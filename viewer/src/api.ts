@@ -1,0 +1,235 @@
+export interface RightAscensionInterval {
+  startDeg: number;
+  endDeg: number;
+  wraps: boolean;
+  spanDeg: number;
+}
+
+export interface DatasetSummary {
+  id: string;
+  name: string;
+  profile: {
+    format: "csv";
+    byteSize: number;
+    rowCount: number;
+    columns: Array<{ name: string; type: string; nullCount: number }>;
+    skyCoverage: {
+      raColumn: string;
+      decColumn: string;
+      rightAscension: RightAscensionInterval;
+      decMinDeg: number;
+      decMaxDeg: number;
+      validRows: number;
+      invalidRows: number;
+    } | null;
+  };
+}
+
+export interface SkySummary {
+  coordinateFrame: "ICRS";
+  objectCount: number;
+  invalidRowCount: number;
+  idColumn: string | null;
+  levels: Array<{ nside: number; occupiedCellCount: number; maxCellCount: number }>;
+}
+
+export interface DensityCell {
+  nside: number;
+  pixel: number;
+  count: number;
+  centerRaDeg: number;
+  centerDecDeg: number;
+  vertices: Array<{ raDeg: number; decDeg: number }>;
+}
+
+export interface SkyPoint {
+  id: string;
+  rowIndex: number;
+  raDeg: number;
+  decDeg: number;
+  attributes: Record<string, string>;
+}
+
+import type { AgentSession, ToolDescriptor, WorkflowDefinition, WorkflowRun } from "../../src/workflow";
+import type { DataAssetRecord, DataAssetRegistrationInput } from "../../src/data-catalog";
+import type { SurveyCard, SurveyRecord, SurveyRegistrationInput } from "../../src/survey-registry";
+import type { SurveyFootprintManifest } from "../../src/survey-footprints";
+
+async function getJson<T>(url: string): Promise<T> {
+  const response = await fetch(url, { headers: { Accept: "application/json" } });
+  if (!response.ok) {
+    const body = (await response.json().catch(() => ({}))) as { error?: string };
+    throw new Error(body.error ?? `Request failed: ${response.status}`);
+  }
+  return response.json() as Promise<T>;
+}
+
+async function postJson<T>(url: string, body: unknown): Promise<T> {
+  const response = await fetch(url, {
+    method: "POST",
+    headers: { Accept: "application/json", "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!response.ok) {
+    const payload = (await response.json().catch(() => ({}))) as { error?: string };
+    throw new Error(payload.error ?? `Request failed: ${response.status}`);
+  }
+  return response.json() as Promise<T>;
+}
+
+async function putJson<T>(url: string, body: unknown): Promise<T> {
+  const response = await fetch(url, {
+    method: "PUT",
+    headers: { Accept: "application/json", "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!response.ok) {
+    const payload = (await response.json().catch(() => ({}))) as { error?: string };
+    throw new Error(payload.error ?? `Request failed: ${response.status}`);
+  }
+  return response.json() as Promise<T>;
+}
+
+async function deleteRequest(url: string): Promise<void> {
+  const response = await fetch(url, { method: "DELETE", headers: { Accept: "application/json" } });
+  if (!response.ok) {
+    const payload = (await response.json().catch(() => ({}))) as { error?: string };
+    throw new Error(payload.error ?? `Request failed: ${response.status}`);
+  }
+}
+
+export const workspaceApi = {
+  async dataAssets(): Promise<DataAssetRecord[]> {
+    return (await getJson<{ assets: DataAssetRecord[] }>("/api/data-assets")).assets;
+  },
+  async dataAsset(id: string): Promise<DataAssetRecord> {
+    return (await getJson<{ asset: DataAssetRecord }>(`/api/data-assets/${encodeURIComponent(id)}`)).asset;
+  },
+  async registerDataAsset(input: DataAssetRegistrationInput): Promise<DataAssetRecord> {
+    return (await postJson<{ asset: DataAssetRecord }>("/api/data-assets", input)).asset;
+  },
+  async updateDataAsset(id: string, input: DataAssetRegistrationInput): Promise<DataAssetRecord> {
+    return (await putJson<{ asset: DataAssetRecord }>(`/api/data-assets/${encodeURIComponent(id)}`, input)).asset;
+  },
+  async deleteDataAsset(id: string): Promise<void> {
+    await deleteRequest(`/api/data-assets/${encodeURIComponent(id)}`);
+  },
+  async datasets(): Promise<DatasetSummary[]> {
+    return (await getJson<{ datasets: DatasetSummary[] }>("/api/datasets")).datasets;
+  },
+  async surveys(): Promise<SurveyCard[]> {
+    return (await getJson<{ surveys: SurveyCard[] }>("/api/surveys")).surveys;
+  },
+  async survey(id: string): Promise<SurveyRecord> {
+    return (await getJson<{ survey: SurveyRecord }>(`/api/surveys/${encodeURIComponent(id)}`)).survey;
+  },
+  async surveyFootprints(): Promise<SurveyFootprintManifest> {
+    return getJson<SurveyFootprintManifest>("/api/survey-footprints");
+  },
+  async registerSurvey(input: SurveyRegistrationInput): Promise<SurveyRecord> {
+    return (await postJson<{ survey: SurveyRecord }>("/api/surveys/registrations", input)).survey;
+  },
+  async skySummary(id: string): Promise<{ dataset: DatasetSummary; sky: SkySummary }> {
+    return getJson(`/api/datasets/${encodeURIComponent(id)}/sky/summary`);
+  },
+  async cells(id: string, nside: number): Promise<DensityCell[]> {
+    return (await getJson<{ cells: DensityCell[] }>(`/api/datasets/${encodeURIComponent(id)}/sky/cells?nside=${nside}`)).cells;
+  },
+  async points(id: string): Promise<SkyPoint[]> {
+    return (await getJson<{ points: SkyPoint[] }>(`/api/datasets/${encodeURIComponent(id)}/sky/objects?limit=50000`)).points;
+  },
+  async volumes(): Promise<VolumeManifest[]> {
+    return (await getJson<{ volumes: VolumeManifest[] }>("/api/volumes")).volumes;
+  },
+  async volumePoints(manifest: VolumeManifest): Promise<VolumePointData> {
+    const response = await fetch(manifest.binary.url ?? `/api/volumes/${encodeURIComponent(manifest.id)}/points.bin`, {
+      headers: { Accept: "application/octet-stream" },
+    });
+    if (!response.ok) throw new Error(`Volume point request failed: ${response.status}`);
+    const buffer = await response.arrayBuffer();
+    if (buffer.byteLength !== manifest.binary.byteLength) {
+      throw new Error(`Volume payload is ${buffer.byteLength} bytes; expected ${manifest.binary.byteLength}`);
+    }
+    return decodeVolumePoints(buffer, manifest.pointCount);
+  },
+  async atlases(): Promise<SurveyAtlasManifest[]> {
+    return (await getJson<{ atlases: SurveyAtlasManifest[] }>("/api/atlases")).atlases;
+  },
+  async atlasAngularCells(manifest: SurveyAtlasManifest): Promise<AtlasAngularCellData> {
+    const response = await fetch(manifest.angularBinary.url ?? `/api/atlases/${encodeURIComponent(manifest.id)}/angular-cells.bin`);
+    if (!response.ok) throw new Error(`Atlas angular request failed: ${response.status}`);
+    const buffer = await response.arrayBuffer();
+    if (buffer.byteLength !== manifest.angularBinary.byteLength) throw new Error("Atlas angular payload length mismatch");
+    return decodeAtlasAngularCells(buffer);
+  },
+  async jointCells(
+    atlasId: string,
+    query: {
+      survey: string;
+      nside: number;
+      radialBins: number;
+      radialMinMpc?: number;
+      radialMaxMpc?: number;
+      parentNside?: number;
+      parentPixel?: number;
+    },
+  ): Promise<AtlasJointQueryResponse> {
+    const parameters = new URLSearchParams();
+    Object.entries(query).forEach(([key, value]) => {
+      if (value != null) parameters.set(key, String(value));
+    });
+    return getJson(`/api/atlases/${encodeURIComponent(atlasId)}/joint?${parameters}`);
+  },
+  async refinement(
+    atlasId: string,
+    query: { survey: string; nside: number; radialBins: number; pixel: number; radialBin: number },
+  ): Promise<AtlasRefinementResponse> {
+    return getJson(`/api/atlases/${encodeURIComponent(atlasId)}/refinement?${new URLSearchParams(
+      Object.fromEntries(Object.entries(query).map(([key, value]) => [key, String(value)])),
+    )}`);
+  },
+  async tools(): Promise<ToolDescriptor[]> {
+    return (await getJson<{ tools: ToolDescriptor[] }>("/api/tools")).tools;
+  },
+  async workflows(): Promise<WorkflowDefinition[]> {
+    return (await getJson<{ workflows: WorkflowDefinition[] }>("/api/workflows")).workflows;
+  },
+  async createWorkflowRun(workflowId: string, input: Record<string, unknown>): Promise<WorkflowRun> {
+    return (await postJson<{ run: WorkflowRun }>("/api/workflow-runs", { workflowId, input })).run;
+  },
+  async workflowRun(id: string): Promise<WorkflowRun> {
+    return (await getJson<{ run: WorkflowRun }>(`/api/workflow-runs/${encodeURIComponent(id)}`)).run;
+  },
+  async decideWorkflowRun(id: string, decision: Record<string, unknown>): Promise<WorkflowRun> {
+    return (await postJson<{ run: WorkflowRun }>(`/api/workflow-runs/${encodeURIComponent(id)}/decisions`, decision)).run;
+  },
+  async createAgentSession(workflowId: string): Promise<AgentSession> {
+    return (await postJson<{ session: AgentSession }>("/api/agent/sessions", { workflowId })).session;
+  },
+  async sendAgentMessage(sessionId: string, message: string): Promise<{ session: AgentSession; run?: WorkflowRun }> {
+    return postJson(`/api/agent/sessions/${encodeURIComponent(sessionId)}/messages`, { message });
+  },
+};
+
+export type {
+  AtlasAngularCellData,
+  AtlasJointCellView,
+  AtlasJointQueryResponse,
+  AtlasRefinementResponse,
+  SurveyAtlasManifest,
+  VolumeManifest,
+  VolumePointData,
+  SurveyCard,
+  SurveyRecord,
+  SurveyRegistrationInput,
+  SurveyFootprintManifest,
+};
+import {
+  decodeAtlasAngularCells,
+  type AtlasAngularCellData,
+  type AtlasJointCellView,
+  type AtlasJointQueryResponse,
+  type AtlasRefinementResponse,
+  type SurveyAtlasManifest,
+} from "../../src/atlas-format";
+import { decodeVolumePoints, type VolumeManifest, type VolumePointData } from "../../src/volume-format";

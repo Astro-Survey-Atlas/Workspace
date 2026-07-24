@@ -1,0 +1,4 @@
+object_id,ra,dec,flux_g,quality
+source-a,359.5,-1.0,10.5,true
+source-b,0.5,2.0,11.25,true
+source-c,1.25,3.5,,false

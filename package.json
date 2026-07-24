@@ -1,0 +1,47 @@
+{
+  "name": "astro-data-workspace",
+  "version": "0.9.1",
+  "private": true,
+  "type": "module",
+  "description": "Minimal astronomy dataset registry and MCP service",
+  "scripts": {
+    "build": "npm run build:server && npm run build:viewer",
+    "build:server": "tsc -p tsconfig.json",
+    "build:viewer": "tsc -p tsconfig.viewer.json --noEmit && vite build",
+    "dev": "tsx src/http-server.ts",
+    "dev:viewer": "vite --host 0.0.0.0 --port 5173",
+    "start": "node dist/src/http-server.js",
+    "test": "tsx --test test/*.test.ts",
+    "test:e2e": "playwright test",
+    "test:volume": "python3 -m unittest scripts/test_build_redshift_volume.py",
+    "build:atlas": "tsx scripts/build_survey_atlas.ts",
+    "build:footprints": "tsx scripts/build_survey_footprints.ts",
+    "benchmark:atlas": "tsx scripts/benchmark_joint_index.ts",
+    "smoke:http": "tsx scripts/mcp-http-smoke.ts",
+    "smoke:workflow-real": "tsx scripts/smoke_real_workflow.ts",
+    "validate": "npm run build && npm test && npm run test:volume"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "1.29.0",
+    "csv-parse": "7.0.1",
+    "express": "^5.1.0",
+    "healpixjs": "^2.0.0",
+    "lucide": "^1.25.0",
+    "three": "^0.185.1",
+    "zod": "4.4.3"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.61.1",
+    "@types/express": "^5.0.0",
+    "@types/node": "^22.0.0",
+    "@types/pngjs": "^6.0.5",
+    "@types/three": "^0.185.1",
+    "pngjs": "^7.0.0",
+    "tsx": "4.23.1",
+    "typescript": "7.0.2",
+    "vite": "^8.1.5"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

@@ -1,0 +1,12 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: workspace-metadata
+  namespace: astro-data-workspace
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: nfs-data
+  resources:
+    requests:
+      storage: 128Mi

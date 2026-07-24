@@ -1,0 +1,175 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: astro-data-workspace
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: registry-state
+  namespace: astro-data-workspace
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: nfs-data
+  resources:
+    requests:
+      storage: 256Mi
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: workspace-metadata
+  namespace: astro-data-workspace
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: nfs-data
+  resources:
+    requests:
+      storage: 128Mi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: astro-data-workspace-mcp
+  namespace: astro-data-workspace
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: astro-data-workspace-mcp
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: astro-data-workspace-mcp
+    spec:
+      nodeSelector:
+        kubernetes.io/hostname: eva7028
+      securityContext:
+        fsGroup: 10001
+        fsGroupChangePolicy: OnRootMismatch
+      containers:
+        - name: mcp
+          image: docker.io/library/astro-data-workspace-mcp:0.9.1
+          imagePullPolicy: Never
+          ports:
+            - name: http
+              containerPort: 3000
+          env:
+            - name: ASTRO_WORKSPACE_STATE
+              value: /state/registry.json
+            - name: ASTRO_ALLOWED_ROOTS
+              value: /catalogs
+            - name: ASTRO_BOOTSTRAP_CATALOG
+              value: /catalogs/cosmos-clean-v2/processing_summary.csv
+            - name: ASTRO_BOOTSTRAP_NAME
+              value: COSMOS Clean V2
+            - name: ASTRO_VOLUME_ROOT
+              value: /volumes
+            - name: ASTRO_ATLAS_ROOT
+              value: /volumes
+            - name: ASTRO_WORKFLOW_ROOT
+              value: /state/workflow-runs
+            - name: ASTRO_CATALOG_MCP_URL
+              value: http://eva24002-entrance.lab.zverse.space:30082/mcp
+            - name: ASTRO_CATALOG_MCP_TIMEOUT_MS
+              value: "15000"
+            - name: ASTRO_ALLOWED_HOSTS
+              value: localhost,127.0.0.1,10.15.49.212,10.15.51.75,astro.agent.dev.72602.online,astro-data-workspace-mcp,astro-data-workspace-mcp.astro-data-workspace,astro-data-workspace-mcp.astro-data-workspace.svc,astro-data-workspace-mcp.astro-data-workspace.svc.cluster.local
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+              httpHeaders:
+                - name: Host
+                  value: astro-data-workspace-mcp
+            initialDelaySeconds: 2
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+              httpHeaders:
+                - name: Host
+                  value: astro-data-workspace-mcp
+            initialDelaySeconds: 5
+            periodSeconds: 15
+          resources:
+            requests:
+              cpu: 25m
+              memory: 64Mi
+            limits:
+              cpu: 250m
+              memory: 256Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 10001
+          volumeMounts:
+            - name: registry-state
+              mountPath: /state
+            - name: tmp
+              mountPath: /tmp
+            - name: cosmos-clean-v2
+              mountPath: /catalogs/cosmos-clean-v2
+              subPath: catalogs/cosmos-clean-v2
+              readOnly: true
+            - name: redshift-volumes
+              mountPath: /volumes
+              subPath: volumes
+              readOnly: true
+      volumes:
+        - name: registry-state
+          persistentVolumeClaim:
+            claimName: registry-state
+        - name: tmp
+          emptyDir: {}
+        - name: cosmos-clean-v2
+          persistentVolumeClaim:
+            claimName: workspace-metadata
+        - name: redshift-volumes
+          persistentVolumeClaim:
+            claimName: workspace-metadata
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: astro-data-workspace-mcp
+  namespace: astro-data-workspace
+spec:
+  selector:
+    app.kubernetes.io/name: astro-data-workspace-mcp
+  ports:
+    - name: http
+      port: 3000
+      targetPort: http
+  type: ClusterIP
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: astro-data-workspace
+  namespace: astro-data-workspace
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "480"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "480"
+spec:
+  ingressClassName: nginx
+  rules:
+    - host: astro.agent.dev.72602.online
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: astro-data-workspace-mcp
+                port:
+                  name: http
