@@ -4,3 +4,7 @@ dist/
 data/registry.json
 *.log
 test-results/
+playwright-report/
+scripts/__pycache__/
+*.pyc
+source-*.tgz

@@ -48,7 +48,10 @@ async function openFresh(page: Page): Promise<void> {
   await page.addInitScript(() => localStorage.clear());
   await proxyApi(page);
   await page.goto("/");
+  await expect(page.locator('[data-mode="catalog"]')).toHaveClass(/active/);
+  await expect(page.locator("#catalog-stage")).toBeVisible();
   await page.locator('[data-mode="layers"]').click();
+  await expect(page.locator('[data-mode="layers"]')).toHaveClass(/active/);
   await expect(page.locator("#loading-indicator")).not.toHaveClass(/visible/);
   await expect(page.locator("#volume-canvas")).toBeVisible();
   await page.waitForTimeout(900);
@@ -107,7 +110,7 @@ test("desktop survey footprints are selectable fragments with layer and overlap 
   await canvas.click({ position: legacyPoint });
   await expect(page.locator("#layer-selection-count")).toHaveText("已选 1 个");
   await expect(page.locator("#inspector-kicker")).toHaveText("REGION SELECTION");
-  await expect(page.locator("#inspector-content")).toContainText("区域已选中");
+  await expect(page.locator("#inspector-content")).toContainText("选区已在所有相关巡天展示层中分别点亮");
   await canvas.screenshot({ path: testInfo.outputPath("selected-region-overlay.png") });
   await page.locator('[data-layer-interaction="inspect"]').click();
 
