@@ -2,7 +2,10 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  adjacentNeighbours,
   buildSurveyLayerModel,
+  isAdjacent,
+  isAdjacentConnected,
   isSideConnected,
   overlapCountByPixel,
   sharesSide,
@@ -53,7 +56,7 @@ function lineOfThree(nside: number): [number, number, number] {
     const sides = sideNeighbours(nside, middle);
     for (const left of sides) {
       for (const right of sides) {
-        if (left !== right && !sharesSide(nside, left, right)) return [left, middle, right];
+        if (left !== right && !isAdjacent(nside, left, right)) return [left, middle, right];
       }
     }
   }
@@ -114,12 +117,13 @@ test("one selected pixel retains every visible survey release and product source
   ]);
 });
 
-test("connected-region toggles accept only shared-edge additions and prevent fragmentation", () => {
+test("connected-region toggles prevent eight-neighbour fragmentation", () => {
   const nside = 8;
   const [left, middle, right] = lineOfThree(nside);
   assert.equal(sharesSide(nside, left, middle), true);
   assert.equal(sharesSide(nside, middle, right), true);
   assert.equal(sharesSide(nside, left, right), false);
+  assert.equal(isAdjacent(nside, left, right), false);
 
   const first = toggleConnectedRegion(nside, [], middle, false);
   assert.deepEqual(first, { ok: true, pixels: [middle], changed: "replaced" });
@@ -134,9 +138,29 @@ test("connected-region toggles accept only shared-edge additions and prevent fra
   if (!split.ok) assert.equal(split.reason, "would-disconnect");
 
   const unrelated = Array.from({ length: 12 * nside ** 2 }, (_, pixel) => pixel)
-    .find((pixel) => !sharesSide(nside, middle, pixel) && pixel !== middle);
+    .find((pixel) => !isAdjacent(nside, middle, pixel) && pixel !== middle);
   assert.notEqual(unrelated, undefined);
   const rejected = toggleConnectedRegion(nside, [middle], unrelated!, true);
   assert.equal(rejected.ok, false);
   if (!rejected.ok) assert.equal(rejected.reason, "not-adjacent");
+});
+
+test("region selection accepts every available HEALPix neighbour, including corners", () => {
+  const nside = 8;
+  const center = 100;
+  const neighbours = adjacentNeighbours(nside, center);
+  assert.equal(neighbours.length, 8);
+  assert.equal(new Set(neighbours).size, 8);
+  assert.equal(sideNeighbours(nside, center).length, 4);
+
+  for (const neighbour of neighbours) {
+    assert.equal(isAdjacent(nside, center, neighbour), true);
+    const result = toggleConnectedRegion(nside, [center], neighbour, true);
+    assert.equal(result.ok, true, `expected neighbour ${neighbour} to be selectable`);
+    if (result.ok) assert.equal(isAdjacentConnected(nside, result.pixels), true);
+  }
+
+  const corner = neighbours.find((pixel) => !sharesSide(nside, center, pixel));
+  assert.notEqual(corner, undefined);
+  assert.equal(toggleConnectedRegion(nside, [center], corner!, true).ok, true);
 });

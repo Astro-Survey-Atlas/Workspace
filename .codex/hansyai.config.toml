@@ -1,0 +1,24 @@
+model_provider = "hansyai"
+model = "gpt-5.6-luna"
+model_reasoning_effort = "xhigh"
+plan_mode_reasoning_effort = "high"
+
+[model_providers.hansyai]
+name = "Hansyai OpenAI-compatible API"
+base_url = "https://hansyai.cn/v1"
+env_key = "HANSYAI_API_KEY"
+wire_api = "responses"
+requires_openai_auth = false
+
+[tui]
+status_line = ["model-with-reasoning", "context-used", "context-window-size", "session-id"]
+
+[tui.model_availability_nux]
+"gpt-5.5" = 4
+"gpt-5.6-sol" = 4
+
+[projects."/home/aaron/Repo/astro-data-workspace"]
+trust_level = "trusted"
+
+[projects."/home/aaron/Repo/astro-code"]
+trust_level = "trusted"

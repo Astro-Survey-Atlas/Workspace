@@ -38,11 +38,15 @@ export class WorkflowPanel {
   private pollTimer: ReturnType<typeof setTimeout> | null = null;
   private initialized = false;
   private active = false;
+  private productionAction: "crossmatch" | "cutout" | "package" = "crossmatch";
 
   constructor(private readonly onError: (error: unknown) => void) {
     byId<HTMLFormElement>("workflow-form").addEventListener("submit", (event) => {
       event.preventDefault();
       void this.createRun().catch((error) => this.showError(error));
+    });
+    document.querySelectorAll<HTMLButtonElement>("[data-production-action]").forEach((button) => {
+      button.addEventListener("click", () => this.selectProductionAction(button.dataset.productionAction as "crossmatch" | "cutout" | "package"));
     });
     byId<HTMLButtonElement>("workflow-accept-all").addEventListener("click", () => void this.decide({ action: "accept_all" }));
     byId<HTMLButtonElement>("workflow-apply-filter").addEventListener("click", () => {
@@ -58,7 +62,6 @@ export class WorkflowPanel {
     byId<HTMLButtonElement>("workflow-adjust-region").addEventListener("click", () => void this.decide({ action: "adjust_region", input: this.formInput() }));
     byId<HTMLButtonElement>("workflow-retry").addEventListener("click", () => void this.decide({ action: "retry" }));
     byId<HTMLButtonElement>("workflow-open-layers").addEventListener("click", () => this.navigate("layers"));
-    byId<HTMLButtonElement>("workflow-open-volume").addEventListener("click", () => this.navigate("volume"));
     byId<HTMLFormElement>("agent-form").addEventListener("submit", (event) => {
       event.preventDefault();
       void this.sendAgentMessage().catch((error) => this.showError(error));
@@ -67,6 +70,7 @@ export class WorkflowPanel {
 
   async activate(): Promise<void> {
     this.active = true;
+    this.selectProductionAction("crossmatch");
     if (!this.initialized) await this.initialize();
     if (this.currentRun && ["queued", "running"].includes(this.currentRun.status)) this.schedulePoll(50);
   }
@@ -114,6 +118,7 @@ export class WorkflowPanel {
   }
 
   private async createRun(): Promise<void> {
+    if (this.productionAction !== "crossmatch") throw new Error("cutout 和打包将在 astro-code 适配器接入后启用");
     this.clearError();
     const workflowId = byId<HTMLSelectElement>("workflow-select").value;
     this.currentRun = await workspaceApi.createWorkflowRun(workflowId, this.formInput());
@@ -189,6 +194,22 @@ export class WorkflowPanel {
       item.append(number, copy, state);
       return item;
     }));
+  }
+
+  private selectProductionAction(action: "crossmatch" | "cutout" | "package"): void {
+    this.productionAction = action;
+    document.querySelectorAll<HTMLButtonElement>("[data-production-action]").forEach((button) => {
+      button.classList.toggle("active", button.dataset.productionAction === action);
+      button.setAttribute("aria-pressed", String(button.dataset.productionAction === action));
+    });
+    const form = byId<HTMLFormElement>("workflow-form");
+    const copy = byId("production-action-copy");
+    form.hidden = action !== "crossmatch";
+    copy.textContent = action === "crossmatch"
+      ? "当前动作使用真实目录执行球面交叉匹配，并保留结果血缘。cutout 与打包会复用同一选区和对象清单。"
+      : action === "cutout"
+        ? "cutout 需要读取已登记图像路径，并把选区转换为带 RA/Dec 的裁剪任务；当前先保留动作边界，不伪造执行结果。"
+        : "打包会把交叉匹配表、cutout 和质量信息组织为可交付数据包；当前先保留数据血缘和输出契约。";
   }
 
   private renderTools(): void {

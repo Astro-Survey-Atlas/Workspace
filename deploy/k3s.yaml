@@ -4,6 +4,88 @@ metadata:
   name: astro-data-workspace
 ---
 apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: astro-data-workspace-mcp
+  namespace: astro-data-workspace
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: connector-credential-manager
+  namespace: astro-data-workspace
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "create", "patch", "update", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: connector-credential-manager
+  namespace: astro-data-workspace
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: connector-credential-manager
+subjects:
+  - kind: ServiceAccount
+    name: astro-data-workspace-mcp
+    namespace: astro-data-workspace
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: astro-workspace-connector-credential-reader
+  namespace: warehouse
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    resourceNames: ["warehouse-s3-credential", "metadata-minio-secret"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: astro-workspace-connector-credential-reader
+  namespace: warehouse
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: astro-workspace-connector-credential-reader
+subjects:
+  - kind: ServiceAccount
+    name: astro-data-workspace-mcp
+    namespace: astro-data-workspace
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: astro-workspace-flink-bridge
+  namespace: warehouse
+rules:
+  - apiGroups: ["org.zhejianglab.astro.metadata"]
+    resources: ["flinkingesttasks", "flinkingesttasks/status"]
+    verbs: ["get", "list", "watch", "create", "patch", "update"]
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "create", "patch", "update", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: astro-workspace-flink-bridge
+  namespace: warehouse
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: astro-workspace-flink-bridge
+subjects:
+  - kind: ServiceAccount
+    name: astro-data-workspace-mcp
+    namespace: astro-data-workspace
+---
+apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
   name: registry-state
@@ -46,19 +128,28 @@ spec:
       labels:
         app.kubernetes.io/name: astro-data-workspace-mcp
     spec:
+      serviceAccountName: astro-data-workspace-mcp
       nodeSelector:
         kubernetes.io/hostname: eva7028
+      imagePullSecrets:
+        - name: aliyun-registry
       securityContext:
         fsGroup: 10001
         fsGroupChangePolicy: OnRootMismatch
       containers:
         - name: mcp
-          image: docker.io/library/astro-data-workspace-mcp:0.9.1
-          imagePullPolicy: Never
+          image: crpi-wixjy6gci86ms14e.cn-hongkong.personal.cr.aliyuncs.com/ay-dev/astro-data-workspace-mcp:0.10.33
+          imagePullPolicy: IfNotPresent
           ports:
             - name: http
               containerPort: 3000
           env:
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: NODE_EXTRA_CA_CERTS
+              value: /var/run/secrets/kubernetes.io/serviceaccount/ca.crt
             - name: ASTRO_WORKSPACE_STATE
               value: /state/registry.json
             - name: ASTRO_ALLOWED_ROOTS
@@ -73,12 +164,28 @@ spec:
               value: /volumes
             - name: ASTRO_WORKFLOW_ROOT
               value: /state/workflow-runs
+            - name: ASTRO_CONNECTOR_BOOTSTRAP
+              value: /app/bootstrap/connectors.json
             - name: ASTRO_CATALOG_MCP_URL
               value: http://eva24002-entrance.lab.zverse.space:30082/mcp
             - name: ASTRO_CATALOG_MCP_TIMEOUT_MS
               value: "15000"
+            # The warehouse-local Elasticsearch contains connector scan results.
+            # Keep this inside the cluster; the public NodePort is for the workspace API only.
+            - name: ASTRO_ES_URL
+              value: http://warehouse-elasticsearch.warehouse.svc.cluster.local:9200
+            - name: ASTRO_ES_ASTRO_INDEX
+              value: astro_file_index_v1
+            - name: ASTRO_ES_OVERVIEW_CACHE_MS
+              value: "60000"
+            - name: ASTRO_FLINK_NAMESPACE
+              value: warehouse
+            - name: ASTRO_FLINK_SECRET_NAMESPACE
+              value: warehouse
+            - name: ASTRO_FLINK_POLL_MS
+              value: "5000"
             - name: ASTRO_ALLOWED_HOSTS
-              value: localhost,127.0.0.1,10.15.49.212,10.15.51.75,astro.agent.dev.72602.online,astro-data-workspace-mcp,astro-data-workspace-mcp.astro-data-workspace,astro-data-workspace-mcp.astro-data-workspace.svc,astro-data-workspace-mcp.astro-data-workspace.svc.cluster.local
+              value: localhost,127.0.0.1,10.15.49.212,10.15.51.75,astro.workspace.dev.72602.online,astro-data-workspace-mcp,astro-data-workspace-mcp.astro-data-workspace,astro-data-workspace-mcp.astro-data-workspace.svc,astro-data-workspace-mcp.astro-data-workspace.svc.cluster.local
           readinessProbe:
             httpGet:
               path: /healthz
@@ -150,7 +257,8 @@ spec:
     - name: http
       port: 3000
       targetPort: http
-  type: ClusterIP
+      nodePort: 32082
+  type: NodePort
 ---
 apiVersion: networking.k8s.io/v1
 kind: Ingress
@@ -163,7 +271,7 @@ metadata:
 spec:
   ingressClassName: nginx
   rules:
-    - host: astro.agent.dev.72602.online
+    - host: astro.workspace.dev.72602.online
       http:
         paths:
           - path: /

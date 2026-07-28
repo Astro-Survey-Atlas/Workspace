@@ -20,6 +20,7 @@ async function fixture(): Promise<{ directory: string; bootstrapPath: string; st
     modalities: ["catalog"],
     access: { connector: "metadata", uri: "catalog://fixture", format: "table" },
     status: "metadata_only",
+    projectState: "public_reference",
     footprintIds: [],
     origin: "builtin",
     createdAt: now,
@@ -45,9 +46,11 @@ test("data catalog merges read-only bootstrap records with persisted user record
       sourceUri: "/mnt/data/euclid/q1.fits",
       format: "fits",
       status: "ready",
+      projectState: "acquired",
     });
     assert.equal(registry.list().length, 2);
     assert.equal(created.origin, "user");
+    assert.equal(created.projectState, "acquired");
 
     const reloaded = new DataCatalogRegistry(paths.bootstrapPath, paths.statePath);
     await reloaded.initialize();
@@ -78,6 +81,7 @@ test("only user records can be updated or removed", async () => {
       sourceUri: "https://example.test/image-v2.fits",
       format: "fits",
       status: "ready",
+      projectState: "processed",
     });
     assert.equal(updated.name, "Updated");
     assert.equal(updated.access.uri, "https://example.test/image-v2.fits");
@@ -100,6 +104,70 @@ test("data catalog rejects incomplete connector metadata", async () => {
       sourceUri: "",
       format: "csv",
     }), /sourceUri is required/);
+  } finally {
+    await rm(paths.directory, { recursive: true, force: true });
+  }
+});
+
+test("ready remote metadata is not inferred to be a processed project asset", async () => {
+  const paths = await fixture();
+  try {
+    const registry = new DataCatalogRegistry(paths.bootstrapPath, paths.statePath);
+    await registry.initialize();
+    const created = await registry.register({
+      name: "Public query metadata",
+      kind: "catalog",
+      connector: "mcp",
+      sourceUri: "catalog+mcp://public-query",
+      format: "table",
+      status: "ready",
+    });
+    assert.deepEqual(created.projectStates, ["planned"]);
+    assert.equal(created.projectState, "planned");
+  } finally {
+    await rm(paths.directory, { recursive: true, force: true });
+  }
+});
+
+test("one logical asset can retain public reference and acquired locations", async () => {
+  const paths = await fixture();
+  try {
+    const registry = new DataCatalogRegistry(paths.bootstrapPath, paths.statePath);
+    await registry.initialize();
+    const created = await registry.register({
+      name: "Euclid Q1 local mirror",
+      surveyId: "euclid",
+      releaseId: "euclid-q1",
+      kind: "catalog",
+      connector: "mcp",
+      sourceUri: "catalog+mcp://euclid-q1",
+      format: "table",
+      accesses: [
+        { connector: "mcp", uri: "catalog+mcp://euclid-q1", format: "table" },
+        { connector: "local", uri: "/mnt/data/euclid/q1", format: "fits" },
+      ],
+      sources: [{ label: "Official Q1", url: "https://example.test/euclid-q1" }],
+      status: "ready",
+      projectStates: ["public_reference", "acquired"],
+    });
+    assert.deepEqual(created.projectStates, ["public_reference", "acquired"]);
+    assert.equal(created.accesses?.length, 2);
+    assert.equal(created.sources?.[0]?.label, "Official Q1");
+
+    const updated = await registry.update("builtin-catalog", {
+      name: "Built-in catalog",
+      kind: "catalog",
+      connector: "metadata",
+      sourceUri: "catalog://fixture",
+      format: "table",
+      accesses: [
+        { connector: "metadata", uri: "catalog://fixture", format: "table" },
+        { connector: "s3", uri: "s3://bucket/catalog", format: "fits" },
+      ],
+      projectStates: ["public_reference", "acquired"],
+    });
+    assert.equal(updated.origin, "builtin");
+    assert.deepEqual(registry.get("builtin-catalog").projectStates, ["public_reference", "acquired"]);
   } finally {
     await rm(paths.directory, { recursive: true, force: true });
   }

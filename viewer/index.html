@@ -17,10 +17,10 @@
           </div>
         </div>
         <div class="mode-control" role="group" aria-label="视图模式">
+          <button type="button" class="mode-button" data-mode="connectors">连接器</button>
           <button type="button" class="mode-button active" data-mode="catalog">数据目录</button>
-          <button type="button" class="mode-button" data-mode="layers">巡天目录</button>
-          <button type="button" class="mode-button" data-mode="volume">联合体积</button>
-          <button type="button" class="mode-button" data-mode="workflow">智能管线</button>
+          <button type="button" class="mode-button" data-mode="layers">项目态势</button>
+          <button type="button" class="mode-button" data-mode="workflow">数据生产</button>
         </div>
         <div class="toolbar-actions">
           <button id="controls-toggle" class="icon-button mobile-only" type="button" aria-label="显示控制" title="显示控制">
@@ -33,31 +33,25 @@
       </header>
 
       <aside id="controls-panel" class="controls-panel" aria-label="巡天与联合索引控制">
-        <div class="panel-kicker" id="panel-kicker">SURVEY REGISTRY</div>
-        <h1 id="panel-dataset-name">Survey registry</h1>
-        <div class="dataset-state"><span></span><span id="dataset-state">索引载入中</span></div>
+        <div id="context-summary">
+          <div class="panel-kicker" id="panel-kicker">PROJECT SKY STATUS</div>
+          <h1 id="panel-dataset-name">项目态势</h1>
+          <div class="dataset-state"><span></span><span id="dataset-state">索引载入中</span></div>
 
-        <dl id="metric-grid" class="metric-grid">
-          <div><dt id="metric-one-label">SURVEYS</dt><dd id="metric-one">--</dd></div>
-          <div><dt>FRAME</dt><dd id="frame-name">ICRS</dd></div>
-          <div><dt id="metric-three-label">OBJECTS</dt><dd id="metric-three">--</dd></div>
-          <div><dt id="metric-four-label">SEMANTICS</dt><dd id="metric-four">--</dd></div>
-        </dl>
+          <dl id="metric-grid" class="metric-grid">
+            <div><dt id="metric-one-label">PUBLIC REFERENCE</dt><dd id="metric-one">--</dd></div>
+            <div><dt id="metric-two-label">ACQUIRED</dt><dd id="metric-two">--</dd></div>
+            <div><dt id="metric-three-label">PROCESSED</dt><dd id="metric-three">--</dd></div>
+            <div><dt id="metric-four-label">DELIVERABLE</dt><dd id="metric-four">--</dd></div>
+            <div><dt id="metric-five-label">PLANNED</dt><dd id="metric-five">--</dd></div>
+          </dl>
+        </div>
 
         <div id="catalog-controls">
           <section class="control-section catalog-filters">
-            <div class="section-heading"><span>数据资产</span><output id="catalog-count">--</output></div>
-            <label class="field-label" for="catalog-search">搜索</label>
-            <input id="catalog-search" class="field-input" type="search" placeholder="名称、巡天、发布或模态" />
-            <div class="catalog-filter-grid">
-              <select id="catalog-origin-filter" class="field-input" aria-label="来源筛选">
-                <option value="all">全部来源</option><option value="builtin">系统内置</option><option value="user">用户登记</option>
-              </select>
-              <select id="catalog-kind-filter" class="field-input" aria-label="数据类型筛选">
-                <option value="all">全部类型</option><option value="catalog">星表</option><option value="image">图像</option><option value="spectra">光谱</option><option value="cube">数据立方</option><option value="timeseries">时序</option><option value="other">其他</option>
-              </select>
-            </div>
-            <p class="control-note">数据目录维护“有哪些数据、属于哪个巡天与发布、如何访问”。巡天目录只展示已关联的天空覆盖。</p>
+            <div class="section-heading"><span>资产基本信息</span><output id="catalog-count">--</output></div>
+            <p class="control-note">选中资产后默认只读。公开来源、Connector 关联和血缘关系在资产详情中分别维护。</p>
+            <button id="catalog-new" class="command-button secondary" type="button">登记新资产</button>
           </section>
           <form id="catalog-registration-form" class="control-section catalog-registration">
             <div class="section-heading"><span id="catalog-form-title">登记用户数据</span><span>METADATA</span></div>
@@ -69,19 +63,17 @@
               <label><span class="field-label">巡天</span><select id="catalog-survey" class="field-input"></select></label>
               <label><span class="field-label">数据发布</span><select id="catalog-release" class="field-input"></select></label>
               <label><span class="field-label">数据类型</span><select id="catalog-kind" class="field-input"><option value="catalog">星表</option><option value="image">图像</option><option value="spectra">光谱</option><option value="cube">数据立方</option><option value="timeseries">时序</option><option value="other">其他</option></select></label>
-              <label><span class="field-label">Connector</span><select id="catalog-connector" class="field-input"><option value="http">HTTP</option><option value="local">本地/NFS</option><option value="mcp">MCP</option><option value="tap">TAP</option><option value="s3">S3/OSS</option><option value="database">数据库</option><option value="metadata">仅元数据</option></select></label>
             </div>
             <label class="field-label" for="catalog-product">数据产品</label>
             <input id="catalog-product" class="field-input" maxlength="160" placeholder="例如 source catalog" />
-            <label class="field-label" for="catalog-uri">访问地址</label>
-            <input id="catalog-uri" class="field-input" maxlength="2048" placeholder="https://、/mnt/data、tap:// 或逻辑 URI" required />
             <div class="catalog-form-grid">
-              <label><span class="field-label">格式</span><input id="catalog-format" class="field-input" maxlength="80" value="fits" required /></label>
-              <label><span class="field-label">状态</span><select id="catalog-status-input" class="field-input"><option value="metadata_only">仅元数据</option><option value="ready">可访问</option><option value="unavailable">不可用</option></select></label>
+              <label><span class="field-label">工程状态</span><select id="catalog-status-input" class="field-input"><option value="metadata_only">仅元数据</option><option value="ready">可访问</option><option value="unavailable">不可用</option></select></label>
+              <fieldset class="catalog-state-field"><legend class="field-label">项目阶段（可多选）</legend><div id="catalog-project-state-list" class="catalog-state-list"><label><input type="checkbox" value="public_reference" />公开参考</label><label><input type="checkbox" value="acquired" />已掌握</label><label><input type="checkbox" value="processed" />已加工</label><label><input type="checkbox" value="deliverable" />可交付</label><label><input type="checkbox" value="planned" />计划中</label></div></fieldset>
             </div>
-            <label class="field-label" for="catalog-modalities">模态（逗号分隔）</label>
-            <input id="catalog-modalities" class="field-input" maxlength="240" placeholder="catalog, spectroscopy" />
+            <div class="section-heading compact-heading"><span>全局 Tag</span></div>
+            <div id="catalog-tags" class="tag-picker" aria-label="数据 Tag"></div>
             <div class="catalog-form-actions">
+              <button id="catalog-form-edit" class="command-button secondary" type="button" hidden>编辑数据资产</button>
               <button id="catalog-form-submit" class="command-button" type="submit">登记数据</button>
               <button id="catalog-form-cancel" class="command-button secondary" type="button" hidden>取消</button>
               <button id="catalog-delete" class="command-button danger" type="button" hidden>删除</button>
@@ -89,33 +81,81 @@
           </form>
         </div>
 
-        <div id="layer-controls" hidden>
+        <div id="connector-controls" hidden>
           <section class="control-section">
-            <div class="section-heading"><span>Footprint fragments</span><output id="layer-nside-output">NSIDE 16</output></div>
-            <p class="control-note">Only registered HEALPix coverage is drawn. Layer offsets are visual and never represent distance, depth, redshift, magnitude, or wavelength.</p>
+            <div class="section-heading"><span>连接配置</span><span>CONFIG ONLY</span></div>
+            <p class="control-note">登记数据位置与访问凭据。检测连接只验证当前路径和权限，不枚举或扫描目录。</p>
           </section>
-          <section class="control-section layer-view-section">
-            <div class="section-heading"><span>Visible surveys</span><output id="layer-visible-output">1 ACTIVE</output></div>
+          <form id="connector-registration-form" class="control-section connector-registration">
+            <div class="section-heading"><span id="connector-form-title">登记 Connector</span><span>METADATA</span></div>
+            <label class="field-label" for="connector-name">名称</label>
+            <input id="connector-name" name="name" class="field-input" maxlength="120" required placeholder="例如 euclid-q1-s3" />
+            <label class="field-label" for="connector-description">说明</label>
+            <input id="connector-description" name="description" class="field-input" maxlength="500" />
+            <div class="catalog-form-grid">
+              <label><span class="field-label">类型</span><select id="connector-kind" name="kind" class="field-input"><option value="s3">S3 / OSS</option><option value="local">本地路径</option><option value="jdbc">JDBC 数据库</option></select></label>
+              <label><span class="field-label">配置状态</span><select id="connector-status" name="status" class="field-input"><option value="draft">草稿</option><option value="ready">可用</option><option value="disabled">停用</option></select></label>
+            </div>
+            <div id="connector-config-s3" data-config="s3" class="connector-config-grid">
+              <label><span class="field-label">Endpoint</span><input id="connector-s3-endpoint" name="endpoint" class="field-input" placeholder="https://s3.example" /></label>
+              <label><span class="field-label">Bucket</span><input id="connector-s3-bucket" name="bucket" class="field-input" required /></label>
+              <label><span class="field-label">Prefix</span><input id="connector-s3-prefix" name="prefix" class="field-input" /></label>
+              <label><span class="field-label">Region</span><input id="connector-s3-region" name="region" class="field-input" value="us-east-1" /></label>
+              <label><span class="field-label">Access Key</span><input name="accessKeyId" class="field-input" autocomplete="off" required /></label>
+              <label><span class="field-label">Secret Key</span><input name="secretAccessKey" class="field-input" type="password" autocomplete="new-password" required /></label>
+            </div>
+            <div id="connector-config-local" data-config="local" class="connector-config-grid" hidden>
+              <label><span class="field-label">根路径</span><input id="connector-local-root" name="rootPath" class="field-input" placeholder="/mnt/data/euclid" /></label>
+            </div>
+            <div id="connector-config-jdbc" data-config="jdbc" class="connector-config-grid" hidden>
+              <label><span class="field-label">JDBC URL</span><input id="connector-jdbc-url" name="url" class="field-input" placeholder="jdbc:postgresql://host:5432/db" /></label>
+              <label><span class="field-label">Database</span><input id="connector-jdbc-database" name="database" class="field-input" /></label>
+              <label><span class="field-label">Schema</span><input id="connector-jdbc-schema" name="schema" class="field-input" value="public" /></label>
+            </div>
+            <div class="connector-registration-actions"><button id="connector-check-form" class="command-button secondary" type="button">检测此配置</button><output id="connector-form-message" class="connector-check-feedback" aria-live="polite"><strong>尚未检测</strong></output></div>
+            <div class="catalog-form-actions">
+              <button id="connector-form-submit" class="command-button" type="submit">登记 Connector</button>
+              <button id="connector-form-cancel" class="command-button secondary" type="button" hidden>取消</button>
+              <button id="connector-delete" class="command-button danger" type="button" hidden>删除</button>
+            </div>
+          </form>
+        </div>
+
+        <div id="layer-controls" hidden>
+          <section class="control-section layer-survey-section">
+            <div class="section-heading"><span>巡天图层</span><output id="layer-visible-output">1 ACTIVE</output></div>
             <div class="layer-bulk-actions">
-              <button id="layer-select-all" class="command-button secondary" type="button">All</button>
-              <button id="layer-clear-all" class="command-button secondary" type="button">Clear</button>
+              <button id="layer-select-all" class="command-button secondary" type="button">全部显示</button>
+              <button id="layer-clear-all" class="command-button secondary" type="button">全部隐藏</button>
             </div>
             <div class="representation-control" role="group" aria-label="Survey footprint layout">
-              <button type="button" class="representation-button active" data-layer-layout="layers">Layers</button>
-              <button type="button" class="representation-button" data-layer-layout="overlap">Overlap</button>
+              <button type="button" class="representation-button active" data-layer-layout="layers">分层</button>
+              <button type="button" class="representation-button" data-layer-layout="overlap">重合</button>
             </div>
+            <div id="survey-list" class="survey-list"></div>
           </section>
-          <section class="control-section layer-selection-section">
-            <div class="section-heading"><span>天区操作</span><output id="layer-selection-count">查看数据</output></div>
-            <div class="representation-control" role="group" aria-label="Canvas interaction mode">
-              <button type="button" class="representation-button active" data-layer-interaction="inspect">查看数据</button>
-              <button type="button" class="representation-button" data-layer-interaction="region">选择区域</button>
+        </div>
+
+        <div id="refinement-controls" hidden>
+          <section class="control-section refinement-mask-summary">
+            <div class="section-heading"><span>空间掩膜</span><output id="refinement-level-output">NSIDE --</output></div>
+            <dl>
+              <div><dt>候选块</dt><dd id="refinement-candidate-count">--</dd></div>
+              <div><dt>已保留</dt><dd id="refinement-selected-count">--</dd></div>
+              <div><dt>面积</dt><dd id="refinement-area">--</dd></div>
+            </dl>
+            <div class="refinement-step-actions">
+              <button id="refinement-back" class="command-button secondary" type="button">上一级</button>
+              <button id="refinement-next" class="command-button" type="button">细分为 4 子块</button>
             </div>
-            <p id="layer-interaction-note" class="control-note">Click a fragment to light and separate every visible survey layer covering the same sky cell.</p>
           </section>
           <section class="control-section">
-            <div class="section-heading"><span>Survey releases</span><span>VISIBILITY</span></div>
-            <div id="survey-list" class="survey-list"></div>
+            <div class="section-heading"><span>巡天筛选</span><output id="refinement-survey-count">--</output></div>
+            <div id="refinement-survey-list" class="refinement-filter-list"></div>
+          </section>
+          <section class="control-section">
+            <div class="section-heading"><span>数据模态</span><output id="refinement-modality-count">--</output></div>
+            <div id="refinement-modality-list" class="refinement-filter-list compact"></div>
           </section>
         </div>
 
@@ -214,42 +254,102 @@
             <div><dt>可访问</dt><dd id="catalog-ready-count">--</dd></div>
           </dl>
         </header>
+        <div class="catalog-search-bar">
+          <label class="sr-only" for="catalog-search">搜索数据资产</label>
+          <input id="catalog-search" class="field-input" type="search" placeholder="搜索名称、巡天、发布、Tag、输入/输出路径或 Connector" />
+          <select id="catalog-origin-filter" class="field-input" aria-label="来源筛选">
+            <option value="all">全部来源</option><option value="builtin">系统内置</option><option value="user">用户登记</option>
+          </select>
+          <select id="catalog-kind-filter" class="field-input" aria-label="数据类型筛选">
+            <option value="all">全部类型</option><option value="catalog">星表</option><option value="image">图像</option><option value="spectra">光谱</option><option value="cube">数据立方</option><option value="timeseries">时序</option><option value="other">其他</option>
+          </select>
+          <output id="catalog-search-hint">搜索全部登记字段</output>
+        </div>
         <div class="catalog-columns" aria-hidden="true"><span>数据资产</span><span>巡天</span><span>类型</span><span>状态</span></div>
         <div id="catalog-asset-list" class="catalog-asset-list"></div>
         <div id="catalog-empty" class="catalog-empty" hidden>没有符合当前筛选条件的数据。</div>
         <footer class="catalog-stage-footer">后续 data-warehouse connector 将读取这里登记的访问描述，并接收经过 MOC 精筛后的空间约束。</footer>
       </section>
 
-      <section id="scene-stage" class="volume-stage" aria-label="多巡天天球与联合体积" hidden>
+      <section id="asset-detail-stage" class="catalog-stage asset-detail-stage" aria-label="数据资产详情" hidden>
+        <header class="catalog-stage-header">
+          <div>
+            <button id="asset-detail-back" class="text-button" type="button">← 返回数据目录</button>
+            <span class="panel-kicker">DATA ASSET DETAIL</span>
+            <h2 id="asset-detail-title">数据资产</h2>
+            <p id="asset-detail-description"></p>
+          </div>
+          <dl id="asset-detail-stats" class="asset-detail-stats"></dl>
+        </header>
+        <div id="asset-detail-body" class="asset-detail-body"></div>
+      </section>
+
+      <section id="connector-stage" class="catalog-stage connector-stage" aria-label="连接器目录" hidden>
+        <header class="catalog-stage-header">
+          <div>
+            <span class="panel-kicker">DATA ACCESS CONFIGURATION</span>
+            <h2>连接器</h2>
+            <p>登记数据所在的位置和访问方式。连接检测只验证端点、路径或数据库主机；目录扫描由 FlinkIngest 任务负责。</p>
+          </div>
+          <dl class="catalog-summary">
+            <div><dt>总数</dt><dd id="connector-count">0</dd></div>
+            <div><dt>草稿</dt><dd id="connector-draft-count">0</dd></div>
+            <div><dt>可用</dt><dd id="connector-ready-count">0</dd></div>
+          </dl>
+        </header>
+        <div class="connector-columns" aria-hidden="true"><span>连接器</span><span>路径</span><span>类型</span><span>状态</span></div>
+        <div id="connector-list" class="connector-list"></div>
+        <div id="connector-empty" class="catalog-empty" hidden>还没有登记 Connector。</div>
+        <div id="connector-detail" class="connector-detail" hidden></div>
+      </section>
+
+      <section id="scene-stage" class="volume-stage" aria-label="项目态势天球与数据空间" hidden>
         <canvas id="volume-canvas"></canvas>
         <div class="scene-hud-top">
           <div class="scene-readout">
             <span><b>FRAME</b> ICRS</span>
-            <span><b id="scene-mode-label">LAYERS</b> <span id="scene-mode-value">VISUAL RADII</span></span>
+            <span title="球面颜色表达公开覆盖和项目资产状态；层间偏移只用于显示，不代表物理距离。"><b id="scene-mode-label">PROJECT COVERAGE</b> <span id="scene-mode-value">PUBLIC + OWNED</span></span>
             <span><b>CAMERA</b> <output id="camera-distance">--</output></span>
           </div>
-          <button id="reset-button" class="icon-button scene-reset scene-action" type="button" aria-label="重置视图" title="重置视图">
-            <i data-lucide="rotate-ccw"></i>
-          </button>
+          <div class="scene-tools">
+            <div id="layer-tool-strip" class="layer-tool-strip" role="group" aria-label="天区工具">
+              <button type="button" class="scene-tool active" data-layer-interaction="inspect" aria-pressed="true"><kbd>F</kbd><span>查看</span></button>
+              <button type="button" class="scene-tool" data-layer-interaction="region" aria-pressed="false"><kbd>G</kbd><span>选区</span></button>
+              <button id="coverage-lock-button" type="button" class="scene-tool" aria-pressed="false" disabled><kbd>C</kbd><span>固定</span></button>
+            </div>
+            <button id="reset-button" class="icon-button scene-reset scene-action" type="button" aria-label="重置视图" title="重置视图">
+              <i data-lucide="rotate-ccw"></i>
+            </button>
+          </div>
         </div>
         <div id="scene-legend" class="distance-legend" aria-label="场景颜色图例">
           <span id="legend-min">INNER</span><i></i><span id="legend-max">OUTER</span>
         </div>
-        <div class="cutaway-badge"><i data-lucide="layers-3"></i><span id="scene-badge">SURVEY LAYERS</span></div>
+        <div class="cutaway-badge"><i data-lucide="layers-3"></i><span id="scene-badge">查看模式</span><output id="layer-selection-count">F</output></div>
         <aside id="coverage-hover" class="coverage-hover" aria-live="polite" hidden></aside>
+        <aside id="region-scene-legend" class="region-scene-legend" aria-live="polite" hidden></aside>
         <aside id="coverage-context-menu" class="coverage-context-menu" hidden></aside>
         <div id="loading-indicator" class="loading-indicator visible">载入多巡天索引</div>
       </section>
 
-      <section id="workflow-stage" class="workflow-stage" aria-label="智能管线运行" hidden>
+      <section id="workflow-stage" class="workflow-stage" aria-label="数据生产" hidden>
         <header class="workflow-stage-header">
           <div>
-            <span class="panel-kicker">DETERMINISTIC WORKFLOW</span>
-            <h2 id="workflow-stage-title">Euclid × DESI 球面交叉匹配</h2>
+            <span class="panel-kicker">ASTRO-CODE DATA PRODUCTION</span>
+            <h2 id="workflow-stage-title">交叉匹配 → cutout → 打包</h2>
           </div>
           <span id="workflow-status-badge" class="run-status" data-status="idle">IDLE</span>
         </header>
         <div id="workflow-error" class="workflow-error" hidden></div>
+        <section class="production-track" aria-label="astro-code 生产动作">
+          <div class="section-heading"><span>生产动作</span><span>ASTRO-CODE</span></div>
+          <div class="production-actions" role="group" aria-label="选择数据生产动作">
+            <button type="button" class="production-action active" data-production-action="crossmatch"><strong>01</strong><span>交叉匹配</span><small>RA / Dec 合并星表</small></button>
+            <button type="button" class="production-action" data-production-action="cutout"><strong>02</strong><span>cutout</span><small>按对象裁剪图像</small><em>待接入</em></button>
+            <button type="button" class="production-action" data-production-action="package"><strong>03</strong><span>打包</span><small>组织多模态交付物</small><em>待接入</em></button>
+          </div>
+          <p id="production-action-copy" class="production-action-copy">当前动作使用真实目录执行球面交叉匹配，并保留结果血缘。cutout 与打包会复用同一选区和对象清单。</p>
+        </section>
         <section class="pipeline-section" aria-labelledby="pipeline-heading">
           <div class="section-heading"><span id="pipeline-heading">Execution steps</span><span id="pipeline-progress">0 / 7</span></div>
           <ol id="workflow-steps" class="workflow-steps"></ol>
@@ -280,7 +380,6 @@
               <button id="workflow-retry" class="icon-button" type="button" aria-label="重试失败任务" title="重试失败任务" hidden><i data-lucide="refresh-cw"></i></button>
               <a id="workflow-download" class="icon-button" aria-label="下载结果" title="下载结果" hidden><i data-lucide="download"></i></a>
               <button id="workflow-open-layers" class="icon-button" type="button" aria-label="在巡天球层中查看" title="在巡天球层中查看"><i data-lucide="globe-2"></i></button>
-              <button id="workflow-open-volume" class="icon-button" type="button" aria-label="在联合体积中查看" title="在联合体积中查看"><i data-lucide="box"></i></button>
             </div>
           </div>
           <div class="result-table-wrap">

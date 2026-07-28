@@ -19,6 +19,11 @@ The current vertical slice can:
 10. Register deterministic tools and versioned workflow DAGs with persistent run state.
 11. Execute `euclid-desi-crossmatch@1` through a rule-based Agent and an explicit human filter gate.
 12. Maintain a deployment-bundled data catalog plus persistent user data registrations for future connectors.
+13. Present project status on the 3D sky through five asset stages: public reference, acquired, processed, deliverable, and planned.
+14. Select connected eight-neighbour sky regions, refine exact NESTED HEALPix masks, and filter registered assets by survey, release, and modality.
+15. Expose the first astro-code production action, cross-match, with cutout and package contracts ready for adapter work.
+16. Maintain editable data-asset detail pages with public sources, multiple access locations, project-stage facets, and lineage placeholders.
+17. Register S3/OSS, local-path, and JDBC connectors with path-based upsert identity, non-enumerating connection checks, and FlinkIngest run history.
 
 The viewer and API do not depend on `cosmos-data-linkage`, its PostgreSQL
 database, or its Aladin viewer. The old service is only a read-only acceptance
@@ -78,7 +83,8 @@ Each record identifies an optional survey and release, a product, modality,
 format, connector kind, logical or physical URI, availability state, and zero
 or more footprint references. A future data-warehouse connector can consume
 this access description together with a refined MOC selection; credentials
-remain outside catalog records.
+remain outside catalog records. Connector associations use normalized location
+keys so a path upsert does not orphan an asset.
 
 ## Survey registry and release footprints
 
@@ -153,6 +159,9 @@ REST endpoints:
 - `GET /api/surveys`
 - `GET /api/surveys/:id`
 - `GET /api/survey-footprints`
+- `GET /api/sky/overview?survey=euclid&release=euclid-q1&nside=16&cells=...`
+- `POST /api/sky/query`
+- `GET /api/sky/coverage?nside=16&assetIds=...` (generic scanned-asset coverage)
 - `POST /api/surveys/registrations`
 - `GET /api/datasets/:id/sky/summary`
 - `GET /api/datasets/:id/sky/cells?nside=128`
@@ -179,13 +188,43 @@ REST endpoints:
 - `POST /api/agent/sessions`
 - `POST /api/agent/sessions/:id/messages`
 
+Generic connector scans use the same derived index as the Euclid pilot. The
+request can point at a connector prefix or a child path and declare catalog
+coordinates without exposing credentials:
+
+```json
+{
+  "mode": "scan",
+  "assetId": "my-user-catalog",
+  "path": "projects/astro/catalogs/sample.csv",
+  "allowedSuffixes": [".csv"],
+  "spatial": {
+    "mode": "catalog",
+    "raColumn": "ra",
+    "decColumn": "dec",
+    "frame": "ICRS",
+    "units": "deg"
+  }
+}
+```
+
+The scanner records files without valid coordinates as metadata-only; it does
+not invent a footprint from the path or filename.
+
+Catalogs that already carry NESTED HEALPix pixels can instead use
+`"mode": "healpix"` with `"healpixColumn": "hpix"`. The resulting document
+uses `coverage_method=catalog_healpix_nested` and is eligible for the generic
+project-sky coverage layer. `"mode": "auto"` tries RA/Dec first and then
+falls back to `hpix` / `healpix_pixel` aliases when those coordinates are not
+present.
+
 The cell-object endpoint lazily builds and reuses a server-side index for the
 requested angular/radial level. The REST representation never exposes a source
 filesystem path.
 
 ## k3s deployment
 
-`deploy/k3s.yaml` deploys version `0.9.1` into the isolated
+`deploy/k3s.yaml` deploys version `0.10.33` into the isolated
 `astro-data-workspace` namespace. The Pod is pinned to `eva7028`; compact catalog
 metadata and derived indexes live in a 128 MiB `nfs-data` PVC backed by
 `/mnt/data`, mounted read-only by the service. Registry state uses a separate
@@ -196,25 +235,43 @@ OSS/rclone mount.
 The Ingress host is:
 
 ```text
-astro.agent.dev.72602.online
+astro.workspace.dev.72602.online
 ```
 
 The cluster ingress controller is currently exposed through NodePort `32080`, so
 the LAN URL is:
 
 ```text
-http://astro.agent.dev.72602.online:32080/
+http://astro.workspace.dev.72602.online:32080/
 ```
 
-The DNS and Ingress route are active. This deployment does not modify the `dev`
-namespace, its services, or the cluster Ingress controller.
+The application Service is also exposed directly through NodePort `32082` for
+VSCode port forwarding or direct node access. It maps node port `32082` to the
+container's HTTP port `3000`:
+
+```bash
+kubectl -n astro-data-workspace get svc astro-data-workspace-mcp
+kubectl -n astro-data-workspace port-forward svc/astro-data-workspace-mcp 32082:3000
+```
+
+When forwarding from a remote VSCode session, forward local port `32082` to
+`astro-data-workspace-mcp` in namespace `astro-data-workspace` on service port
+`3000`. The Ingress NodePort `32080` remains available separately.
+
+The Ingress rule is configured for the new host. The DNS record for
+`astro.workspace.dev.72602.online` must point at the reachable node address;
+this deployment does not modify the `dev` namespace, its services, or the
+cluster Ingress controller.
 
 Build and apply:
 
 ```bash
 docker build \
   --build-arg NPM_REGISTRY=https://registry.npmmirror.com \
-  -t docker.io/library/astro-data-workspace-mcp:0.9.1 .
+  -t crpi-wixjy6gci86ms14e.cn-hongkong.personal.cr.aliyuncs.com/ay-dev/astro-data-workspace-mcp:0.10.33 .
+
+podman push \
+  crpi-wixjy6gci86ms14e.cn-hongkong.personal.cr.aliyuncs.com/ay-dev/astro-data-workspace-mcp:0.10.33
 
 kubectl apply -f deploy/k3s.yaml
 kubectl -n astro-data-workspace rollout status deployment/astro-data-workspace-mcp

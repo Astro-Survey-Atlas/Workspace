@@ -1,4 +1,4 @@
-import { Box, createIcons, Download, Globe2, Layers3, MessageSquare, Play, Plus, RefreshCw, RotateCcw, Send, SlidersHorizontal } from "lucide";
+import { createIcons, Download, Globe2, Layers3, MessageSquare, Play, Plus, RefreshCw, RotateCcw, Send, SlidersHorizontal } from "lucide";
 
 import "./styles.css";
 import {
@@ -7,9 +7,12 @@ import {
   type AtlasJointCellView,
   type AtlasJointQueryResponse,
   type AtlasRefinementResponse,
+  type AstroOverviewResponse,
+  type AstroSpatialSummary,
   type SurveyCard,
   type SurveyRecord,
   type SurveyFootprintManifest,
+  type DataAssetRecord,
   type SurveyAtlasManifest,
   type VolumeManifest,
   type VolumePointData,
@@ -32,8 +35,10 @@ import {
 } from "./volume-viewer";
 import { WorkflowPanel } from "./workflow-panel";
 import { DataCatalogPanel } from "./data-catalog-panel";
+import { ConnectorPanel } from "./connector-panel";
+import { RegionRefinementViewer, type RegionRefinementState } from "./region-refinement-viewer";
 
-type ViewMode = "catalog" | "layers" | "volume" | "workflow";
+type ViewMode = "catalog" | "connectors" | "layers" | "refine" | "volume" | "workflow";
 type VolumeRepresentation = "cells" | "points";
 
 function byId<T extends HTMLElement>(id: string): T {
@@ -48,6 +53,80 @@ function formatInteger(value: number): string {
 
 function formatMpc(value: number, digits = 0): string {
   return `${value.toFixed(digits)} Mpc`;
+}
+
+function formatBytes(value: number): string {
+  if (!Number.isFinite(value) || value <= 0) return "0 B";
+  const units = ["B", "KB", "MB", "GB", "TB", "PB"];
+  let amount = value;
+  let unit = 0;
+  while (amount >= 1024 && unit < units.length - 1) {
+    amount /= 1024;
+    unit += 1;
+  }
+  return `${amount >= 10 || unit === 0 ? amount.toFixed(0) : amount.toFixed(1)} ${units[unit]}`;
+}
+
+const PROJECT_STATE_LABELS: Record<DataAssetRecord["projectState"], string> = {
+  public_reference: "公开参考",
+  acquired: "已掌握",
+  processed: "已加工",
+  deliverable: "可交付",
+  planned: "计划中",
+};
+
+function projectAssetCounts(): Record<DataAssetRecord["projectState"], number> {
+  const counts: Record<DataAssetRecord["projectState"], number> = {
+    public_reference: 0,
+    acquired: 0,
+    processed: 0,
+    deliverable: 0,
+    planned: 0,
+  };
+  dataAssets.forEach((asset) => {
+    const states = asset.projectStates?.length ? asset.projectStates : [asset.projectState];
+    states.forEach((state) => { counts[state] += 1; });
+  });
+  return counts;
+}
+
+function renderProjectMetrics(): void {
+  const counts = projectAssetCounts();
+  const metrics: Array<[string, string, string]> = [
+    ["metric-one-label", "metric-one", "public_reference"],
+    ["metric-two-label", "metric-two", "acquired"],
+    ["metric-three-label", "metric-three", "processed"],
+    ["metric-four-label", "metric-four", "deliverable"],
+    ["metric-five-label", "metric-five", "planned"],
+  ];
+  metrics.forEach(([labelId, valueId, state]) => {
+    byId(labelId).textContent = PROJECT_STATE_LABELS[state as DataAssetRecord["projectState"]].toUpperCase();
+    byId(valueId).textContent = formatInteger(counts[state as DataAssetRecord["projectState"]]);
+  });
+}
+
+function assetsForSelection(selection: SurveyLayerSelection): DataAssetRecord[] {
+  const surveyIds = new Set(selection.surveyIds);
+  const releaseIds = new Set(selection.releaseIds);
+  return dataAssets.filter((asset) => asset.surveyId && surveyIds.has(asset.surveyId) && (!asset.releaseId || releaseIds.has(asset.releaseId)));
+}
+
+function projectStateSummary(assets: DataAssetRecord[]): string {
+  const counts: Record<DataAssetRecord["projectState"], number> = {
+    public_reference: 0,
+    acquired: 0,
+    processed: 0,
+    deliverable: 0,
+    planned: 0,
+  };
+  assets.forEach((asset) => {
+    const states = asset.projectStates?.length ? asset.projectStates : [asset.projectState];
+    states.forEach((state) => { counts[state] += 1; });
+  });
+  return (Object.keys(PROJECT_STATE_LABELS) as DataAssetRecord["projectState"][])
+    .filter((state) => counts[state] > 0)
+    .map((state) => `${PROJECT_STATE_LABELS[state]} ${counts[state]}`)
+    .join(" · ") || "暂无关联项目资产";
 }
 
 function inspectorRows(title: string, rows: Array<[string, string]>, actions: HTMLButtonElement[] = []): void {
@@ -86,6 +165,15 @@ function actionButton(label: string, action: () => void): HTMLButtonElement {
   return button;
 }
 
+function downloadJson(name: string, value: unknown): void {
+  const blob = new Blob([`${JSON.stringify(value, null, 2)}\n`], { type: "application/json" });
+  const link = document.createElement("a");
+  link.href = URL.createObjectURL(blob);
+  link.download = name;
+  link.click();
+  URL.revokeObjectURL(link.href);
+}
+
 let canvas = byId<HTMLCanvasElement>("volume-canvas");
 const loadingIndicator = byId("loading-indicator");
 const controlsPanel = byId("controls-panel");
@@ -99,6 +187,11 @@ let surveyFootprints: SurveyFootprintManifest | null = null;
 let selectedSurvey: SurveyRecord | null = null;
 const surveyRecordsById = new Map<string, SurveyRecord>();
 let selectedLayerRegion: SurveyLayerSelection | null = null;
+let refinementSourceRegion: SurveyLayerSelection | null = null;
+let refinementState: RegionRefinementState | null = null;
+let dataAssets: DataAssetRecord[] = [];
+let refinementSurveyIds = new Set<string>();
+let refinementModalities = new Set<string>();
 let visibleSurveyIds = new Set<string>();
 let layerLayoutMode: SurveyLayerLayoutMode = "layers";
 let layerInteractionMode: SurveyLayerInteractionMode = "inspect";
@@ -106,6 +199,7 @@ let hoverDismissTimer: ReturnType<typeof setTimeout> | null = null;
 let volumeManifest: VolumeManifest | null = null;
 let volumePoints: VolumePointData | null = null;
 let layerViewer: SurveyLayerViewer | null = null;
+let refinementViewer: RegionRefinementViewer | null = null;
 let volumeViewer: VolumeViewer | null = null;
 let mode: ViewMode = "layers";
 let representation: VolumeRepresentation = "cells";
@@ -116,13 +210,23 @@ let radialMaxMpc = 6000;
 let parentFilter: { nside: number; pixel: number } | null = null;
 let selectedJointCell: JointCellSelection | null = null;
 let selectedRefinement: AtlasRefinementResponse | null = null;
+let astroOverview: AstroOverviewResponse | null = null;
+const workspaceCellSummaries = new Map<number, AstroSpatialSummary>();
+const workspaceHoverRequests = new Set<number>();
+let activeWorkspaceHover: SurveyLayerHover | null = null;
+let astroInspectionGeneration = 0;
 let radialTimer: ReturnType<typeof setTimeout> | null = null;
 let activationGeneration = 0;
 const workflowPanel = new WorkflowPanel((error) => console.error("Workflow UI request failed", error));
-const dataCatalogPanel = new DataCatalogPanel((error) => showFatal(error));
+let connectorSelectionRequest: string | null = null;
+const dataCatalogPanel = new DataCatalogPanel((error) => showFatal(error), (connectorId) => {
+  connectorSelectionRequest = connectorId;
+  void activateMode("connectors").catch(showFatal);
+});
+const connectorPanel = new ConnectorPanel((error) => showFatal(error));
 const LAYER_PREFERENCES_KEY = "astro-workspace:survey-layer-preferences:v1";
 
-createIcons({ icons: { Box, Download, Globe2, Layers3, MessageSquare, Play, Plus, RefreshCw, RotateCcw, Send, SlidersHorizontal } });
+createIcons({ icons: { Download, Globe2, Layers3, MessageSquare, Play, Plus, RefreshCw, RotateCcw, Send, SlidersHorizontal } });
 
 function showFatal(error: unknown): void {
   console.error(error);
@@ -133,7 +237,9 @@ function showFatal(error: unknown): void {
 }
 
 function freshCanvas(): HTMLCanvasElement {
-  const replacement = canvas.cloneNode(false) as HTMLCanvasElement;
+  const replacement = document.createElement("canvas");
+  replacement.id = canvas.id;
+  replacement.className = canvas.className;
   canvas.replaceWith(replacement);
   canvas = replacement;
   return replacement;
@@ -141,10 +247,11 @@ function freshCanvas(): HTMLCanvasElement {
 
 function destroyViewer(): void {
   layerViewer?.dispose();
+  refinementViewer?.dispose();
   volumeViewer?.dispose();
   layerViewer = null;
+  refinementViewer = null;
   volumeViewer = null;
-  selectedLayerRegion = null;
   renderSurveyHover(null);
 }
 
@@ -160,12 +267,13 @@ function renderLayerState(state: SurveyLayerState): void {
   canvas.dataset.layoutMode = state.layoutMode;
   canvas.dataset.interactionMode = state.interactionMode;
   canvas.dataset.visibleSurveyIds = state.visibleSurveyIds.join(",");
+  canvas.dataset.selectedPixels = state.selectedPixels.join(",");
   byId("camera-distance").textContent = `${state.cameraDistance.toFixed(2)} R`;
-  byId("layer-nside-output").textContent = `NSIDE ${state.nside}`;
   byId("layer-visible-output").textContent = `${state.visibleSurveyIds.length} ACTIVE`;
   byId("layer-selection-count").textContent = state.interactionMode === "inspect"
-    ? state.pinnedCoveragePixel == null ? "查看数据" : `CELL ${state.pinnedCoveragePixel}${state.lockedCoveragePixel === state.pinnedCoveragePixel ? " · 已固定" : ""}`
-    : state.selectedCellCount ? `已选 ${state.selectedCellCount} 个` : "尚未选择";
+    ? state.pinnedCoveragePixel == null ? "F" : `CELL ${state.pinnedCoveragePixel}${state.lockedCoveragePixel === state.pinnedCoveragePixel ? " · LOCKED" : ""}`
+    : state.selectedCellCount ? `${state.selectedCellCount} CELLS` : "G";
+  renderRegionSceneLegend(state);
   const pinStatus = document.getElementById("coverage-pin-status") as HTMLButtonElement | null;
   if (pinStatus) {
     const locked = state.lockedCoveragePixel === state.pinnedCoveragePixel && state.lockedCoveragePixel != null;
@@ -175,12 +283,55 @@ function renderLayerState(state: SurveyLayerState): void {
   }
   setActiveButtons("[data-layer-layout]", (button) => button.dataset.layerLayout === state.layoutMode);
   setActiveButtons("[data-layer-interaction]", (button) => button.dataset.layerInteraction === state.interactionMode);
-  byId("scene-mode-value").textContent = state.layoutMode === "layers" ? "FRAGMENT OFFSETS" : "OVERLAP COUNT";
-  byId("legend-min").textContent = state.layoutMode === "layers" ? "INNER" : "1 SURVEY";
-  byId("legend-max").textContent = state.layoutMode === "layers" ? "OUTER" : "MOST OVERLAP";
+  document.querySelectorAll<HTMLButtonElement>("[data-layer-interaction]").forEach((button) => button.setAttribute("aria-pressed", String(button.dataset.layerInteraction === state.interactionMode)));
+  const lockButton = byId<HTMLButtonElement>("coverage-lock-button");
+  const locked = state.pinnedCoveragePixel != null && state.lockedCoveragePixel === state.pinnedCoveragePixel;
+  lockButton.disabled = state.interactionMode !== "inspect" || state.pinnedCoveragePixel == null;
+  lockButton.classList.toggle("active", locked);
+  lockButton.setAttribute("aria-pressed", String(locked));
+  byId("scene-mode-value").textContent = state.layoutMode === "layers" ? "VISUAL OFFSETS" : "OVERLAP COUNT";
+  byId("legend-min").textContent = state.layoutMode === "layers" ? "图层内侧" : "1 SURVEY";
+  byId("legend-max").textContent = state.layoutMode === "layers" ? "图层外侧" : "MOST OVERLAP";
   byId("scene-badge").textContent = state.interactionMode === "region"
-    ? state.selectedCellCount ? `已选择 ${state.selectedCellCount} 个 HEALPix 区块` : "区域选择已开启"
-    : "DISPLAY LAYERS · NOT DISTANCE";
+    ? state.selectedCellCount ? "区域选择 · 已高亮" : "区域选择"
+    : locked ? "查看模式 · 已固定" : "查看模式";
+}
+
+function renderRegionSceneLegend(state: SurveyLayerState): void {
+  const legend = byId("region-scene-legend");
+  if (!state.selectedCellCount || !state.selectionAnchor?.visible || !selectedLayerRegion) {
+    legend.hidden = true;
+    legend.replaceChildren();
+    return;
+  }
+  const title = document.createElement("strong");
+  title.textContent = `SELECTED SKY REGION · ${state.selectedCellCount} CELLS`;
+  const subtitle = document.createElement("span");
+  subtitle.textContent = "其余天区已弱化";
+  const surveys = document.createElement("div");
+  surveys.className = "region-scene-surveys";
+  selectedLayerRegion.surveyIds.forEach((surveyId) => {
+    const survey = surveyCards.find((entry) => entry.id === surveyId);
+    const item = document.createElement("span");
+    const swatch = document.createElement("i");
+    swatch.style.background = survey?.color ?? "#f2cf62";
+    item.append(swatch, survey?.name ?? surveyId);
+    surveys.append(item);
+  });
+  if (!selectedLayerRegion.surveyIds.length) {
+    const item = document.createElement("span");
+    item.textContent = "NO REGISTERED COVERAGE";
+    surveys.append(item);
+  }
+  legend.replaceChildren(title, subtitle, surveys);
+  legend.hidden = false;
+  const stage = byId("scene-stage").getBoundingClientRect();
+  const width = Math.min(270, Math.max(200, stage.width - 24));
+  const left = Math.max(12, Math.min(state.selectionAnchor.xRatio * stage.width + 18, stage.width - width - 12));
+  const top = Math.max(52, Math.min(state.selectionAnchor.yRatio * stage.height - 42, stage.height - 110));
+  legend.style.width = `${width}px`;
+  legend.style.left = `${left}px`;
+  legend.style.top = `${top}px`;
 }
 
 function renderVolumeState(state: VolumeViewState): void {
@@ -195,14 +346,14 @@ function renderVolumeState(state: VolumeViewState): void {
 
 function renderSurveySelection(selection: SurveyLayerSelection | null): void {
   selectedLayerRegion = selection;
+  if (selection) refinementSourceRegion = { ...selection, pixels: [...selection.pixels] };
   byId("inspector-kicker").textContent = "REGION SELECTION";
   if (!selection) {
-    if (layerInteractionMode === "region") byId("layer-interaction-note").textContent = "点击一个 HEALPix 区块开始；之后点击共享边界的相邻区块自动扩展选区。";
+    byId("region-scene-legend").hidden = true;
     if (selectedSurvey) renderSurveyDetails(selectedSurvey);
     else inspectorRows("", []);
     return;
   }
-  byId("layer-interaction-note").textContent = `当前已组合 ${selection.pixels.length} 个相邻区块。每个巡天层只点亮自身实际覆盖的部分。`;
   const names = selection.surveyIds.map((id) => surveyCards.find((survey) => survey.id === id)?.name ?? id).join(" / ");
   const coverageSummary = selection.coverageCounts.map(({ surveyId, cellCount }) => `${surveyCards.find((survey) => survey.id === surveyId)?.name ?? surveyId}: ${cellCount}/${selection.pixels.length}`).join(" · ");
   const artifactSummary = selection.artifacts.map((artifact) => {
@@ -210,17 +361,40 @@ function renderSurveySelection(selection: SurveyLayerSelection | null): void {
     const release = survey?.releases.find((entry) => entry.id === artifact.releaseId);
     return `${survey?.name ?? artifact.surveyId} ${release?.label ?? artifact.releaseId}: ${artifact.product} (${release?.modalities.join(", ") ?? "metadata pending"})`;
   }).join(" | ");
-  inspectorRows(`已选择 ${selection.pixels.length} 个相邻区块`, [
-    ["NSIDE", String(selection.nside)],
-    ["Cells", `${selection.pixels.length} / ${selection.pixels.join(", ")}`],
-    ["Surveys", names],
-    ["Coverage by survey", coverageSummary || "当前可见巡天未覆盖所选区域"],
-    ["Matching releases", selection.releaseIds.join(" / ")],
-    ["Products / modalities", artifactSummary],
-    ["状态", selection.notice ?? "选区已在所有相关巡天展示层中分别点亮"],
-    ["调整", "点击相邻区块添加；点击已选区块移除；选区始终保持边连接"],
-    ["Use", "Region selection is angular coverage only; display offsets are not observational depth"],
-  ], [actionButton("清除所选区域", () => layerViewer?.clearRegionSelection())]);
+  const selectedAssets = assetsForSelection(selection);
+  const searchAction = actionButton("细化选区并检索", () => void openRegionRefinement(selection).catch(showFatal));
+  searchAction.dataset.action = "search-region";
+  const downloadAction = actionButton("下载 HEALPix 选区", () => downloadJson(`sky-region-nside-${selection.nside}.json`, {
+    schemaVersion: 1,
+    coordinateFrame: "ICRS",
+    nside: selection.nside,
+    ordering: "NESTED",
+    pixels: selection.pixels,
+    center: { raDeg: selection.centerRaDeg, decDeg: selection.centerDecDeg },
+    boundingRadiusDeg: selection.angularRadiusDeg,
+    surveys: selection.surveyIds,
+    releases: selection.releaseIds,
+  }));
+  downloadAction.classList.add("secondary");
+  downloadAction.dataset.action = "download-region";
+  const clearAction = actionButton("清除所选区域", () => {
+    refinementSourceRegion = null;
+    layerViewer?.clearRegionSelection();
+  });
+  clearAction.classList.add("secondary");
+  inspectorRows(`已锁定 ${selection.pixels.length} 个连续天区`, [
+    ["天区中心", `RA ${selection.centerRaDeg.toFixed(4)}° · Dec ${selection.centerDecDeg >= 0 ? "+" : ""}${selection.centerDecDeg.toFixed(4)}°`],
+    ["HEALPix mask", `NESTED · NSIDE ${selection.nside} · ${selection.pixels.length} cells`],
+    ["外接角半径", `${selection.angularRadiusDeg.toFixed(2)}°`],
+    ["数据巡天", names || "当前可见巡天暂无覆盖"],
+    ["各巡天覆盖", coverageSummary || "0 个已登记覆盖单元"],
+    ["未覆盖区块", `${selection.emptyCellCount} / ${selection.pixels.length}`],
+    ["匹配数据发布", selection.releaseIds.join(" / ") || "无"],
+    ["产品与模态", artifactSummary || "所选区块尚无已登记产品"],
+    ["项目资产", projectStateSummary(selectedAssets)],
+    ["选区状态", selection.notice ?? "完整角向选区已高亮；有数据的巡天切片叠加显示"],
+  ], [searchAction, downloadAction, clearAction]);
+  if (layerViewer) renderRegionSceneLegend(layerViewer.state);
 }
 
 function renderSurveyInspection(inspection: SurveyLayerInspection | null): void {
@@ -293,18 +467,29 @@ function renderSurveyInspection(inspection: SurveyLayerInspection | null): void 
     });
     stack.append(group);
   });
+  const cellAssets = dataAssets.filter((asset) => asset.surveyId && inspection.surveyIds.includes(asset.surveyId));
+  const projectState = document.createElement("section");
+  projectState.className = "coverage-project-state";
+  const projectHeading = document.createElement("header");
+  projectHeading.textContent = "项目资产";
+  const projectCopy = document.createElement("p");
+  projectCopy.textContent = projectStateSummary(cellAssets);
+  projectState.append(projectHeading, projectCopy);
   const nextStep = document.createElement("div");
   nextStep.className = "coverage-next-step";
   const nextCopy = document.createElement("p");
-  nextCopy.textContent = "已确认该天区存在数据。下一步将把天区和数据源提交给 data-warehouse，创建下载或扫描任务。";
+  nextCopy.textContent = "已确认该天区存在公开覆盖。下一步可把精确选区交给数据生产，生成扫描、下载或加工任务。";
   const prepare = document.createElement("button");
   prepare.type = "button";
   prepare.className = "command-button";
   prepare.disabled = true;
-  prepare.textContent = "数据准备任务 · 待接入";
+  prepare.textContent = "准备数据任务 · 待接入";
   prepare.title = "data-warehouse connector 尚未接入当前工作区";
   nextStep.append(nextCopy, prepare);
-  content.replaceChildren(titleRow, coordinates, stack, nextStep);
+  const workspaceSection = renderWorkspaceDataSection(workspaceSummaryForPixel(inspection.pixel));
+  workspaceSection.id = "coverage-workspace-data";
+  content.replaceChildren(titleRow, coordinates, stack, projectState, workspaceSection, nextStep);
+  void loadAstroInspection(inspection);
   if (window.innerWidth <= 1040) byId("inspector-panel").classList.add("mobile-open");
 }
 
@@ -312,9 +497,121 @@ function footprintsForSurvey(surveyId: string) {
   return surveyFootprints?.footprints.filter((footprint) => footprint.surveyId === surveyId) ?? [];
 }
 
+function workspaceSummaryForPixel(pixel: number): AstroSpatialSummary | undefined {
+  return workspaceCellSummaries.get(pixel) ?? astroOverview?.cells.find((cell) => cell.pixel === pixel);
+}
+
+function requestWorkspaceHoverSummary(hover: SurveyLayerHover): void {
+  if (workspaceSummaryForPixel(hover.pixel) || workspaceHoverRequests.has(hover.pixel)) return;
+  workspaceHoverRequests.add(hover.pixel);
+  void workspaceApi.skyQuery({ cells: [hover.pixel], nside: hover.nside })
+    .then((summary) => {
+      workspaceCellSummaries.set(hover.pixel, summary);
+      if (activeWorkspaceHover?.pixel === hover.pixel) renderSurveyHover(activeWorkspaceHover);
+    })
+    .catch((error) => console.warn("Unable to load workspace hover summary", error))
+    .finally(() => workspaceHoverRequests.delete(hover.pixel));
+}
+
+function workspaceStatusLabel(summary: AstroSpatialSummary | undefined): string {
+  if (!summary) return "未查询";
+  if (summary.status === "unavailable") return "尚未建立空间索引";
+  if (summary.status === "error") return summary.message ? `空间索引查询失败：${summary.message}` : "空间索引查询失败";
+  if (!summary.matchedFiles) return "已建立索引，此区块暂无文件";
+  return `${formatInteger(summary.matchedFiles)} 个文件 · ${formatBytes(summary.totalBytes)}`;
+}
+
+function renderWorkspaceDataSection(summary: AstroSpatialSummary | undefined, loading = false): HTMLElement {
+  const section = document.createElement("section");
+  section.className = "coverage-workspace-data";
+  section.dataset.status = summary?.status ?? (loading ? "loading" : "unknown");
+  const heading = document.createElement("header");
+  const title = document.createElement("strong");
+  title.textContent = "工作区数据";
+  const badge = document.createElement("span");
+  badge.textContent = loading ? "查询中" : summary?.status === "ready" ? "已扫描" : "未建立索引";
+  heading.append(title, badge);
+  const status = document.createElement("p");
+  status.textContent = loading ? "正在查询 astro_file_index_v1" : workspaceStatusLabel(summary);
+  section.append(heading, status);
+  if (!summary || summary.status !== "ready" || !summary.matchedFiles) return section;
+  const details = document.createElement("div");
+  details.className = "coverage-workspace-details";
+  const known = document.createElement("span");
+  known.textContent = `已知空间 ${formatInteger(summary.knownFiles)}`;
+  const unknown = document.createElement("span");
+  unknown.textContent = `未知空间 ${formatInteger(summary.unknownFiles)}`;
+  details.append(known, unknown);
+  section.append(details);
+  if (summary.byAsset.length) {
+    const assets = document.createElement("small");
+    assets.textContent = `资产：${summary.byAsset.slice(0, 3).map((entry) => `${dataAssets.find((asset) => asset.id === entry.key)?.name ?? entry.key} (${formatInteger(entry.files)})`).join(" · ")}`;
+    section.append(assets);
+  }
+  return section;
+}
+
+function euclidOverviewPixels(): number[] {
+  return [...new Set(
+    (surveyFootprints?.footprints ?? [])
+      .filter((footprint) => footprint.surveyId === "euclid" && footprint.releaseId === "euclid-q1" && footprint.nside === 16)
+      .flatMap((footprint) => footprint.pixels),
+  )].sort((left, right) => left - right);
+}
+
+async function loadEuclidAstroOverview(): Promise<void> {
+  const cells = euclidOverviewPixels();
+  if (!cells.length) return;
+  const overview = await workspaceApi.skyOverview({ survey: "euclid", release: "euclid-q1", nside: 16, cells });
+  astroOverview = overview;
+  if (mode === "layers") {
+    byId("dataset-state").textContent = overview.status === "ready"
+      ? "公开覆盖与工作区已扫描空间索引已载入"
+      : "公开覆盖已载入；工作区空间索引尚未建立";
+  }
+}
+
+async function loadWorkspaceAssetCoverage(): Promise<void> {
+  const assetIds = dataAssets.map((asset) => asset.id).filter(Boolean);
+  if (!assetIds.length) {
+    layerViewer?.setWorkspaceCoverage(null);
+    return;
+  }
+  const coverage = await workspaceApi.skyCoverage({ nside: 16, assetIds });
+  layerViewer?.setWorkspaceCoverage({ nside: coverage.nside, pixels: coverage.pixels });
+  if (coverage.status === "error") console.warn("Unable to load generic workspace coverage", coverage.message);
+}
+
+async function loadAstroInspection(inspection: SurveyLayerInspection): Promise<void> {
+  const generation = ++astroInspectionGeneration;
+  const summary = workspaceSummaryForPixel(inspection.pixel);
+  try {
+    const queried = await workspaceApi.skyQuery({
+      cells: [inspection.pixel],
+      nside: inspection.nside,
+    });
+    if (generation !== astroInspectionGeneration) return;
+    workspaceCellSummaries.set(inspection.pixel, queried);
+    const section = byId<HTMLElement>("coverage-workspace-data");
+    section.replaceWith(renderWorkspaceDataSection(queried));
+  } catch (error) {
+    if (generation !== astroInspectionGeneration) return;
+    const section = byId<HTMLElement>("coverage-workspace-data");
+    section.replaceWith(renderWorkspaceDataSection({
+      ...(summary ?? { status: "error", index: "astro_file_index_v1", nside: inspection.nside, matchedFiles: 0, totalBytes: 0, knownFiles: 0, unknownFiles: 0, spatialStatus: {}, byAsset: [], bySurveyReleaseModality: [] }),
+      status: "error",
+      message: error instanceof Error ? error.message : String(error),
+    }));
+  }
+}
+
 function renderSurveyHover(hover: SurveyLayerHover | null): void {
   const card = byId("coverage-hover");
   if (!hover) {
+    activeWorkspaceHover = null;
+    delete canvas.dataset.hoveredPixel;
+    delete canvas.dataset.hoveredCovered;
+    delete canvas.dataset.hoveredSelectable;
     if (hoverDismissTimer) clearTimeout(hoverDismissTimer);
     hoverDismissTimer = setTimeout(() => {
       card.hidden = true;
@@ -322,16 +619,22 @@ function renderSurveyHover(hover: SurveyLayerHover | null): void {
     }, 110);
     return;
   }
+  activeWorkspaceHover = hover;
+  requestWorkspaceHoverSummary(hover);
   if (hoverDismissTimer) clearTimeout(hoverDismissTimer);
   hoverDismissTimer = null;
+  canvas.dataset.hoveredPixel = String(hover.pixel);
+  canvas.dataset.hoveredCovered = String(hover.artifacts.length > 0);
+  canvas.dataset.hoveredSelectable = String(hover.selectableInRegion);
   const stage = byId("scene-stage");
   const bounds = stage.getBoundingClientRect();
   const title = document.createElement("strong");
-  title.textContent = `ICRS coverage cell ${hover.pixel}`;
+  title.textContent = `ICRS sky cell ${hover.pixel}`;
   const subtitle = document.createElement("span");
   subtitle.textContent = `RA ${hover.pointerRaDeg.toFixed(5)}° · Dec ${hover.pointerDecDeg >= 0 ? "+" : ""}${hover.pointerDecDeg.toFixed(5)}° · NSIDE ${hover.nside}`;
   const center = document.createElement("span");
-  center.textContent = `Cell center ${hover.centerRaDeg.toFixed(5)}°, ${hover.centerDecDeg >= 0 ? "+" : ""}${hover.centerDecDeg.toFixed(5)}° · ${hover.artifacts.length} sources`;
+  const localSummary = workspaceSummaryForPixel(hover.pixel);
+  center.textContent = `Cell center ${hover.centerRaDeg.toFixed(5)}°, ${hover.centerDecDeg >= 0 ? "+" : ""}${hover.centerDecDeg.toFixed(5)}° · 官方 ${hover.artifacts.length} · 工作区 ${localSummary?.matchedFiles ?? 0}`;
   const entries = document.createElement("div");
   entries.className = "coverage-hover-list";
   hover.artifacts.forEach((artifact) => {
@@ -354,6 +657,16 @@ function renderSurveyHover(hover: SurveyLayerHover | null): void {
     entry.append(name, detail, provenance);
     entries.append(entry);
   });
+  entries.append(renderWorkspaceDataSection(localSummary));
+  if (!hover.artifacts.length) {
+    const empty = document.createElement("article");
+    const name = document.createElement("b");
+    name.textContent = "当前可见巡天无已登记覆盖";
+    const detail = document.createElement("span");
+    detail.textContent = hover.selectableInRegion ? "该区块仍可加入连续天区选区" : "切换到区域选择后可纳入天区 mask";
+    empty.append(name, detail);
+    entries.append(empty);
+  }
   card.replaceChildren(title, subtitle, center, entries);
   card.hidden = false;
   const width = Math.min(276, Math.max(220, bounds.width - 24));
@@ -412,6 +725,159 @@ function footprintSurveyIds(): string[] {
   return surveyCards.filter((survey) => available.has(survey.id)).map((survey) => survey.id);
 }
 
+function activeRefinementBaseCoverage(): Set<number> {
+  const selection = refinementSourceRegion ?? selectedLayerRegion;
+  if (!selection) return new Set();
+  const basePixels = new Set(selection.pixels);
+  const covered = new Set<number>();
+  surveyFootprints?.footprints.forEach((footprint) => {
+    if (!refinementSurveyIds.has(footprint.surveyId)) return;
+    footprint.pixels.forEach((pixel) => {
+      if (basePixels.has(pixel)) covered.add(pixel);
+    });
+  });
+  return covered;
+}
+
+function availableRefinementSurveyIds(): string[] {
+  const source = refinementSourceRegion ?? selectedLayerRegion;
+  if (!source) return [];
+  const selected = new Set(source.pixels);
+  const available = new Set((surveyFootprints?.footprints ?? [])
+    .filter((footprint) => footprint.pixels.some((pixel) => selected.has(pixel)))
+    .map((footprint) => footprint.surveyId));
+  return surveyCards.filter((survey) => available.has(survey.id)).map((survey) => survey.id);
+}
+
+function refinementReleaseIds(): string[] {
+  const selection = refinementSourceRegion ?? selectedLayerRegion;
+  if (!selection || !refinementState) return [];
+  const selectedBasePixels = new Set(refinementState.selectedPixels.map((pixel) => {
+    const ratio = refinementState!.nside / selection.nside;
+    return Math.floor(pixel / (ratio * ratio));
+  }));
+  return [...new Set((surveyFootprints?.footprints ?? [])
+    .filter((footprint) => refinementSurveyIds.has(footprint.surveyId) && footprint.pixels.some((pixel) => selectedBasePixels.has(pixel)))
+    .map((footprint) => footprint.releaseId))].sort();
+}
+
+function matchingRefinementAssets(): DataAssetRecord[] {
+  if (!refinementState?.selectedPixels.length || !refinementSurveyIds.size || !refinementModalities.size) return [];
+  const releases = new Set(refinementReleaseIds());
+  return dataAssets.filter((asset) => {
+    if (!asset.surveyId || !refinementSurveyIds.has(asset.surveyId)) return false;
+    if (asset.releaseId && !releases.has(asset.releaseId)) return false;
+    if (refinementModalities.size && !asset.modalities.some((modality) => refinementModalities.has(modality))) return false;
+    return true;
+  });
+}
+
+function renderRefinementFilters(): void {
+  const selection = refinementSourceRegion ?? selectedLayerRegion;
+  if (!selection) return;
+  const surveyList = byId("refinement-survey-list");
+  const availableSurveys = availableRefinementSurveyIds();
+  surveyList.replaceChildren(...availableSurveys.map((surveyId) => {
+    const label = document.createElement("label");
+    const input = document.createElement("input");
+    input.type = "checkbox";
+    input.checked = refinementSurveyIds.has(surveyId);
+    input.addEventListener("change", () => {
+      if (input.checked) refinementSurveyIds.add(surveyId);
+      else refinementSurveyIds.delete(surveyId);
+      refinementViewer?.setCoveredBasePixels(activeRefinementBaseCoverage());
+      renderRefinementFilters();
+      renderRefinementInspector();
+    });
+    const swatch = document.createElement("i");
+    swatch.style.background = surveyCards.find((survey) => survey.id === surveyId)?.color ?? "#42d4c6";
+    const name = document.createElement("span");
+    name.textContent = surveyCards.find((survey) => survey.id === surveyId)?.name ?? surveyId;
+    label.append(input, swatch, name);
+    return label;
+  }));
+  byId("refinement-survey-count").textContent = `${refinementSurveyIds.size}/${availableSurveys.length}`;
+
+  const availableModalities = [...new Set(availableSurveys.flatMap((surveyId) => surveyRecordsById.get(surveyId)?.modalities ?? []))].sort();
+  const modalityList = byId("refinement-modality-list");
+  modalityList.replaceChildren(...availableModalities.map((modality) => {
+    const label = document.createElement("label");
+    const input = document.createElement("input");
+    input.type = "checkbox";
+    input.checked = refinementModalities.has(modality);
+    input.addEventListener("change", () => {
+      if (input.checked) refinementModalities.add(modality);
+      else refinementModalities.delete(modality);
+      renderRefinementFilters();
+      renderRefinementInspector();
+    });
+    const name = document.createElement("span");
+    name.textContent = modality;
+    label.append(input, name);
+    return label;
+  }));
+  byId("refinement-modality-count").textContent = `${refinementModalities.size}/${availableModalities.length}`;
+}
+
+function renderRefinementInspector(): void {
+  const selection = refinementSourceRegion ?? selectedLayerRegion;
+  const state = refinementState;
+  if (!selection || !state) return;
+  const assets = matchingRefinementAssets();
+  const releaseIds = refinementReleaseIds();
+  const download = actionButton("导出检索清单", () => downloadJson(`sky-data-query-nside-${state.nside}.json`, {
+    schemaVersion: 1,
+    coordinateFrame: "ICRS",
+    spatialConstraint: { type: "healpix-mask", ordering: "NESTED", nside: state.nside, pixels: state.selectedPixels },
+    coverageResolution: { nside: selection.nside, method: "inherited-parent-footprint" },
+    surveys: [...refinementSurveyIds].sort(),
+    releases: releaseIds,
+    modalities: [...refinementModalities].sort(),
+    assets: assets.map((asset) => ({ id: asset.id, surveyId: asset.surveyId, releaseId: asset.releaseId, product: asset.product, connector: asset.access.connector, uri: asset.access.uri })),
+  }));
+  download.dataset.action = "export-refined-query";
+  const back = actionButton("返回项目态势", () => void activateMode("layers").catch(showFatal));
+  back.classList.add("secondary");
+  inspectorRows(`已筛得 ${assets.length} 个数据资产`, [
+    ["精细选区", `NESTED · NSIDE ${state.nside} · ${state.selectedPixels.length} cells`],
+    ["估算面积", `${state.selectedAreaDeg2.toFixed(3)} deg²`],
+    ["巡天", [...refinementSurveyIds].map((id) => surveyCards.find((survey) => survey.id === id)?.name ?? id).join(" / ") || "未选择"],
+    ["发布", releaseIds.join(" / ") || "无匹配覆盖"],
+    ["模态", [...refinementModalities].join(" / ") || "未选择"],
+    ["覆盖精度", `登记 footprint NSIDE ${selection.nside}；细块继承父块覆盖`],
+    ["候选资产", assets.map((asset) => `${asset.name} [${asset.status}]`).join(" · ") || "数据目录中暂无匹配资产"],
+  ], [download, back]);
+  byId<HTMLButtonElement>("refinement-next").disabled = !state.canRefine;
+  byId<HTMLButtonElement>("refinement-back").disabled = !state.canGoBack;
+}
+
+function renderRefinementState(state: RegionRefinementState): void {
+  refinementState = state;
+  canvas.dataset.mode = "refine";
+  canvas.dataset.refinementNside = String(state.nside);
+  canvas.dataset.candidatePixels = state.candidatePixels.join(",");
+  canvas.dataset.selectedPixels = state.selectedPixels.join(",");
+  canvas.dataset.cameraDistance = state.cameraDistance.toFixed(6);
+  byId("camera-distance").textContent = `${state.cameraDistance.toFixed(2)} R`;
+  byId("refinement-level-output").textContent = `NSIDE ${state.nside}`;
+  byId("refinement-candidate-count").textContent = formatInteger(state.candidatePixels.length);
+  byId("refinement-selected-count").textContent = formatInteger(state.selectedPixels.length);
+  byId("refinement-area").textContent = `${state.selectedAreaDeg2.toFixed(3)} deg²`;
+  byId("scene-mode-value").textContent = `NESTED NSIDE ${state.nside}`;
+  byId("scene-badge").textContent = `${state.selectedPixels.length} / ${state.candidatePixels.length} 子块已保留`;
+  byId("layer-selection-count").textContent = `NSIDE ${state.nside}`;
+  renderRefinementInspector();
+}
+
+async function openRegionRefinement(selection: SurveyLayerSelection): Promise<void> {
+  selectedLayerRegion = selection;
+  refinementSourceRegion = { ...selection, pixels: [...selection.pixels] };
+  const availableSurveys = availableRefinementSurveyIds();
+  refinementSurveyIds = new Set(availableSurveys);
+  refinementModalities = new Set(availableSurveys.flatMap((surveyId) => surveyRecordsById.get(surveyId)?.modalities ?? []));
+  await activateMode("refine");
+}
+
 function restoreLayerPreferences(): void {
   const available = new Set(footprintSurveyIds());
   try {
@@ -445,14 +911,16 @@ function applyLayerPreferences(): void {
   layerViewer?.setLayoutMode(layerLayoutMode);
   layerViewer?.setVisibleSurveys(visibleSurveyIds);
   layerViewer?.setInteractionMode(layerInteractionMode);
-  const regionMode = layerInteractionMode === "region";
-  byId("layer-interaction-note").textContent = regionMode
-    ? selectedLayerRegion?.pixels.length
-      ? `当前已组合 ${selectedLayerRegion.pixels.length} 个相邻区块。点击边相邻区块继续添加，点击已选区块移除。`
-      : "点击一个 HEALPix 区块开始；之后点击边相邻区块自动扩展选区。"
-    : "点击区块查看同一天区内所有可见巡天的 DR、产品和模态；右键可固定天区。";
   buildSurveyList();
   persistLayerPreferences();
+}
+
+function chooseLayerInteraction(nextMode: SurveyLayerInteractionMode): void {
+  if (nextMode === "inspect") {
+    refinementSourceRegion = null;
+  }
+  layerInteractionMode = nextMode;
+  applyLayerPreferences();
 }
 
 function setSurveyVisibility(surveyId: string, visible: boolean): void {
@@ -700,28 +1168,42 @@ function updateJointControls(): void {
 
 async function activateMode(nextMode: ViewMode): Promise<void> {
   if (nextMode === "layers" && !surveyFootprints) throw new Error("Survey footprint catalog is not configured");
+  if (nextMode === "refine" && !refinementSourceRegion && !selectedLayerRegion) throw new Error("请先在项目态势中选择连续天区");
   if (nextMode === "volume" && (!atlas || !angularCells || !volumeManifest)) throw new Error("Joint volume is not configured");
+  const sourceRegion = refinementSourceRegion ?? selectedLayerRegion;
+  const returningLayerRegion = nextMode === "layers" && sourceRegion
+    ? { ...sourceRegion, pixels: [...sourceRegion.pixels] }
+    : null;
   activationGeneration += 1;
   const generation = activationGeneration;
   mode = nextMode;
   destroyViewer();
   setActiveButtons("[data-mode]", (button) => button.dataset.mode === mode);
   byId("catalog-controls").hidden = mode !== "catalog";
+  byId("connector-controls").hidden = mode !== "connectors";
   byId("layer-controls").hidden = mode !== "layers";
+  byId("refinement-controls").hidden = mode !== "refine";
   byId("volume-controls").hidden = mode !== "volume";
   byId("workflow-controls").hidden = mode !== "workflow";
   byId("catalog-stage").hidden = mode !== "catalog";
-  byId("scene-stage").hidden = mode === "workflow" || mode === "catalog";
+  byId("asset-detail-stage").hidden = true;
+  byId("connector-stage").hidden = mode !== "connectors";
+  byId("scene-stage").hidden = mode === "workflow" || mode === "catalog" || mode === "connectors";
   byId("workflow-stage").hidden = mode !== "workflow";
   byId("inspector-view").hidden = mode === "workflow";
   byId("agent-panel").hidden = mode !== "workflow";
   byId("agent-toggle").hidden = mode === "volume";
-  const inspectorLabel = mode === "workflow" ? "显示 Agent" : mode === "catalog" ? "显示数据详情" : "显示覆盖详情";
+  const inspectorLabel = mode === "workflow" ? "显示 Agent" : mode === "catalog" ? "显示数据详情" : mode === "refine" ? "显示检索详情" : "显示覆盖详情";
   byId("agent-toggle").setAttribute("aria-label", inspectorLabel);
   byId("agent-toggle").setAttribute("title", inspectorLabel);
-  document.querySelectorAll<HTMLElement>(".scene-action").forEach((element) => { element.hidden = mode === "workflow" || mode === "catalog"; });
+  document.querySelectorAll<HTMLElement>(".scene-action").forEach((element) => { element.hidden = mode === "workflow" || mode === "catalog" || mode === "connectors"; });
+  byId("layer-tool-strip").hidden = mode !== "layers";
+  byId("scene-legend").hidden = mode === "refine";
+  byId("region-scene-legend").hidden = mode !== "layers";
+  byId("context-summary").hidden = mode === "refine";
   document.querySelector<HTMLElement>(".workspace-shell")?.classList.toggle("workflow-active", mode === "workflow");
   document.querySelector<HTMLElement>(".workspace-shell")?.classList.toggle("catalog-active", mode === "catalog");
+  document.querySelector<HTMLElement>(".workspace-shell")?.classList.toggle("connector-active", mode === "connectors");
   byId("inspector-panel").classList.remove("mobile-open");
   inspectorRows("", []);
   loadingIndicator.classList.add("visible");
@@ -731,12 +1213,7 @@ async function activateMode(nextMode: ViewMode): Promise<void> {
     byId("panel-kicker").textContent = "DATA CATALOG";
     byId("panel-dataset-name").textContent = "数据资产登记";
     byId("dataset-state").textContent = "内置与用户数据目录已加载";
-    byId("metric-one-label").textContent = "ASSETS";
-    byId("metric-one").textContent = "--";
-    byId("metric-three-label").textContent = "SURVEYS";
-    byId("metric-three").textContent = String(surveyCards.length);
-    byId("metric-four-label").textContent = "STORAGE";
-    byId("metric-four").textContent = "METADATA";
+    renderProjectMetrics();
     byId("render-status").textContent = "CATALOG REGISTRY";
     byId("object-status").textContent = "NO RAW DATA COPIED";
     loadingIndicator.classList.remove("visible");
@@ -746,6 +1223,28 @@ async function activateMode(nextMode: ViewMode): Promise<void> {
   }
 
   dataCatalogPanel.deactivate();
+  if (mode === "connectors") {
+    workflowPanel.deactivate();
+    byId("panel-kicker").textContent = "CONNECTOR REGISTRY";
+    byId("panel-dataset-name").textContent = "连接器配置";
+    byId("dataset-state").textContent = "连接测试按需执行，目录扫描由 FlinkIngest 负责";
+    byId("metric-one-label").textContent = "CONNECTORS";
+    byId("metric-one").textContent = "--";
+    byId("metric-two-label").textContent = "S3 / OSS";
+    byId("metric-two").textContent = "--";
+    byId("metric-three-label").textContent = "LOCAL";
+    byId("metric-three").textContent = "--";
+    byId("metric-four-label").textContent = "JDBC";
+    byId("metric-four").textContent = "--";
+    byId("metric-five-label").textContent = "SCANS";
+    byId("metric-five").textContent = "0";
+    byId("render-status").textContent = "CONNECTOR REGISTRY";
+    byId("object-status").textContent = "NO CONNECTION TESTS";
+    loadingIndicator.classList.remove("visible");
+    await connectorPanel.activate(connectorSelectionRequest ?? undefined);
+    connectorSelectionRequest = null;
+    return;
+  }
   if (mode === "workflow") {
     workflowPanel.deactivate();
     byId("panel-kicker").textContent = "WORKFLOW CONTROL";
@@ -753,10 +1252,14 @@ async function activateMode(nextMode: ViewMode): Promise<void> {
     byId("dataset-state").textContent = "工作流服务连接中";
     byId("metric-one-label").textContent = "STEPS";
     byId("metric-one").textContent = "0/7";
+    byId("metric-two-label").textContent = "PUBLIC REF";
+    byId("metric-two").textContent = formatInteger(projectAssetCounts().public_reference);
     byId("metric-three-label").textContent = "RESULTS";
     byId("metric-three").textContent = "--";
     byId("metric-four-label").textContent = "ENGINE";
     byId("metric-four").textContent = "RULES";
+    byId("metric-five-label").textContent = "PLANNED";
+    byId("metric-five").textContent = formatInteger(projectAssetCounts().planned);
     byId("render-status").textContent = "WORKFLOW DAG";
     byId("object-status").textContent = "0 MATCHES";
     loadingIndicator.classList.remove("visible");
@@ -765,31 +1268,56 @@ async function activateMode(nextMode: ViewMode): Promise<void> {
   }
 
   workflowPanel.deactivate();
-  byId("panel-dataset-name").textContent = mode === "layers" ? "Survey registry" : atlas?.name ?? "Joint volume";
+  byId("panel-dataset-name").textContent = mode === "layers" ? "巡天图层" : mode === "refine" ? "选区细化" : atlas?.name ?? "Joint volume";
   const targetCanvas = freshCanvas();
 
   if (mode === "layers") {
-    byId("inspector-kicker").textContent = "SURVEY REGISTRY";
-    byId("panel-kicker").textContent = "SURVEY REGISTRY";
-    byId("dataset-state").textContent = "Layered release/product footprints loaded";
-    byId("metric-one-label").textContent = "SURVEYS";
-    byId("metric-one").textContent = String(surveyCards.length);
-    byId("metric-three-label").textContent = "RELEASES";
-    byId("metric-three").textContent = formatInteger(surveyCards.reduce((sum, survey) => sum + survey.releaseCount, 0));
-    byId("metric-four-label").textContent = "FOOTPRINTS";
-    byId("metric-four").textContent = `${surveyFootprints?.footprints.length ?? 0} ARTIFACTS`;
-    byId("scene-mode-label").textContent = "COVERAGE";
-    byId("scene-mode-value").textContent = "DISPLAY OFFSETS";
-    byId("scene-badge").textContent = "DISPLAY LAYERS · NOT DISTANCE";
-    byId("legend-min").textContent = "INNER SLOT";
-    byId("legend-max").textContent = "OUTER SLOT";
-    byId("object-status").textContent = `${surveyFootprints?.footprints.length ?? 0} RELEASE MOCS`;
+    byId("inspector-kicker").textContent = "PROJECT SKY STATUS";
+    byId("panel-kicker").textContent = "PROJECT SKY STATUS";
+    byId("panel-dataset-name").textContent = "项目态势";
+    byId("dataset-state").textContent = "公开覆盖与项目资产状态已载入";
+    renderProjectMetrics();
+    byId("scene-mode-label").textContent = "PROJECT COVERAGE";
+    byId("scene-mode-value").textContent = "PUBLIC + OWNED";
+    byId("scene-badge").textContent = "项目覆盖态势";
+    byId("legend-min").textContent = "公开覆盖";
+    byId("legend-max").textContent = "项目资产";
+    byId("object-status").textContent = `${surveyFootprints?.footprints.length ?? 0} COVERAGE SOURCES`;
     layerViewer = new SurveyLayerViewer(targetCanvas, surveyFootprints!, surveyCards, renderSurveySelection, renderSurveyHover, renderSurveyInspection, renderSurveyContextMenu, renderLayerState);
     layerViewer.setLayoutMode(layerLayoutMode);
     layerViewer.setVisibleSurveys(visibleSurveyIds);
     layerViewer.setInteractionMode(layerInteractionMode);
     applyLayerPreferences();
+    if (returningLayerRegion) {
+      layerInteractionMode = "region";
+      layerViewer.setInteractionMode("region");
+      layerViewer.setRegionSelection(returningLayerRegion.pixels);
+    }
+    void loadEuclidAstroOverview().catch((error) => {
+      console.warn("Unable to load Euclid workspace coverage overview", error);
+    });
+    void loadWorkspaceAssetCoverage().catch((error) => {
+      console.warn("Unable to load custom workspace coverage", error);
+    });
     byId("render-status").textContent = layerViewer.webglVersion;
+    loadingIndicator.classList.remove("visible");
+  } else if (mode === "refine") {
+    byId("inspector-kicker").textContent = "DATA RETRIEVAL SCOPE";
+    byId("scene-mode-label").textContent = "REFINE";
+    byId("scene-mode-value").textContent = "NESTED HEALPIX";
+    byId("scene-badge").textContent = "选区已实体化";
+    byId("legend-min").textContent = "排除";
+    byId("legend-max").textContent = "保留 / 有覆盖";
+    byId("object-status").textContent = "EXACT ANGULAR MASK";
+    renderRefinementFilters();
+    refinementViewer = new RegionRefinementViewer(
+      targetCanvas,
+      sourceRegion!.nside,
+      sourceRegion!.pixels,
+      activeRefinementBaseCoverage(),
+      renderRefinementState,
+    );
+    byId("render-status").textContent = refinementViewer.webglVersion;
     loadingIndicator.classList.remove("visible");
   } else {
     byId("inspector-kicker").textContent = "JOINT CELL";
@@ -825,10 +1353,12 @@ document.querySelectorAll<HTMLButtonElement>("[data-layer-layout]").forEach((but
 });
 document.querySelectorAll<HTMLButtonElement>("[data-layer-interaction]").forEach((button) => {
   button.addEventListener("click", () => {
-    layerInteractionMode = button.dataset.layerInteraction as SurveyLayerInteractionMode;
-    applyLayerPreferences();
+    chooseLayerInteraction(button.dataset.layerInteraction as SurveyLayerInteractionMode);
   });
 });
+byId<HTMLButtonElement>("coverage-lock-button").addEventListener("click", () => layerViewer?.togglePinnedInspectionLock());
+byId<HTMLButtonElement>("refinement-next").addEventListener("click", () => refinementViewer?.refine());
+byId<HTMLButtonElement>("refinement-back").addEventListener("click", () => refinementViewer?.goBack());
 byId<HTMLButtonElement>("layer-select-all").addEventListener("click", () => {
   visibleSurveyIds = new Set(footprintSurveyIds());
   applyLayerPreferences();
@@ -881,6 +1411,7 @@ radialMinInput.addEventListener("input", () => scheduleRadialQuery("min"));
 radialMaxInput.addEventListener("input", () => scheduleRadialQuery("max"));
 byId<HTMLButtonElement>("reset-button").addEventListener("click", () => {
   if (mode === "layers") layerViewer?.reset();
+  else if (mode === "refine") refinementViewer?.reset();
   else if (mode === "volume") {
     jointNside = 32;
     radialBins = 8;
@@ -896,6 +1427,18 @@ byId<HTMLButtonElement>("reset-button").addEventListener("click", () => {
     void loadJointCells().catch(showFatal);
   }
 });
+window.addEventListener("keydown", (event) => {
+  if (mode !== "layers" || event.metaKey || event.ctrlKey || event.altKey) return;
+  const target = event.target as HTMLElement | null;
+  if (target?.matches("input, textarea, select, [contenteditable='true']")) return;
+  const key = event.key.toLocaleLowerCase();
+  if (key === "f" || key === "g") {
+    chooseLayerInteraction(key === "f" ? "inspect" : "region");
+  } else if (key === "c") {
+    layerViewer?.togglePinnedInspectionLock();
+  } else return;
+  event.preventDefault();
+});
 byId<HTMLButtonElement>("controls-toggle").addEventListener("click", () => controlsPanel.classList.toggle("mobile-open"));
 byId<HTMLButtonElement>("agent-toggle").addEventListener("click", () => byId("inspector-panel").classList.toggle("mobile-open"));
 window.addEventListener("astro:navigate", (event) => {
@@ -910,9 +1453,10 @@ declare global {
 }
 
 async function start(): Promise<void> {
-  const [surveys, footprints, atlases, volumes] = await Promise.all([workspaceApi.surveys(), workspaceApi.surveyFootprints(), workspaceApi.atlases(), workspaceApi.volumes()]);
+  const [surveys, footprints, atlases, volumes, assets] = await Promise.all([workspaceApi.surveys(), workspaceApi.surveyFootprints(), workspaceApi.atlases(), workspaceApi.volumes(), workspaceApi.dataAssets()]);
   surveyCards = surveys;
   surveyFootprints = footprints;
+  dataAssets = assets;
   const surveyRecords = await Promise.all(surveys.map((survey) => workspaceApi.survey(survey.id)));
   surveyRecordsById.clear();
   surveyRecords.forEach((survey) => surveyRecordsById.set(survey.id, survey));

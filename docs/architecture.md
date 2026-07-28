@@ -2,8 +2,16 @@
 
 ## Product boundary
 
-Astro Data Workspace is not a general data catalog and is not a general-purpose
-code agent. It owns the astronomy-specific layer between registered data and an
+Astro Data Workspace is a project-facing astronomy workspace, not a general
+data platform or a general-purpose code agent. It has two deliberate entry
+points:
+
+- the 3D sky is a project-status view for public coverage, acquired assets,
+  processed results, deliverables, and known gaps;
+- the data workspace is the production view for registered paths, provenance,
+  and reproducible astro-code tasks.
+
+The product owns the astronomy-specific layer between registered data and an
 analysis workspace:
 
 ```text
@@ -13,8 +21,22 @@ connector -> deterministic scan -> astronomy profile -> exploration API
                                                    -> workflow runs / Agent
 ```
 
-Generic connector scheduling, secrets, and enterprise metadata can be integrated
-later. They are not reimplemented in this service.
+The public catalog records what a survey/release covers and where a product can
+be obtained. It does not mirror every public archive. Generic connector
+scheduling, secrets, and enterprise metadata can be integrated later; they are
+not reimplemented in this service.
+
+Each logical data asset may have several project-stage facets and access
+locations. For example, a public Euclid release can be both `public_reference`
+and `acquired` when a local or S3 mirror is registered. Official source URLs,
+connector locations, and project-side metadata are editable from the asset
+detail view; built-in catalog entries use persistent overrides so the bundled
+public metadata remains reproducible. Connector registration stores only
+S3/OSS, local-path, and JDBC configuration plus a credential reference. Its
+normalized scan path is the business identity, so registration upserts an
+existing path. The UI can perform a non-enumerating endpoint/path check, while
+FlinkIngest scan history is kept separately and associated with that path. Raw
+secrets remain outside this service.
 
 ## Deterministic data plane
 
@@ -34,6 +56,26 @@ The data plane is testable without an LLM:
 MCP is an adapter over this plane. Agent reasoning may select tools and interpret
 results, but it does not calculate catalog coordinates or indexes.
 
+### Spatial evidence v1
+
+Every scanned file is eligible for the project sky only when the scanner can
+explain its position from the file content or explicitly declared catalog
+fields. The first stable contract accepts:
+
+- CSV/TSV/TXT catalogs with ICRS RA/Dec columns in degrees, radians, or
+  hour-angle units;
+- CSV/TSV/TXT catalogs with NESTED HEALPix pixels at the configured order,
+  including the standard `hpix` and `healpix_pixel` aliases in automatic mode;
+- FITS image headers with a linear or TAN WCS that can be sampled into ICRS
+  NESTED HEALPix cells.
+
+These records are written to `astro_file_index_v1` with a method, role, frame,
+and HEALPix cells. Files without valid evidence remain searchable metadata with
+`spatial_status=unknown` or `failed`; they are never assigned a footprint from
+their filename, path, survey label, or asset name. MOC files, FITS binary-table
+coordinates, and non-ICRS frames are deliberate later extensions rather than
+silent guesses.
+
 ## Workflow control plane
 
 `ToolRegistry` contains both local deterministic functions and bounded MCP
@@ -42,13 +84,58 @@ registered. A `WorkflowRun` records step state, duration, tool summaries,
 explicit human decisions, and artifact hashes independently from `ScanRun`.
 The two run types join through SHA-256 lineage rather than mutable paths.
 
-The first plugin, `euclid-desi-crossmatch@1`, queries the real
+The first production action, `euclid-desi-crossmatch@1`, queries the real
 `euclid-q1-mer-final` and `desi-dr10-tractor` catalogs, normalizes ICRS fields,
 performs nearest-neighbor spherical matching, pauses for filtering, and exports
 at most 1,000 rows. A failed MCP request or incomplete catalog schema is a
 terminal failure; production execution has no synthetic-coordinate fallback.
 The Agent entry point uses a deterministic Chinese/English rule interpreter.
 LLM capability remains disabled until a namespace-local secret is configured.
+
+## Persistence and service boundaries
+
+The JSON files on the runtime PVC are prototype persistence. They are useful
+for a single replica and deterministic tests, but they are not the long-term
+source of truth for a multi-user workspace. The production boundary is:
+
+```text
+workspace API
+  |-- PostgreSQL: assets, public sources, connectors, access locations,
+  |               tags, lineage edges, scan/task records, audit timestamps
+  |-- MinIO/S3:   MOC/HEALPix artifacts, scan manifests, cutouts, exports,
+  |               package bundles, Agent task artifacts
+  |-- Elasticsearch: searchable FITS/header/object metadata produced by scans
+  |-- data-warehouse: FlinkIngestTask and scan execution
+  `-- Agent worker: cross-match/cutout/package orchestration and status updates
+```
+
+PostgreSQL is the authoritative metadata store. Elasticsearch is a derived
+search index and must be rebuildable from scan manifests; it must not own
+Connector or data-card identity. MinIO stores bytes, not mutable card metadata.
+Built-in public cards are seeded read-only records with a version, while user
+cards and overrides are ordinary PostgreSQL rows. A normalized Connector path
+remains unique, so an upsert cannot create duplicate scan targets.
+
+Connector credentials remain Kubernetes Secrets and are referenced by an
+internal identifier only. When a scan is submitted, the workspace service
+creates or synchronizes a task-scoped Secret in the `warehouse` namespace and
+submits a `FlinkIngestTask`; the UI never needs to know the Secret name. The
+task record stores the Connector path, requested prefix/MOC, Flink resource
+identity, and status, but never stores raw keys.
+
+The existing PostgreSQL instance in the `database` namespace belongs to an
+unrelated application and uses its own `n8n` database. It should not be reused
+without an explicit owner-approved database and role. The first production
+step is therefore a dedicated workspace database (or a separate schema and
+role provisioned by its owner), followed by a dual-write migration from the
+JSON registry. The workspace API remains the only component allowed to mutate
+metadata; Agent, Flink, and indexers report through bounded APIs/events.
+
+The next production actions are intentionally narrow and ordered: `cutout`
+reads registered image paths and emits object-centered crops, then `package`
+combines the cross-match table, image products, and quality metadata into a
+downstream training/evaluation bundle. They are product contracts first and are
+not exposed as fake generic workflow steps until the astro-code adapters exist.
 
 ## Sky representations
 
@@ -88,7 +175,7 @@ FITS source without relying on mutable file paths.
 
 - Namespace: `astro-data-workspace`
 - Workload node: `eva7028`
-- Metadata storage: dedicated NFS PVC backed by `/mnt/data`, read-only in the service Pod
+- Metadata storage: JSON prototype on a dedicated NFS PVC; PostgreSQL is the planned production store
 - Source policy: original FITS/images remain external; runtime stores only compact profiles and indexes
 - Runtime state: dedicated NFS PVC
 - Public route: dedicated Ingress host
@@ -96,9 +183,16 @@ FITS source without relying on mutable file paths.
 
 ## Next stages
 
-1. Register deterministic dataset scanning and volume drill-down as workflow tools.
-2. Add a connector contract for FITS tables, Parquet, TAP, HTTP, and object storage.
-3. Complete source fingerprints for the legacy multi-survey atlas.
-4. Replace the fixed sparse levels with a revisioned adaptive active frontier.
-5. Add selection functions and completeness maps before interpreting occupancy as physical density.
-6. Enable optional LLM intent enhancement with a namespace-local secret while retaining the rule interpreter.
+1. Provision an owner-approved workspace PostgreSQL database and migration role.
+2. Add repository interfaces and dual-write/read-back for assets, connectors, access locations, and lineage.
+3. Connect selected HEALPix/MOC masks to data-warehouse scan and download jobs.
+4. Implement the astro-code `cutout` adapter against registered image paths.
+5. Implement the astro-code `package` adapter and persist derived asset lineage.
+6. Index scan outputs into Elasticsearch and retain rebuildable manifests in MinIO.
+7. Complete source fingerprints for the legacy multi-survey atlas.
+8. Add selection functions and completeness maps before interpreting occupancy as physical density.
+9. Enable optional LLM intent enhancement with a namespace-local secret while retaining the rule interpreter.
+
+The fine HEALPix refinement view remains an advanced retrieval control. It is
+useful when a selected region would produce too much data, but it is not the
+main project narrative and does not add another visual highlight layer.

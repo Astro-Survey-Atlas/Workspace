@@ -52,8 +52,13 @@ export interface SkyPoint {
 
 import type { AgentSession, ToolDescriptor, WorkflowDefinition, WorkflowRun } from "../../src/workflow";
 import type { DataAssetRecord, DataAssetRegistrationInput } from "../../src/data-catalog";
+import type { ConnectorCheck, ConnectorCheckInput, ConnectorPublicRecord, ConnectorRegistrationInput } from "../../src/connectors";
+import type { ConnectorIngestRun, ConnectorIngestRunInput } from "../../src/connector-history";
+import type { GenericScanInput } from "../../src/flink-ingest";
+import type { TagDefinition } from "../../src/tags";
 import type { SurveyCard, SurveyRecord, SurveyRegistrationInput } from "../../src/survey-registry";
 import type { SurveyFootprintManifest } from "../../src/survey-footprints";
+import type { AstroCoverageResponse, AstroOverviewResponse, AstroSkyQueryInput, AstroSpatialSummary } from "../../src/astro-index";
 
 async function getJson<T>(url: string): Promise<T> {
   const response = await fetch(url, { headers: { Accept: "application/json" } });
@@ -105,6 +110,9 @@ export const workspaceApi = {
   async dataAsset(id: string): Promise<DataAssetRecord> {
     return (await getJson<{ asset: DataAssetRecord }>(`/api/data-assets/${encodeURIComponent(id)}`)).asset;
   },
+  async tags(): Promise<TagDefinition[]> {
+    return (await getJson<{ tags: TagDefinition[] }>("/api/tags")).tags;
+  },
   async registerDataAsset(input: DataAssetRegistrationInput): Promise<DataAssetRecord> {
     return (await postJson<{ asset: DataAssetRecord }>("/api/data-assets", input)).asset;
   },
@@ -113,6 +121,39 @@ export const workspaceApi = {
   },
   async deleteDataAsset(id: string): Promise<void> {
     await deleteRequest(`/api/data-assets/${encodeURIComponent(id)}`);
+  },
+  async connectors(): Promise<ConnectorPublicRecord[]> {
+    return (await getJson<{ connectors: ConnectorPublicRecord[] }>("/api/connectors")).connectors;
+  },
+  async connector(id: string): Promise<ConnectorPublicRecord> {
+    return (await getJson<{ connector: ConnectorPublicRecord }>(`/api/connectors/${encodeURIComponent(id)}`)).connector;
+  },
+  async registerConnector(input: ConnectorRegistrationInput): Promise<ConnectorPublicRecord> {
+    return (await postJson<{ connector: ConnectorPublicRecord }>("/api/connectors", input)).connector;
+  },
+  async updateConnector(id: string, input: ConnectorRegistrationInput): Promise<ConnectorPublicRecord> {
+    return (await putJson<{ connector: ConnectorPublicRecord }>(`/api/connectors/${encodeURIComponent(id)}`, input)).connector;
+  },
+  async deleteConnector(id: string): Promise<void> {
+    await deleteRequest(`/api/connectors/${encodeURIComponent(id)}`);
+  },
+  async checkConnector(id: string): Promise<{ connector: ConnectorPublicRecord; check: ConnectorCheck }> {
+    return postJson(`/api/connectors/${encodeURIComponent(id)}/check`, {});
+  },
+  async checkConnectorInput(input: ConnectorCheckInput): Promise<ConnectorCheck> {
+    return (await postJson<{ check: ConnectorCheck }>("/api/connectors/check", input)).check;
+  },
+  async connectorRuns(id: string): Promise<ConnectorIngestRun[]> {
+    return (await getJson<{ runs: ConnectorIngestRun[] }>(`/api/connectors/${encodeURIComponent(id)}/ingest-runs`)).runs;
+  },
+  async submitConnectorPilotScan(id: string): Promise<ConnectorIngestRun[]> {
+    return (await postJson<{ runs: ConnectorIngestRun[] }>(`/api/connectors/${encodeURIComponent(id)}/scans`, { mode: "pilot" })).runs;
+  },
+  async submitConnectorScan(id: string, input: GenericScanInput): Promise<ConnectorIngestRun> {
+    return (await postJson<{ run: ConnectorIngestRun }>(`/api/connectors/${encodeURIComponent(id)}/scans`, { mode: "scan", ...input })).run;
+  },
+  async addConnectorRun(id: string, input: ConnectorIngestRunInput): Promise<ConnectorIngestRun> {
+    return (await postJson<{ run: ConnectorIngestRun }>(`/api/connectors/${encodeURIComponent(id)}/ingest-runs`, input)).run;
   },
   async datasets(): Promise<DatasetSummary[]> {
     return (await getJson<{ datasets: DatasetSummary[] }>("/api/datasets")).datasets;
@@ -125,6 +166,25 @@ export const workspaceApi = {
   },
   async surveyFootprints(): Promise<SurveyFootprintManifest> {
     return getJson<SurveyFootprintManifest>("/api/survey-footprints");
+  },
+  async skyOverview(input: { survey: string; release: string; nside: number; cells: number[] }): Promise<AstroOverviewResponse> {
+    const parameters = new URLSearchParams({
+      survey: input.survey,
+      release: input.release,
+      nside: String(input.nside),
+      cells: input.cells.join(","),
+    });
+    return getJson<AstroOverviewResponse>(`/api/sky/overview?${parameters}`);
+  },
+  async skyQuery(input: AstroSkyQueryInput): Promise<AstroSpatialSummary> {
+    return postJson<AstroSpatialSummary>("/api/sky/query", input);
+  },
+  async skyCoverage(input: { nside: number; assetIds?: string[]; survey?: string; release?: string }): Promise<AstroCoverageResponse> {
+    const parameters = new URLSearchParams({ nside: String(input.nside) });
+    if (input.assetIds?.length) parameters.set("assetIds", input.assetIds.join(","));
+    if (input.survey) parameters.set("survey", input.survey);
+    if (input.release) parameters.set("release", input.release);
+    return getJson<AstroCoverageResponse>(`/api/sky/coverage?${parameters}`);
   },
   async registerSurvey(input: SurveyRegistrationInput): Promise<SurveyRecord> {
     return (await postJson<{ survey: SurveyRecord }>("/api/surveys/registrations", input)).survey;
@@ -223,6 +283,12 @@ export type {
   SurveyRecord,
   SurveyRegistrationInput,
   SurveyFootprintManifest,
+  AstroOverviewResponse,
+  AstroSkyQueryInput,
+  AstroSpatialSummary,
+  DataAssetRecord,
+  ConnectorPublicRecord,
+  ConnectorRegistrationInput,
 };
 import {
   decodeAtlasAngularCells,

@@ -1,0 +1,32 @@
+[
+  {
+    "id": "connector-9f0b1927-7f08-46ed-aca3-34b5b0c2b5c9",
+    "name": "Euclid Q1 MER Catalog",
+    "description": "已下载的 Euclid Q1 MER FITS 产品；供后续按 MOC/HEALPix 范围扫描。",
+    "kind": "s3",
+    "config": {
+      "endpoint": "http://oss-cn-hangzhou-zjy-d01-a.res.cloud.zhejianglab.com",
+      "bucket": "data-and-computing",
+      "prefix": "projects/CSST/shared-data/euclid/aws-mirrors/q1/catalogs/MER_FINAL_CATALOG",
+      "region": "us-east-1"
+    },
+    "credentialRef": "astro-data-workspace/astro-connector-9f0b1927-7f08-46ed-aca3-34b5b0c2b5c9",
+    "status": "ready",
+    "createdAt": "2026-07-26T00:00:00.000Z",
+    "updatedAt": "2026-07-26T00:00:00.000Z",
+    "origin": "user"
+  },
+  {
+    "id": "connector-workspace-cosmos-catalogs",
+    "name": "COSMOS workspace catalog mount",
+    "description": "工作区当前以只读方式挂载的 COSMOS 处理汇总目录。",
+    "kind": "local",
+    "config": {
+      "rootPath": "/catalogs/cosmos-clean-v2"
+    },
+    "status": "ready",
+    "createdAt": "2026-07-26T00:00:00.000Z",
+    "updatedAt": "2026-07-26T00:00:00.000Z",
+    "origin": "user"
+  }
+]

@@ -8,8 +8,13 @@ import type { Request, Response } from "express";
 
 import { AgentService } from "./agent.js";
 import { AtlasCatalog, publicAtlasManifest } from "./atlas.js";
+import { AstroIndexService, ASTRO_OVERVIEW_NSIDE, type AstroSkyQueryInput } from "./astro-index.js";
 import { McpCatalogQueryClient } from "./catalog-mcp-client.js";
-import { DataCatalogRegistry, type DataAssetRegistrationInput } from "./data-catalog.js";
+import { createConnectorCredentialStore, type StoredConnectorCredentials } from "./connector-credentials.js";
+import { ConnectorRegistry, connectorLocationKey, validateConnectorInput, type ConnectorCheckInput, type ConnectorPublicRecord, type ConnectorRecord, type ConnectorRegistrationInput } from "./connectors.js";
+import { ConnectorIngestRunCatalog, type ConnectorIngestRunInput } from "./connector-history.js";
+import { DataCatalogRegistry, type DataAssetAccess, type DataAssetRecord, type DataAssetRegistrationInput } from "./data-catalog.js";
+import { FlinkScanService, type GenericScanInput } from "./flink-ingest.js";
 import { createAstroMcpServer } from "./mcp.js";
 import { ScanRunCatalog } from "./provenance.js";
 import { JsonDatasetRegistry } from "./registry.js";
@@ -20,6 +25,7 @@ import type { DatasetRecord } from "./types.js";
 import { publicVolumeManifest, VolumeCatalog } from "./volume.js";
 import { WorkflowEngine } from "./workflow-engine.js";
 import { WorkflowStore } from "./workflow-store.js";
+import { listTags } from "./tags.js";
 
 const projectRoot = fileURLToPath(new URL("../", import.meta.url));
 const port = Number(process.env.PORT ?? "3000");
@@ -43,9 +49,17 @@ const workflowRoot = process.env.ASTRO_WORKFLOW_ROOT ?? path.join(projectRoot, "
 const surveyRegistryStatePath = process.env.ASTRO_SURVEY_REGISTRY_STATE ?? path.join(path.dirname(statePath), "survey-registrations.json");
 const dataCatalogBootstrapPath = process.env.ASTRO_DATA_CATALOG_BOOTSTRAP ?? path.join(projectRoot, "bootstrap", "catalogs.json");
 const dataCatalogStatePath = process.env.ASTRO_DATA_CATALOG_STATE ?? path.join(path.dirname(statePath), "data-catalog.json");
+const connectorStatePath = process.env.ASTRO_CONNECTOR_STATE ?? path.join(path.dirname(statePath), "connectors.json");
+const connectorBootstrapPath = process.env.ASTRO_CONNECTOR_BOOTSTRAP ?? path.join(projectRoot, "bootstrap", "connectors.json");
+const connectorRunStatePath = process.env.ASTRO_CONNECTOR_RUN_STATE ?? path.join(path.dirname(statePath), "connector-ingest-runs.json");
 const surveyFootprintRoot = process.env.ASTRO_SURVEY_FOOTPRINT_ROOT ?? path.join(projectRoot, "footprints");
 const catalogMcpUrl = process.env.ASTRO_CATALOG_MCP_URL ?? "http://eva24002-entrance.lab.zverse.space:30082/mcp";
 const catalogMcpTimeoutMs = Number(process.env.ASTRO_CATALOG_MCP_TIMEOUT_MS ?? "15000");
+const flinkNamespace = process.env.ASTRO_FLINK_NAMESPACE ?? "warehouse";
+const flinkSecretNamespace = process.env.ASTRO_FLINK_SECRET_NAMESPACE ?? flinkNamespace;
+const flinkPollMs = Number(process.env.ASTRO_FLINK_POLL_MS ?? "5000");
+const astroEsUrl = process.env.ASTRO_ES_URL ?? "";
+const astroEsIndex = process.env.ASTRO_ES_ASTRO_INDEX ?? "astro_file_index_v1";
 
 const registry = new JsonDatasetRegistry({ statePath, allowedRoots });
 const skyIndexes = new CatalogSkyIndexService();
@@ -55,7 +69,22 @@ const scanRuns = new ScanRunCatalog(provenanceRoot);
 const workflowStore = new WorkflowStore(workflowRoot);
 const surveys = new SurveyRegistry(surveyRegistryStatePath);
 const dataCatalog = new DataCatalogRegistry(dataCatalogBootstrapPath, dataCatalogStatePath);
+const connectors = new ConnectorRegistry(connectorStatePath, connectorBootstrapPath);
+const connectorCredentials = createConnectorCredentialStore();
+const connectorRuns = new ConnectorIngestRunCatalog(connectorRunStatePath);
+const flinkScans = new FlinkScanService({
+  connectors,
+  dataCatalog,
+  credentials: connectorCredentials,
+  runs: connectorRuns,
+  namespace: flinkNamespace,
+  secretNamespace: flinkSecretNamespace,
+  esUrl: astroEsUrl,
+  esIndex: astroEsIndex,
+  pollMs: flinkPollMs,
+});
 const surveyFootprints = new SurveyFootprintCatalog(surveyFootprintRoot);
+const astroIndex = new AstroIndexService();
 const workflowEngine = new WorkflowEngine(workflowStore, new McpCatalogQueryClient(catalogMcpUrl, catalogMcpTimeoutMs, 1));
 const agentService = new AgentService(workflowStore, workflowEngine);
 const app = createMcpExpressApp({ host, allowedHosts });
@@ -63,7 +92,7 @@ const app = createMcpExpressApp({ host, allowedHosts });
 app.use("/api", express.json({ limit: "64kb" }));
 
 app.get("/healthz", (_request: Request, response: Response) => {
-  response.json({ status: "ok", service: "astro-data-workspace", version: "0.9.1" });
+  response.json({ status: "ok", service: "astro-data-workspace", version: "0.10.25" });
 });
 
 function publicDataset(record: DatasetRecord) {
@@ -77,9 +106,74 @@ function publicDataset(record: DatasetRecord) {
   };
 }
 
+function connectorAccess(record: ConnectorRecord): DataAssetAccess {
+  const config = record.config;
+  return { connector: record.kind, uri: record.displayPath, format: config.format ?? "directory", connectorId: record.id, label: record.name };
+}
+
+async function publicConnector(record: ConnectorRecord): Promise<ConnectorPublicRecord> {
+  let stored: StoredConnectorCredentials | undefined;
+  if (record.credentialRef) {
+    try {
+      stored = await connectorCredentials.get(record.credentialRef);
+    } catch (error) {
+      console.warn(`Unable to resolve credentials for connector ${record.id}`, error instanceof Error ? error.message : error);
+    }
+  }
+  const { credentialRef: _credentialRef, ...visible } = record;
+  return {
+    ...visible,
+    credentials: { accessKeyId: stored?.accessKeyId ?? "", secretConfigured: Boolean(stored?.secretAccessKey) },
+  };
+}
+
+function credentialText(value: unknown, label: string, maximum: number, required: boolean): string {
+  const result = typeof value === "string" ? value.trim() : "";
+  if (required && !result) throw new RangeError(`${label} is required`);
+  if (result.length > maximum) throw new RangeError(`${label} is too long`);
+  return result;
+}
+
+function resolvedS3Credentials(input: ConnectorRegistrationInput, existing?: StoredConnectorCredentials): StoredConnectorCredentials {
+  const accessKeyId = credentialText(input.credentials?.accessKeyId, "Access Key", 512, !existing?.accessKeyId) || existing?.accessKeyId || "";
+  const secretAccessKey = credentialText(input.credentials?.secretAccessKey, "Secret Key", 2048, !existing?.secretAccessKey) || existing?.secretAccessKey || "";
+  return { accessKeyId, secretAccessKey, endpoint: credentialText(input.config?.endpoint, "Endpoint", 2048, false) || existing?.endpoint || "" };
+}
+
+function internalConnectorInput(input: ConnectorRegistrationInput, credentialRef?: string): ConnectorRegistrationInput {
+  const { credentials: _credentials, credentialRef: _clientCredentialRef, ...metadata } = input;
+  return { ...metadata, credentialRef };
+}
+
+function publicDataAsset(asset: DataAssetRecord): DataAssetRecord {
+  const connectorRecords = connectors.list();
+  const resolvedRecords = [
+    ...(asset.connectorLocationKeys ?? []).flatMap((key) => connectorRecords.filter((record) => record.locationKey === key)),
+    ...(asset.connectorIds ?? []).flatMap((id) => {
+      try { return [connectors.get(id)]; } catch { return []; }
+    }),
+  ];
+  const uniqueRecords = [...new Map(resolvedRecords.map((record) => [record.locationKey, record])).values()];
+  const resolved = uniqueRecords.map(connectorAccess);
+  if (!resolved.length) return asset;
+  const configured = asset.accesses?.length ? asset.accesses : [asset.access];
+  const connectorIds = new Set(configured.map((access) => access.connectorId).filter(Boolean));
+  const accesses = [...configured, ...resolved.filter((access) => !connectorIds.has(access.connectorId))];
+  return { ...asset, connectorIds: uniqueRecords.map((record) => record.id), connectorLocationKeys: uniqueRecords.map((record) => record.locationKey), access: accesses[0]!, accesses };
+}
+
+function validateConnectorIds(input: DataAssetRegistrationInput): void {
+  for (const id of input.connectorIds ?? []) {
+    try { connectors.get(id); } catch { throw new RangeError(`connectorIds contains unknown connector: ${id}`); }
+  }
+  for (const key of input.connectorLocationKeys ?? []) {
+    if (!connectors.list().some((record) => record.locationKey === key)) throw new RangeError(`connectorLocationKeys contains unknown path: ${key}`);
+  }
+}
+
 function sendApiError(response: Response, error: unknown): void {
   const message = error instanceof Error ? error.message : String(error);
-  const notFound = message.startsWith("Dataset not found:") || message.startsWith("Data asset not found:") || message.startsWith("Volume not found:") || message.startsWith("Atlas not found:") || message.startsWith("Survey not found:")
+  const notFound = message.startsWith("Dataset not found:") || message.startsWith("Data asset not found:") || message.startsWith("Connector not found:") || message.startsWith("Connector ingest run not found:") || message.startsWith("Volume not found:") || message.startsWith("Atlas not found:") || message.startsWith("Survey not found:")
     || message.startsWith("Scan run not found:") || message.startsWith("Lineage not found:") || message.startsWith("Workflow not found:")
     || message.startsWith("Workflow run not found:") || message.startsWith("Workflow artifact not found:") || message.startsWith("Agent session not found:");
   const status = error instanceof RangeError ? 400 : notFound ? 404 : 500;
@@ -103,12 +197,16 @@ app.get("/api/datasets", async (_request: Request, response: Response) => {
 });
 
 app.get("/api/data-assets", (_request: Request, response: Response) => {
-  response.json({ assets: dataCatalog.list() });
+  response.json({ assets: dataCatalog.list().map(publicDataAsset) });
+});
+
+app.get("/api/tags", (_request: Request, response: Response) => {
+  response.json({ tags: listTags() });
 });
 
 app.get("/api/data-assets/:id", (request: Request, response: Response) => {
   try {
-    response.json({ asset: dataCatalog.get(datasetIdFrom(request)) });
+    response.json({ asset: publicDataAsset(dataCatalog.get(datasetIdFrom(request))) });
   } catch (error) {
     sendApiError(response, error);
   }
@@ -116,7 +214,9 @@ app.get("/api/data-assets/:id", (request: Request, response: Response) => {
 
 app.post("/api/data-assets", async (request: Request, response: Response) => {
   try {
-    response.status(201).json({ asset: await dataCatalog.register(request.body as DataAssetRegistrationInput) });
+    const input = request.body as DataAssetRegistrationInput;
+    validateConnectorIds(input);
+    response.status(201).json({ asset: publicDataAsset(await dataCatalog.register(input)) });
   } catch (error) {
     sendApiError(response, error);
   }
@@ -124,7 +224,9 @@ app.post("/api/data-assets", async (request: Request, response: Response) => {
 
 app.put("/api/data-assets/:id", async (request: Request, response: Response) => {
   try {
-    response.json({ asset: await dataCatalog.update(datasetIdFrom(request), request.body as DataAssetRegistrationInput) });
+    const input = request.body as DataAssetRegistrationInput;
+    validateConnectorIds(input);
+    response.json({ asset: publicDataAsset(await dataCatalog.update(datasetIdFrom(request), input)) });
   } catch (error) {
     sendApiError(response, error);
   }
@@ -133,6 +235,156 @@ app.put("/api/data-assets/:id", async (request: Request, response: Response) => 
 app.delete("/api/data-assets/:id", async (request: Request, response: Response) => {
   try {
     await dataCatalog.remove(datasetIdFrom(request));
+    response.status(204).end();
+  } catch (error) {
+    sendApiError(response, error);
+  }
+});
+
+app.get("/api/connectors", async (_request: Request, response: Response) => {
+  response.json({ connectors: await Promise.all(connectors.list().map(publicConnector)) });
+});
+
+app.get("/api/connectors/:id", async (request: Request, response: Response) => {
+  try {
+    response.json({ connector: await publicConnector(connectors.get(datasetIdFrom(request))) });
+  } catch (error) {
+    sendApiError(response, error);
+  }
+});
+
+app.get("/api/connectors/:id/ingest-runs", async (request: Request, response: Response) => {
+  try {
+    const connector = connectors.get(datasetIdFrom(request));
+    await flinkScans.poll();
+    response.json({ runs: connectorRuns.list(connector.locationKey) });
+  } catch (error) {
+    sendApiError(response, error);
+  }
+});
+
+// Alias kept for integrations that call these records scan runs.
+app.get("/api/connectors/:id/runs", async (request: Request, response: Response) => {
+  try {
+    const connector = connectors.get(datasetIdFrom(request));
+    await flinkScans.poll();
+    response.json({ runs: connectorRuns.list(connector.locationKey) });
+  } catch (error) {
+    sendApiError(response, error);
+  }
+});
+
+app.post("/api/connectors/:id/check", async (request: Request, response: Response) => {
+  try {
+    const id = datasetIdFrom(request);
+    const current = connectors.get(id);
+    const credentials = current.credentialRef ? await connectorCredentials.get(current.credentialRef) : undefined;
+    const connector = await connectors.check(id, credentials, current.kind === "s3");
+    response.json({ connector: await publicConnector(connector), check: connector.lastCheck });
+  } catch (error) {
+    sendApiError(response, error);
+  }
+});
+
+app.post("/api/connectors/check", async (request: Request, response: Response) => {
+  try {
+    response.json({ check: await connectors.checkInput(request.body as ConnectorCheckInput) });
+  } catch (error) {
+    sendApiError(response, error);
+  }
+});
+
+app.post("/api/connectors/:id/ingest-runs", async (request: Request, response: Response) => {
+  try {
+    const connector = connectors.get(datasetIdFrom(request));
+    response.status(201).json({ run: await connectorRuns.add(connector.locationKey, request.body as ConnectorIngestRunInput) });
+  } catch (error) {
+    sendApiError(response, error);
+  }
+});
+
+app.post("/api/connectors/:id/scans", async (request: Request, response: Response) => {
+  try {
+    const mode = typeof request.body?.mode === "string" ? request.body.mode : "pilot";
+    if (mode === "pilot") {
+      response.status(202).json({ runs: await flinkScans.submitPilot(datasetIdFrom(request)) });
+      return;
+    }
+    if (mode !== "scan") throw new RangeError("scan mode must be pilot or scan");
+    const input = request.body as Partial<GenericScanInput>;
+    if (typeof input.assetId !== "string" || !input.assetId.trim()) throw new RangeError("assetId is required for a generic scan");
+    response.status(202).json({ run: await flinkScans.submitScan(datasetIdFrom(request), input as GenericScanInput) });
+  } catch (error) {
+    sendApiError(response, error);
+  }
+});
+
+app.delete("/api/connectors/:id/ingest-runs/:runId", async (request: Request, response: Response) => {
+  try {
+    const connector = connectors.get(datasetIdFrom(request));
+    const runId = Array.isArray(request.params.runId) ? request.params.runId[0] : request.params.runId;
+    if (!runId) throw new RangeError("run id is required");
+    await connectorRuns.remove(connector.locationKey, runId);
+    response.status(204).end();
+  } catch (error) {
+    sendApiError(response, error);
+  }
+});
+
+app.post("/api/connectors", async (request: Request, response: Response) => {
+  try {
+    const input = request.body as ConnectorRegistrationInput;
+    const value = validateConnectorInput(input);
+    const existing = connectors.list().find((record) => record.locationKey === connectorLocationKey(value.kind, value.config));
+    const credentials = value.kind === "s3" ? resolvedS3Credentials(input) : undefined;
+    const connector = await connectors.register(internalConnectorInput(value, existing?.credentialRef));
+    if (credentials) {
+      const reference = connectorCredentials.managedReference(connector.id);
+      try {
+        await connectorCredentials.put(reference, credentials);
+      } catch (error) {
+        if (!existing) await connectors.remove(connector.id);
+        throw error;
+      }
+      const saved = await connectors.setCredentialReference(connector.id, reference);
+      response.status(201).json({ connector: await publicConnector(saved) });
+      return;
+    }
+    response.status(201).json({ connector: await publicConnector(connector) });
+  } catch (error) {
+    sendApiError(response, error);
+  }
+});
+
+app.put("/api/connectors/:id", async (request: Request, response: Response) => {
+  try {
+    const id = datasetIdFrom(request);
+    const input = request.body as ConnectorRegistrationInput;
+    const current = connectors.get(id);
+    const value = validateConnectorInput(input);
+    let credentialRef = current.credentialRef;
+    if (value.kind === "s3") {
+      const existing = current.credentialRef ? await connectorCredentials.get(current.credentialRef) : undefined;
+      const credentials = resolvedS3Credentials(input, existing);
+      credentialRef = current.credentialRef && connectorCredentials.isManaged(current.credentialRef)
+        ? current.credentialRef
+        : connectorCredentials.managedReference(current.id);
+      await connectorCredentials.put(credentialRef, credentials);
+    }
+    const connector = await connectors.update(id, internalConnectorInput(value, credentialRef));
+    if (value.kind !== "s3" && current.credentialRef) await connectorCredentials.remove(current.credentialRef);
+    response.json({ connector: await publicConnector(connector) });
+  } catch (error) {
+    sendApiError(response, error);
+  }
+});
+
+app.delete("/api/connectors/:id", async (request: Request, response: Response) => {
+  try {
+    const id = datasetIdFrom(request);
+    const current = connectors.get(id);
+    await connectors.remove(id);
+    if (current.credentialRef) connectorCredentials.remove(current.credentialRef).catch((error) => console.error("Unable to remove managed connector credentials", error));
     response.status(204).end();
   } catch (error) {
     sendApiError(response, error);
@@ -163,6 +415,79 @@ app.get("/api/survey-footprints", async (_request: Request, response: Response) 
 app.post("/api/surveys/registrations", async (request: Request, response: Response) => {
   try {
     response.status(201).json({ survey: await surveys.register(request.body as SurveyRegistrationInput) });
+  } catch (error) {
+    sendApiError(response, error);
+  }
+});
+
+function queryCells(value: unknown, maximum = 64): number[] {
+  const raw = Array.isArray(value) ? value : typeof value === "string" ? value.split(",") : [];
+  const cells = raw.map((entry) => Number(entry)).filter((entry) => Number.isInteger(entry));
+  if (!cells.length || cells.length > maximum) throw new RangeError(`cells must contain between 1 and ${maximum} HEALPix pixels`);
+  if (cells.some((cell) => cell < 0)) throw new RangeError("cells must contain non-negative HEALPix pixels");
+  return [...new Set(cells)];
+}
+
+function queryText(value: unknown, name: string, maximum = 160): string | undefined {
+  if (value == null || value === "") return undefined;
+  if (typeof value !== "string" || value.trim().length > maximum) throw new RangeError(`${name} is invalid`);
+  return value.trim() || undefined;
+}
+
+app.get("/api/sky/overview", async (request: Request, response: Response) => {
+  try {
+    const survey = queryText(request.query.survey, "survey");
+    const release = queryText(request.query.release, "release");
+    const nside = Number(request.query.nside ?? ASTRO_OVERVIEW_NSIDE);
+    if (!survey || !release) throw new RangeError("survey and release are required");
+    if (!Number.isInteger(nside) || nside < 1) throw new RangeError("nside must be a positive integer");
+    response.json(await astroIndex.overview({
+      survey,
+      release,
+      nside,
+      cells: queryCells(request.query.cells),
+    }));
+  } catch (error) {
+    sendApiError(response, error);
+  }
+});
+
+app.post("/api/sky/query", async (request: Request, response: Response) => {
+  try {
+    const body = (request.body ?? {}) as Partial<AstroSkyQueryInput>;
+    const nside = Number(body.nside ?? ASTRO_OVERVIEW_NSIDE);
+    if (!Number.isInteger(nside) || nside < 1) throw new RangeError("nside must be a positive integer");
+    const assetIds = body.assetIds == null
+      ? undefined
+      : Array.isArray(body.assetIds) && body.assetIds.every((value) => typeof value === "string")
+        ? body.assetIds
+        : (() => { throw new RangeError("assetIds must be an array of strings"); })();
+    response.json(await astroIndex.query({
+      nside,
+      cells: queryCells(body.cells),
+      survey: queryText(body.survey, "survey"),
+      release: queryText(body.release, "release"),
+      product: queryText(body.product, "product"),
+      modality: queryText(body.modality, "modality"),
+      assetIds,
+    }));
+  } catch (error) {
+    sendApiError(response, error);
+  }
+});
+
+app.get("/api/sky/coverage", async (request: Request, response: Response) => {
+  try {
+    const nside = Number(request.query.nside ?? ASTRO_OVERVIEW_NSIDE);
+    if (!Number.isInteger(nside) || nside < 1) throw new RangeError("nside must be a positive integer");
+    const rawAssetIds = typeof request.query.assetIds === "string" ? request.query.assetIds : "";
+    const assetIds = rawAssetIds.split(",").map((value) => value.trim()).filter(Boolean);
+    response.json(await astroIndex.coverage({
+      nside,
+      ...(assetIds.length ? { assetIds } : {}),
+      survey: queryText(request.query.survey, "survey"),
+      release: queryText(request.query.release, "release"),
+    }));
   } catch (error) {
     sendApiError(response, error);
   }
@@ -521,6 +846,9 @@ async function start(): Promise<void> {
   await workflowStore.initialize();
   await surveys.initialize();
   await dataCatalog.initialize();
+  await connectors.initialize();
+  await connectorRuns.initialize();
+  await flinkScans.start();
   const bootstrapCatalog = process.env.ASTRO_BOOTSTRAP_CATALOG;
   if (bootstrapCatalog) {
     const record = await registry.registerLocalCsv(
@@ -542,6 +870,7 @@ void start().catch((error) => {
 });
 
 function shutdown(): void {
+  flinkScans.stop();
   if (!httpServer) {
     process.exit(0);
     return;

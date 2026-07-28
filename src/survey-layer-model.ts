@@ -30,7 +30,7 @@ export const SURVEY_LAYER_BASE_RADIUS = 1;
 export const SURVEY_LAYER_DISPLAY_STEP = 0.075;
 
 const healpixByNside = new Map<number, Healpix>();
-const SIDE_NEIGHBOUR_INDICES = [1, 3, 5, 7] as const;
+const SIDE_NEIGHBOUR_INDICES = [0, 2, 4, 6] as const;
 
 function healpix(nside: number): Healpix {
   let instance = healpixByNside.get(nside);
@@ -121,7 +121,12 @@ export function overlapCountByPixel(
     .filter(([, count]) => count > 0));
 }
 
-/** HEALPix returns SW, W, NW, N, NE, E, SE, S. Keep only shared-edge neighbours. */
+/** healpixjs returns W, NW, N, NE, E, SE, S, SW. */
+export function adjacentNeighbours(nside: number, pixel: number): number[] {
+  return [...healpix(nside).neighbours(pixel)].filter((neighbour) => neighbour >= 0);
+}
+
+/** Keep the four neighbours that share an edge rather than only a corner. */
 export function sideNeighbours(nside: number, pixel: number): number[] {
   const neighbours = healpix(nside).neighbours(pixel);
   return SIDE_NEIGHBOUR_INDICES
@@ -131,6 +136,10 @@ export function sideNeighbours(nside: number, pixel: number): number[] {
 
 export function sharesSide(nside: number, left: number, right: number): boolean {
   return sideNeighbours(nside, left).includes(right);
+}
+
+export function isAdjacent(nside: number, left: number, right: number): boolean {
+  return adjacentNeighbours(nside, left).includes(right);
 }
 
 export function isSideConnected(nside: number, pixels: Iterable<number>): boolean {
@@ -143,6 +152,22 @@ export function isSideConnected(nside: number, pixels: Iterable<number>): boolea
     if (pixel == null || visited.has(pixel)) continue;
     visited.add(pixel);
     for (const neighbour of sideNeighbours(nside, pixel)) {
+      if (selected.has(neighbour) && !visited.has(neighbour)) pending.push(neighbour);
+    }
+  }
+  return visited.size === selected.size;
+}
+
+export function isAdjacentConnected(nside: number, pixels: Iterable<number>): boolean {
+  const selected = new Set(pixels);
+  if (selected.size < 2) return true;
+  const pending = [selected.values().next().value as number];
+  const visited = new Set<number>();
+  while (pending.length) {
+    const pixel = pending.pop();
+    if (pixel == null || visited.has(pixel)) continue;
+    visited.add(pixel);
+    for (const neighbour of adjacentNeighbours(nside, pixel)) {
       if (selected.has(neighbour) && !visited.has(neighbour)) pending.push(neighbour);
     }
   }
@@ -163,14 +188,14 @@ export function toggleConnectedRegion(
   if (!additive) return { ok: true, pixels: [pixel], changed: "replaced" };
   if (current.size === 0) return { ok: true, pixels: [pixel], changed: "added" };
   if (!current.has(pixel)) {
-    if (![...current].some((candidate) => sharesSide(nside, candidate, pixel))) {
+    if (![...current].some((candidate) => isAdjacent(nside, candidate, pixel))) {
       return { ok: false, reason: "not-adjacent", pixels: [...current].sort((left, right) => left - right) };
     }
     current.add(pixel);
     return { ok: true, pixels: [...current].sort((left, right) => left - right), changed: "added" };
   }
   current.delete(pixel);
-  if (!isSideConnected(nside, current)) {
+  if (!isAdjacentConnected(nside, current)) {
     return { ok: false, reason: "would-disconnect", pixels: [...currentPixels].sort((left, right) => left - right) };
   }
   return { ok: true, pixels: [...current].sort((left, right) => left - right), changed: "removed" };

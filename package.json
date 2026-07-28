@@ -1,6 +1,6 @@
 {
   "name": "astro-data-workspace",
-  "version": "0.9.1",
+  "version": "0.10.25",
   "private": true,
   "type": "module",
   "description": "Minimal astronomy dataset registry and MCP service",
@@ -22,7 +22,9 @@
     "validate": "npm run build && npm test && npm run test:volume"
   },
   "dependencies": {
+    "@aws-sdk/client-s3": "^3.1095.0",
     "@modelcontextprotocol/sdk": "1.29.0",
+    "ali-oss": "^6.23.0",
     "csv-parse": "7.0.1",
     "express": "^5.1.0",
     "healpixjs": "^2.0.0",
