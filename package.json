@@ -1,6 +1,6 @@
 {
   "name": "astro-data-workspace",
-  "version": "0.10.25",
+  "version": "0.10.38",
   "private": true,
   "type": "module",
   "description": "Minimal astronomy dataset registry and MCP service",

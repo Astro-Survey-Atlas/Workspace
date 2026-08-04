@@ -9,6 +9,15 @@ export type DataAssetStatus = "ready" | "metadata_only" | "unavailable";
 export type DataAssetProjectState = "public_reference" | "acquired" | "processed" | "deliverable" | "planned";
 export type DataAssetOrigin = "builtin" | "user" | "override";
 
+export interface DataAssetSurveyBinding {
+  source: "connector" | "asset" | "unassigned" | "conflict";
+  surveyId?: string;
+  releaseId?: string;
+  connectorIds: string[];
+  connectorLocationKeys: string[];
+  message?: string;
+}
+
 export interface DataAssetSource {
   label: string;
   url: string;
@@ -53,6 +62,8 @@ export interface DataAssetRecord {
   origin: DataAssetOrigin;
   createdAt: string;
   updatedAt: string;
+  /** Response-only effective ownership; not persisted by the registry. */
+  surveyBinding?: DataAssetSurveyBinding;
 }
 
 export interface DataAssetRegistrationInput {

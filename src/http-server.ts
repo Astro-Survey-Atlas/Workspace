@@ -8,12 +8,13 @@ import type { Request, Response } from "express";
 
 import { AgentService } from "./agent.js";
 import { AtlasCatalog, publicAtlasManifest } from "./atlas.js";
-import { AstroIndexService, ASTRO_OVERVIEW_NSIDE, type AstroSkyQueryInput } from "./astro-index.js";
+import { AstroIndexService, ASTRO_OVERVIEW_NSIDE, type AstroCoverageLayer, type AstroSkyQueryInput } from "./astro-index.js";
 import { McpCatalogQueryClient } from "./catalog-mcp-client.js";
 import { createConnectorCredentialStore, type StoredConnectorCredentials } from "./connector-credentials.js";
 import { ConnectorRegistry, connectorLocationKey, validateConnectorInput, type ConnectorCheckInput, type ConnectorPublicRecord, type ConnectorRecord, type ConnectorRegistrationInput } from "./connectors.js";
 import { ConnectorIngestRunCatalog, type ConnectorIngestRunInput } from "./connector-history.js";
 import { DataCatalogRegistry, type DataAssetAccess, type DataAssetRecord, type DataAssetRegistrationInput } from "./data-catalog.js";
+import { ownershipKey, resolveDataOwnership, type EffectiveDataOwnership } from "./data-ownership.js";
 import { FlinkScanService, type GenericScanInput } from "./flink-ingest.js";
 import { createAstroMcpServer } from "./mcp.js";
 import { ScanRunCatalog } from "./provenance.js";
@@ -92,7 +93,7 @@ const app = createMcpExpressApp({ host, allowedHosts });
 app.use("/api", express.json({ limit: "64kb" }));
 
 app.get("/healthz", (_request: Request, response: Response) => {
-  response.json({ status: "ok", service: "astro-data-workspace", version: "0.10.25" });
+  response.json({ status: "ok", service: "astro-data-workspace", version: "0.10.38" });
 });
 
 function publicDataset(record: DatasetRecord) {
@@ -145,8 +146,46 @@ function internalConnectorInput(input: ConnectorRegistrationInput, credentialRef
   return { ...metadata, credentialRef };
 }
 
+function validateConnectorSurveyBinding(input: ConnectorRegistrationInput): void {
+  if (!input.surveyId) {
+    if (input.releaseId) throw new RangeError("releaseId requires surveyId");
+    return;
+  }
+  const survey = surveys.get(input.surveyId);
+  if (input.releaseId && !survey.releases.some((release) => release.id === input.releaseId)) {
+    throw new RangeError(`releaseId ${input.releaseId} does not belong to survey ${input.surveyId}`);
+  }
+}
+
+function validateAssetConnectorOwnership(input: DataAssetRegistrationInput): EffectiveDataOwnership {
+  const access = input.accesses?.[0] ?? {
+    connector: input.connector ?? "metadata",
+    uri: input.sourceUri ?? "asset://validation",
+    format: input.format ?? "metadata",
+  };
+  const ownership = resolveDataOwnership({
+    ...input,
+    id: "asset-validation",
+    name: input.name,
+    description: input.description ?? "",
+    product: input.product ?? input.name,
+    kind: input.kind,
+    modalities: input.modalities ?? input.tags ?? [],
+    access,
+    status: input.status ?? "metadata_only",
+    projectState: input.projectState ?? "planned",
+    footprintIds: input.footprintIds ?? [],
+    origin: "user",
+    createdAt: "",
+    updatedAt: "",
+  } as DataAssetRecord, connectors.list());
+  if (ownership.source === "conflict") throw new RangeError(ownership.message ?? "关联 Connector 的巡天归属不一致");
+  return ownership;
+}
+
 function publicDataAsset(asset: DataAssetRecord): DataAssetRecord {
   const connectorRecords = connectors.list();
+  const ownership = resolveDataOwnership(asset, connectorRecords);
   const resolvedRecords = [
     ...(asset.connectorLocationKeys ?? []).flatMap((key) => connectorRecords.filter((record) => record.locationKey === key)),
     ...(asset.connectorIds ?? []).flatMap((id) => {
@@ -155,11 +194,17 @@ function publicDataAsset(asset: DataAssetRecord): DataAssetRecord {
   ];
   const uniqueRecords = [...new Map(resolvedRecords.map((record) => [record.locationKey, record])).values()];
   const resolved = uniqueRecords.map(connectorAccess);
-  if (!resolved.length) return asset;
+  const effective = {
+    ...asset,
+    surveyId: ownership.surveyId,
+    releaseId: ownership.releaseId,
+    surveyBinding: ownership,
+  };
+  if (!resolved.length) return effective;
   const configured = asset.accesses?.length ? asset.accesses : [asset.access];
   const connectorIds = new Set(configured.map((access) => access.connectorId).filter(Boolean));
   const accesses = [...configured, ...resolved.filter((access) => !connectorIds.has(access.connectorId))];
-  return { ...asset, connectorIds: uniqueRecords.map((record) => record.id), connectorLocationKeys: uniqueRecords.map((record) => record.locationKey), access: accesses[0]!, accesses };
+  return { ...effective, connectorIds: uniqueRecords.map((record) => record.id), connectorLocationKeys: uniqueRecords.map((record) => record.locationKey), access: accesses[0]!, accesses };
 }
 
 function validateConnectorIds(input: DataAssetRegistrationInput): void {
@@ -216,6 +261,7 @@ app.post("/api/data-assets", async (request: Request, response: Response) => {
   try {
     const input = request.body as DataAssetRegistrationInput;
     validateConnectorIds(input);
+    validateAssetConnectorOwnership(input);
     response.status(201).json({ asset: publicDataAsset(await dataCatalog.register(input)) });
   } catch (error) {
     sendApiError(response, error);
@@ -224,9 +270,18 @@ app.post("/api/data-assets", async (request: Request, response: Response) => {
 
 app.put("/api/data-assets/:id", async (request: Request, response: Response) => {
   try {
+    const id = datasetIdFrom(request);
     const input = request.body as DataAssetRegistrationInput;
     validateConnectorIds(input);
-    response.json({ asset: publicDataAsset(await dataCatalog.update(datasetIdFrom(request), input)) });
+    const current = dataCatalog.get(id);
+    validateAssetConnectorOwnership({
+      ...current,
+      ...input,
+      connectorIds: input.connectorIds ?? current.connectorIds,
+      connectorLocationKeys: input.connectorLocationKeys ?? current.connectorLocationKeys,
+      accesses: input.accesses ?? current.accesses,
+    });
+    response.json({ asset: publicDataAsset(await dataCatalog.update(id, input)) });
   } catch (error) {
     sendApiError(response, error);
   }
@@ -288,7 +343,9 @@ app.post("/api/connectors/:id/check", async (request: Request, response: Respons
 
 app.post("/api/connectors/check", async (request: Request, response: Response) => {
   try {
-    response.json({ check: await connectors.checkInput(request.body as ConnectorCheckInput) });
+    const input = request.body as ConnectorCheckInput;
+    validateConnectorSurveyBinding(input);
+    response.json({ check: await connectors.checkInput(input) });
   } catch (error) {
     sendApiError(response, error);
   }
@@ -335,6 +392,7 @@ app.post("/api/connectors", async (request: Request, response: Response) => {
   try {
     const input = request.body as ConnectorRegistrationInput;
     const value = validateConnectorInput(input);
+    validateConnectorSurveyBinding(value);
     const existing = connectors.list().find((record) => record.locationKey === connectorLocationKey(value.kind, value.config));
     const credentials = value.kind === "s3" ? resolvedS3Credentials(input) : undefined;
     const connector = await connectors.register(internalConnectorInput(value, existing?.credentialRef));
@@ -362,6 +420,7 @@ app.put("/api/connectors/:id", async (request: Request, response: Response) => {
     const input = request.body as ConnectorRegistrationInput;
     const current = connectors.get(id);
     const value = validateConnectorInput(input);
+    validateConnectorSurveyBinding(value);
     let credentialRef = current.credentialRef;
     if (value.kind === "s3") {
       const existing = current.credentialRef ? await connectorCredentials.get(current.credentialRef) : undefined;
@@ -482,11 +541,87 @@ app.get("/api/sky/coverage", async (request: Request, response: Response) => {
     if (!Number.isInteger(nside) || nside < 1) throw new RangeError("nside must be a positive integer");
     const rawAssetIds = typeof request.query.assetIds === "string" ? request.query.assetIds : "";
     const assetIds = rawAssetIds.split(",").map((value) => value.trim()).filter(Boolean);
-    response.json(await astroIndex.coverage({
+    const survey = queryText(request.query.survey, "survey");
+    const release = queryText(request.query.release, "release");
+    const baseInput = {
       nside,
+      ...(survey ? { survey } : {}),
+      ...(release ? { release } : {}),
+    };
+
+    // ES documents written by older FlinkIngest jobs may have blank survey /
+    // release fields. Resolve ownership from the catalog first, then query ES
+    // by asset group so those historical documents still land in the right
+    // survey layer without rewriting the index.
+    if (assetIds.length) {
+      const groups = new Map<string, {
+        key: string;
+        surveyId?: string;
+        releaseId?: string;
+        source: EffectiveDataOwnership["source"];
+        message?: string;
+        assetIds: string[];
+      }>();
+      for (const assetId of [...new Set(assetIds)]) {
+        let asset: DataAssetRecord;
+        try { asset = dataCatalog.get(assetId); } catch { continue; }
+        const ownership = resolveDataOwnership(asset, connectors.list());
+        if (survey && ownership.surveyId !== survey) continue;
+        if (release && ownership.releaseId !== release) continue;
+        const key = ownership.source === "conflict" ? `__conflict__:${asset.id}` : ownershipKey(ownership);
+        const group = groups.get(key) ?? {
+          key,
+          surveyId: ownership.surveyId,
+          releaseId: ownership.releaseId,
+          source: ownership.source,
+          message: ownership.message,
+          assetIds: [],
+        };
+        group.assetIds.push(asset.id);
+        groups.set(key, group);
+      }
+      if (groups.size) {
+        const layers: AstroCoverageLayer[] = [];
+        const allPixels = new Set<number>();
+        const allAssets = new Map<string, AstroCoverageLayer["byAsset"][number]>();
+        const statuses: string[] = [];
+        const messages: string[] = [];
+        for (const group of groups.values()) {
+          // The catalog ownership filter above is authoritative. Do not add
+          // survey/release terms to the ES request: older scanner documents
+          // may have blank fields and must still be recovered by asset_id.
+          const coverage = await astroIndex.coverage({ nside, assetIds: group.assetIds });
+          coverage.pixels.forEach((pixel) => allPixels.add(pixel));
+          coverage.byAsset.forEach((entry) => allAssets.set(entry.key, entry));
+          statuses.push(coverage.status);
+          if (coverage.message) messages.push(coverage.message);
+          layers.push({
+            key: group.key,
+            surveyId: group.surveyId,
+            releaseId: group.releaseId,
+            source: group.source,
+            message: group.message,
+            assetIds: [...group.assetIds].sort(),
+            pixels: coverage.pixels,
+            byAsset: coverage.byAsset,
+          });
+        }
+        const status = statuses.includes("error") ? "error" : statuses.includes("unavailable") ? "unavailable" : "ready";
+        response.json({
+          status,
+          index: astroEsIndex || "astro_file_index_v1",
+          nside,
+          pixels: [...allPixels].sort((left, right) => left - right),
+          byAsset: [...allAssets.values()],
+          layers,
+          ...(messages.length ? { message: [...new Set(messages)].join("; ") } : {}),
+        });
+        return;
+      }
+    }
+    response.json(await astroIndex.coverage({
+      ...baseInput,
       ...(assetIds.length ? { assetIds } : {}),
-      survey: queryText(request.query.survey, "survey"),
-      release: queryText(request.query.release, "release"),
     }));
   } catch (error) {
     sendApiError(response, error);

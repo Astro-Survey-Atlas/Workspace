@@ -10,6 +10,8 @@
       "prefix": "projects/CSST/shared-data/euclid/aws-mirrors/q1/catalogs/MER_FINAL_CATALOG",
       "region": "us-east-1"
     },
+    "surveyId": "euclid",
+    "releaseId": "euclid-q1",
     "credentialRef": "astro-data-workspace/astro-connector-9f0b1927-7f08-46ed-aca3-34b5b0c2b5c9",
     "status": "ready",
     "createdAt": "2026-07-26T00:00:00.000Z",

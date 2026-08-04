@@ -2,6 +2,7 @@ import type { ConnectorCheck, ConnectorCheckStatus, ConnectorKind, ConnectorPubl
 import type { ConnectorIngestRun } from "../../src/connector-history";
 import type { DataAssetRecord } from "../../src/data-catalog";
 import type { GenericScanInput } from "../../src/flink-ingest";
+import type { SurveyCard, SurveyRecord } from "../../src/survey-registry";
 import { workspaceApi } from "./api";
 
 function byId<T extends HTMLElement>(id: string): T {
@@ -47,6 +48,8 @@ export class ConnectorPanel {
   readonly #onError: (error: unknown) => void;
   #records: ConnectorPublicRecord[] = [];
   #assets: DataAssetRecord[] = [];
+  #surveys: SurveyCard[] = [];
+  #surveyRecords = new Map<string, SurveyRecord>();
   #selectedId: string | null = null;
   #editingId: string | null = null;
   #active = false;
@@ -67,7 +70,10 @@ export class ConnectorPanel {
 
   async activate(selectedId?: string): Promise<void> {
     this.#active = true;
-    [this.#records, this.#assets] = await Promise.all([workspaceApi.connectors(), workspaceApi.dataAssets()]);
+    [this.#records, this.#assets, this.#surveys] = await Promise.all([workspaceApi.connectors(), workspaceApi.dataAssets(), workspaceApi.surveys()]);
+    const records = await Promise.all(this.#surveys.map((survey) => workspaceApi.survey(survey.id)));
+    this.#surveyRecords = new Map(records.map((record) => [record.id, record]));
+    this.#populateSurveySelects(byId<HTMLFormElement>("connector-registration-form"), "", "");
     if (selectedId && this.#records.some((record) => record.id === selectedId)) this.#selectedId = selectedId;
     if (!this.#selectedId || !this.#records.some((record) => record.id === this.#selectedId)) this.#selectedId = this.#records[0]?.id ?? null;
     this.#resetRegistrationForm();
@@ -120,6 +126,22 @@ export class ConnectorPanel {
     byId("connector-draft-count").textContent = String(this.#records.filter((record) => record.status === "draft").length);
     byId("connector-ready-count").textContent = String(this.#records.filter((record) => record.status === "ready" || record.lastCheck?.status === "ok").length);
     this.#renderDetail();
+  }
+
+  #populateSurveySelects(form: HTMLFormElement, selectedSurveyId: string, selectedReleaseId: string): void {
+    const surveySelect = form.elements.namedItem("surveyId") as HTMLSelectElement | null;
+    const releaseSelect = form.elements.namedItem("releaseId") as HTMLSelectElement | null;
+    if (!surveySelect || !releaseSelect) return;
+    const previousSurvey = selectedSurveyId || surveySelect.value;
+    surveySelect.replaceChildren(new Option("未绑定巡天（可稍后补充）", ""));
+    this.#surveys.forEach((survey) => surveySelect.append(new Option(survey.name, survey.id)));
+    surveySelect.value = this.#surveys.some((survey) => survey.id === previousSurvey) ? previousSurvey : "";
+    const survey = this.#surveyRecords.get(surveySelect.value);
+    const previousRelease = selectedReleaseId || releaseSelect.value;
+    releaseSelect.replaceChildren(new Option("未绑定发布", ""));
+    survey?.releases.forEach((release) => releaseSelect.append(new Option(release.label, release.id)));
+    releaseSelect.value = survey?.releases.some((release) => release.id === previousRelease) ? previousRelease : "";
+    surveySelect.onchange = () => this.#populateSurveySelects(form, surveySelect.value, "");
   }
 
   #renderDetail(): void {
@@ -259,7 +281,7 @@ export class ConnectorPanel {
     const pathValue = document.createElement("code"); pathValue.className = "connector-detail-path"; pathValue.textContent = connectorLocation(record);
     const description = document.createElement("p"); description.className = "catalog-detail-copy"; description.textContent = record.description;
     const summary = document.createElement("dl");
-    const rows: Array<[string, string]> = [["类型", KIND_LABELS[record.kind]], ["状态", STATUS_LABELS[record.status]]];
+    const rows: Array<[string, string]> = [["类型", KIND_LABELS[record.kind]], ["状态", STATUS_LABELS[record.status]], ["巡天归属", record.surveyId ?? "未绑定"], ["发布归属", record.releaseId ?? "未绑定"]];
     if (record.kind === "s3") {
       rows.push(["Bucket", record.config.bucket ?? ""], ["Prefix", record.config.prefix || "根目录"], ["Access Key", record.credentials.accessKeyId || "未配置"], ["Secret Key", record.credentials.secretConfigured ? "••••••••••••" : "未配置"]);
     }
@@ -300,9 +322,10 @@ export class ConnectorPanel {
 
   #editForm(record: ConnectorPublicRecord): HTMLFormElement {
     const form = document.createElement("form"); form.className = "connector-inline-editor";
-    form.innerHTML = `<label class="connector-edit-title"><span>名称</span><input name="name" class="field-input" maxlength="120" required></label><label><span>说明</span><textarea name="description" class="field-input" maxlength="500" rows="3"></textarea></label><div class="connector-config-grid"><label><span>类型</span><select name="kind" class="field-input"><option value="s3">S3 / OSS</option><option value="local">本地路径</option><option value="jdbc">JDBC 数据库</option></select></label><label><span>状态</span><select name="status" class="field-input"><option value="draft">草稿</option><option value="ready">可用</option><option value="disabled">停用</option></select></label></div><div data-config="s3" class="connector-config-grid"><label><span>Endpoint</span><input name="endpoint" class="field-input"></label><label><span>Bucket</span><input name="bucket" class="field-input"></label><label><span>Prefix</span><input name="prefix" class="field-input"></label><label><span>Region</span><input name="region" class="field-input"></label><label><span>Access Key</span><input name="accessKeyId" class="field-input" autocomplete="off"></label><label><span>Secret Key</span><input name="secretAccessKey" class="field-input" type="password" autocomplete="new-password" placeholder="已保存；留空保持不变"></label></div><div data-config="local" class="connector-config-grid" hidden><label><span>根路径</span><input name="rootPath" class="field-input"></label></div><div data-config="jdbc" class="connector-config-grid" hidden><label><span>JDBC URL</span><input name="url" class="field-input"></label><label><span>Database</span><input name="database" class="field-input"></label><label><span>Schema</span><input name="schema" class="field-input"></label></div><output class="connector-edit-feedback" aria-live="polite"></output><div class="detail-editor-actions"><button class="command-button" type="submit">保存修改</button><button class="command-button secondary" type="button" data-cancel>取消</button></div>`;
+    form.innerHTML = `<label class="connector-edit-title"><span>名称</span><input name="name" class="field-input" maxlength="120" required></label><label><span>说明</span><textarea name="description" class="field-input" maxlength="500" rows="3"></textarea></label><div class="connector-config-grid"><label><span>类型</span><select name="kind" class="field-input"><option value="s3">S3 / OSS</option><option value="local">本地路径</option><option value="jdbc">JDBC 数据库</option></select></label><label><span>状态</span><select name="status" class="field-input"><option value="draft">草稿</option><option value="ready">可用</option><option value="disabled">停用</option></select></label><label><span>归属巡天</span><select name="surveyId" class="field-input"></select></label><label><span>归属发布</span><select name="releaseId" class="field-input"></select></label></div><div data-config="s3" class="connector-config-grid"><label><span>Endpoint</span><input name="endpoint" class="field-input"></label><label><span>Bucket</span><input name="bucket" class="field-input"></label><label><span>Prefix</span><input name="prefix" class="field-input"></label><label><span>Region</span><input name="region" class="field-input"></label><label><span>Access Key</span><input name="accessKeyId" class="field-input" autocomplete="off"></label><label><span>Secret Key</span><input name="secretAccessKey" class="field-input" type="password" autocomplete="new-password" placeholder="已保存；留空保持不变"></label></div><div data-config="local" class="connector-config-grid" hidden><label><span>根路径</span><input name="rootPath" class="field-input"></label></div><div data-config="jdbc" class="connector-config-grid" hidden><label><span>JDBC URL</span><input name="url" class="field-input"></label><label><span>Database</span><input name="database" class="field-input"></label><label><span>Schema</span><input name="schema" class="field-input"></label></div><output class="connector-edit-feedback" aria-live="polite"></output><div class="detail-editor-actions"><button class="command-button" type="submit">保存修改</button><button class="command-button secondary" type="button" data-cancel>取消</button></div>`;
     const set = (name: string, value: string) => { const element = form.elements.namedItem(name) as HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement | null; if (element) element.value = value; };
     set("name", record.name); set("description", record.description); set("kind", record.kind); set("status", record.status); set("endpoint", record.config.endpoint ?? ""); set("bucket", record.config.bucket ?? ""); set("prefix", record.config.prefix ?? ""); set("region", record.config.region ?? "us-east-1"); set("accessKeyId", record.credentials.accessKeyId); set("rootPath", record.config.rootPath ?? ""); set("url", record.config.url ?? ""); set("database", record.config.database ?? ""); set("schema", record.config.schema ?? "public");
+    this.#populateSurveySelects(form, record.surveyId ?? "", record.releaseId ?? "");
     (form.elements.namedItem("kind") as HTMLSelectElement).addEventListener("change", () => this.#renderConfigFieldsFrom(form, false));
     form.addEventListener("submit", (event) => {
       event.preventDefault();
@@ -319,7 +342,7 @@ export class ConnectorPanel {
     const kind = field(form, "kind") as ConnectorKind;
     const config: Record<string, string> = kind === "s3" ? { endpoint: field(form, "endpoint"), bucket: field(form, "bucket"), prefix: field(form, "prefix"), region: field(form, "region") } : kind === "local" ? { rootPath: field(form, "rootPath") } : { url: field(form, "url"), database: field(form, "database"), schema: field(form, "schema") };
     const secretAccessKey = field(form, "secretAccessKey");
-    return { name: field(form, "name"), description: field(form, "description") || undefined, kind, config, credentials: kind === "s3" ? { accessKeyId: field(form, "accessKeyId"), ...(secretAccessKey ? { secretAccessKey } : {}) } : undefined, status: field(form, "status") as ConnectorStatus };
+    return { name: field(form, "name"), description: field(form, "description") || undefined, kind, config, surveyId: field(form, "surveyId") || undefined, releaseId: field(form, "releaseId") || undefined, credentials: kind === "s3" ? { accessKeyId: field(form, "accessKeyId"), ...(secretAccessKey ? { secretAccessKey } : {}) } : undefined, status: field(form, "status") as ConnectorStatus };
   }
 
   async #register(): Promise<void> {
@@ -403,6 +426,7 @@ export class ConnectorPanel {
     (form.elements.namedItem("status") as HTMLSelectElement).value = "draft";
     (form.elements.namedItem("region") as HTMLInputElement).value = "us-east-1";
     (form.elements.namedItem("schema") as HTMLInputElement).value = "public";
+    this.#populateSurveySelects(form, "", "");
     this.#renderConfigFieldsFrom(form, true);
     this.#registrationFeedback("unknown", "尚未检测", "填写后可先检测连接，也可以直接登记。 ");
   }

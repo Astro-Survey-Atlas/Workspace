@@ -27,6 +27,20 @@ test("connector registry persists S3, local, and JDBC configuration without test
   }
 });
 
+test("connector survey ownership round-trips and requires a survey for releases", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "astro-connectors-"));
+  try {
+    const registry = new ConnectorRegistry(path.join(directory, "connectors.json"));
+    await registry.initialize();
+    const record = await registry.register({ name: "Euclid owned", kind: "s3", config: { bucket: "euclid" }, surveyId: "euclid", releaseId: "euclid-q1" });
+    assert.equal(record.surveyId, "euclid");
+    assert.equal(record.releaseId, "euclid-q1");
+    await assert.rejects(() => registry.register({ name: "Invalid ownership", kind: "s3", config: { bucket: "invalid" }, releaseId: "euclid-q1" }), /releaseId requires surveyId/);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test("connector registry seeds a new state file from the bundled bootstrap", async () => {
   const directory = await mkdtemp(path.join(os.tmpdir(), "astro-connectors-"));
   try {

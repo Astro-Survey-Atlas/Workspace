@@ -95,6 +95,8 @@
             <div class="catalog-form-grid">
               <label><span class="field-label">类型</span><select id="connector-kind" name="kind" class="field-input"><option value="s3">S3 / OSS</option><option value="local">本地路径</option><option value="jdbc">JDBC 数据库</option></select></label>
               <label><span class="field-label">配置状态</span><select id="connector-status" name="status" class="field-input"><option value="draft">草稿</option><option value="ready">可用</option><option value="disabled">停用</option></select></label>
+              <label><span class="field-label">归属巡天</span><select id="connector-survey" name="surveyId" class="field-input"><option value="">未绑定巡天（可稍后补充）</option></select></label>
+              <label><span class="field-label">归属发布</span><select id="connector-release" name="releaseId" class="field-input"><option value="">未绑定发布</option></select></label>
             </div>
             <div id="connector-config-s3" data-config="s3" class="connector-config-grid">
               <label><span class="field-label">Endpoint</span><input id="connector-s3-endpoint" name="endpoint" class="field-input" placeholder="https://s3.example" /></label>

@@ -1,5 +1,10 @@
 node_modules/
 dist/
+# The application is TypeScript-only. Keep transpiled JavaScript out of the
+# source tree so it cannot shadow the authoritative .ts modules.
+src/*.js
+viewer/src/*.js
+vite.config.js
 .data/
 data/registry.json
 *.log

@@ -4,7 +4,7 @@ export default defineConfig({
   root: "viewer",
   build: {
     outDir: "../dist/viewer",
-    emptyOutDir: false,
+    emptyOutDir: true,
   },
   server: {
     proxy: {

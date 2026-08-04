@@ -6,6 +6,7 @@ import type { ConnectorCredentialStore, StoredConnectorCredentials } from "./con
 import { ConnectorIngestRunCatalog, type ConnectorIngestRun } from "./connector-history.js";
 import type { DataAssetRecord, DataCatalogRegistry } from "./data-catalog.js";
 import type { ConnectorRegistry } from "./connectors.js";
+import { resolveDataOwnership, type EffectiveDataOwnership } from "./data-ownership.js";
 
 const TASK_API = "/apis/org.zhejianglab.astro.metadata/v1";
 const PILOT_ASSETS = [
@@ -183,6 +184,7 @@ export class FlinkScanService {
     try {
       for (const entry of selected) {
         const asset = this.#dataCatalog.get(entry.definition.assetId);
+        const ownership = this.#scanOwnership(asset, connector);
         const taskName = safeName(`euclid-q1-mer-pilot-${entry.definition.key}-${token}`).slice(0, 63).replace(/-+$/g, "");
         const batchId = `workspace-pilot-${token}-${entry.definition.key}`;
         const run = await this.#runs.add(connector.locationKey, {
@@ -205,6 +207,7 @@ export class FlinkScanService {
             taskName,
             batchId,
             secretName,
+            ownership,
           });
           created.push(run);
         } catch (error) {
@@ -225,6 +228,7 @@ export class FlinkScanService {
     if (connector.kind !== "s3") throw new RangeError("Generic scanning currently supports S3/OSS connectors only");
     if (connector.status !== "ready" && connector.lastCheck?.status !== "ok") throw new RangeError("Connector must pass connection detection before scanning");
     const asset = this.#dataCatalog.get(input.assetId);
+    const ownership = this.#scanOwnership(asset, connector);
     const spatialMode = input.spatial?.mode ?? "auto";
     if (!["auto", "none", "catalog", "healpix"].includes(spatialMode)) throw new RangeError("spatial.mode must be auto, none, catalog, or healpix");
     if (spatialMode === "catalog" && (!input.spatial?.raColumn?.trim() || !input.spatial?.decColumn?.trim())) {
@@ -265,6 +269,7 @@ export class FlinkScanService {
         taskName,
         batchId,
         secretName,
+        ownership,
       });
     } catch (error) {
       await this.#runs.update(run.id, { status: "failed", error: error instanceof Error ? error.message : String(error), completedAt: new Date().toISOString() });
@@ -380,11 +385,12 @@ export class FlinkScanService {
     paths: string[];
     allowedSuffixes: string[];
     spatial?: GenericScanInput["spatial"];
+    ownership: EffectiveDataOwnership;
     taskName: string;
     batchId: string;
     secretName: string;
   }): Promise<void> {
-    const { connector, asset, paths, allowedSuffixes, spatial, taskName, batchId, secretName } = input;
+    const { connector, asset, paths, allowedSuffixes, spatial, taskName, batchId, secretName, ownership } = input;
     const astro = spatial ?? {};
     const body = {
       apiVersion: "org.zhejianglab.astro.metadata/v1",
@@ -418,8 +424,8 @@ export class FlinkScanService {
           coordinateUnits: astro.units ?? "deg",
           coverageRole: astro.role ?? "object_presence",
           healpixOrder: astro.healpixOrder ?? 8,
-          survey: asset.surveyId ?? "",
-          release: asset.releaseId ?? "",
+          survey: ownership.surveyId ?? "",
+          release: ownership.releaseId ?? "",
           product: asset.product,
           modality: asset.modalities.join("+"),
           assetId: asset.id,
@@ -442,5 +448,24 @@ export class FlinkScanService {
     };
     const result = await this.#client!.request("POST", `${TASK_API}/namespaces/${encodeURIComponent(this.#namespace)}/flinkingesttasks`, body);
     if (!result.ok) throw new Error(`Unable to create FlinkIngestTask (HTTP ${result.status}): ${result.text.slice(0, 240)}`);
+  }
+
+  #scanOwnership(asset: DataAssetRecord, connector: ConnectorRecord): EffectiveDataOwnership {
+    // A scan path is itself an association with an assigned Connector. This
+    // also makes legacy assets (which predate connectorIds) inherit the
+    // Connector's survey/release in newly written ES documents. An unassigned
+    // Connector does not erase an asset's explicit survey metadata when the
+    // asset has no association yet.
+    const alreadyLinked = (asset.connectorIds ?? []).includes(connector.id)
+      || (asset.connectorLocationKeys ?? []).includes(connector.locationKey)
+      || (asset.accesses ?? []).some((access) => access.connectorId === connector.id);
+    const linkedAsset = {
+      ...asset,
+      connectorIds: connector.surveyId || alreadyLinked ? [...new Set([...(asset.connectorIds ?? []), connector.id])] : asset.connectorIds,
+      connectorLocationKeys: connector.surveyId || alreadyLinked ? [...new Set([...(asset.connectorLocationKeys ?? []), connector.locationKey])] : asset.connectorLocationKeys,
+    } as DataAssetRecord;
+    const ownership = resolveDataOwnership(linkedAsset, this.#connectors.list());
+    if (ownership.source === "conflict") throw new RangeError(ownership.message ?? "关联 Connector 的巡天归属不一致");
+    return ownership;
   }
 }

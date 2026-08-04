@@ -100,6 +100,9 @@ export class DataCatalogPanel {
     return this.#connectors.filter((connector) => keys.has(connector.locationKey) || ids.has(connector.id));
   }
 
+  #effectiveSurveyId(asset: DataAssetRecord): string | undefined { return asset.surveyBinding?.surveyId ?? asset.surveyId; }
+  #effectiveReleaseId(asset: DataAssetRecord): string | undefined { return asset.surveyBinding?.releaseId ?? asset.releaseId; }
+
   #resolvedAccesses(asset: DataAssetRecord): DataAssetAccess[] {
     const references = asset.connectorLocationKeys?.length || asset.connectorIds?.length ? this.#connectorRecordsFor(asset) : [];
     const resolved = references.map((connector) => ({ connector: connector.kind, uri: connectorLocation(connector), format: connector.config.format ?? "directory", connectorId: connector.id, label: connector.name }));
@@ -120,7 +123,7 @@ export class DataCatalogPanel {
       const sources = (asset.sources ?? []).flatMap((source) => [source.label, source.url, source.description ?? ""]);
       const accesses = this.#resolvedAccesses(asset).flatMap((access) => [access.connector, access.uri, access.format, access.label ?? ""]);
       const tags = (asset.tags ?? asset.modalities).flatMap((tag) => [tag, this.#tagLabel(tag)]);
-      const haystack = [asset.name, asset.description, asset.product, asset.surveyId, asset.releaseId, asset.kind, ...tags, ...sources, ...accesses, ...connectorText].filter(Boolean).join(" ").toLocaleLowerCase();
+      const haystack = [asset.name, asset.description, asset.product, this.#effectiveSurveyId(asset), this.#effectiveReleaseId(asset), asset.kind, ...tags, ...sources, ...accesses, ...connectorText].filter(Boolean).join(" ").toLocaleLowerCase();
       return haystack.includes(query);
     });
   }
@@ -148,7 +151,7 @@ export class DataCatalogPanel {
       identity.append(name, product);
       const survey = document.createElement("span");
       survey.className = "catalog-row-survey";
-      survey.textContent = this.#surveyName(asset.surveyId);
+      survey.textContent = this.#surveyName(this.#effectiveSurveyId(asset));
       const kind = document.createElement("span");
       kind.className = "catalog-kind";
       kind.textContent = asset.kind.toUpperCase();
@@ -193,14 +196,17 @@ export class DataCatalogPanel {
     }
     byId<HTMLInputElement>("catalog-name").value = asset.name;
     byId<HTMLInputElement>("catalog-description").value = asset.description;
-    byId<HTMLSelectElement>("catalog-survey").value = asset.surveyId ?? "";
+    byId<HTMLSelectElement>("catalog-survey").value = this.#effectiveSurveyId(asset) ?? "";
     this.#syncReleaseOptions();
-    byId<HTMLSelectElement>("catalog-release").value = asset.releaseId ?? "";
+    byId<HTMLSelectElement>("catalog-release").value = this.#effectiveReleaseId(asset) ?? "";
     byId<HTMLInputElement>("catalog-product").value = asset.product;
     byId<HTMLSelectElement>("catalog-kind").value = asset.kind;
     byId<HTMLSelectElement>("catalog-status-input").value = asset.status;
     this.#setProjectStates(asset.projectStates?.length ? asset.projectStates : [asset.projectState]);
     this.#renderTags(asset.tags ?? asset.modalities);
+    const inherited = asset.surveyBinding?.source === "connector";
+    byId<HTMLSelectElement>("catalog-survey").disabled = inherited;
+    byId<HTMLSelectElement>("catalog-release").disabled = inherited;
     byId("catalog-form-title").textContent = "资产基本信息";
     byId<HTMLButtonElement>("catalog-delete").hidden = true;
     this.#setFormDisabled(true);
@@ -218,7 +224,7 @@ export class DataCatalogPanel {
     heading.textContent = asset.name;
     const note = document.createElement("p");
     note.className = "catalog-detail-copy";
-    note.textContent = `${this.#surveyName(asset.surveyId)} · ${asset.product}`;
+    note.textContent = `${this.#surveyName(this.#effectiveSurveyId(asset))} · ${asset.product}`;
     const summary = document.createElement("dl");
     const summaryItems: Array<[string, string]> = [["状态", statusLabel(asset.status)], ["访问", this.#resolvedAccesses(asset).map((access) => access.uri).join(" · ")]];
     summaryItems.forEach(([label, value]) => {
@@ -311,13 +317,16 @@ export class DataCatalogPanel {
     this.#editingId = asset.id;
     byId<HTMLInputElement>("catalog-name").value = asset.name;
     byId<HTMLInputElement>("catalog-description").value = asset.description;
-    byId<HTMLSelectElement>("catalog-survey").value = asset.surveyId ?? "";
-    this.#syncReleaseOptions(); byId<HTMLSelectElement>("catalog-release").value = asset.releaseId ?? "";
+    byId<HTMLSelectElement>("catalog-survey").value = this.#effectiveSurveyId(asset) ?? "";
+    this.#syncReleaseOptions(); byId<HTMLSelectElement>("catalog-release").value = this.#effectiveReleaseId(asset) ?? "";
     byId<HTMLInputElement>("catalog-product").value = asset.product;
     byId<HTMLSelectElement>("catalog-kind").value = asset.kind;
     byId<HTMLSelectElement>("catalog-status-input").value = asset.status;
     this.#setProjectStates(asset.projectStates?.length ? asset.projectStates : [asset.projectState]);
     this.#renderTags(asset.tags ?? asset.modalities);
+    const inherited = asset.surveyBinding?.source === "connector";
+    byId<HTMLSelectElement>("catalog-survey").disabled = inherited;
+    byId<HTMLSelectElement>("catalog-release").disabled = inherited;
     byId("catalog-form-title").textContent = "编辑基本信息";
     byId("catalog-form-submit").textContent = "保存基本信息";
     byId<HTMLButtonElement>("catalog-delete").hidden = asset.origin === "builtin";
@@ -382,7 +391,7 @@ export class DataCatalogPanel {
 
   #assetInput(asset: DataAssetRecord, overrides: Partial<DataAssetRegistrationInput> = {}): DataAssetRegistrationInput {
     return {
-      name: asset.name, description: asset.description, surveyId: asset.surveyId, releaseId: asset.releaseId, product: asset.product, kind: asset.kind,
+      name: asset.name, description: asset.description, surveyId: this.#effectiveSurveyId(asset), releaseId: this.#effectiveReleaseId(asset), product: asset.product, kind: asset.kind,
       tags: asset.tags ?? asset.modalities, connector: asset.access.connector, sourceUri: asset.access.uri, format: asset.access.format,
       accesses: asset.accesses, sources: asset.sources, connectorIds: asset.connectorIds ?? [], connectorLocationKeys: asset.connectorLocationKeys ?? [], status: asset.status, projectStates: asset.projectStates ?? [asset.projectState], footprintIds: asset.footprintIds, ...overrides,
     };
@@ -414,6 +423,14 @@ export class DataCatalogPanel {
     const form = document.createElement("form"); form.className = "detail-editor connector-picker";
     form.innerHTML = this.#connectors.length ? this.#connectors.map((connector) => `<label class="connector-option"><input type="checkbox" value="${connector.locationKey}"><span><strong>${connector.name}</strong><small>${connector.kind} · ${connector.displayPath}</small></span></label>`).join("") : "<p class=asset-detail-placeholder>尚未登记 Connector，请先在连接器页面创建。</p>";
     const selected = new Set(asset.connectorLocationKeys?.length ? asset.connectorLocationKeys : this.#connectorRecordsFor(asset).map((connector) => connector.locationKey)); form.querySelectorAll<HTMLInputElement>("input[type=checkbox]").forEach((input) => { input.checked = selected.has(input.value); });
+    form.querySelectorAll<HTMLElement>(".connector-option").forEach((option) => {
+      const locationKey = option.querySelector<HTMLInputElement>("input")?.value;
+      const connector = this.#connectors.find((candidate) => candidate.locationKey === locationKey);
+      if (connector) {
+        const note = option.querySelector("small");
+        if (note) note.textContent = `${connector.kind} · ${connector.displayPath} · ${connector.surveyId ?? "未绑定巡天"}${connector.releaseId ? ` / ${connector.releaseId}` : ""}`;
+      }
+    });
     const actions = document.createElement("div"); actions.className = "detail-editor-actions"; actions.innerHTML = `<button class="command-button" type="submit">保存关联</button><button class="text-button" type="button" data-cancel>取消</button>`; form.append(actions);
     form.addEventListener("submit", (event) => { event.preventDefault(); const connectorLocationKeys = [...form.querySelectorAll<HTMLInputElement>("input:checked")].map((input) => input.value); const connectorIds = this.#connectors.filter((connector) => connectorLocationKeys.includes(connector.locationKey)).map((connector) => connector.id); this.#saveDetail(this.#assetInput(asset, { connectorIds, connectorLocationKeys })); });
     form.querySelector("[data-cancel]")?.addEventListener("click", () => { this.#detailEditing = null; this.#renderDetailPage(); }); return form;
@@ -456,7 +473,7 @@ export class DataCatalogPanel {
     const asset = this.#assets.find((candidate) => candidate.id === this.#selectedId); if (!asset) return;
     byId("asset-detail-title").textContent = asset.name; byId("asset-detail-description").textContent = asset.description;
     const stats = byId("asset-detail-stats"); stats.replaceChildren(); const statItems: Array<[string, string]> = [["状态", statusLabel(asset.status)], ["Tag", String((asset.tags ?? asset.modalities).length)], ["Connector", String(this.#connectorRecordsFor(asset).length)], ["文件", "待扫描"]]; statItems.forEach(([label, value]) => { const row = document.createElement("div"); const dt = document.createElement("dt"); const dd = document.createElement("dd"); dt.textContent = label; dd.textContent = value; row.append(dt, dd); stats.append(row); });
-    const basic = this.#detailEditing === "basic" ? this.#basicEditor(asset) : this.#rows([["来源", asset.origin === "builtin" ? "系统内置" : "用户登记"], ["巡天 / 发布", `${this.#surveyName(asset.surveyId)} / ${asset.releaseId ?? "未关联"}`], ["产品 / 类型", `${asset.product} / ${asset.kind}`], ["Tag", this.#tagText(asset.tags ?? asset.modalities) || "未标注"], ["项目阶段", projectStatesLabel(asset)], ["工程状态", statusLabel(asset.status)]]);
+    const basic = this.#detailEditing === "basic" ? this.#basicEditor(asset) : this.#rows([["来源", asset.origin === "builtin" ? "系统内置" : "用户登记"], ["巡天 / 发布", `${this.#surveyName(this.#effectiveSurveyId(asset))} / ${this.#effectiveReleaseId(asset) ?? "未关联"}`], ["产品 / 类型", `${asset.product} / ${asset.kind}`], ["Tag", this.#tagText(asset.tags ?? asset.modalities) || "未标注"], ["项目阶段", projectStatesLabel(asset)], ["工程状态", statusLabel(asset.status)]]);
     const sourceList = this.#detailEditing === "sources" ? this.#sourceEditor(asset) : document.createElement("ul");
     if (this.#detailEditing !== "sources") { (asset.sources ?? []).forEach((source) => { const item = document.createElement("li"); const link = document.createElement("a"); link.href = source.url; link.target = "_blank"; link.rel = "noreferrer"; link.textContent = `${source.label}: ${source.url}`; item.append(link); source.description && item.append(` · ${source.description}`); (sourceList as HTMLUListElement).append(item); }); if (!(sourceList as HTMLUListElement).childElementCount) sourceList.textContent = "尚未登记公开来源"; }
     const accessList = this.#detailEditing === "access" ? this.#accessEditor(asset) : document.createElement("ul");

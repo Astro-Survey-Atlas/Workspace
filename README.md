@@ -224,7 +224,7 @@ filesystem path.
 
 ## k3s deployment
 
-`deploy/k3s.yaml` deploys version `0.10.33` into the isolated
+`deploy/k3s.yaml` deploys version `0.10.38` into the isolated
 `astro-data-workspace` namespace. The Pod is pinned to `eva7028`; compact catalog
 metadata and derived indexes live in a 128 MiB `nfs-data` PVC backed by
 `/mnt/data`, mounted read-only by the service. Registry state uses a separate
@@ -268,10 +268,10 @@ Build and apply:
 ```bash
 docker build \
   --build-arg NPM_REGISTRY=https://registry.npmmirror.com \
-  -t crpi-wixjy6gci86ms14e.cn-hongkong.personal.cr.aliyuncs.com/ay-dev/astro-data-workspace-mcp:0.10.33 .
+  -t crpi-wixjy6gci86ms14e.cn-hongkong.personal.cr.aliyunc.com/ay-dev/astro-data-workspace-mcp:0.10.38 .
 
 podman push \
-  crpi-wixjy6gci86ms14e.cn-hongkong.personal.cr.aliyuncs.com/ay-dev/astro-data-workspace-mcp:0.10.33
+  crpi-wixjy6gci86ms14e.cn-hongkong.personal.cr.aliyuncs.com/ay-dev/astro-data-workspace-mcp:0.10.38
 
 kubectl apply -f deploy/k3s.yaml
 kubectl -n astro-data-workspace rollout status deployment/astro-data-workspace-mcp

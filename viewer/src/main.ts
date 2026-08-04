@@ -108,7 +108,11 @@ function renderProjectMetrics(): void {
 function assetsForSelection(selection: SurveyLayerSelection): DataAssetRecord[] {
   const surveyIds = new Set(selection.surveyIds);
   const releaseIds = new Set(selection.releaseIds);
-  return dataAssets.filter((asset) => asset.surveyId && surveyIds.has(asset.surveyId) && (!asset.releaseId || releaseIds.has(asset.releaseId)));
+  return dataAssets.filter((asset) => {
+    const surveyId = asset.surveyBinding?.surveyId ?? asset.surveyId;
+    const releaseId = asset.surveyBinding?.releaseId ?? asset.releaseId;
+    return Boolean(surveyId) && surveyIds.has(surveyId!) && (!releaseId || releaseIds.has(releaseId));
+  });
 }
 
 function projectStateSummary(assets: DataAssetRecord[]): string {
@@ -193,6 +197,8 @@ let dataAssets: DataAssetRecord[] = [];
 let refinementSurveyIds = new Set<string>();
 let refinementModalities = new Set<string>();
 let visibleSurveyIds = new Set<string>();
+let workspaceSurveyIds = new Set<string>();
+let unassignedWorkspaceVisible = false;
 let layerLayoutMode: SurveyLayerLayoutMode = "layers";
 let layerInteractionMode: SurveyLayerInteractionMode = "inspect";
 let hoverDismissTimer: ReturnType<typeof setTimeout> | null = null;
@@ -467,7 +473,10 @@ function renderSurveyInspection(inspection: SurveyLayerInspection | null): void 
     });
     stack.append(group);
   });
-  const cellAssets = dataAssets.filter((asset) => asset.surveyId && inspection.surveyIds.includes(asset.surveyId));
+  const cellAssets = dataAssets.filter((asset) => {
+    const surveyId = asset.surveyBinding?.surveyId ?? asset.surveyId;
+    return Boolean(surveyId && inspection.surveyIds.includes(surveyId));
+  });
   const projectState = document.createElement("section");
   projectState.className = "coverage-project-state";
   const projectHeading = document.createElement("header");
@@ -574,11 +583,16 @@ async function loadEuclidAstroOverview(): Promise<void> {
 async function loadWorkspaceAssetCoverage(): Promise<void> {
   const assetIds = dataAssets.map((asset) => asset.id).filter(Boolean);
   if (!assetIds.length) {
-    layerViewer?.setWorkspaceCoverage(null);
+    workspaceSurveyIds.clear();
+    layerViewer?.setWorkspaceCoverageLayers([], 16);
     return;
   }
   const coverage = await workspaceApi.skyCoverage({ nside: 16, assetIds });
-  layerViewer?.setWorkspaceCoverage({ nside: coverage.nside, pixels: coverage.pixels });
+  const layers = coverage.layers?.map((layer) => ({ ...layer, nside: coverage.nside })) ?? [{ key: "__workspace__", surveyId: undefined, releaseId: undefined, nside: coverage.nside, pixels: coverage.pixels }];
+  workspaceSurveyIds = new Set(layers.filter((layer) => layer.pixels.length > 0).map((layer) => layer.surveyId).filter((surveyId): surveyId is string => Boolean(surveyId)));
+  layerViewer?.setWorkspaceCoverageLayers(layers, coverage.nside);
+  layerViewer?.setVisibleSurveys(new Set([...visibleSurveyIds, ...(unassignedWorkspaceVisible ? ["__unassigned__"] : [])]));
+  buildSurveyList();
   if (coverage.status === "error") console.warn("Unable to load generic workspace coverage", coverage.message);
 }
 
@@ -765,8 +779,10 @@ function matchingRefinementAssets(): DataAssetRecord[] {
   if (!refinementState?.selectedPixels.length || !refinementSurveyIds.size || !refinementModalities.size) return [];
   const releases = new Set(refinementReleaseIds());
   return dataAssets.filter((asset) => {
-    if (!asset.surveyId || !refinementSurveyIds.has(asset.surveyId)) return false;
-    if (asset.releaseId && !releases.has(asset.releaseId)) return false;
+    const surveyId = asset.surveyBinding?.surveyId ?? asset.surveyId;
+    const releaseId = asset.surveyBinding?.releaseId ?? asset.releaseId;
+    if (!surveyId || !refinementSurveyIds.has(surveyId)) return false;
+    if (releaseId && !releases.has(releaseId)) return false;
     if (refinementModalities.size && !asset.modalities.some((modality) => refinementModalities.has(modality))) return false;
     return true;
   });
@@ -833,7 +849,7 @@ function renderRefinementInspector(): void {
     surveys: [...refinementSurveyIds].sort(),
     releases: releaseIds,
     modalities: [...refinementModalities].sort(),
-    assets: assets.map((asset) => ({ id: asset.id, surveyId: asset.surveyId, releaseId: asset.releaseId, product: asset.product, connector: asset.access.connector, uri: asset.access.uri })),
+    assets: assets.map((asset) => ({ id: asset.id, surveyId: asset.surveyBinding?.surveyId ?? asset.surveyId, releaseId: asset.surveyBinding?.releaseId ?? asset.releaseId, product: asset.product, connector: asset.access.connector, uri: asset.access.uri })),
   }));
   download.dataset.action = "export-refined-query";
   const back = actionButton("返回项目态势", () => void activateMode("layers").catch(showFatal));
@@ -885,6 +901,7 @@ function restoreLayerPreferences(): void {
       visibleSurveyIds?: string[];
       layoutMode?: SurveyLayerLayoutMode;
       interactionMode?: SurveyLayerInteractionMode;
+      unassignedWorkspaceVisible?: boolean;
     } | null;
     const restored = stored?.visibleSurveyIds?.filter((surveyId) => available.has(surveyId)) ?? [];
     if (restored.length || stored?.visibleSurveyIds?.length === 0) visibleSurveyIds = new Set(restored);
@@ -892,10 +909,12 @@ function restoreLayerPreferences(): void {
     else visibleSurveyIds = new Set([...available].slice(0, 1));
     layerLayoutMode = stored?.layoutMode === "overlap" ? "overlap" : "layers";
     layerInteractionMode = stored?.interactionMode === "region" ? "region" : "inspect";
+    unassignedWorkspaceVisible = stored?.unassignedWorkspaceVisible === true;
   } catch {
     visibleSurveyIds = available.has("legacy-surveys") ? new Set(["legacy-surveys"]) : new Set([...available].slice(0, 1));
     layerLayoutMode = "layers";
     layerInteractionMode = "inspect";
+    unassignedWorkspaceVisible = false;
   }
 }
 
@@ -904,12 +923,13 @@ function persistLayerPreferences(): void {
     visibleSurveyIds: [...visibleSurveyIds],
     layoutMode: layerLayoutMode,
     interactionMode: layerInteractionMode,
+    unassignedWorkspaceVisible,
   }));
 }
 
 function applyLayerPreferences(): void {
   layerViewer?.setLayoutMode(layerLayoutMode);
-  layerViewer?.setVisibleSurveys(visibleSurveyIds);
+  layerViewer?.setVisibleSurveys(new Set([...visibleSurveyIds, ...(unassignedWorkspaceVisible ? ["__unassigned__"] : [])]));
   layerViewer?.setInteractionMode(layerInteractionMode);
   buildSurveyList();
   persistLayerPreferences();
@@ -927,6 +947,11 @@ function setSurveyVisibility(surveyId: string, visible: boolean): void {
   if (visible) visibleSurveyIds.add(surveyId);
   else visibleSurveyIds.delete(surveyId);
   if (selectedSurvey?.id === surveyId && !visible) selectedSurvey = null;
+  applyLayerPreferences();
+}
+
+function setUnassignedWorkspaceVisibility(visible: boolean): void {
+  unassignedWorkspaceVisible = visible;
   applyLayerPreferences();
 }
 
@@ -1056,17 +1081,19 @@ function buildSurveyList(): void {
   list.replaceChildren(...surveyCards.map((survey) => {
     const footprints = footprintsForSurvey(survey.id);
     const hasFootprint = footprints.length > 0;
+    const hasWorkspaceCoverage = workspaceSurveyIds.has(survey.id);
+    const available = hasFootprint || hasWorkspaceCoverage;
     const card = document.createElement("article");
     card.className = "survey-card";
     card.classList.toggle("visible", visibleSurveyIds.has(survey.id));
-    card.classList.toggle("pending", !hasFootprint);
+    card.classList.toggle("pending", !available);
     const visibility = document.createElement("label");
     visibility.className = "survey-visibility";
-    visibility.title = hasFootprint ? `Show ${survey.name}` : `${survey.name} footprint is pending`;
+    visibility.title = available ? `Show ${survey.name}` : `${survey.name} footprint is pending`;
     const checkbox = document.createElement("input");
     checkbox.type = "checkbox";
     checkbox.checked = visibleSurveyIds.has(survey.id);
-    checkbox.disabled = !hasFootprint;
+    checkbox.disabled = !available;
     checkbox.setAttribute("aria-label", `Show ${survey.name}`);
     checkbox.addEventListener("change", () => setSurveyVisibility(survey.id, checkbox.checked));
     const swatch = document.createElement("i");
@@ -1074,10 +1101,10 @@ function buildSurveyList(): void {
     visibility.append(checkbox, swatch);
     const body = document.createElement("div");
     body.className = "survey-card-body";
-    body.tabIndex = hasFootprint ? 0 : -1;
-    body.addEventListener("click", () => hasFootprint && setSurveyVisibility(survey.id, !visibleSurveyIds.has(survey.id)));
+    body.tabIndex = available ? 0 : -1;
+    body.addEventListener("click", () => available && setSurveyVisibility(survey.id, !visibleSurveyIds.has(survey.id)));
     body.addEventListener("keydown", (event) => {
-      if (hasFootprint && (event.key === "Enter" || event.key === " ")) {
+      if (available && (event.key === "Enter" || event.key === " ")) {
         event.preventDefault();
         setSurveyVisibility(survey.id, !visibleSurveyIds.has(survey.id));
       }
@@ -1085,13 +1112,39 @@ function buildSurveyList(): void {
     const name = document.createElement("span");
     name.textContent = survey.name;
     const count = document.createElement("b");
-    count.textContent = hasFootprint ? `${footprints.length}/${survey.releaseCount} MOC` : "PENDING";
+    count.textContent = hasFootprint ? `${footprints.length}/${survey.releaseCount} MOC` : hasWorkspaceCoverage ? "WORKSPACE" : "PENDING";
     const metadata = document.createElement("small");
     metadata.textContent = `${survey.mission} · ${footprintLabel(survey.coverageStatus)}`;
     body.append(name, count, metadata);
     card.append(visibility, body);
     return card;
   }));
+  const unassigned = document.createElement("article");
+  unassigned.className = "survey-card workspace-unassigned";
+  unassigned.classList.toggle("visible", unassignedWorkspaceVisible);
+  const visibility = document.createElement("label");
+  visibility.className = "survey-visibility";
+  const checkbox = document.createElement("input");
+  checkbox.type = "checkbox";
+  checkbox.checked = unassignedWorkspaceVisible;
+  checkbox.setAttribute("aria-label", "显示未关联巡天数据");
+  checkbox.addEventListener("change", () => setUnassignedWorkspaceVisibility(checkbox.checked));
+  const swatch = document.createElement("i");
+  swatch.style.background = "#d69b4e";
+  visibility.append(checkbox, swatch);
+  const body = document.createElement("div");
+  body.className = "survey-card-body";
+  body.tabIndex = 0;
+  body.addEventListener("click", () => setUnassignedWorkspaceVisibility(!unassignedWorkspaceVisible));
+  const name = document.createElement("span");
+  name.textContent = "未关联巡天";
+  const count = document.createElement("b");
+  count.textContent = "WORKSPACE";
+  const metadata = document.createElement("small");
+  metadata.textContent = "仅显示未绑定巡天的工作区覆盖";
+  body.append(name, count, metadata);
+  unassigned.append(visibility, body);
+  list.append(unassigned);
 }
 
 async function selectSurvey(id: string): Promise<void> {
@@ -1360,11 +1413,12 @@ byId<HTMLButtonElement>("coverage-lock-button").addEventListener("click", () => 
 byId<HTMLButtonElement>("refinement-next").addEventListener("click", () => refinementViewer?.refine());
 byId<HTMLButtonElement>("refinement-back").addEventListener("click", () => refinementViewer?.goBack());
 byId<HTMLButtonElement>("layer-select-all").addEventListener("click", () => {
-  visibleSurveyIds = new Set(footprintSurveyIds());
+  visibleSurveyIds = new Set([...footprintSurveyIds(), ...workspaceSurveyIds]);
   applyLayerPreferences();
 });
 byId<HTMLButtonElement>("layer-clear-all").addEventListener("click", () => {
   visibleSurveyIds.clear();
+  unassignedWorkspaceVisible = false;
   applyLayerPreferences();
 });
 document.querySelectorAll<HTMLButtonElement>("[data-joint-nside]").forEach((button) => {

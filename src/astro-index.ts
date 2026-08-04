@@ -64,12 +64,25 @@ export interface AstroCoverageInput {
   nside: number;
 }
 
+/** Coverage returned for one effective survey ownership group. */
+export interface AstroCoverageLayer {
+  key: string;
+  surveyId?: string;
+  releaseId?: string;
+  assetIds: string[];
+  pixels: number[];
+  byAsset: AstroBreakdown[];
+  source?: "connector" | "asset" | "unassigned" | "conflict";
+  message?: string;
+}
+
 export interface AstroCoverageResponse {
   status: AstroIndexStatus;
   index: string;
   nside: number;
   pixels: number[];
   byAsset: AstroBreakdown[];
+  layers?: AstroCoverageLayer[];
   message?: string;
 }
 

@@ -31,6 +31,9 @@ export interface ConnectorRecord {
   description: string;
   kind: ConnectorKind;
   config: Record<string, string>;
+  /** Optional scientific ownership carried by this data location. */
+  surveyId?: string;
+  releaseId?: string;
   credentialRef?: string;
   status: ConnectorStatus;
   createdAt: string;
@@ -44,6 +47,8 @@ export interface ConnectorRegistrationInput {
   description?: string;
   kind: ConnectorKind;
   config: Record<string, string>;
+  surveyId?: string;
+  releaseId?: string;
   /** Internal storage reference. Browser clients use credentials instead. */
   credentialRef?: string;
   credentials?: ConnectorCredentialsInput;
@@ -149,11 +154,16 @@ export function validateConnectorInput(input: ConnectorRegistrationInput): Conne
   for (const key of REQUIRED_CONFIG[value.kind as ConnectorKind]) {
     if (!config[key]) throw new RangeError(`config.${key} is required`);
   }
+  const surveyId = textValue(value.surveyId, "surveyId", 120, false) || undefined;
+  const releaseId = textValue(value.releaseId, "releaseId", 120, false) || undefined;
+  if (releaseId && !surveyId) throw new RangeError("releaseId requires surveyId");
   return {
     name,
     description: textValue(value.description, "description", 500, false) || undefined,
     kind: value.kind as ConnectorKind,
     config,
+    surveyId,
+    releaseId,
     credentialRef: textValue(value.credentialRef, "credentialRef", 160, false) || undefined,
     status: value.status,
   };
@@ -219,6 +229,8 @@ export class ConnectorRegistry {
         description: value.description ?? current.description,
         kind: value.kind,
         config: value.config,
+        surveyId: value.surveyId,
+        releaseId: value.releaseId,
         credentialRef: value.credentialRef ?? current.credentialRef,
         status: value.status ?? current.status,
         locationKey,
@@ -237,6 +249,8 @@ export class ConnectorRegistry {
       description: value.description ?? "Connector configuration only. Connection and scanning are not enabled yet.",
       kind: value.kind,
       config: value.config,
+      surveyId: value.surveyId,
+      releaseId: value.releaseId,
       credentialRef: value.credentialRef,
       status: value.status ?? "draft",
       createdAt: now,
@@ -262,6 +276,8 @@ export class ConnectorRegistry {
       description: value.description ?? current.description,
       kind: value.kind,
       config: value.config,
+      surveyId: value.surveyId,
+      releaseId: value.releaseId,
       credentialRef: value.credentialRef,
       status: value.status ?? current.status,
       locationKey,
@@ -313,6 +329,8 @@ export class ConnectorRegistry {
       description: value.description ?? "",
       kind: value.kind,
       config: value.config,
+      surveyId: value.surveyId,
+      releaseId: value.releaseId,
       credentialRef: value.credentialRef,
       status: value.status ?? "draft",
       createdAt: now,
@@ -337,6 +355,8 @@ export class ConnectorRegistry {
         description: typeof candidate.description === "string" ? candidate.description : "Connector configuration.",
         kind: candidate.kind,
         config,
+        surveyId: typeof candidate.surveyId === "string" && candidate.surveyId.trim() ? candidate.surveyId.trim() : undefined,
+        releaseId: typeof candidate.releaseId === "string" && candidate.releaseId.trim() ? candidate.releaseId.trim() : undefined,
         locationKey,
         displayPath: connectorDisplayPath(candidate.kind, config),
         createdAt: typeof candidate.createdAt === "string" ? candidate.createdAt : new Date().toISOString(),

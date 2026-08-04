@@ -138,8 +138,8 @@ spec:
         fsGroupChangePolicy: OnRootMismatch
       containers:
         - name: mcp
-          image: crpi-wixjy6gci86ms14e.cn-hongkong.personal.cr.aliyuncs.com/ay-dev/astro-data-workspace-mcp:0.10.33
-          imagePullPolicy: IfNotPresent
+          image: crpi-wixjy6gci86ms14e.cn-hongkong.personal.cr.aliyuncs.com/ay-dev/astro-data-workspace-mcp:0.10.38
+          imagePullPolicy: Always
           ports:
             - name: http
               containerPort: 3000
