@@ -44,6 +44,17 @@ function assertManifest(value: unknown): asserts value is SurveyFootprintManifes
   }
 }
 
+export function normalizeSurveyFootprintManifest(value: unknown): SurveyFootprintManifest {
+  assertManifest(value);
+  return {
+    ...value,
+    footprints: value.footprints.map((footprint) => ({
+      ...footprint,
+      pixels: [...new Set(footprint.pixels)].sort((left, right) => left - right),
+    })),
+  };
+}
+
 /** Read a compact, generated coverage catalog. It contains metadata only, never survey rows or images. */
 export class SurveyFootprintCatalog {
   readonly #manifestPath: string;
@@ -56,14 +67,7 @@ export class SurveyFootprintCatalog {
   async list(): Promise<SurveyFootprintManifest> {
     if (this.#manifest) return this.#manifest;
     const parsed = JSON.parse(await readFile(this.#manifestPath, "utf8")) as unknown;
-    assertManifest(parsed);
-    this.#manifest = {
-      ...parsed,
-      footprints: parsed.footprints.map((footprint) => ({
-        ...footprint,
-        pixels: [...new Set(footprint.pixels)].sort((left, right) => left - right),
-      })),
-    };
+    this.#manifest = normalizeSurveyFootprintManifest(parsed);
     return this.#manifest;
   }
 }

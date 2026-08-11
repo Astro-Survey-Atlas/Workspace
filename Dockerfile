@@ -20,6 +20,9 @@ ENV NODE_ENV=production \
     ASTRO_DATA_CATALOG_STATE=/state/data-catalog.json \
     ASTRO_CONNECTOR_BOOTSTRAP=/app/bootstrap/connectors.json \
     ASTRO_CONNECTOR_STATE=/state/connectors.json \
+    ASTRO_RESOURCE_CATALOG_URL=file:///app/bootstrap/resource-packages/catalog.json \
+    ASTRO_RESOURCE_PACKAGE_ROOT=/resource-packages \
+    ASTRO_RESOURCE_PACKAGE_STATE=/state/resource-package-state.json \
     ASTRO_ALLOWED_ROOTS=/app/fixtures \
     ASTRO_VIEWER_ROOT=/app/viewer \
     ASTRO_SURVEY_FOOTPRINT_ROOT=/app/footprints
@@ -27,8 +30,8 @@ ENV NODE_ENV=production \
 WORKDIR /app
 RUN groupadd --gid 10001 astro \
     && useradd --uid 10001 --gid astro --no-create-home astro \
-    && mkdir -p /state \
-    && chown astro:astro /state
+    && mkdir -p /state /resource-packages \
+    && chown astro:astro /state /resource-packages
 COPY --from=build --chown=astro:astro /app/node_modules ./node_modules
 COPY --from=build --chown=astro:astro /app/dist/src ./dist
 COPY --from=build --chown=astro:astro /app/dist/viewer ./viewer

@@ -168,6 +168,10 @@ function disposeObject(object: THREE.Object3D): void {
   });
 }
 
+function releaseWebglContext(renderer: THREE.WebGLRenderer): void {
+  renderer.getContext().getExtension("WEBGL_lose_context")?.loseContext();
+}
+
 function clearGroup(group: THREE.Group): void {
   for (const child of [...group.children]) {
     group.remove(child);
@@ -485,6 +489,7 @@ export class SurveyLayerViewer {
     window.removeEventListener("keydown", this.#handleKeyDown);
     disposeObject(this.#scene);
     this.#renderer.dispose();
+    releaseWebglContext(this.#renderer);
   }
 
   #rebuildVisible(animated: boolean): void {

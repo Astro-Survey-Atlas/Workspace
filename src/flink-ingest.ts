@@ -39,7 +39,11 @@ export interface GenericScanInput {
   };
 }
 
-class KubernetesResourceClient {
+export interface FlinkResourceClient {
+  request<T>(method: string, path: string, body?: unknown): Promise<{ status: number; ok: boolean; value?: T; text: string }>;
+}
+
+class KubernetesResourceClient implements FlinkResourceClient {
   readonly #apiUrl: string;
   readonly #tokenPath: string;
 
@@ -121,6 +125,7 @@ export interface FlinkScanServiceOptions {
   esUrl: string;
   esIndex: string;
   pollMs: number;
+  resourceClient?: FlinkResourceClient;
 }
 
 export class FlinkScanService {
@@ -132,7 +137,7 @@ export class FlinkScanService {
   readonly #secretNamespace: string;
   readonly #esUrl: string;
   readonly #esIndex: string;
-  readonly #client: KubernetesResourceClient | undefined;
+  readonly #client: FlinkResourceClient | undefined;
   readonly #pollMs: number;
   #timer: ReturnType<typeof setInterval> | undefined;
   #polling = false;
@@ -147,12 +152,12 @@ export class FlinkScanService {
     this.#esUrl = options.esUrl.replace(/\/+$/, "");
     this.#esIndex = options.esIndex;
     this.#pollMs = Math.max(1000, options.pollMs);
-    if (process.env.KUBERNETES_SERVICE_HOST) this.#client = new KubernetesResourceClient();
+    this.#client = options.resourceClient ?? (process.env.KUBERNETES_SERVICE_HOST ? new KubernetesResourceClient() : undefined);
   }
 
-  async start(): Promise<void> {
+  start(): void {
     if (!this.#client) return;
-    await this.poll();
+    void this.poll();
     this.#timer = setInterval(() => { void this.poll(); }, this.#pollMs);
   }
 
@@ -285,7 +290,11 @@ export class FlinkScanService {
     try {
       for (const run of this.#runs.list()) {
         if (!run.jobId || (run.status !== "queued" && run.status !== "running")) continue;
-        await this.#pollRun(run);
+        try {
+          await this.#pollRun(run);
+        } catch (error) {
+          console.warn(`Unable to refresh external Flink task ${run.jobId}; keeping stored status`, error instanceof Error ? error.message : error);
+        }
       }
     } finally {
       this.#polling = false;
@@ -296,8 +305,7 @@ export class FlinkScanService {
     const result = await this.#client!.request<KubernetesResource>("GET", `${TASK_API}/namespaces/${encodeURIComponent(this.#namespace)}/flinkingesttasks/${encodeURIComponent(run.jobId!)}`);
     if (result.status === 404) return;
     if (!result.ok || !result.value) {
-      await this.#runs.update(run.id, { status: "failed", error: `Unable to read FlinkIngestTask (HTTP ${result.status})`, completedAt: new Date().toISOString() });
-      return;
+      throw new Error(`Unable to read FlinkIngestTask (HTTP ${result.status})`);
     }
     const actualBatchId = result.value.status?.batchId?.trim();
     if (actualBatchId && actualBatchId !== run.batchId) {

@@ -17,6 +17,7 @@
           </div>
         </div>
         <div class="mode-control" role="group" aria-label="视图模式">
+          <button type="button" class="mode-button" data-mode="packages">资源集</button>
           <button type="button" class="mode-button" data-mode="connectors">连接器</button>
           <button type="button" class="mode-button active" data-mode="catalog">数据目录</button>
           <button type="button" class="mode-button" data-mode="layers">项目态势</button>
@@ -79,6 +80,16 @@
               <button id="catalog-delete" class="command-button danger" type="button" hidden>删除</button>
             </div>
           </form>
+        </div>
+
+        <div id="resource-package-controls" hidden>
+          <section class="control-section">
+            <div class="section-heading"><span>巡天资源筛选</span><span>PUBLIC COVERAGE</span></div>
+            <label class="field-label" for="resource-package-search">搜索巡天</label>
+            <input id="resource-package-search" class="field-input" type="search" placeholder="名称、设施、波段或产品" />
+            <div id="resource-package-filters" class="resource-package-filters"></div>
+            <p class="control-note">同类标签取并集，不同维度取交集。勾选只修改草稿，不会立即下载或改变天球。</p>
+          </section>
         </div>
 
         <div id="connector-controls" hidden>
@@ -284,6 +295,32 @@
           <dl id="asset-detail-stats" class="asset-detail-stats"></dl>
         </header>
         <div id="asset-detail-body" class="asset-detail-body"></div>
+      </section>
+
+      <section id="resource-package-stage" class="catalog-stage resource-package-stage" aria-label="公共覆盖资源集" hidden>
+        <header class="catalog-stage-header">
+          <div>
+            <span class="panel-kicker">PUBLIC SURVEY COVERAGE</span>
+            <h2>资源集</h2>
+            <p>每个巡天独立下载。选择需要的公开覆盖，下载到当前服务器后再一次性加载到 3D 天球。</p>
+          </div>
+          <dl class="catalog-summary">
+            <div><dt>可用</dt><dd id="resource-package-count">0</dd></div>
+            <div><dt>已安装</dt><dd id="resource-package-installed-count">0</dd></div>
+            <div><dt>已加载</dt><dd id="resource-package-active-count">0</dd></div>
+            <div><dt>已选</dt><dd id="resource-package-selected-count">0</dd></div>
+          </dl>
+        </header>
+        <div class="resource-package-actions">
+          <span id="resource-package-pending" aria-live="polite">草稿与天球一致</span>
+          <button id="resource-package-reset" class="command-button secondary" type="button">重置草稿</button>
+          <button id="resource-package-download" class="command-button secondary" type="button">下载所选</button>
+          <button id="resource-package-apply" class="command-button" type="button">批量加载</button>
+        </div>
+        <div class="resource-package-columns" aria-hidden="true"><span></span><span>巡天</span><span>版本 / 大小</span><span>服务器状态</span><span></span></div>
+        <div id="resource-package-list" class="resource-package-list"></div>
+        <div id="resource-package-empty" class="catalog-empty" hidden>中央目录当前没有可用资源包。</div>
+        <footer class="catalog-stage-footer">批量加载成功后可前往“项目态势”查看 3D 覆盖。Connector 中的用户数据保持独立。</footer>
       </section>
 
       <section id="connector-stage" class="catalog-stage connector-stage" aria-label="连接器目录" hidden>

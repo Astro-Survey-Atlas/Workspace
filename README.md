@@ -224,7 +224,7 @@ filesystem path.
 
 ## k3s deployment
 
-`deploy/k3s.yaml` deploys version `0.10.38` into the isolated
+`deploy/k3s.yaml` deploys version `0.10.38-20260811150930` into the isolated
 `astro-data-workspace` namespace. The Pod is pinned to `eva7028`; compact catalog
 metadata and derived indexes live in a 128 MiB `nfs-data` PVC backed by
 `/mnt/data`, mounted read-only by the service. Registry state uses a separate
@@ -235,14 +235,14 @@ OSS/rclone mount.
 The Ingress host is:
 
 ```text
-astro.workspace.dev.72602.online
+astro.workspace.dev.72602.space
 ```
 
 The cluster ingress controller is currently exposed through NodePort `32080`, so
 the LAN URL is:
 
 ```text
-http://astro.workspace.dev.72602.online:32080/
+http://astro.workspace.dev.72602.space:32080/
 ```
 
 The application Service is also exposed directly through NodePort `32082` for
@@ -259,7 +259,7 @@ When forwarding from a remote VSCode session, forward local port `32082` to
 `3000`. The Ingress NodePort `32080` remains available separately.
 
 The Ingress rule is configured for the new host. The DNS record for
-`astro.workspace.dev.72602.online` must point at the reachable node address;
+`astro.workspace.dev.72602.space` must point at the reachable node address;
 this deployment does not modify the `dev` namespace, its services, or the
 cluster Ingress controller.
 
@@ -268,10 +268,10 @@ Build and apply:
 ```bash
 docker build \
   --build-arg NPM_REGISTRY=https://registry.npmmirror.com \
-  -t crpi-wixjy6gci86ms14e.cn-hongkong.personal.cr.aliyunc.com/ay-dev/astro-data-workspace-mcp:0.10.38 .
+  -t crpi-wixjy6gci86ms14e.cn-hongkong.personal.cr.aliyuncs.com/ay-dev/astro-data-workspace-mcp:0.10.38-20260811150930 .
 
 podman push \
-  crpi-wixjy6gci86ms14e.cn-hongkong.personal.cr.aliyuncs.com/ay-dev/astro-data-workspace-mcp:0.10.38
+  crpi-wixjy6gci86ms14e.cn-hongkong.personal.cr.aliyuncs.com/ay-dev/astro-data-workspace-mcp:0.10.38-20260811150930
 
 kubectl apply -f deploy/k3s.yaml
 kubectl -n astro-data-workspace rollout status deployment/astro-data-workspace-mcp

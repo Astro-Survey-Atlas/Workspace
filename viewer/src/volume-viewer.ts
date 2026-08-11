@@ -52,6 +52,10 @@ function disposeObject(object: THREE.Object3D): void {
   });
 }
 
+function releaseWebglContext(renderer: THREE.WebGLRenderer): void {
+  renderer.getContext().getExtension("WEBGL_lose_context")?.loseContext();
+}
+
 function colorForRadius(value: number): THREE.Color {
   const low = new THREE.Color(0x42d4c6);
   const middle = new THREE.Color(0xf2cf62);
@@ -442,6 +446,7 @@ export class VolumeViewer {
     this.#controls.dispose();
     disposeObject(this.#scene);
     this.#renderer.dispose();
+    releaseWebglContext(this.#renderer);
   }
 
   #createBackgroundStars(): THREE.Points {

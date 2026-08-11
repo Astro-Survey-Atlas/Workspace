@@ -46,6 +46,10 @@ function disposeObject(object: THREE.Object3D): void {
   });
 }
 
+function releaseWebglContext(renderer: THREE.WebGLRenderer): void {
+  renderer.getContext().getExtension("WEBGL_lose_context")?.loseContext();
+}
+
 function childrenOf(pixels: Iterable<number>): number[] {
   return [...pixels].flatMap((pixel) => [pixel * 4, pixel * 4 + 1, pixel * 4 + 2, pixel * 4 + 3]);
 }
@@ -182,6 +186,7 @@ export class RegionRefinementViewer {
     this.#canvas.removeEventListener("pointerleave", this.#handlePointerLeave);
     disposeObject(this.#scene);
     this.#renderer.dispose();
+    releaseWebglContext(this.#renderer);
   }
 
   #rebuild(): void {

@@ -1,5 +1,5 @@
 ﻿import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { createMcpExpressApp } from "@modelcontextprotocol/sdk/server/express.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
@@ -19,8 +19,8 @@ import { FlinkScanService, type GenericScanInput } from "./flink-ingest.js";
 import { createAstroMcpServer } from "./mcp.js";
 import { ScanRunCatalog } from "./provenance.js";
 import { JsonDatasetRegistry } from "./registry.js";
+import { ResourcePackageManager, type ResourcePackageLoad } from "./resource-packages.js";
 import { SurveyRegistry, type SurveyRegistrationInput } from "./survey-registry.js";
-import { SurveyFootprintCatalog } from "./survey-footprints.js";
 import { CatalogSkyIndexService } from "./sky-index.js";
 import type { DatasetRecord } from "./types.js";
 import { publicVolumeManifest, VolumeCatalog } from "./volume.js";
@@ -53,7 +53,9 @@ const dataCatalogStatePath = process.env.ASTRO_DATA_CATALOG_STATE ?? path.join(p
 const connectorStatePath = process.env.ASTRO_CONNECTOR_STATE ?? path.join(path.dirname(statePath), "connectors.json");
 const connectorBootstrapPath = process.env.ASTRO_CONNECTOR_BOOTSTRAP ?? path.join(projectRoot, "bootstrap", "connectors.json");
 const connectorRunStatePath = process.env.ASTRO_CONNECTOR_RUN_STATE ?? path.join(path.dirname(statePath), "connector-ingest-runs.json");
-const surveyFootprintRoot = process.env.ASTRO_SURVEY_FOOTPRINT_ROOT ?? path.join(projectRoot, "footprints");
+const resourcePackageRoot = process.env.ASTRO_RESOURCE_PACKAGE_ROOT ?? path.join(projectRoot, "data", "resource-packages");
+const resourcePackageStatePath = process.env.ASTRO_RESOURCE_PACKAGE_STATE ?? path.join(path.dirname(statePath), "resource-package-state.json");
+const resourceCatalogUrl = process.env.ASTRO_RESOURCE_CATALOG_URL ?? pathToFileURL(path.join(projectRoot, "bootstrap", "resource-packages", "catalog.json")).href;
 const catalogMcpUrl = process.env.ASTRO_CATALOG_MCP_URL ?? "http://eva24002-entrance.lab.zverse.space:30082/mcp";
 const catalogMcpTimeoutMs = Number(process.env.ASTRO_CATALOG_MCP_TIMEOUT_MS ?? "15000");
 const flinkNamespace = process.env.ASTRO_FLINK_NAMESPACE ?? "warehouse";
@@ -84,7 +86,7 @@ const flinkScans = new FlinkScanService({
   esIndex: astroEsIndex,
   pollMs: flinkPollMs,
 });
-const surveyFootprints = new SurveyFootprintCatalog(surveyFootprintRoot);
+const resourcePackages = new ResourcePackageManager({ catalogUrl: resourceCatalogUrl, root: resourcePackageRoot, statePath: resourcePackageStatePath });
 const astroIndex = new AstroIndexService();
 const workflowEngine = new WorkflowEngine(workflowStore, new McpCatalogQueryClient(catalogMcpUrl, catalogMcpTimeoutMs, 1));
 const agentService = new AgentService(workflowStore, workflowEngine);
@@ -218,7 +220,7 @@ function validateConnectorIds(input: DataAssetRegistrationInput): void {
 
 function sendApiError(response: Response, error: unknown): void {
   const message = error instanceof Error ? error.message : String(error);
-  const notFound = message.startsWith("Dataset not found:") || message.startsWith("Data asset not found:") || message.startsWith("Connector not found:") || message.startsWith("Connector ingest run not found:") || message.startsWith("Volume not found:") || message.startsWith("Atlas not found:") || message.startsWith("Survey not found:")
+  const notFound = message.startsWith("Dataset not found:") || message.startsWith("Data asset not found:") || message.startsWith("Connector not found:") || message.startsWith("Connector ingest run not found:") || message.startsWith("Volume not found:") || message.startsWith("Atlas not found:") || message.startsWith("Survey not found:") || message.startsWith("Resource package not found:") || message.startsWith("Resource package is not installed:") || message.startsWith("Resource package job not found:")
     || message.startsWith("Scan run not found:") || message.startsWith("Lineage not found:") || message.startsWith("Workflow not found:")
     || message.startsWith("Workflow run not found:") || message.startsWith("Workflow artifact not found:") || message.startsWith("Agent session not found:");
   const status = error instanceof RangeError ? 400 : notFound ? 404 : 500;
@@ -311,7 +313,7 @@ app.get("/api/connectors/:id", async (request: Request, response: Response) => {
 app.get("/api/connectors/:id/ingest-runs", async (request: Request, response: Response) => {
   try {
     const connector = connectors.get(datasetIdFrom(request));
-    await flinkScans.poll();
+    void flinkScans.poll();
     response.json({ runs: connectorRuns.list(connector.locationKey) });
   } catch (error) {
     sendApiError(response, error);
@@ -322,7 +324,7 @@ app.get("/api/connectors/:id/ingest-runs", async (request: Request, response: Re
 app.get("/api/connectors/:id/runs", async (request: Request, response: Response) => {
   try {
     const connector = connectors.get(datasetIdFrom(request));
-    await flinkScans.poll();
+    void flinkScans.poll();
     response.json({ runs: connectorRuns.list(connector.locationKey) });
   } catch (error) {
     sendApiError(response, error);
@@ -464,8 +466,77 @@ app.get("/api/surveys/:id", (request: Request, response: Response) => {
 
 app.get("/api/survey-footprints", async (_request: Request, response: Response) => {
   try {
-    response.set("Cache-Control", "public, max-age=3600");
-    response.json(await surveyFootprints.list());
+    response.set("Cache-Control", "no-store");
+    response.json(await resourcePackages.activeFootprints());
+  } catch (error) {
+    sendApiError(response, error);
+  }
+});
+
+app.get("/api/resource-packages", (_request: Request, response: Response) => {
+  response.set("Cache-Control", "no-store");
+  response.json({ packages: resourcePackages.list() });
+});
+
+app.get("/api/resource-packages/active-footprints", async (_request: Request, response: Response) => {
+  try {
+    response.set("Cache-Control", "no-store");
+    response.json(await resourcePackages.activeFootprints());
+  } catch (error) {
+    sendApiError(response, error);
+  }
+});
+
+app.get("/api/resource-packages/jobs/:id", (request: Request, response: Response) => {
+  try {
+    response.json({ job: resourcePackages.job(datasetIdFrom(request)) });
+  } catch (error) {
+    sendApiError(response, error);
+  }
+});
+
+app.post("/api/resource-packages/:id/install", (request: Request, response: Response) => {
+  try {
+    response.status(202).json({ job: resourcePackages.install(datasetIdFrom(request)) });
+  } catch (error) {
+    sendApiError(response, error);
+  }
+});
+
+app.put("/api/resource-packages/active", async (request: Request, response: Response) => {
+  try {
+    const loads = request.body?.loads ?? (Array.isArray(request.body?.ids)
+      ? request.body.ids.map((packageId: unknown) => {
+          const record = typeof packageId === "string" ? resourcePackages.get(packageId) : undefined;
+          return { packageId, releaseIds: record?.availableReleaseIds };
+        })
+      : request.body?.loads);
+    response.json({ packages: await resourcePackages.setActive(loads as ResourcePackageLoad[]) });
+  } catch (error) {
+    sendApiError(response, error);
+  }
+});
+
+app.post("/api/resource-packages/:id/activate", async (request: Request, response: Response) => {
+  try {
+    response.json({ package: await resourcePackages.activate(datasetIdFrom(request)) });
+  } catch (error) {
+    sendApiError(response, error);
+  }
+});
+
+app.post("/api/resource-packages/:id/deactivate", async (request: Request, response: Response) => {
+  try {
+    response.json({ package: await resourcePackages.deactivate(datasetIdFrom(request)) });
+  } catch (error) {
+    sendApiError(response, error);
+  }
+});
+
+app.delete("/api/resource-packages/:id", async (request: Request, response: Response) => {
+  try {
+    await resourcePackages.remove(datasetIdFrom(request));
+    response.status(204).end();
   } catch (error) {
     sendApiError(response, error);
   }
@@ -983,7 +1054,8 @@ async function start(): Promise<void> {
   await dataCatalog.initialize();
   await connectors.initialize();
   await connectorRuns.initialize();
-  await flinkScans.start();
+  await resourcePackages.initialize();
+  flinkScans.start();
   const bootstrapCatalog = process.env.ASTRO_BOOTSTRAP_CATALOG;
   if (bootstrapCatalog) {
     const record = await registry.registerLocalCsv(

@@ -1,0 +1,18 @@
+{
+  "id": "ags_826afef3-b452-47cd-bcab-6081ccf2f831",
+  "createdAt": "2026-08-11T05:57:53.441Z",
+  "updatedAt": "2026-08-11T05:57:53.441Z",
+  "workflowKey": "euclid-desi-crossmatch@1",
+  "capabilities": {
+    "ruleInterpreter": true,
+    "llm": false
+  },
+  "messages": [
+    {
+      "id": "16afbfa5-22de-488f-913d-8600c1bdc763",
+      "role": "assistant",
+      "content": "已连接确定性工作流。请给出 RA、Dec；匹配半径默认 1.5 角秒。",
+      "createdAt": "2026-08-11T05:57:53.441Z"
+    }
+  ]
+}

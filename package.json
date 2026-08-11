@@ -16,6 +16,7 @@
     "test:volume": "python3 -m unittest scripts/test_build_redshift_volume.py",
     "build:atlas": "tsx scripts/build_survey_atlas.ts",
     "build:footprints": "tsx scripts/build_survey_footprints.ts",
+    "build:resource-packages": "tsx scripts/build_resource_package_fixtures.ts",
     "benchmark:atlas": "tsx scripts/benchmark_joint_index.ts",
     "smoke:http": "tsx scripts/mcp-http-smoke.ts",
     "smoke:workflow-real": "tsx scripts/smoke_real_workflow.ts",
@@ -30,6 +31,8 @@
     "healpixjs": "^2.0.0",
     "lucide": "^1.25.0",
     "three": "^0.185.1",
+    "yauzl": "^3.2.0",
+    "yazl": "^3.3.1",
     "zod": "4.4.3"
   },
   "devDependencies": {
@@ -38,6 +41,8 @@
     "@types/node": "^22.0.0",
     "@types/pngjs": "^6.0.5",
     "@types/three": "^0.185.1",
+    "@types/yauzl": "^2.10.3",
+    "@types/yazl": "^3.3.0",
     "pngjs": "^7.0.0",
     "tsx": "4.23.1",
     "typescript": "7.0.2",

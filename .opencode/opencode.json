@@ -1,0 +1,231 @@
+{
+  "model": "openai/gpt-5.6-sol",
+  "small_model": "openai/gpt-5.6-sol",
+  "yolo": true,
+  "provider": {
+    "openai": {
+      "options": {
+        "baseURL": "https://token.72602.space/v1",
+        "apiKey": "{env:CAFE_API_KEY}",
+        "headerTimeout": 60000,
+        "timeout": 600000,
+        "chunkTimeout": 120000
+      },
+      "models": {
+        "gpt-5.6-terra": {
+          "name": "GPT-5.6-Terra",
+          "limit": {
+            "context": 1050000,
+            "output": 128000
+          },
+          "options": {
+            "store": false
+          },
+          "variants": {
+            "low": {},
+            "medium": {},
+            "high": {},
+            "xhigh": {}
+          }
+        },
+        "gpt-5.6-luna": {
+          "name": "GPT-5.6-Luna",
+          "limit": {
+            "context": 1050000,
+            "output": 128000
+          },
+          "options": {
+            "store": false
+          },
+          "variants": {
+            "low": {},
+            "medium": {},
+            "high": {},
+            "xhigh": {}
+          }
+        },
+        "gpt-5.6-sol": {
+          "name": "GPT-5.6-Sol",
+          "limit": {
+            "context": 1050000,
+            "output": 128000
+          },
+          "options": {
+            "store": false
+          },
+          "variants": {
+            "low": {},
+            "medium": {},
+            "high": {},
+            "xhigh": {}
+          }
+        }
+      }
+    },
+    "grok": {
+      "options": {
+        "baseURL": "https://token.72602.space/v1",
+        "apiKey": "{env:GROK_API_KEY}",
+        "headerTimeout": 60000,
+        "timeout": 600000,
+        "chunkTimeout": 120000
+      },
+      "npm": "@ai-sdk/openai",
+      "name": "Grok via Sub2API",
+      "models": {
+        "grok-4.5": {
+          "name": "Grok 4.5",
+          "limit": {
+            "context": 1000000,
+            "output": 128000
+          }
+        },
+        "grok-4.3": {
+          "name": "Grok 4.3",
+          "limit": {
+            "context": 1000000,
+            "output": 128000
+          }
+        },
+        "grok-build-0.1": {
+          "name": "Grok Build 0.1",
+          "limit": {
+            "context": 256000,
+            "output": 128000
+          }
+        },
+        "grok-composer-2.5-fast": {
+          "name": "Grok Composer 2.5 Fast",
+          "limit": {
+            "context": 500000,
+            "output": 128000
+          }
+        }
+      }
+    },
+    "wzzzz": {
+      "options": {
+        "baseURL": "https://sub2api.home.geekcity.tech:32443/v1",
+        "apiKey": "sk-762fdc21284c286c2e6cf9cfd42d469cf3604210274396ed954e79d085ac5ea6",
+        "headerTimeout": 60000,
+        "timeout": 600000,
+        "chunkTimeout": 120000
+      },
+      "models": {
+        "gpt-5.6-terra": {
+          "name": "GPT-5.6-Terra",
+          "limit": {
+            "context": 1050000,
+            "output": 128000
+          },
+          "options": {
+            "store": false
+          },
+          "variants": {
+            "low": {},
+            "medium": {},
+            "high": {},
+            "xhigh": {}
+          }
+        },
+        "gpt-5.6-luna": {
+          "name": "GPT-5.6-Luna",
+          "limit": {
+            "context": 1050000,
+            "output": 128000
+          },
+          "options": {
+            "store": false
+          },
+          "variants": {
+            "low": {},
+            "medium": {},
+            "high": {},
+            "xhigh": {}
+          }
+        },
+        "gpt-5.6-sol": {
+          "name": "GPT-5.6-Sol",
+          "limit": {
+            "context": 1050000,
+            "output": 128000
+          },
+          "options": {
+            "store": false
+          },
+          "variants": {
+            "low": {},
+            "medium": {},
+            "high": {},
+            "xhigh": {}
+          }
+        }
+      }
+    }
+  },
+  "agent": {
+    "build": {
+      "options": {
+        "store": false
+      }
+    },
+    "plan": {
+      "options": {
+        "store": false
+      }
+    }
+  },
+  "permission": {
+    "read": "allow",
+    "edit": "allow",
+    "glob": "allow",
+    "grep": "allow",
+    "list": "allow",
+    "task": "allow",
+    "external_directory": "allow",
+    "todowrite": "allow",
+    "question": "allow",
+    "webfetch": "allow",
+    "websearch": "allow",
+    "lsp": "allow",
+    "doom_loop": "allow",
+    "skill": "allow",
+    "bash": {
+      "*": "allow",
+      "kubectl delete *": "ask",
+      "kubectl * delete *": "ask",
+      "kubectl drain *": "ask",
+      "kubectl * drain *": "ask",
+      "kubectl cordon *": "ask",
+      "kubectl * cordon *": "ask",
+      "kubectl taint *": "ask",
+      "kubectl * taint *": "ask",
+      "ssh * kubectl * delete *": "ask",
+      "ssh * kubectl * drain *": "ask",
+      "ssh * kubectl * cordon *": "ask",
+      "ssh * kubectl * taint *": "ask",
+      "sudo *": "ask",
+      "* sudo *": "ask",
+      "systemctl *": "ask",
+      "* systemctl *": "ask",
+      "rm -rf *": "ask",
+      "git reset --hard*": "ask",
+      "git push *--force*": "ask"
+    }
+  },
+  "plugin": [
+    "opencode-vibeguard@0.1.0",
+    "@tarquinen/opencode-dcp@3.1.14",
+    "@prevalentware/opencode-goal-plugin@0.1.24"
+  ],
+  "share": "disabled",
+  "compaction": {
+    "auto": true,
+    "prune": true,
+    "tail_turns": 10
+  },
+  "skills": {
+    "paths": [".opencode/skills"]
+  },
+  "$schema": "https://opencode.ai/config.json"
+}

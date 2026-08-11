@@ -111,6 +111,19 @@ spec:
     requests:
       storage: 128Mi
 ---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: resource-packages
+  namespace: astro-data-workspace
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: nfs-data
+  resources:
+    requests:
+      storage: 1Gi
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -138,7 +151,7 @@ spec:
         fsGroupChangePolicy: OnRootMismatch
       containers:
         - name: mcp
-          image: crpi-wixjy6gci86ms14e.cn-hongkong.personal.cr.aliyuncs.com/ay-dev/astro-data-workspace-mcp:0.10.38
+          image: crpi-wixjy6gci86ms14e.cn-hongkong.personal.cr.aliyuncs.com/ay-dev/astro-data-workspace-mcp:0.10.38-20260811094806
           imagePullPolicy: Always
           ports:
             - name: http
@@ -164,6 +177,12 @@ spec:
               value: /volumes
             - name: ASTRO_WORKFLOW_ROOT
               value: /state/workflow-runs
+            - name: ASTRO_RESOURCE_CATALOG_URL
+              value: file:///app/bootstrap/resource-packages/catalog.json
+            - name: ASTRO_RESOURCE_PACKAGE_ROOT
+              value: /resource-packages
+            - name: ASTRO_RESOURCE_PACKAGE_STATE
+              value: /state/resource-package-state.json
             - name: ASTRO_CONNECTOR_BOOTSTRAP
               value: /app/bootstrap/connectors.json
             - name: ASTRO_CATALOG_MCP_URL
@@ -185,7 +204,7 @@ spec:
             - name: ASTRO_FLINK_POLL_MS
               value: "5000"
             - name: ASTRO_ALLOWED_HOSTS
-              value: localhost,127.0.0.1,10.15.49.212,10.15.51.75,astro.workspace.dev.72602.online,astro-data-workspace-mcp,astro-data-workspace-mcp.astro-data-workspace,astro-data-workspace-mcp.astro-data-workspace.svc,astro-data-workspace-mcp.astro-data-workspace.svc.cluster.local
+              value: localhost,127.0.0.1,10.15.49.212,10.15.51.75,astro.workspace.dev.72602.space,astro-data-workspace-mcp,astro-data-workspace-mcp.astro-data-workspace,astro-data-workspace-mcp.astro-data-workspace.svc,astro-data-workspace-mcp.astro-data-workspace.svc.cluster.local
           readinessProbe:
             httpGet:
               path: /healthz
@@ -222,6 +241,8 @@ spec:
           volumeMounts:
             - name: registry-state
               mountPath: /state
+            - name: resource-packages
+              mountPath: /resource-packages
             - name: tmp
               mountPath: /tmp
             - name: cosmos-clean-v2
@@ -236,6 +257,9 @@ spec:
         - name: registry-state
           persistentVolumeClaim:
             claimName: registry-state
+        - name: resource-packages
+          persistentVolumeClaim:
+            claimName: resource-packages
         - name: tmp
           emptyDir: {}
         - name: cosmos-clean-v2
@@ -271,7 +295,7 @@ metadata:
 spec:
   ingressClassName: nginx
   rules:
-    - host: astro.workspace.dev.72602.online
+    - host: astro.workspace.dev.72602.space
       http:
         paths:
           - path: /

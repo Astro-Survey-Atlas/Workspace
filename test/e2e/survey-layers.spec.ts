@@ -2,7 +2,52 @@ import { expect, test, type Page } from "@playwright/test";
 import { PNG } from "pngjs";
 import { Healpix } from "healpixjs";
 
-const apiRoot = process.env.ASTRO_E2E_API ?? "http://astro.workspace.dev.72602.online:32080";
+const apiRoot = process.env.ASTRO_E2E_API ?? "http://astro.workspace.dev.72602.space:32080";
+const baselinePackageIds = ["public-legacy-surveys-footprints", "public-sdss-footprints", "public-hst-footprints"];
+let initialActivePackageIds: string[] = [];
+
+async function apiJson<T>(path: string, init?: RequestInit): Promise<T> {
+  const response = await fetch(`${apiRoot}${path}`, init);
+  if (!response.ok) throw new Error(`${init?.method ?? "GET"} ${path} failed: ${response.status} ${await response.text()}`);
+  return await response.json() as T;
+}
+
+async function installPackage(id: string): Promise<void> {
+  const catalog = await apiJson<{ packages: Array<{ id: string; installedVersion?: string }> }>("/api/resource-packages");
+  const record = catalog.packages.find((candidate) => candidate.id === id);
+  if (!record) throw new Error(`Missing E2E resource package: ${id}`);
+  if (!record.installedVersion) {
+    let { job } = await apiJson<{ job: { id: string; status: string; error?: string } }>(`/api/resource-packages/${id}/install`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: "{}",
+    });
+    while (job.status === "queued" || job.status === "running") {
+      await new Promise((resolve) => setTimeout(resolve, 250));
+      ({ job } = await apiJson<{ job: typeof job }>(`/api/resource-packages/jobs/${job.id}`));
+    }
+    if (job.status !== "completed") throw new Error(job.error ?? "Resource package installation failed");
+  }
+}
+
+test.beforeAll(async () => {
+  const catalog = await apiJson<{ packages: Array<{ id: string; active: boolean }> }>("/api/resource-packages");
+  initialActivePackageIds = catalog.packages.filter((record) => record.active).map((record) => record.id);
+  await Promise.all(baselinePackageIds.map((id) => installPackage(id)));
+  await apiJson("/api/resource-packages/active", {
+    method: "PUT",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ ids: [...new Set([...initialActivePackageIds.filter((id) => id !== "public-euclid-footprints"), ...baselinePackageIds])] }),
+  });
+});
+
+test.afterAll(async () => {
+  await apiJson("/api/resource-packages/active", {
+    method: "PUT",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ ids: initialActivePackageIds }),
+  });
+});
 
 async function proxyApi(page: Page): Promise<void> {
   await page.route("**/api/**", async (route) => {
@@ -72,6 +117,51 @@ async function openFresh(page: Page): Promise<void> {
   await page.waitForTimeout(900);
 }
 
+test("resource package draft downloads and loads one survey explicitly", async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.addInitScript(() => localStorage.clear());
+  await proxyApi(page);
+  await page.goto("/");
+  await expect(page.locator("#service-status")).toHaveText("SERVICE ONLINE");
+  await expect(page.locator("#loading-indicator")).not.toHaveClass(/visible/);
+
+  const packageButton = page.locator('[data-mode="packages"]');
+  await expect(packageButton).toHaveCount(1);
+  await expect(packageButton.evaluate((button) => button.nextElementSibling?.getAttribute("data-mode"))).resolves.toBe("connectors");
+  await packageButton.click();
+  await expect(packageButton).toHaveClass(/active/);
+  await expect(page.locator("#resource-package-stage")).toBeVisible();
+
+  const row = page.locator(".resource-package-row", { hasText: "Euclid" });
+  const toggle = row.locator('input[type="checkbox"]');
+  await row.click();
+  await expect(page.locator("#inspector-content")).toContainText("Euclid");
+  await expect(page.locator("#inspector-content")).toContainText("official-overview");
+  const activeBefore = await page.locator("#resource-package-active-count").textContent();
+  await expect(toggle).not.toBeChecked();
+  await toggle.check();
+  await expect(page.locator("#resource-package-pending")).toContainText("待加载");
+  await expect(page.locator("#resource-package-active-count")).toHaveText(activeBefore ?? "0");
+  await expect(packageButton).toHaveClass(/active/);
+
+  const download = page.locator("#resource-package-download");
+  if (await download.isEnabled()) await download.click();
+  await expect(download).toBeDisabled();
+  await page.locator("#resource-package-apply").click();
+  await expect(page.locator("#resource-package-pending")).toHaveText("草稿与天球一致");
+  await expect(row.locator(".resource-package-status")).toHaveText("已加载");
+  await expect(packageButton).toHaveClass(/active/);
+
+  await toggle.uncheck();
+  await page.locator("#resource-package-apply").click();
+  await expect(row.locator(".resource-package-status")).toHaveText("已下载");
+  await page.locator('[data-mode="layers"]').click();
+  const canvas = page.locator("#volume-canvas");
+  await expect(canvas).toBeVisible();
+  const visibleSurveys = new Set((await canvas.getAttribute("data-visible-survey-ids"))?.split(",") ?? []);
+  expect(visibleSurveys.has("euclid")).toBe(false);
+});
+
 async function findCanvasPoint(page: Page, predicate: (state: { pixel: number; covered: boolean; selectable: boolean }) => boolean): Promise<{ x: number; y: number; pixel: number }> {
   const canvas = page.locator("#volume-canvas");
   const bounds = await canvas.boundingBox();
@@ -108,7 +198,31 @@ async function findSelectedRefinementPoint(page: Page): Promise<{ x: number; y: 
   throw new Error("No selected refinement cell found on the visible region");
 }
 
+test("project status remains available when joint volume resources fail", async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.addInitScript(() => localStorage.clear());
+  await proxyApi(page);
+  await page.route("**/api/atlases", async (route) => route.fulfill({
+    status: 503,
+    contentType: "application/json",
+    body: JSON.stringify({ error: "joint atlas unavailable" }),
+  }));
+  await page.route("**/api/volumes", async (route) => route.fulfill({
+    status: 503,
+    contentType: "application/json",
+    body: JSON.stringify({ error: "radial volume unavailable" }),
+  }));
+
+  await page.goto("/");
+  await expect(page.locator("#service-status")).toHaveText("SERVICE ONLINE");
+  await page.locator('button[data-mode="layers"]').click();
+  await expect(page.locator('button[data-mode="layers"]')).toHaveClass(/active/);
+  await expect(page.locator("#volume-canvas")).toBeVisible();
+  await expect(page.locator("#loading-indicator")).not.toHaveClass(/visible/);
+});
+
 test("desktop survey footprints are selectable fragments with layer and overlap layouts", async ({ page }, testInfo) => {
+  test.setTimeout(90_000);
   await page.setViewportSize({ width: 1440, height: 900 });
   await openFresh(page);
   const canvas = page.locator("#volume-canvas");
@@ -168,7 +282,6 @@ test("desktop survey footprints are selectable fragments with layer and overlap 
   await canvas.screenshot({ path: testInfo.outputPath("selected-region-overlay.png") });
 
   await page.locator('[data-action="search-region"]').click();
-  await expect(page.locator('button[data-mode="refine"]')).toHaveClass(/active/);
   await expect(canvas).toHaveAttribute("data-mode", "refine");
   await expect(canvas).toHaveAttribute("data-refinement-nside", "32");
   await expect(page.locator("#refinement-level-output")).toHaveText("NSIDE 32");

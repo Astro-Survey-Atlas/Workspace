@@ -27,6 +27,7 @@ import {
   type SurveyLayerSelection,
   type SurveyLayerState,
 } from "./survey-layer-viewer";
+import type { PublicResourcePackage } from "../../src/resource-packages";
 import {
   VolumeViewer,
   type JointCellSelection,
@@ -36,9 +37,10 @@ import {
 import { WorkflowPanel } from "./workflow-panel";
 import { DataCatalogPanel } from "./data-catalog-panel";
 import { ConnectorPanel } from "./connector-panel";
+import { ResourcePackagePanel } from "./resource-package-panel";
 import { RegionRefinementViewer, type RegionRefinementState } from "./region-refinement-viewer";
 
-type ViewMode = "catalog" | "connectors" | "layers" | "refine" | "volume" | "workflow";
+type ViewMode = "catalog" | "packages" | "connectors" | "layers" | "refine" | "volume" | "workflow";
 type VolumeRepresentation = "cells" | "points";
 
 function byId<T extends HTMLElement>(id: string): T {
@@ -230,6 +232,11 @@ const dataCatalogPanel = new DataCatalogPanel((error) => showFatal(error), (conn
   void activateMode("connectors").catch(showFatal);
 });
 const connectorPanel = new ConnectorPanel((error) => showFatal(error));
+const resourcePackagePanel = new ResourcePackagePanel(
+  (before, after) => refreshActiveFootprints(before, after),
+  (record) => renderResourcePackageDetails(record),
+  (error) => showFatal(error),
+);
 const LAYER_PREFERENCES_KEY = "astro-workspace:survey-layer-preferences:v1";
 
 createIcons({ icons: { Download, Globe2, Layers3, MessageSquare, Play, Plus, RefreshCw, RotateCcw, Send, SlidersHorizontal } });
@@ -927,6 +934,87 @@ function persistLayerPreferences(): void {
   }));
 }
 
+async function refreshActiveFootprints(before: PublicResourcePackage[], after: PublicResourcePackage[]): Promise<void> {
+  const footprints = await workspaceApi.surveyFootprints();
+  surveyFootprints = footprints;
+  const available = new Set(footprintSurveyIds());
+  visibleSurveyIds = new Set([...visibleSurveyIds].filter((surveyId) => available.has(surveyId)));
+  const previouslyActive = new Set(before.filter((record) => record.active).map((record) => record.id));
+  for (const record of after) {
+    if (record.active && !previouslyActive.has(record.id) && available.has(record.surveyId)) visibleSurveyIds.add(record.surveyId);
+  }
+  selectedLayerRegion = null;
+  refinementSourceRegion = null;
+  refinementState = null;
+  refinementSurveyIds = new Set();
+  refinementModalities = new Set();
+  astroOverview = null;
+  workspaceCellSummaries.clear();
+  buildSurveyList();
+  persistLayerPreferences();
+  if (mode === "layers" || mode === "refine") await activateMode("layers");
+}
+
+function renderResourcePackageDetails(record: PublicResourcePackage): void {
+  const survey = surveyRecordsById.get(record.surveyId);
+  const empty = byId("inspector-empty");
+  const content = byId("inspector-content");
+  empty.hidden = true;
+  content.hidden = false;
+  const heading = document.createElement("h2");
+  heading.textContent = survey?.name ?? record.name;
+  const summary = document.createElement("p");
+  summary.className = "inspector-summary";
+  summary.textContent = survey?.description ?? record.description;
+  const metadata = document.createElement("dl");
+  const rows: Array<[string, string]> = [
+    ["Mission", survey?.mission ?? record.facilities.join(" / ")],
+    ["Modalities", record.modalities.join(" / ")],
+    ["Wavelengths", record.wavelengths.join(" / ")],
+    ["Products", record.productTypes.join(" / ")],
+    ["Coverage authority", record.coverageAuthorities.join(" / ")],
+    ["Releases", record.releases.join(" / ")],
+    ["Package", `${record.version} / ${(record.sizeBytes / 1024).toFixed(1)} KB`],
+    ["SHA256", record.sha256],
+    ["Server state", record.active ? "已加载" : record.installedVersion ? "已下载，未加载" : "未下载"],
+  ];
+  for (const [label, value] of rows) {
+    const row = document.createElement("div");
+    const term = document.createElement("dt"); term.textContent = label;
+    const detail = document.createElement("dd"); detail.textContent = value;
+    row.append(term, detail);
+    metadata.append(row);
+  }
+  const releases = document.createElement("div");
+  releases.className = "release-list";
+  for (const entry of survey?.releases ?? []) {
+    const item = document.createElement("article");
+    item.className = "release-row";
+    const line = document.createElement("div");
+    const title = document.createElement("strong"); title.textContent = entry.label;
+    const status = document.createElement("span"); status.textContent = entry.coverage.status.toUpperCase(); status.dataset.status = entry.coverage.status;
+    line.append(title, status);
+    const detail = document.createElement("p");
+    detail.textContent = `${entry.modalities.join(", ")} / ${entry.products.map((product) => product.name).join(", ")} / ${entry.coverage.summary}`;
+    const source = document.createElement("a"); source.href = entry.coverage.sourceUrl; source.target = "_blank"; source.rel = "noreferrer"; source.textContent = "Release source";
+    item.append(line, detail, source);
+    releases.append(item);
+  }
+  for (const entry of record.sources) {
+    const item = document.createElement("article");
+    item.className = "release-row";
+    const line = document.createElement("div");
+    const title = document.createElement("strong"); title.textContent = entry.label;
+    const status = document.createElement("span"); status.textContent = entry.authority; status.dataset.status = "verified";
+    line.append(title, status);
+    const detail = document.createElement("p"); detail.textContent = entry.license ? `Artifact license: ${entry.license}` : "Upstream terms apply";
+    const source = document.createElement("a"); source.href = entry.url; source.target = "_blank"; source.rel = "noreferrer"; source.textContent = "Coverage source";
+    item.append(line, detail, source);
+    releases.append(item);
+  }
+  content.replaceChildren(heading, summary, metadata, releases);
+}
+
 function applyLayerPreferences(): void {
   layerViewer?.setLayoutMode(layerLayoutMode);
   layerViewer?.setVisibleSurveys(new Set([...visibleSurveyIds, ...(unassignedWorkspaceVisible ? ["__unassigned__"] : [])]));
@@ -1233,6 +1321,7 @@ async function activateMode(nextMode: ViewMode): Promise<void> {
   destroyViewer();
   setActiveButtons("[data-mode]", (button) => button.dataset.mode === mode);
   byId("catalog-controls").hidden = mode !== "catalog";
+  byId("resource-package-controls").hidden = mode !== "packages";
   byId("connector-controls").hidden = mode !== "connectors";
   byId("layer-controls").hidden = mode !== "layers";
   byId("refinement-controls").hidden = mode !== "refine";
@@ -1240,16 +1329,17 @@ async function activateMode(nextMode: ViewMode): Promise<void> {
   byId("workflow-controls").hidden = mode !== "workflow";
   byId("catalog-stage").hidden = mode !== "catalog";
   byId("asset-detail-stage").hidden = true;
+  byId("resource-package-stage").hidden = mode !== "packages";
   byId("connector-stage").hidden = mode !== "connectors";
-  byId("scene-stage").hidden = mode === "workflow" || mode === "catalog" || mode === "connectors";
+  byId("scene-stage").hidden = mode === "workflow" || mode === "catalog" || mode === "connectors" || mode === "packages";
   byId("workflow-stage").hidden = mode !== "workflow";
   byId("inspector-view").hidden = mode === "workflow";
   byId("agent-panel").hidden = mode !== "workflow";
   byId("agent-toggle").hidden = mode === "volume";
-  const inspectorLabel = mode === "workflow" ? "显示 Agent" : mode === "catalog" ? "显示数据详情" : mode === "refine" ? "显示检索详情" : "显示覆盖详情";
+  const inspectorLabel = mode === "workflow" ? "显示 Agent" : mode === "catalog" ? "显示数据详情" : mode === "packages" ? "显示巡天信息" : mode === "refine" ? "显示检索详情" : "显示覆盖详情";
   byId("agent-toggle").setAttribute("aria-label", inspectorLabel);
   byId("agent-toggle").setAttribute("title", inspectorLabel);
-  document.querySelectorAll<HTMLElement>(".scene-action").forEach((element) => { element.hidden = mode === "workflow" || mode === "catalog" || mode === "connectors"; });
+  document.querySelectorAll<HTMLElement>(".scene-action").forEach((element) => { element.hidden = mode === "workflow" || mode === "catalog" || mode === "connectors" || mode === "packages"; });
   byId("layer-tool-strip").hidden = mode !== "layers";
   byId("scene-legend").hidden = mode === "refine";
   byId("region-scene-legend").hidden = mode !== "layers";
@@ -1263,6 +1353,7 @@ async function activateMode(nextMode: ViewMode): Promise<void> {
 
   if (mode === "catalog") {
     workflowPanel.deactivate();
+    resourcePackagePanel.deactivate();
     byId("panel-kicker").textContent = "DATA CATALOG";
     byId("panel-dataset-name").textContent = "数据资产登记";
     byId("dataset-state").textContent = "内置与用户数据目录已加载";
@@ -1276,6 +1367,30 @@ async function activateMode(nextMode: ViewMode): Promise<void> {
   }
 
   dataCatalogPanel.deactivate();
+  resourcePackagePanel.deactivate();
+  if (mode === "packages") {
+    workflowPanel.deactivate();
+    byId("inspector-kicker").textContent = "SURVEY INFORMATION";
+    byId("panel-kicker").textContent = "PUBLIC COVERAGE PACKAGES";
+    byId("panel-dataset-name").textContent = "资源集";
+    byId("dataset-state").textContent = "公开覆盖包目录已加载";
+    const records = await workspaceApi.resourcePackages();
+    byId("metric-one-label").textContent = "PACKAGES";
+    byId("metric-one").textContent = String(records.length);
+    byId("metric-two-label").textContent = "INSTALLED";
+    byId("metric-two").textContent = String(records.filter((record) => record.installedVersion).length);
+    byId("metric-three-label").textContent = "ACTIVE";
+    byId("metric-three").textContent = String(records.filter((record) => record.active).length);
+    byId("metric-four-label").textContent = "SURVEYS";
+    byId("metric-four").textContent = String(new Set(records.filter((record) => record.active).map((record) => record.surveyId)).size);
+    byId("metric-five-label").textContent = "FOOTPRINTS";
+    byId("metric-five").textContent = String(surveyFootprints?.footprints.length ?? 0);
+    byId("render-status").textContent = "PUBLIC COVERAGE PACKAGES";
+    byId("object-status").textContent = `${surveyFootprints?.footprints.length ?? 0} COVERAGE SOURCES`;
+    loadingIndicator.classList.remove("visible");
+    await resourcePackagePanel.activate();
+    return;
+  }
   if (mode === "connectors") {
     workflowPanel.deactivate();
     byId("panel-kicker").textContent = "CONNECTOR REGISTRY";
@@ -1507,7 +1622,7 @@ declare global {
 }
 
 async function start(): Promise<void> {
-  const [surveys, footprints, atlases, volumes, assets] = await Promise.all([workspaceApi.surveys(), workspaceApi.surveyFootprints(), workspaceApi.atlases(), workspaceApi.volumes(), workspaceApi.dataAssets()]);
+  const [surveys, footprints, assets] = await Promise.all([workspaceApi.surveys(), workspaceApi.surveyFootprints(), workspaceApi.dataAssets()]);
   surveyCards = surveys;
   surveyFootprints = footprints;
   dataAssets = assets;
@@ -1515,10 +1630,22 @@ async function start(): Promise<void> {
   surveyRecordsById.clear();
   surveyRecords.forEach((survey) => surveyRecordsById.set(survey.id, survey));
   restoreLayerPreferences();
+
+  const [atlasResult, volumeResult] = await Promise.allSettled([workspaceApi.atlases(), workspaceApi.volumes()]);
+  const atlases = atlasResult.status === "fulfilled" ? atlasResult.value : [];
+  const volumes = volumeResult.status === "fulfilled" ? volumeResult.value : [];
+  if (atlasResult.status === "rejected") console.warn("Joint atlas is unavailable; project sky remains enabled", atlasResult.reason);
+  if (volumeResult.status === "rejected") console.warn("Radial volumes are unavailable; project sky remains enabled", volumeResult.reason);
   atlas = atlases[0] ?? null;
   volumeManifest = volumes.find((candidate) => candidate.id === atlas?.jointIndex.radialCoordinate.sourceVolumeId) ?? volumes[0] ?? null;
-  if (!atlas) throw new Error("Local sky reference index is not configured");
-  angularCells = await workspaceApi.atlasAngularCells(atlas);
+  if (atlas) {
+    try {
+      angularCells = await workspaceApi.atlasAngularCells(atlas);
+    } catch (error) {
+      console.warn("Joint atlas cells are unavailable; project sky remains enabled", error);
+      angularCells = null;
+    }
+  }
   byId("dataset-name").textContent = "Curated survey releases";
   byId("panel-dataset-name").textContent = "Survey registry";
   buildSurveyList();

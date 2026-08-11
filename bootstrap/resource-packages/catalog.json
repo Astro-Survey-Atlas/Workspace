@@ -1,0 +1,564 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-08-11T09:34:29.746Z",
+  "packages": [
+    {
+      "surveyId": "euclid",
+      "name": "Euclid",
+      "description": "Euclid Q1 深场官方中心与面积生成的概览覆盖。",
+      "modalities": [
+        "imaging",
+        "photometry"
+      ],
+      "wavelengths": [
+        "optical",
+        "near-infrared"
+      ],
+      "productTypes": [
+        "field-overview"
+      ],
+      "facilities": [
+        "ESA Euclid"
+      ],
+      "coverageAuthorities": [
+        "overview"
+      ],
+      "accessModes": [
+        "ESA Science Archive"
+      ],
+      "sources": [
+        {
+          "label": "Euclid Q1",
+          "url": "https://www.euclid-ec.org/science/q1/",
+          "authority": "official-overview"
+        }
+      ],
+      "id": "public-euclid-footprints",
+      "releases": [
+        "euclid-q1"
+      ],
+      "version": "2.0.0",
+      "archiveUrl": "public-euclid-footprints-2.0.0.zip",
+      "sizeBytes": 1124,
+      "sha256": "99a65f986da4c5e1014618f9dccc7bbf4564cec33f32e86bb9c5817dbde0f2ed",
+      "updatedAt": "2026-08-11T09:34:29.746Z"
+    },
+    {
+      "surveyId": "galex",
+      "name": "GALEX",
+      "description": "GALEX GR6/GR7 紫外彩色 HiPS 的公开覆盖。",
+      "modalities": [
+        "imaging",
+        "ultraviolet"
+      ],
+      "wavelengths": [
+        "far-ultraviolet",
+        "near-ultraviolet"
+      ],
+      "productTypes": [
+        "HiPS-image"
+      ],
+      "facilities": [
+        "NASA GALEX",
+        "MAST"
+      ],
+      "coverageAuthorities": [
+        "third-party-moc"
+      ],
+      "accessModes": [
+        "MAST",
+        "CDS HiPS"
+      ],
+      "sources": [
+        {
+          "label": "GALEX GR6/GR7 HiPS MOC",
+          "url": "https://alasky.cds.unistra.fr/MocServer/query?ID=CDS%2FP%2FGALEXGR6_7%2Fcolor&get=record&fmt=json",
+          "authority": "CDS",
+          "license": "ODbL-1.0 derivative"
+        }
+      ],
+      "id": "public-galex-footprints",
+      "releases": [
+        "galex-gr6-gr7"
+      ],
+      "version": "2.0.0",
+      "archiveUrl": "public-galex-footprints-2.0.0.zip",
+      "sizeBytes": 8602,
+      "sha256": "d7abfd4e22758cb34d3bbfb89f38376cdad8910899b48c01e3db8148ce3c1112",
+      "updatedAt": "2026-08-11T09:34:29.746Z"
+    },
+    {
+      "surveyId": "legacy-surveys",
+      "name": "Legacy Surveys",
+      "description": "Legacy Surveys DR10 彩色成像覆盖，不代表 DESI 光谱覆盖。",
+      "modalities": [
+        "imaging",
+        "photometry"
+      ],
+      "wavelengths": [
+        "optical",
+        "infrared-photometry"
+      ],
+      "productTypes": [
+        "HiPS-image"
+      ],
+      "facilities": [
+        "DECam",
+        "BASS",
+        "MzLS"
+      ],
+      "coverageAuthorities": [
+        "third-party-moc"
+      ],
+      "accessModes": [
+        "Legacy Survey viewer",
+        "CDS HiPS"
+      ],
+      "sources": [
+        {
+          "label": "Legacy Surveys DR10 HiPS MOC",
+          "url": "https://alasky.cds.unistra.fr/MocServer/query?ID=CDS%2FP%2FDESI-Legacy-Surveys%2FDR10%2Fcolor&get=record&fmt=json",
+          "authority": "CDS",
+          "license": "ODbL-1.0 derivative"
+        }
+      ],
+      "id": "public-legacy-surveys-footprints",
+      "releases": [
+        "legacy-dr10"
+      ],
+      "version": "2.0.0",
+      "archiveUrl": "public-legacy-surveys-footprints-2.0.0.zip",
+      "sizeBytes": 6823,
+      "sha256": "235c80367099b1af56640c0f7754f41ce837964fa247f260715e48f63b6f2057",
+      "updatedAt": "2026-08-11T09:34:29.746Z"
+    },
+    {
+      "surveyId": "sdss",
+      "name": "SDSS",
+      "description": "SDSS DR9 彩色成像覆盖；光谱和后续数据发布需独立覆盖制品。",
+      "modalities": [
+        "imaging",
+        "photometry"
+      ],
+      "wavelengths": [
+        "optical"
+      ],
+      "productTypes": [
+        "HiPS-image"
+      ],
+      "facilities": [
+        "Sloan Foundation Telescope"
+      ],
+      "coverageAuthorities": [
+        "third-party-moc"
+      ],
+      "accessModes": [
+        "SkyServer",
+        "CDS HiPS"
+      ],
+      "sources": [
+        {
+          "label": "SDSS DR9 HiPS MOC",
+          "url": "https://alasky.cds.unistra.fr/MocServer/query?ID=CDS%2FP%2FSDSS9%2Fcolor&get=record&fmt=json",
+          "authority": "CDS",
+          "license": "ODbL-1.0 derivative"
+        }
+      ],
+      "id": "public-sdss-footprints",
+      "releases": [
+        "sdss-dr09"
+      ],
+      "version": "2.0.0",
+      "archiveUrl": "public-sdss-footprints-2.0.0.zip",
+      "sizeBytes": 5297,
+      "sha256": "0f1572b2792a2d4dbbc76ba53d819dfa61e016c7aed492f9847f9cb3bef469b9",
+      "updatedAt": "2026-08-11T09:34:29.746Z"
+    },
+    {
+      "surveyId": "hsc-ssp",
+      "name": "HSC-SSP",
+      "description": "HSC-SSP PDR2 Wide 与 Deep 彩色成像覆盖并集。",
+      "modalities": [
+        "imaging",
+        "photometry"
+      ],
+      "wavelengths": [
+        "optical"
+      ],
+      "productTypes": [
+        "HiPS-image"
+      ],
+      "facilities": [
+        "Subaru Hyper Suprime-Cam"
+      ],
+      "coverageAuthorities": [
+        "third-party-moc"
+      ],
+      "accessModes": [
+        "HSC archive",
+        "CDS HiPS"
+      ],
+      "sources": [
+        {
+          "label": "HSC-SSP PDR2 HiPS MOCs",
+          "url": "https://alasky.cds.unistra.fr/MocServer/query?ID=CDS%2FP%2FHSC%2FDR2%2Fwide%2Fcolor-i-r-g%2CCDS%2FP%2FHSC%2FDR2%2Fdeep%2Fcolor-i-r-g&get=record&fmt=json",
+          "authority": "CDS",
+          "license": "ODbL-1.0 derivative"
+        }
+      ],
+      "id": "public-hsc-ssp-footprints",
+      "releases": [
+        "hsc-pdr2"
+      ],
+      "version": "2.0.0",
+      "archiveUrl": "public-hsc-ssp-footprints-2.0.0.zip",
+      "sizeBytes": 1483,
+      "sha256": "11c972fd0f52a6581c4e2e5af6055b9f0831c5452b987940c63ab2e68e34338e",
+      "updatedAt": "2026-08-11T09:34:29.746Z"
+    },
+    {
+      "surveyId": "hst",
+      "name": "HST",
+      "description": "CDS 已发布 HST HiPS 产品的档案快照覆盖，不等同于完整 MAST 产品并集。",
+      "modalities": [
+        "imaging"
+      ],
+      "wavelengths": [
+        "ultraviolet",
+        "optical",
+        "near-infrared"
+      ],
+      "productTypes": [
+        "archive-snapshot"
+      ],
+      "facilities": [
+        "Hubble Space Telescope",
+        "MAST"
+      ],
+      "coverageAuthorities": [
+        "third-party-moc"
+      ],
+      "accessModes": [
+        "MAST",
+        "CDS HiPS"
+      ],
+      "sources": [
+        {
+          "label": "Published HST HiPS MOC union",
+          "url": "https://alasky.cds.unistra.fr/MocServer/query?ID=*P%2FHST%2F*&get=record&fmt=json",
+          "authority": "CDS",
+          "license": "ODbL-1.0 derivative"
+        }
+      ],
+      "id": "public-hst-footprints",
+      "releases": [
+        "hst-mast-snapshot-2026"
+      ],
+      "version": "2.0.0",
+      "archiveUrl": "public-hst-footprints-2.0.0.zip",
+      "sizeBytes": 8545,
+      "sha256": "7e45711b3803c88bbab26cd0e0f99335d699e6a090671e4820dac36ade8020f4",
+      "updatedAt": "2026-08-11T09:34:29.746Z"
+    },
+    {
+      "surveyId": "panstarrs",
+      "name": "Pan-STARRS1",
+      "description": "Pan-STARRS1 DR1 i/r/g 叠加彩色成像覆盖。",
+      "modalities": [
+        "imaging",
+        "photometry"
+      ],
+      "wavelengths": [
+        "optical"
+      ],
+      "productTypes": [
+        "HiPS-image"
+      ],
+      "facilities": [
+        "Pan-STARRS1"
+      ],
+      "coverageAuthorities": [
+        "third-party-moc"
+      ],
+      "accessModes": [
+        "MAST",
+        "CDS HiPS"
+      ],
+      "sources": [
+        {
+          "label": "Pan-STARRS1 DR1 HiPS MOC",
+          "url": "https://alasky.cds.unistra.fr/MocServer/query?ID=CDS%2FP%2FPanSTARRS%2FDR1%2Fcolor-i-r-g&get=record&fmt=json",
+          "authority": "CDS",
+          "license": "ODbL-1.0 derivative"
+        }
+      ],
+      "id": "public-panstarrs-footprints",
+      "releases": [
+        "panstarrs-dr1"
+      ],
+      "version": "2.0.0",
+      "archiveUrl": "public-panstarrs-footprints-2.0.0.zip",
+      "sizeBytes": 7278,
+      "sha256": "65f44c111e2da732f1b6f8e9ff7c5de42ee7e76ee23c9325c64e10d933d22c62",
+      "updatedAt": "2026-08-11T09:34:29.746Z"
+    },
+    {
+      "surveyId": "des",
+      "name": "DES",
+      "description": "Dark Energy Survey DR2 彩色成像覆盖。",
+      "modalities": [
+        "imaging",
+        "photometry"
+      ],
+      "wavelengths": [
+        "optical"
+      ],
+      "productTypes": [
+        "HiPS-image"
+      ],
+      "facilities": [
+        "DECam"
+      ],
+      "coverageAuthorities": [
+        "third-party-moc"
+      ],
+      "accessModes": [
+        "DES Data Management",
+        "CDS HiPS"
+      ],
+      "sources": [
+        {
+          "label": "DES DR2 HiPS MOC",
+          "url": "https://alasky.cds.unistra.fr/MocServer/query?ID=CDS%2FP%2FDES-DR2%2FColorIRG&get=record&fmt=json",
+          "authority": "CDS",
+          "license": "ODbL-1.0 derivative"
+        }
+      ],
+      "id": "public-des-footprints",
+      "releases": [
+        "des-dr2"
+      ],
+      "version": "2.0.0",
+      "archiveUrl": "public-des-footprints-2.0.0.zip",
+      "sizeBytes": 2265,
+      "sha256": "b6c4fee08a10c7a6592dd446d51b9b8c533f6d141ee0575f226640bf50c4a8ff",
+      "updatedAt": "2026-08-11T09:34:29.746Z"
+    },
+    {
+      "surveyId": "2mass",
+      "name": "2MASS",
+      "description": "2MASS All-Sky J 波段图像覆盖。",
+      "modalities": [
+        "imaging",
+        "photometry",
+        "infrared"
+      ],
+      "wavelengths": [
+        "near-infrared"
+      ],
+      "productTypes": [
+        "HiPS-image"
+      ],
+      "facilities": [
+        "2MASS"
+      ],
+      "coverageAuthorities": [
+        "third-party-moc"
+      ],
+      "accessModes": [
+        "IRSA",
+        "CDS HiPS"
+      ],
+      "sources": [
+        {
+          "label": "2MASS J-band HiPS MOC",
+          "url": "https://alasky.cds.unistra.fr/MocServer/query?ID=CDS%2FP%2F2MASS%2FJ&get=record&fmt=json",
+          "authority": "CDS/IRSA",
+          "license": "ODbL-1.0 derivative"
+        }
+      ],
+      "id": "public-2mass-footprints",
+      "releases": [
+        "2mass-all-sky"
+      ],
+      "version": "2.0.0",
+      "archiveUrl": "public-2mass-footprints-2.0.0.zip",
+      "sizeBytes": 8710,
+      "sha256": "12533f4fc673ad1f20ea08e384911a9232062304580e76dbe11bb44c3176c46f",
+      "updatedAt": "2026-08-11T09:34:29.746Z"
+    },
+    {
+      "surveyId": "allwise",
+      "name": "AllWISE",
+      "description": "AllWISE W1 静态图像覆盖，不表达 NEOWISE 时间完整性。",
+      "modalities": [
+        "imaging",
+        "photometry",
+        "infrared"
+      ],
+      "wavelengths": [
+        "mid-infrared"
+      ],
+      "productTypes": [
+        "HiPS-image"
+      ],
+      "facilities": [
+        "WISE",
+        "IRSA"
+      ],
+      "coverageAuthorities": [
+        "third-party-moc"
+      ],
+      "accessModes": [
+        "IRSA",
+        "CDS HiPS"
+      ],
+      "sources": [
+        {
+          "label": "AllWISE W1 HiPS MOC",
+          "url": "https://alasky.cds.unistra.fr/MocServer/query?ID=CDS%2FP%2FallWISE%2FW1&get=record&fmt=json",
+          "authority": "CDS/IRSA",
+          "license": "ODbL-1.0 derivative"
+        }
+      ],
+      "id": "public-allwise-footprints",
+      "releases": [
+        "allwise"
+      ],
+      "version": "2.0.0",
+      "archiveUrl": "public-allwise-footprints-2.0.0.zip",
+      "sizeBytes": 8776,
+      "sha256": "bb4e263a450ddbab8187ec71c28b8d32141bdbe8dbc266bd20a7a21cc4f16a7e",
+      "updatedAt": "2026-08-11T09:34:29.746Z"
+    },
+    {
+      "surveyId": "kids",
+      "name": "KiDS",
+      "description": "KiDS DR5 gri 彩色成像覆盖。",
+      "modalities": [
+        "imaging",
+        "photometry"
+      ],
+      "wavelengths": [
+        "optical"
+      ],
+      "productTypes": [
+        "HiPS-image"
+      ],
+      "facilities": [
+        "ESO VST/OmegaCAM"
+      ],
+      "coverageAuthorities": [
+        "survey-endorsed-moc"
+      ],
+      "accessModes": [
+        "KiDS archive",
+        "CDS HiPS"
+      ],
+      "sources": [
+        {
+          "label": "KiDS DR5 gri HiPS MOC",
+          "url": "https://alasky.cds.unistra.fr/MocServer/query?ID=CDS%2FP%2FKiDS%2FDR5%2Fcolor-gri&get=record&fmt=json",
+          "authority": "KiDS/CDS",
+          "license": "CC BY 4.0 upstream; ODbL-1.0 derivative"
+        }
+      ],
+      "id": "public-kids-footprints",
+      "releases": [
+        "kids-dr5"
+      ],
+      "version": "2.0.0",
+      "archiveUrl": "public-kids-footprints-2.0.0.zip",
+      "sizeBytes": 1506,
+      "sha256": "ef23d8cad01fc7768fe3ae0b14fd4c21e9c92f3ec629332a1be91305bf196667",
+      "updatedAt": "2026-08-11T09:34:29.746Z"
+    },
+    {
+      "surveyId": "nvss",
+      "name": "NVSS",
+      "description": "NVSS 1.4 GHz 图像网格覆盖。",
+      "modalities": [
+        "imaging"
+      ],
+      "wavelengths": [
+        "radio-1.4GHz"
+      ],
+      "productTypes": [
+        "HiPS-image"
+      ],
+      "facilities": [
+        "NRAO VLA"
+      ],
+      "coverageAuthorities": [
+        "third-party-moc"
+      ],
+      "accessModes": [
+        "NRAO archive",
+        "CDS HiPS"
+      ],
+      "sources": [
+        {
+          "label": "NVSS HiPS MOC",
+          "url": "https://alasky.cds.unistra.fr/MocServer/query?ID=CDS%2FP%2FNVSS&get=record&fmt=json",
+          "authority": "CDS",
+          "license": "ODbL-1.0 derivative"
+        }
+      ],
+      "id": "public-nvss-footprints",
+      "releases": [
+        "nvss-final"
+      ],
+      "version": "2.0.0",
+      "archiveUrl": "public-nvss-footprints-2.0.0.zip",
+      "sizeBytes": 7714,
+      "sha256": "250c2da6c2b61e89969ffa086989a66a71bd7425a734adf49af0ee03548188da",
+      "updatedAt": "2026-08-11T09:34:29.746Z"
+    },
+    {
+      "id": "public-imaging-footprints",
+      "name": "公开成像巡天覆盖",
+      "description": "Euclid、Legacy Surveys、SDSS、HSC-SSP 与 HST 的公开覆盖范围，用于 3D 天球底图。",
+      "modality": "imaging",
+      "surveys": [
+        "euclid",
+        "legacy-surveys",
+        "sdss",
+        "hsc-ssp",
+        "hst"
+      ],
+      "version": "1.0.0",
+      "archiveUrl": "public-imaging-footprints-1.0.0.zip",
+      "sizeBytes": 14059,
+      "sha256": "147055d5f40e36e8b33629f26192dbbbbba8860069f558f151ba4917c1f851d5",
+      "updatedAt": "2026-07-23T10:21:49.205Z",
+      "hidden": true,
+      "deprecated": true,
+      "replacedBy": [
+        "public-euclid-footprints",
+        "public-legacy-surveys-footprints",
+        "public-sdss-footprints",
+        "public-hsc-ssp-footprints",
+        "public-hst-footprints"
+      ]
+    },
+    {
+      "id": "public-ultraviolet-footprints",
+      "name": "公开紫外巡天覆盖",
+      "description": "GALEX GR6/GR7 紫外巡天的公开 MOC 覆盖范围，用于 3D 天球底图。",
+      "modality": "ultraviolet",
+      "surveys": [
+        "galex"
+      ],
+      "version": "1.0.0",
+      "archiveUrl": "public-ultraviolet-footprints-1.0.0.zip",
+      "sizeBytes": 8704,
+      "sha256": "c9d3d9c35297e206abcd12fc7c12041ac91d2cf0f95b4878a5808edea1d0fdf0",
+      "updatedAt": "2026-07-23T10:21:49.205Z",
+      "hidden": true,
+      "deprecated": true,
+      "replacedBy": [
+        "public-galex-footprints"
+      ]
+    }
+  ]
+}

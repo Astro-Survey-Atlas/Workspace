@@ -26,6 +26,15 @@ be obtained. It does not mirror every public archive. Generic connector
 scheduling, secrets, and enterprise metadata can be integrated later; they are
 not reimplemented in this service.
 
+The workspace is authoritative for its catalog, coverage evidence, ownership
+associations, and user-visible query state. `data-warehouse` is an optional,
+replaceable execution provider: Flink task submission and status polling must
+never gate workspace startup, catalog queries, official coverage rendering, or
+inspection of previously recorded local state. When the executor or its
+derived Elasticsearch index is unavailable, the workspace reports that local
+verification is unavailable or stale; it does not reinterpret official
+coverage as absent and does not make unrelated views fail.
+
 Each logical data asset may have several project-stage facets and access
 locations. For example, a public Euclid release can be both `public_reference`
 and `acquired` when a local or S3 mirror is registered. Official source URLs,
@@ -115,6 +124,13 @@ Connector or data-card identity. MinIO stores bytes, not mutable card metadata.
 Built-in public cards are seeded read-only records with a version, while user
 cards and overrides are ordinary PostgreSQL rows. A normalized Connector path
 remains unique, so an upsert cannot create duplicate scan targets.
+
+Flink execution status is observational workspace data, not a dependency
+health gate. Polling is best-effort and asynchronous. An unreachable Kubernetes
+API preserves the last recorded task state, and a failed task affects only its
+own scan record. Core asset and coverage APIs continue to use workspace-owned
+metadata; optional joint-atlas and radial-volume artifacts likewise cannot
+block the project-sky view.
 
 Connector credentials remain Kubernetes Secrets and are referenced by an
 internal identifier only. When a scan is submitted, the workspace service

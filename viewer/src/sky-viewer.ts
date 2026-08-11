@@ -49,6 +49,10 @@ function disposeObject(object: THREE.Object3D): void {
   });
 }
 
+function releaseWebglContext(renderer: THREE.WebGLRenderer): void {
+  renderer.getContext().getExtension("WEBGL_lose_context")?.loseContext();
+}
+
 export class SkyViewer {
   readonly #canvas: HTMLCanvasElement;
   readonly #scene = new THREE.Scene();
@@ -276,6 +280,7 @@ export class SkyViewer {
     this.#clearDataLayer();
     disposeObject(this.#scene);
     this.#renderer.dispose();
+    releaseWebglContext(this.#renderer);
   }
 
   #createStarField(): THREE.Points {

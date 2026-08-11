@@ -58,6 +58,7 @@ import type { GenericScanInput } from "../../src/flink-ingest";
 import type { TagDefinition } from "../../src/tags";
 import type { SurveyCard, SurveyRecord, SurveyRegistrationInput } from "../../src/survey-registry";
 import type { SurveyFootprintManifest } from "../../src/survey-footprints";
+import type { PublicResourcePackage, ResourcePackageJob, ResourcePackageLoad } from "../../src/resource-packages";
 import type { AstroCoverageResponse, AstroOverviewResponse, AstroSkyQueryInput, AstroSpatialSummary } from "../../src/astro-index";
 
 async function getJson<T>(url: string): Promise<T> {
@@ -166,6 +167,28 @@ export const workspaceApi = {
   },
   async surveyFootprints(): Promise<SurveyFootprintManifest> {
     return getJson<SurveyFootprintManifest>("/api/survey-footprints");
+  },
+  async resourcePackages(): Promise<PublicResourcePackage[]> {
+    return (await getJson<{ packages: PublicResourcePackage[] }>("/api/resource-packages")).packages;
+  },
+  async installResourcePackage(id: string): Promise<ResourcePackageJob> {
+    return (await postJson<{ job: ResourcePackageJob }>(`/api/resource-packages/${encodeURIComponent(id)}/install`, {})).job;
+  },
+  async resourcePackageJob(id: string): Promise<ResourcePackageJob> {
+    return (await getJson<{ job: ResourcePackageJob }>(`/api/resource-packages/jobs/${encodeURIComponent(id)}`)).job;
+  },
+  async setActiveResourcePackages(loads: ResourcePackageLoad[] | string[]): Promise<PublicResourcePackage[]> {
+    const body = typeof loads[0] === "string" ? { ids: loads } : { loads };
+    return (await putJson<{ packages: PublicResourcePackage[] }>("/api/resource-packages/active", body)).packages;
+  },
+  async activateResourcePackage(id: string): Promise<PublicResourcePackage> {
+    return (await postJson<{ package: PublicResourcePackage }>(`/api/resource-packages/${encodeURIComponent(id)}/activate`, {})).package;
+  },
+  async deactivateResourcePackage(id: string): Promise<PublicResourcePackage> {
+    return (await postJson<{ package: PublicResourcePackage }>(`/api/resource-packages/${encodeURIComponent(id)}/deactivate`, {})).package;
+  },
+  async deleteResourcePackage(id: string): Promise<void> {
+    await deleteRequest(`/api/resource-packages/${encodeURIComponent(id)}`);
   },
   async skyOverview(input: { survey: string; release: string; nside: number; cells: number[] }): Promise<AstroOverviewResponse> {
     const parameters = new URLSearchParams({
