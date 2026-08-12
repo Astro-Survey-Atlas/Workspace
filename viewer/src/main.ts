@@ -38,7 +38,7 @@ import {
 } from "./volume-viewer";
 import { WorkflowPanel } from "./workflow-panel";
 import { DataCatalogPanel } from "./data-catalog-panel";
-import { ConnectorPanel } from "./connector-panel";
+import { ConnectorPanel, type ConnectorMetrics } from "./connector-panel";
 import { ResourcePackagePanel, type ResourcePackageSelectionCallbacks } from "./resource-package-panel";
 import { RegionRefinementViewer, type RegionRefinementState } from "./region-refinement-viewer";
 
@@ -238,7 +238,20 @@ const dataCatalogPanel = new DataCatalogPanel((error) => showFatal(error), (conn
   connectorSelectionRequest = connectorId;
   void activateMode("connectors").catch(showFatal);
 });
-const connectorPanel = new ConnectorPanel((error) => showFatal(error));
+function renderConnectorMetrics(metrics: ConnectorMetrics): void {
+  const values: Array<[string, string, number]> = [
+    ["metric-one", "CONNECTORS", metrics.total],
+    ["metric-two", "S3 / OSS", metrics.s3],
+    ["metric-three", "LOCAL", metrics.local],
+    ["metric-four", "JDBC", metrics.jdbc],
+    ["metric-five", "SCANS", metrics.scans],
+  ];
+  values.forEach(([valueId, label, value]) => {
+    byId(`${valueId}-label`).textContent = label;
+    byId(valueId).textContent = formatInteger(value);
+  });
+}
+const connectorPanel = new ConnectorPanel((error) => showFatal(error), renderConnectorMetrics);
 const resourcePackagePanel = new ResourcePackagePanel(
   (before, after) => refreshActiveFootprints(before, after),
   (record, draftReleaseIds, callbacks) => renderResourcePackageDetails(record, draftReleaseIds, callbacks),
@@ -1108,7 +1121,7 @@ function renderResourcePackageDetails(
   const selectAll = document.createElement("button");
   selectAll.type = "button";
   selectAll.className = "command-button secondary";
-  selectAll.textContent = "选择全部版本";
+  selectAll.textContent = "选择全部";
   selectAll.addEventListener("click", () => callbacks.setDraftReleases(releaseIds));
   const clearAll = document.createElement("button");
   clearAll.type = "button";

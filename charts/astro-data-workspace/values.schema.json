@@ -6,7 +6,11 @@
       "type": "object",
       "properties": {
         "mode": { "type": "string", "enum": ["sqlite", "bundled-postgresql", "external-postgresql"] },
-        "sqlite": { "type": "object", "properties": { "path": { "type": "string", "minLength": 1 } } },
+        "sqlite": {
+          "type": "object",
+          "properties": { "path": { "type": "string", "pattern": "^/state/.+" } },
+          "required": ["path"]
+        },
         "external": {
           "type": "object",
           "properties": {
@@ -17,7 +21,46 @@
       },
       "required": ["mode"]
     },
-    "postgresql": { "type": "object", "properties": { "enabled": { "type": "boolean" } } }
+    "persistence": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "existingClaim": { "type": "string" },
+        "size": { "type": "string", "minLength": 1 }
+      },
+      "required": ["enabled", "existingClaim"]
+    },
+    "dataWarehouse": {
+      "type": "object",
+      "properties": { "enabled": { "type": "boolean" } },
+      "required": ["enabled"]
+    },
+    "resources": { "type": "object" },
+    "podSecurityContext": { "type": "object" },
+    "containerSecurityContext": { "type": "object" },
+    "postgresql": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "nameOverride": { "type": "string" },
+        "fullnameOverride": { "type": "string" },
+        "auth": {
+          "type": "object",
+          "properties": {
+            "database": { "type": "string" },
+            "username": { "type": "string" },
+            "existingSecret": { "type": "string" },
+            "secretKeys": {
+              "type": "object",
+              "properties": { "userPasswordKey": { "type": "string", "minLength": 1 } },
+              "required": ["userPasswordKey"]
+            }
+          },
+          "required": ["database", "username", "secretKeys"]
+        }
+      },
+      "required": ["enabled"]
+    }
   },
   "allOf": [
     {
@@ -43,7 +86,15 @@
       "then": {
         "properties": {
           "postgresql": { "properties": { "enabled": { "const": false } } },
-          "metadataStore": { "required": ["external"], "properties": { "external": { "required": ["existingSecret"] } } }
+          "metadataStore": {
+            "required": ["external"],
+            "properties": {
+              "external": {
+                "required": ["existingSecret", "existingSecretKey"],
+                "properties": { "existingSecret": { "minLength": 1 } }
+              }
+            }
+          }
         }
       }
     }

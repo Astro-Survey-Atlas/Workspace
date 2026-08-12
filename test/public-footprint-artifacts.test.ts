@@ -13,16 +13,19 @@ const sourcesPath = path.join(root, "artifacts", "public-survey-footprints", "so
 test("public sources cover every available release and product", async () => {
   const result = await validate();
   assert.equal(result.releases, CURATED_SURVEYS.flatMap((survey) => survey.releases.filter((release) => release.availability === "available")).length);
-  assert.equal(result.acquired, 12);
-  assert.ok(result.unavailable > 0);
+  assert.equal(result.acquired, 11);
+  assert.equal(result.overview_only, 14);
+  assert.equal(result.awaiting_geometry, 42);
+  assert.equal(result.not_applicable, 0);
 });
 
-test("unavailable source records contain no pixels", async () => {
+test("source records use four-state product status and contain no pixels", async () => {
   const sources = JSON.parse(await readFile(sourcesPath, "utf8")) as { releases: Array<{ products: Array<Record<string, unknown>> }> };
   for (const release of sources.releases) for (const product of release.products) {
-    assert.ok(product.status === "acquired" || product.status === "unavailable");
+    assert.ok(["acquired", "overview_only", "awaiting_geometry", "not_applicable"].includes(String(product.status)));
     assert.equal("pixels" in product, false);
-    if (product.status === "unavailable") assert.equal(typeof product.reason, "string");
+    if (product.status !== "acquired") assert.equal(typeof product.reason, "string");
+    if (product.status === "overview_only" || product.status === "awaiting_geometry") assert.equal(typeof product.manualStep, "string");
   }
 });
 
@@ -31,18 +34,19 @@ test("all acquired identities are represented by the existing manifest", async (
   const manifest = JSON.parse(await readFile(path.join(root, "src", "footprints", "survey-footprints.json"), "utf8")) as { footprints: Array<{ surveyId: string; releaseId: string; product: string }> };
   const identities = new Set(manifest.footprints.map((entry) => `${entry.surveyId}:${entry.releaseId}:${entry.product}`));
   const acquired = sources.releases.flatMap((release) => release.products.filter((product) => product.status === "acquired").map((product) => `${release.surveyId}:${release.releaseId}:${product.product}`));
-  assert.equal(acquired.length, 12);
+  assert.equal(acquired.length, 11);
   assert.deepEqual(acquired.filter((identity) => !identities.has(identity)), []);
 });
 
-test("sync provenance records SHA256 values", async () => {
-  const provenance = JSON.parse(await readFile(path.join(root, "artifacts", "public-survey-footprints", "provenance.json"), "utf8")) as { files: { manifest: { path: string; sha256: string }; catalog: { path: string; sha256: string } } };
-  for (const file of [provenance.files.manifest, provenance.files.catalog]) assert.equal(createHash("sha256").update(await readFile(path.join(root, "artifacts", "public-survey-footprints", file.path))).digest("hex"), file.sha256);
+test("sync provenance records input and output SHA256 values", async () => {
+  const provenance = JSON.parse(await readFile(path.join(root, "artifacts", "public-survey-footprints", "provenance.json"), "utf8")) as { inputs: Record<string, { path: string; sha256: string }>; files: { manifest: { path: string; sha256: string }; catalog: { path: string; sha256: string } } };
+  for (const file of [...Object.values(provenance.inputs), provenance.files.manifest, provenance.files.catalog]) assert.equal(createHash("sha256").update(await readFile(path.resolve(root, "artifacts", "public-survey-footprints", file.path))).digest("hex"), file.sha256);
 });
 
 test("manual footprint submission file starts empty and validates", async () => {
-  const manual = JSON.parse(await readFile(path.join(root, "artifacts", "public-survey-footprints", "manual", "footprints.json"), "utf8")) as { schemaVersion: number; footprints: unknown[] };
+  const manual = JSON.parse(await readFile(path.join(root, "artifacts", "public-survey-footprints", "manual", "footprints.json"), "utf8")) as { schemaVersion: number; ordering: string; footprints: unknown[] };
   assert.equal(manual.schemaVersion, 1);
+  assert.equal(manual.ordering, "NESTED");
   assert.deepEqual(manual.footprints, []);
   await validate();
 });

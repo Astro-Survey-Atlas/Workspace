@@ -6,6 +6,7 @@ metadata:
   namespace: {{ .Values.dataWarehouse.namespace }}
   labels:
     {{- include "astro-data-workspace.labels" . | nindent 4 }}
+rules:
   - apiGroups: [""]
     resources: ["secrets"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]

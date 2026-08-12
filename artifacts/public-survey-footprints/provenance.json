@@ -1,107 +1,130 @@
 {
-  "schemaVersion": 1,
-  "generatedAt": "2026-08-12T03:07:28.389Z",
+  "schemaVersion": 2,
+  "generatedAt": "2026-08-12T09:01:55.129Z",
+  "generator": {
+    "name": "scripts/public_footprint_artifacts.ts"
+  },
   "statistics": {
     "releases": 48,
     "products": 67,
-    "acquired": 12,
-    "unavailable": 55,
+    "acquired": 11,
+    "overview_only": 14,
+    "awaiting_geometry": 42,
+    "not_applicable": 0,
     "manifestFootprints": 12,
     "packages": 14
+  },
+  "inputs": {
+    "canonicalManifest": {
+      "path": "../../src/footprints/survey-footprints.json",
+      "sha256": "b44da549831905e31ec40ea165fd9fc783255d9c52022653b34d377a6916d906"
+    },
+    "sources": {
+      "path": "sources.json",
+      "sha256": "444e326f15f22da1ca85a8684073eafa96d6b0176ccd9f3251d46985cfd287bc"
+    },
+    "manual": {
+      "path": "manual/footprints.json",
+      "sha256": "d82ba5a0649a9784106772eda6f2b968e1c267715cf1ae3b0ca560378c9715bf"
+    },
+    "rawMocIndex": {
+      "path": "raw/moc/index.json",
+      "sha256": "a5931f657dde4edf7b0a02dde82983f818748695991c08d98741dd3128170aa5"
+    }
   },
   "files": {
     "manifest": {
       "path": "normalized/survey-footprints.json",
-      "sha256": "8438e6f2b8fc5053ec9b0c2e7a645284f4108c62bd0b48c70882488ac7b6d39d"
+      "sha256": "b44da549831905e31ec40ea165fd9fc783255d9c52022653b34d377a6916d906"
     },
     "catalog": {
       "path": "packages/catalog.json",
-      "sha256": "ca405ac5ecd70b717748347dfd8d90481e49824ae9c37d13f433b3537d36e2a5"
+      "sha256": "63fef84b6aa353173f2fcbbb27b3b693830804cd1a28090126e928be7340dfef"
     },
     "packages": [
       {
         "id": "public-euclid-footprints",
-        "version": "2.0.0",
-        "archive": "packages/public-euclid-footprints-2.0.0.zip",
+        "version": "2.0.1",
+        "archive": "packages/public-euclid-footprints-2.0.1.zip",
         "sizeBytes": 1124,
-        "sha256": "99a65f986da4c5e1014618f9dccc7bbf4564cec33f32e86bb9c5817dbde0f2ed"
+        "sha256": "a35c86f89a2898dd2ddd1d0d6e8198865b8e14e5ac994929774bbc6580a8f759"
       },
       {
         "id": "public-galex-footprints",
-        "version": "2.0.0",
-        "archive": "packages/public-galex-footprints-2.0.0.zip",
-        "sizeBytes": 8602,
-        "sha256": "d7abfd4e22758cb34d3bbfb89f38376cdad8910899b48c01e3db8148ce3c1112"
+        "version": "2.0.1",
+        "archive": "packages/public-galex-footprints-2.0.1.zip",
+        "sizeBytes": 8603,
+        "sha256": "e6c5b59e5b952126e47bc9ec89936f8cc1f9c351ccd83fa98a584e2b5e67b458"
       },
       {
         "id": "public-legacy-surveys-footprints",
-        "version": "2.0.0",
-        "archive": "packages/public-legacy-surveys-footprints-2.0.0.zip",
+        "version": "2.0.1",
+        "archive": "packages/public-legacy-surveys-footprints-2.0.1.zip",
         "sizeBytes": 6823,
-        "sha256": "235c80367099b1af56640c0f7754f41ce837964fa247f260715e48f63b6f2057"
+        "sha256": "6a33355ad145fc9208ab674a1f94123e66b07a997063b0c06d7f8583e9867311"
       },
       {
         "id": "public-sdss-footprints",
-        "version": "2.0.0",
-        "archive": "packages/public-sdss-footprints-2.0.0.zip",
-        "sizeBytes": 5297,
-        "sha256": "0f1572b2792a2d4dbbc76ba53d819dfa61e016c7aed492f9847f9cb3bef469b9"
+        "version": "2.0.1",
+        "archive": "packages/public-sdss-footprints-2.0.1.zip",
+        "sizeBytes": 5298,
+        "sha256": "bde41b3df45c09d3f17962c76d174d7828c724475357aa358a58fd827b8cc1cf"
       },
       {
         "id": "public-hsc-ssp-footprints",
-        "version": "2.0.0",
-        "archive": "packages/public-hsc-ssp-footprints-2.0.0.zip",
+        "version": "2.0.1",
+        "archive": "packages/public-hsc-ssp-footprints-2.0.1.zip",
         "sizeBytes": 1483,
-        "sha256": "11c972fd0f52a6581c4e2e5af6055b9f0831c5452b987940c63ab2e68e34338e"
+        "sha256": "de514e6b8f18ae70ac864731dc07e1815d0bfe37f1c99dd7864f6fcadab38613"
       },
       {
         "id": "public-hst-footprints",
-        "version": "2.0.0",
-        "archive": "packages/public-hst-footprints-2.0.0.zip",
-        "sizeBytes": 8545,
-        "sha256": "7e45711b3803c88bbab26cd0e0f99335d699e6a090671e4820dac36ade8020f4"
+        "version": "2.0.1",
+        "archive": "packages/public-hst-footprints-2.0.1.zip",
+        "sizeBytes": 8546,
+        "sha256": "f48f332dbc0fe6bc5addd7e608ad2f7a78bfa3785a9b6b06b95b4c529e2956c2"
       },
       {
         "id": "public-panstarrs-footprints",
-        "version": "2.0.0",
-        "archive": "packages/public-panstarrs-footprints-2.0.0.zip",
-        "sizeBytes": 7278,
-        "sha256": "65f44c111e2da732f1b6f8e9ff7c5de42ee7e76ee23c9325c64e10d933d22c62"
+        "version": "2.0.1",
+        "archive": "packages/public-panstarrs-footprints-2.0.1.zip",
+        "sizeBytes": 7276,
+        "sha256": "b109d0f0f6d86a24ea70c5cbdc8508f217a5cc96e32f2781b977aa5f27291dc1"
       },
       {
         "id": "public-des-footprints",
-        "version": "2.0.0",
-        "archive": "packages/public-des-footprints-2.0.0.zip",
+        "version": "2.0.1",
+        "archive": "packages/public-des-footprints-2.0.1.zip",
         "sizeBytes": 2265,
-        "sha256": "b6c4fee08a10c7a6592dd446d51b9b8c533f6d141ee0575f226640bf50c4a8ff"
+        "sha256": "f930b3e1d8bcecea10abff22556856df9186a192ae8a8a70afff482d2b3dd07e"
       },
       {
         "id": "public-2mass-footprints",
-        "version": "2.0.0",
-        "archive": "packages/public-2mass-footprints-2.0.0.zip",
+        "version": "2.0.1",
+        "archive": "packages/public-2mass-footprints-2.0.1.zip",
         "sizeBytes": 8710,
-        "sha256": "12533f4fc673ad1f20ea08e384911a9232062304580e76dbe11bb44c3176c46f"
+        "sha256": "15a187487a3ab59af95afb0fd5f8ef504f54c062322e88ad53a3631f2b999db8"
       },
       {
         "id": "public-allwise-footprints",
-        "version": "2.0.0",
-        "archive": "packages/public-allwise-footprints-2.0.0.zip",
-        "sizeBytes": 8776,
-        "sha256": "bb4e263a450ddbab8187ec71c28b8d32141bdbe8dbc266bd20a7a21cc4f16a7e"
+        "version": "2.0.1",
+        "archive": "packages/public-allwise-footprints-2.0.1.zip",
+        "sizeBytes": 8777,
+        "sha256": "cbba57e7ed3f19d147adf53dc46cbf658187ac0a7d47cb44306af8a8ec5d6a09"
       },
       {
         "id": "public-kids-footprints",
-        "version": "2.0.0",
-        "archive": "packages/public-kids-footprints-2.0.0.zip",
+        "version": "2.0.1",
+        "archive": "packages/public-kids-footprints-2.0.1.zip",
         "sizeBytes": 1506,
-        "sha256": "ef23d8cad01fc7768fe3ae0b14fd4c21e9c92f3ec629332a1be91305bf196667"
+        "sha256": "5e24e9cf363185e0187ab80f8410ce2f032be6bbe2720a551ce2b5762e86a4e5"
       },
       {
         "id": "public-nvss-footprints",
-        "version": "2.0.0",
-        "archive": "packages/public-nvss-footprints-2.0.0.zip",
+        "version": "2.0.1",
+        "archive": "packages/public-nvss-footprints-2.0.1.zip",
         "sizeBytes": 7714,
-        "sha256": "250c2da6c2b61e89969ffa086989a66a71bd7425a734adf49af0ee03548188da"
+        "sha256": "b990a1f04742d9ade77b52c48f35e4747f9d18135057cfbb3309aeff9bac5d17"
       },
       {
         "id": "public-imaging-footprints",

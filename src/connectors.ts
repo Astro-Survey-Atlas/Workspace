@@ -1,13 +1,15 @@
 /// <reference path="./ali-oss.d.ts" />
 
 import { randomUUID } from "node:crypto";
-import { access, constants, mkdir, readFile, rename, stat, writeFile } from "node:fs/promises";
+import { access, constants, readFile, stat } from "node:fs/promises";
 import https from "node:https";
 import path from "node:path";
 import net from "node:net";
 
 import { HeadBucketCommand, ListObjectsV2Command, S3Client } from "@aws-sdk/client-s3";
 import OSS from "ali-oss";
+
+import type { MetadataStore, MetadataTransaction } from "./storage/types.js";
 
 export type ConnectorKind = "s3" | "local" | "jdbc";
 export type ConnectorStatus = "draft" | "ready" | "disabled";
@@ -181,37 +183,34 @@ function validateResolvedCredentials(input: unknown): ResolvedConnectorCredentia
 }
 
 export class ConnectorRegistry {
-  readonly #statePath: string;
+  readonly #store: MetadataStore;
   readonly #bootstrapPath?: string;
-  #records: ConnectorRecord[] = [];
   #legacyAliases = new Map<string, string>();
 
-  constructor(statePath: string, bootstrapPath?: string) {
-    this.#statePath = statePath;
+  constructor(store: MetadataStore, bootstrapPath?: string) {
+    this.#store = store;
     this.#bootstrapPath = bootstrapPath;
   }
 
   async initialize(): Promise<void> {
-    try {
-      const persisted = JSON.parse(await readFile(this.#statePath, "utf8")) as unknown;
-      if (!Array.isArray(persisted)) throw new Error("connector state must be an array");
-      this.#records = this.#normalizeRecords(persisted);
-      await this.#loadLegacyAliases();
-      await this.#persist();
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-      this.#records = await this.#loadBootstrap();
-      await this.#loadLegacyAliases();
-      await this.#persist();
-    }
+    await this.#store.transaction(async (transaction) => {
+      if ((await transaction.listConnectors()).length) return;
+      const marker = await transaction.getImportMarker("json-state-v1");
+      const importedConnectorState = marker
+        ? (JSON.parse(marker) as { connectorState?: string }).connectorState === "present"
+        : false;
+      if (importedConnectorState) return;
+      for (const record of await this.#loadBootstrap()) await transaction.putConnector(record);
+    });
+    await this.#loadLegacyAliases();
   }
 
-  list(): ConnectorRecord[] {
-    return this.#records.map((record) => structuredClone(record));
+  async list(): Promise<ConnectorRecord[]> {
+    return (await this.#store.listConnectors()).map((record) => structuredClone(record));
   }
 
-  get(id: string): ConnectorRecord {
-    const record = this.#records.find((entry) => entry.id === id || entry.id === this.#legacyAliases.get(id));
+  async get(id: string): Promise<ConnectorRecord> {
+    const record = await this.#store.getConnector(this.#legacyAliases.get(id) ?? id);
     if (!record) throw new Error(`Connector not found: ${id}`);
     return structuredClone(record);
   }
@@ -219,10 +218,10 @@ export class ConnectorRegistry {
   async register(input: ConnectorRegistrationInput): Promise<ConnectorRecord> {
     const value = validateConnectorInput(input);
     const locationKey = connectorLocationKey(value.kind, value.config);
-    const existingIndex = this.#records.findIndex((record) => record.locationKey === locationKey);
-    const now = new Date().toISOString();
-    if (existingIndex >= 0) {
-      const current = this.#records[existingIndex]!;
+    return this.#store.transaction(async (transaction) => {
+      const current = await transaction.getConnectorByLocationKey(locationKey);
+      const now = new Date().toISOString();
+      if (current) {
       const updated: ConnectorRecord = {
         ...current,
         name: value.name,
@@ -237,11 +236,10 @@ export class ConnectorRegistry {
         displayPath: connectorDisplayPath(value.kind, value.config),
         updatedAt: now,
       };
-      this.#records[existingIndex] = updated;
-      await this.#persist();
-      return structuredClone(updated);
-    }
-    const record: ConnectorRecord = {
+        await transaction.putConnector(updated);
+        return structuredClone(updated);
+      }
+      const record: ConnectorRecord = {
       id: `connector-${randomUUID()}`,
       locationKey,
       displayPath: connectorDisplayPath(value.kind, value.config),
@@ -257,20 +255,21 @@ export class ConnectorRegistry {
       updatedAt: now,
       origin: "user",
     };
-    this.#records.push(record);
-    await this.#persist();
-    return structuredClone(record);
+      await transaction.putConnector(record);
+      return structuredClone(record);
+    });
   }
 
   async update(id: string, input: ConnectorRegistrationInput): Promise<ConnectorRecord> {
-    const index = this.#records.findIndex((entry) => entry.id === id || entry.id === this.#legacyAliases.get(id));
-    if (index < 0) throw new Error(`Connector not found: ${id}`);
     const value = validateConnectorInput(input);
-    const current = this.#records[index]!;
-    const locationKey = connectorLocationKey(value.kind, value.config);
-    const duplicate = this.#records.find((record, candidateIndex) => candidateIndex !== index && record.locationKey === locationKey);
-    if (duplicate) throw new RangeError(`A connector already exists for path: ${duplicate.displayPath}`);
-    const updated: ConnectorRecord = {
+    return this.#store.transaction(async (transaction) => {
+      const resolvedId = this.#legacyAliases.get(id) ?? id;
+      const current = await transaction.getConnector(resolvedId);
+      if (!current) throw new Error(`Connector not found: ${id}`);
+      const locationKey = connectorLocationKey(value.kind, value.config);
+      const duplicate = await transaction.getConnectorByLocationKey(locationKey);
+      if (duplicate && duplicate.id !== current.id) throw new RangeError(`A connector already exists for path: ${duplicate.displayPath}`);
+      const updated: ConnectorRecord = {
       ...current,
       name: value.name,
       description: value.description ?? current.description,
@@ -284,37 +283,24 @@ export class ConnectorRegistry {
       displayPath: connectorDisplayPath(value.kind, value.config),
       updatedAt: new Date().toISOString(),
     };
-    this.#records[index] = updated;
-    await this.#persist();
-    return structuredClone(updated);
+      await transaction.putConnector(updated);
+      return structuredClone(updated);
+    });
   }
 
   async setCredentialReference(id: string, credentialRef: string): Promise<ConnectorRecord> {
-    const index = this.#records.findIndex((entry) => entry.id === id || entry.id === this.#legacyAliases.get(id));
-    if (index < 0) throw new Error(`Connector not found: ${id}`);
-    const current = this.#records[index]!;
-    const updated = { ...current, credentialRef: textValue(credentialRef, "credentialRef", 160), updatedAt: new Date().toISOString() };
-    this.#records[index] = updated;
-    await this.#persist();
-    return structuredClone(updated);
+    return this.#updateRecord(id, (current) => ({ ...current, credentialRef: textValue(credentialRef, "credentialRef", 160), updatedAt: new Date().toISOString() }));
   }
 
   async remove(id: string): Promise<void> {
-    const index = this.#records.findIndex((entry) => entry.id === id || entry.id === this.#legacyAliases.get(id));
-    if (index < 0) throw new Error(`Connector not found: ${id}`);
-    this.#records.splice(index, 1);
-    await this.#persist();
+    const deleted = await this.#store.deleteConnector(this.#legacyAliases.get(id) ?? id);
+    if (!deleted) throw new Error(`Connector not found: ${id}`);
   }
 
   async check(id: string, credentials?: ConnectorCredentialsInput, requireCredentials = false): Promise<ConnectorRecord> {
-    const index = this.#records.findIndex((entry) => entry.id === id || entry.id === this.#legacyAliases.get(id));
-    if (index < 0) throw new Error(`Connector not found: ${id}`);
-    const current = this.#records[index]!;
+    const current = await this.get(id);
     const result = await checkConnector(current, validateResolvedCredentials(credentials), requireCredentials);
-    const updated = { ...current, lastCheck: result, updatedAt: new Date().toISOString() };
-    this.#records[index] = updated;
-    await this.#persist();
-    return structuredClone(updated);
+    return this.#updateRecord(id, (latest) => ({ ...latest, lastCheck: result, updatedAt: new Date().toISOString() }));
   }
 
   async checkInput(input: ConnectorCheckInput): Promise<ConnectorCheck> {
@@ -339,42 +325,15 @@ export class ConnectorRegistry {
     }, credentials, value.kind === "s3");
   }
 
-  #normalizeRecords(entries: unknown[]): ConnectorRecord[] {
-    const records: ConnectorRecord[] = [];
-    for (const entry of entries) {
-      if (!entry || typeof entry !== "object") continue;
-      const candidate = entry as Partial<ConnectorRecord>;
-      if (!candidate.kind || !candidate.config || typeof candidate.config !== "object") continue;
-      const config = Object.fromEntries(Object.entries(candidate.config as Record<string, unknown>).filter(([key, value]) => typeof value === "string" && !SECRET_CONFIG_KEY.test(key))) as Record<string, string>;
-      const locationKey = connectorLocationKey(candidate.kind, config);
-      if (records.some((record) => record.locationKey === locationKey)) continue;
-      records.push({
-        ...(candidate as ConnectorRecord),
-        id: typeof candidate.id === "string" && candidate.id ? candidate.id : `connector-${randomUUID()}`,
-        name: typeof candidate.name === "string" && candidate.name ? candidate.name : locationKey,
-        description: typeof candidate.description === "string" ? candidate.description : "Connector configuration.",
-        kind: candidate.kind,
-        config,
-        surveyId: typeof candidate.surveyId === "string" && candidate.surveyId.trim() ? candidate.surveyId.trim() : undefined,
-        releaseId: typeof candidate.releaseId === "string" && candidate.releaseId.trim() ? candidate.releaseId.trim() : undefined,
-        locationKey,
-        displayPath: connectorDisplayPath(candidate.kind, config),
-        createdAt: typeof candidate.createdAt === "string" ? candidate.createdAt : new Date().toISOString(),
-        updatedAt: typeof candidate.updatedAt === "string" ? candidate.updatedAt : new Date().toISOString(),
-        origin: "user",
-      });
-    }
-    return records;
-  }
-
   async #loadLegacyAliases(): Promise<void> {
     this.#legacyAliases.clear();
     if (!this.#bootstrapPath) return;
     try {
       const bootstrap = JSON.parse(await readFile(this.#bootstrapPath, "utf8")) as unknown;
       if (!Array.isArray(bootstrap)) return;
-      for (const entry of this.#normalizeRecords(bootstrap)) {
-        const current = this.#records.find((record) => record.locationKey === entry.locationKey);
+      const records = await this.#store.listConnectors();
+      for (const entry of normalizeConnectorRecords(bootstrap)) {
+        const current = records.find((record) => record.locationKey === entry.locationKey);
         if (current && entry.id !== current.id) this.#legacyAliases.set(entry.id, current.id);
       }
     } catch {
@@ -382,19 +341,54 @@ export class ConnectorRegistry {
     }
   }
 
-  async #persist(): Promise<void> {
-    await mkdir(path.dirname(this.#statePath), { recursive: true });
-    const temporaryPath = `${this.#statePath}.${process.pid}.${randomUUID()}.tmp`;
-    await writeFile(temporaryPath, JSON.stringify(this.#records, null, 2), "utf8");
-    await rename(temporaryPath, this.#statePath);
-  }
-
   async #loadBootstrap(): Promise<ConnectorRecord[]> {
     if (!this.#bootstrapPath) return [];
     const bootstrap = JSON.parse(await readFile(this.#bootstrapPath, "utf8")) as unknown;
     if (!Array.isArray(bootstrap)) throw new Error("connector bootstrap must be an array");
-    return this.#normalizeRecords(bootstrap);
+    return normalizeConnectorRecords(bootstrap);
   }
+
+  async #updateRecord(id: string, update: (current: ConnectorRecord) => ConnectorRecord): Promise<ConnectorRecord> {
+    return this.#store.transaction(async (transaction: MetadataTransaction) => {
+      const current = await transaction.getConnector(this.#legacyAliases.get(id) ?? id);
+      if (!current) throw new Error(`Connector not found: ${id}`);
+      const updated = update(current);
+      await transaction.putConnector(updated);
+      return structuredClone(updated);
+    });
+  }
+}
+
+export function normalizeConnectorRecords(entries: unknown[]): ConnectorRecord[] {
+  const records: ConnectorRecord[] = [];
+  for (const entry of entries) {
+    if (!entry || typeof entry !== "object") throw new Error("connector state contains an invalid record");
+    const candidate = entry as Partial<ConnectorRecord>;
+    if (!candidate.kind || !CONNECTOR_KINDS.includes(candidate.kind) || !candidate.config || typeof candidate.config !== "object" || Array.isArray(candidate.config)) {
+      throw new Error("connector state contains an invalid record");
+    }
+    const config = Object.fromEntries(Object.entries(candidate.config as Record<string, unknown>).filter(([key, value]) => typeof value === "string" && !SECRET_CONFIG_KEY.test(key))) as Record<string, string>;
+    validateConnectorInput({ name: candidate.name || connectorLocationKey(candidate.kind, config), kind: candidate.kind, config, surveyId: candidate.surveyId, releaseId: candidate.releaseId, status: candidate.status });
+    const locationKey = connectorLocationKey(candidate.kind, config);
+    if (records.some((record) => record.locationKey === locationKey)) continue;
+    records.push({
+      ...(candidate as ConnectorRecord),
+      id: typeof candidate.id === "string" && candidate.id ? candidate.id : `connector-${randomUUID()}`,
+      name: typeof candidate.name === "string" && candidate.name ? candidate.name : locationKey,
+      description: typeof candidate.description === "string" ? candidate.description : "Connector configuration.",
+      kind: candidate.kind,
+      config,
+      surveyId: typeof candidate.surveyId === "string" && candidate.surveyId.trim() ? candidate.surveyId.trim() : undefined,
+      releaseId: typeof candidate.releaseId === "string" && candidate.releaseId.trim() ? candidate.releaseId.trim() : undefined,
+      status: CONNECTOR_STATUSES.includes(candidate.status as ConnectorStatus) ? candidate.status! : "draft",
+      locationKey,
+      displayPath: connectorDisplayPath(candidate.kind, config),
+      createdAt: typeof candidate.createdAt === "string" ? candidate.createdAt : new Date().toISOString(),
+      updatedAt: typeof candidate.updatedAt === "string" ? candidate.updatedAt : new Date().toISOString(),
+      origin: "user",
+    });
+  }
+  return records;
 }
 
 async function checkS3(record: ConnectorRecord, credentials?: ResolvedConnectorCredentials, requireCredentials = false): Promise<ConnectorCheck> {

@@ -4,6 +4,7 @@ metadata:
   name: {{ include "astro-data-workspace.fullname" . }}
   labels:
     {{- include "astro-data-workspace.labels" . | nindent 4 }}
+spec:
   type: {{ .Values.service.type }}
   selector:
     app.kubernetes.io/name: {{ include "astro-data-workspace.name" . }}

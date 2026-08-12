@@ -2,5 +2,9 @@
 {{- if and (eq .Values.metadataStore.mode "bundled-postgresql") (not .Values.postgresql.enabled) }}{{ fail "metadataStore.mode=bundled-postgresql requires postgresql.enabled=true" }}{{- end }}
 {{- if and (eq .Values.metadataStore.mode "external-postgresql") .Values.postgresql.enabled }}{{ fail "metadataStore.mode=external-postgresql requires postgresql.enabled=false" }}{{- end }}
 {{- if and (eq .Values.metadataStore.mode "external-postgresql") (empty .Values.metadataStore.external.existingSecret) }}{{ fail "metadataStore.external.existingSecret is required for external-postgresql" }}{{- end }}
+{{- if and (eq .Values.metadataStore.mode "external-postgresql") (empty .Values.metadataStore.external.existingSecretKey) }}{{ fail "metadataStore.external.existingSecretKey is required for external-postgresql" }}{{- end }}
 {{- if not (has .Values.metadataStore.mode (list "sqlite" "bundled-postgresql" "external-postgresql")) }}{{ fail "metadataStore.mode must be sqlite, bundled-postgresql, or external-postgresql" }}{{- end }}
 {{- if and .Values.metadataStore.external.existingSecret (ne .Values.metadataStore.mode "external-postgresql") }}{{ fail "metadataStore.external.existingSecret is only valid with external-postgresql" }}{{- end }}
+{{- if and (eq .Values.metadataStore.mode "bundled-postgresql") (empty .Values.postgresql.auth.username) }}{{ fail "postgresql.auth.username is required for bundled-postgresql" }}{{- end }}
+{{- if and (eq .Values.metadataStore.mode "bundled-postgresql") (empty .Values.postgresql.auth.database) }}{{ fail "postgresql.auth.database is required for bundled-postgresql" }}{{- end }}
+{{- if and (eq .Values.metadataStore.mode "sqlite") (not (hasPrefix "/state/" .Values.metadataStore.sqlite.path)) }}{{ fail "metadataStore.sqlite.path must be on the /state persistence mount" }}{{- end }}

@@ -31,6 +31,7 @@
     "express": "^5.1.0",
     "healpixjs": "^2.0.0",
     "lucide": "^1.25.0",
+    "pg": "^8.16.3",
     "three": "^0.185.1",
     "yauzl": "^3.2.0",
     "yazl": "^3.3.1",
@@ -41,6 +42,7 @@
     "@types/express": "^5.0.0",
     "@types/node": "^22.0.0",
     "@types/pngjs": "^6.0.5",
+    "@types/pg": "^8.15.5",
     "@types/three": "^0.185.1",
     "@types/yauzl": "^2.10.3",
     "@types/yazl": "^3.3.0",
@@ -50,6 +52,6 @@
     "vite": "^8.1.5"
   },
   "engines": {
-    "node": ">=22"
+    "node": ">=22.13"
   }
 }

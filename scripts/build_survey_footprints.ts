@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 
@@ -26,6 +27,7 @@ interface MocFootprintDefinition {
   sourceId: string;
   sourceUrl: string;
   notes: string;
+  rawSourceIds?: readonly string[];
 }
 
 const MOC_FOOTPRINTS: readonly MocFootprintDefinition[] = [
@@ -64,6 +66,7 @@ const MOC_FOOTPRINTS: readonly MocFootprintDefinition[] = [
     sourceId: "CDS/P/HSC/DR2/wide/color-i-r-g,CDS/P/HSC/DR2/deep/color-i-r-g",
     sourceUrl: "https://alasky.cds.unistra.fr/MocServer/query?ID=CDS%2FP%2FHSC%2FDR2%2Fwide%2Fcolor-i-r-g%2CCDS%2FP%2FHSC%2FDR2%2Fdeep%2Fcolor-i-r-g&get=smoc&order=4&fmt=json",
     notes: "Union of CDS PDR2 Wide and Deep image MOCs, rasterized to NSIDE 16. PDR3 is registered separately and remains pending an artifact.",
+    rawSourceIds: ["CDS/P/HSC/DR2/wide/color-i-r-g", "CDS/P/HSC/DR2/deep/color-i-r-g"],
   },
   {
     surveyId: "hst",
@@ -197,6 +200,78 @@ async function requestMoc(sourceId: string): Promise<MocJson> {
   return response.json() as Promise<MocJson>;
 }
 
+interface RawMocArtifact {
+  surveyId: string;
+  releaseId: string;
+  product: string;
+  sourceId: string;
+  sourceUrl: string;
+  metadataUrl: string;
+  fitsPath: string;
+  metadataPath: string;
+  retrievedAt: string;
+  mediaType: string;
+  byteLength: number;
+  sha256: string;
+}
+
+function rawFileStem(definition: MocFootprintDefinition, sourceId: string): string {
+  const suffix = definition.rawSourceIds && definition.rawSourceIds.length > 1
+    ? `-${sourceId.includes("/wide/") ? "wide" : "deep"}`
+    : "";
+  return `${definition.surveyId}-${definition.releaseId}-${definition.product}${suffix}`
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-|-$/g, "");
+}
+
+async function preserveNativeMocs(rawRoot: string, retrievedAt: string): Promise<void> {
+  await mkdir(rawRoot, { recursive: true });
+  const artifacts = await Promise.all(MOC_FOOTPRINTS.flatMap((definition) => (definition.rawSourceIds ?? [definition.sourceId]).map(async (sourceId): Promise<RawMocArtifact> => {
+    const fitsParameters = new URLSearchParams({ ID: sourceId, get: "smoc", fmt: "fits" });
+    const metadataParameters = new URLSearchParams({ ID: sourceId, get: "record", fmt: "json" });
+    const sourceUrl = `${MOC_SERVER_URL}?${fitsParameters}`;
+    const metadataUrl = `${MOC_SERVER_URL}?${metadataParameters}`;
+    const [fitsResponse, metadataResponse] = await Promise.all([
+      fetch(sourceUrl, { signal: AbortSignal.timeout(120_000) }),
+      fetch(metadataUrl, { signal: AbortSignal.timeout(120_000) }),
+    ]);
+    if (!fitsResponse.ok) throw new Error(`Native MOC request failed for ${sourceId}: ${fitsResponse.status}`);
+    if (!metadataResponse.ok) throw new Error(`MOC metadata request failed for ${sourceId}: ${metadataResponse.status}`);
+    const fits = Buffer.from(await fitsResponse.arrayBuffer());
+    const metadata = await metadataResponse.text();
+    JSON.parse(metadata);
+    const stem = rawFileStem(definition, sourceId);
+    const fitsName = `${stem}.fits`;
+    const metadataName = `${stem}.record.json`;
+    await Promise.all([
+      writeFile(path.join(rawRoot, fitsName), fits),
+      writeFile(path.join(rawRoot, metadataName), `${JSON.stringify(JSON.parse(metadata), null, 2)}\n`, "utf8"),
+    ]);
+    return {
+      surveyId: definition.surveyId,
+      releaseId: definition.releaseId,
+      product: definition.product,
+      sourceId,
+      sourceUrl,
+      metadataUrl,
+      fitsPath: fitsName,
+      metadataPath: metadataName,
+      retrievedAt,
+      mediaType: fitsResponse.headers.get("content-type") ?? "application/fits",
+      byteLength: fits.byteLength,
+      sha256: createHash("sha256").update(fits).digest("hex"),
+    };
+  })));
+  await writeFile(path.join(rawRoot, "index.json"), `${JSON.stringify({
+    schemaVersion: 1,
+    generatedAt: retrievedAt,
+    coordinateFrame: "ICRS",
+    format: "FITS MOC 2.0 (native resolution)",
+    artifacts,
+  }, null, 2)}\n`, "utf8");
+}
+
 function mocFootprint(definition: MocFootprintDefinition, pixels: number[], retrievedAt: string): SurveyFootprint {
   return {
     surveyId: definition.surveyId,
@@ -240,10 +315,12 @@ export async function buildSurveyFootprints(): Promise<SurveyFootprintManifest> 
 async function main(): Promise<void> {
   const outputDirectory = path.resolve(process.argv[2] ?? "src/footprints");
   const manifest = await buildSurveyFootprints();
+  const rawRoot = path.resolve("artifacts/public-survey-footprints/raw/moc");
+  await preserveNativeMocs(rawRoot, manifest.generatedAt);
   await mkdir(outputDirectory, { recursive: true });
   const outputPath = path.join(outputDirectory, "survey-footprints.json");
   await writeFile(outputPath, `${JSON.stringify(manifest, null, 2)}\n`);
-  console.log(`Wrote ${manifest.footprints.length} survey footprints (${manifest.footprints.reduce((total, footprint) => total + footprint.pixels.length, 0)} cells) to ${outputPath}`);
+  console.log(`Wrote ${manifest.footprints.length} survey footprints (${manifest.footprints.reduce((total, footprint) => total + footprint.pixels.length, 0)} cells) to ${outputPath}; native MOCs to ${rawRoot}`);
 }
 
 if (import.meta.url === new URL(`file://${process.argv[1]}`).href) {

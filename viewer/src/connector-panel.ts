@@ -3,7 +3,15 @@ import type { ConnectorIngestRun } from "../../src/connector-history";
 import type { DataAssetRecord } from "../../src/data-catalog";
 import type { GenericScanInput } from "../../src/flink-ingest";
 import type { SurveyCard, SurveyRecord } from "../../src/survey-registry";
-import { workspaceApi } from "./api";
+import { workspaceApi, type WorkspaceCapabilities } from "./api";
+
+export interface ConnectorMetrics {
+  total: number;
+  s3: number;
+  local: number;
+  jdbc: number;
+  scans: number;
+}
 
 function byId<T extends HTMLElement>(id: string): T {
   const element = document.getElementById(id);
@@ -47,9 +55,11 @@ function checkFeedback(check?: ConnectorCheck): HTMLDivElement {
 
 export class ConnectorPanel {
   readonly #onError: (error: unknown) => void;
+  readonly #onMetrics: (metrics: ConnectorMetrics) => void;
   #records: ConnectorPublicRecord[] = [];
   #assets: DataAssetRecord[] = [];
   #surveys: SurveyCard[] = [];
+  #capabilities: WorkspaceCapabilities = { dataWarehouse: { enabled: false }, metadataStore: { engine: "unknown" } };
   #surveyRecords = new Map<string, SurveyRecord>();
   #selectedId: string | null = null;
   #editingId: string | null = null;
@@ -57,8 +67,9 @@ export class ConnectorPanel {
   #detailGeneration = 0;
   #runPollTimer: ReturnType<typeof setTimeout> | undefined;
 
-  constructor(onError: (error: unknown) => void) {
+  constructor(onError: (error: unknown) => void, onMetrics: (metrics: ConnectorMetrics) => void = () => {}) {
     this.#onError = onError;
+    this.#onMetrics = onMetrics;
     const registrationForm = byId<HTMLFormElement>("connector-registration-form");
     (registrationForm.elements.namedItem("kind") as HTMLSelectElement).addEventListener("change", () => this.#renderConfigFieldsFrom(registrationForm, true));
     registrationForm.addEventListener("submit", (event) => {
@@ -78,7 +89,12 @@ export class ConnectorPanel {
 
   async activate(selectedId?: string): Promise<void> {
     this.#active = true;
-    [this.#records, this.#assets, this.#surveys] = await Promise.all([workspaceApi.connectors(), workspaceApi.dataAssets(), workspaceApi.surveys()]);
+    const [connectorRecords, assets, surveys, runs, capabilities] = await Promise.all([workspaceApi.connectors(), workspaceApi.dataAssets(), workspaceApi.surveys(), workspaceApi.connectorIngestRuns(), workspaceApi.capabilities()]);
+    this.#records = connectorRecords;
+    this.#assets = assets;
+    this.#surveys = surveys;
+    this.#capabilities = capabilities;
+    this.#updateMetrics(runs);
     const records = await Promise.all(this.#surveys.map((survey) => workspaceApi.survey(survey.id)));
     this.#surveyRecords = new Map(records.map((record) => [record.id, record]));
     this.#populateSurveySelects(byId<HTMLFormElement>("connector-registration-form"), "", "");
@@ -145,6 +161,16 @@ export class ConnectorPanel {
     const facetCount = document.getElementById("connector-filter-count");
     if (facetCount) facetCount.textContent = `${records.length} / ${this.#records.length}`;
     this.#renderDetail();
+  }
+
+  #updateMetrics(runs: ConnectorIngestRun[]): void {
+    this.#onMetrics({
+      total: this.#records.length,
+      s3: this.#records.filter((record) => record.kind === "s3").length,
+      local: this.#records.filter((record) => record.kind === "local").length,
+      jdbc: this.#records.filter((record) => record.kind === "jdbc").length,
+      scans: runs.length,
+    });
   }
 
   #filteredRecords(): ConnectorPublicRecord[] {
@@ -242,6 +268,11 @@ export class ConnectorPanel {
     section.append(heading);
     const note = document.createElement("p");
     note.className = "connector-scan-note";
+    if (!this.#capabilities.dataWarehouse.enabled) {
+      note.textContent = "未启用数据仓库";
+      section.append(note);
+      return section;
+    }
     note.textContent = record.kind === "s3"
       ? "选择已关联的数据资产，声明文件路径和空间信息。扫描只写入文件元数据；有 RA/Dec、FITS WCS 或 NESTED HEALPix 才会进入天球覆盖。"
       : "当前扫描任务先支持 S3 / OSS；本地路径和 JDBC Connector 可以先登记，后续接入对应扫描器。";
@@ -330,6 +361,7 @@ export class ConnectorPanel {
     setFeedback(output, "checking", "正在提交扫描任务…", "FlinkIngest 会在后台遍历路径并批量写入 Elasticsearch。 ");
     try {
       const run = await workspaceApi.submitConnectorScan(record.id, input);
+      this.#updateMetrics(await workspaceApi.connectorIngestRuns());
       setFeedback(output, "ok", "扫描任务已提交", `${run.jobId ?? run.batchId ?? "任务已创建"}；请在下方查看状态。 `);
       this.#renderDetail();
     } catch (error) {
@@ -360,7 +392,7 @@ export class ConnectorPanel {
     const editButton = document.createElement("button"); editButton.type = "button"; editButton.className = "command-button secondary"; editButton.textContent = "编辑配置"; editButton.addEventListener("click", () => { this.#editingId = record.id; this.#renderDetail(); });
     const deleteButton = document.createElement("button"); deleteButton.type = "button"; deleteButton.className = "command-button danger"; deleteButton.textContent = "删除"; deleteButton.addEventListener("click", () => void this.#remove().catch(this.#onError));
     const hasEuclidPilot = this.#assetsFor(record).some((asset) => asset.id === "euclid-q1-mer-final" || asset.id === "euclid-q1-mer-cutouts-cat" || asset.id === "euclid-q1-mer-morph-cat");
-    actions.append(...(hasEuclidPilot ? [scanButton] : []), checkButton, editButton, deleteButton);
+    actions.append(...(this.#capabilities.dataWarehouse.enabled && hasEuclidPilot ? [scanButton] : []), checkButton, editButton, deleteButton);
     return [heading, pathValue, statusPill(record), description, summary, feedback, actions];
   }
 
@@ -373,6 +405,7 @@ export class ConnectorPanel {
     try {
       await workspaceApi.submitConnectorPilotScan(id);
       this.#records = await workspaceApi.connectors();
+      this.#updateMetrics(await workspaceApi.connectorIngestRuns());
       setFeedback(feedback, "ok", "小批任务已提交", "将在下方扫描记录中显示 Flink 状态和 ES 文档数。 ");
       this.#render();
     } catch (error) {
@@ -412,13 +445,13 @@ export class ConnectorPanel {
     if (!form.reportValidity()) { this.#registrationFeedback("failed", "信息不完整", "请补全当前 Connector 所需字段。 "); return; }
     this.#registrationFeedback("checking", "正在保存 Connector…");
     const record = await workspaceApi.registerConnector(this.#inputFromForm(form));
-    this.#records = await workspaceApi.connectors(); this.#selectedId = record.id; this.#closeCreateDialog(); this.#render();
+    this.#records = await workspaceApi.connectors(); this.#updateMetrics(await workspaceApi.connectorIngestRuns()); this.#selectedId = record.id; this.#closeCreateDialog(); this.#render();
   }
 
   async #saveEdit(record: ConnectorPublicRecord, form: HTMLFormElement): Promise<void> {
     if (!form.reportValidity()) return;
     const updated = await workspaceApi.updateConnector(record.id, this.#inputFromForm(form));
-    this.#records = await workspaceApi.connectors(); this.#selectedId = updated.id; this.#editingId = null; this.#render();
+    this.#records = await workspaceApi.connectors(); this.#updateMetrics(await workspaceApi.connectorIngestRuns()); this.#selectedId = updated.id; this.#editingId = null; this.#render();
   }
 
   async #checkSelected(button: HTMLButtonElement, feedback: HTMLElement): Promise<void> {
@@ -428,6 +461,7 @@ export class ConnectorPanel {
     try {
       const result = await workspaceApi.checkConnector(id);
       this.#records = this.#records.map((record) => record.id === id ? result.connector : record);
+      this.#updateMetrics(await workspaceApi.connectorIngestRuns());
       this.#render();
     } catch (error) {
       button.disabled = false; button.textContent = "重新检测";
@@ -460,7 +494,7 @@ export class ConnectorPanel {
       const runs = await workspaceApi.connectorRuns(record.id);
       if (!this.#active || generation !== this.#detailGeneration || this.#selectedId !== record.id) return;
       target.replaceChildren(...(runs.length ? runs.map((run) => this.#runRow(run)) : [this.#emptyRunRow()]));
-      if (runs.some((run) => run.status === "queued" || run.status === "running")) this.#scheduleRunPoll(record);
+      if (this.#capabilities.dataWarehouse.enabled && runs.some((run) => run.status === "queued" || run.status === "running")) this.#scheduleRunPoll(record);
     } catch (error) { target.textContent = error instanceof Error ? error.message : String(error); }
   }
 
@@ -501,6 +535,6 @@ export class ConnectorPanel {
   async #remove(): Promise<void> {
     if (!this.#selectedId) return;
     await workspaceApi.deleteConnector(this.#selectedId);
-    this.#records = await workspaceApi.connectors(); this.#selectedId = this.#records[0]?.id ?? null; this.#resetRegistrationForm(); this.#render();
+    this.#records = await workspaceApi.connectors(); this.#updateMetrics(await workspaceApi.connectorIngestRuns()); this.#selectedId = this.#records[0]?.id ?? null; this.#resetRegistrationForm(); this.#render();
   }
 }

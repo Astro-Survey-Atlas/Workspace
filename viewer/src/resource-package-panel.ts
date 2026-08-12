@@ -43,13 +43,14 @@ export type ResourcePackageSelectedHandler = (
 ) => void;
 
 export type ResourcePackageReleaseHandler = (surveyId: string, releaseId: string) => void;
+type ResourceRow = PublicResourcePackage & { hasPackage: boolean };
 
 export class ResourcePackagePanel {
   readonly #onApplied: (before: PublicResourcePackage[], after: PublicResourcePackage[]) => Promise<void>;
   readonly #onSelected: ResourcePackageSelectedHandler;
   readonly #onReleaseSelected: ResourcePackageReleaseHandler;
   readonly #onError: (error: unknown) => void;
-  #records: PublicResourcePackage[] = [];
+  #records: ResourceRow[] = [];
   #releaseDetails: PublicReleaseDetail[] = [];
   #baselineReleases = new Map<string, Set<string>>();
   #draftReleases = new Map<string, Set<string>>();
@@ -86,7 +87,25 @@ export class ResourcePackagePanel {
 
   async activate(): Promise<void> {
     this.#active = true;
-    this.#records = await workspaceApi.resourcePackages();
+    const packages = await workspaceApi.resourcePackages();
+    const packageSurveyIds = new Set(packages.map((record) => record.surveyId));
+    const noPackageRows = [...new Set(this.#releaseDetails.map((detail) => detail.surveyId))]
+      .filter((surveyId) => !packageSurveyIds.has(surveyId))
+      .map((surveyId) => {
+        const details = this.#releaseDetails.filter((detail) => detail.surveyId === surveyId);
+        const first = details[0]!;
+        return {
+          id: `survey-${surveyId}`, name: first.mission, description: `公开 ${first.mission} Release 详情`, surveyId,
+          modalities: [...new Set(details.flatMap((detail) => detail.modalities))], wavelengths: [],
+          productTypes: [...new Set(details.flatMap((detail) => detail.products.map((product) => product.name)))], facilities: [first.mission],
+          coverageAuthorities: [], accessModes: [], releases: details.map((detail) => detail.releaseId),
+          releaseLabels: Object.fromEntries(details.map((detail) => [detail.releaseId, detail.label])),
+          sources: details.map((detail) => ({ releaseId: detail.releaseId, label: detail.label, url: detail.officialSourceUrl, authority: detail.mission })),
+          version: "", archiveUrl: "", sizeBytes: 0, sha256: "", updatedAt: "", hidden: false, deprecated: false, replacedBy: [],
+          activeReleaseIds: [], availableReleaseIds: [], active: false, status: "not_installed" as const, hasPackage: false,
+        } satisfies ResourceRow;
+      });
+    this.#records = [...packages.map((record) => ({ ...record, hasPackage: true })), ...noPackageRows];
     this.#baselineReleases = this.#releaseMapFromRecords();
     this.#draftReleases = this.#cloneReleaseMap(this.#baselineReleases);
     this.#selectedId ??= this.#records[0]?.id ?? null;
@@ -133,7 +152,7 @@ export class ResourcePackagePanel {
     this.#render();
     try {
       await workspaceApi.deleteResourcePackage(record.id);
-      this.#records = await workspaceApi.resourcePackages();
+      this.#records = (await workspaceApi.resourcePackages()).map((record) => ({ ...record, hasPackage: true }));
       this.#draftReleases.delete(record.id);
       this.#baselineReleases.delete(record.id);
       this.#renderFilters();
@@ -153,7 +172,8 @@ export class ResourcePackagePanel {
     return new Map(this.#records.filter((record) => record.activeReleaseIds.length).map((record) => [record.id, new Set(record.activeReleaseIds)]));
   }
 
-  #catalogReleaseIds(record: PublicResourcePackage): string[] {
+  #catalogReleaseIds(record: ResourceRow): string[] {
+    if (!record.hasPackage) return [];
     return [...new Set(this.#releaseDetails
       .filter((detail) => detail.surveyId === record.surveyId && detail.products.some((product) => product.coverageStatus === "acquired"))
       .map((detail) => detail.releaseId))];
@@ -208,51 +228,9 @@ export class ResourcePackagePanel {
     });
   }
 
-  #renderReleaseCatalog(): void {
-    const details = this.#visibleReleaseDetails();
-    const groups = new Map<string, PublicReleaseDetail[]>();
-    for (const detail of details) groups.set(detail.surveyId, [...(groups.get(detail.surveyId) ?? []), detail]);
-    const packageSurveyIds = new Set(this.#records.map((record) => record.surveyId));
-    byId("public-release-catalog-list").replaceChildren(...[...groups].map(([surveyId, releases]) => {
-      const group = document.createElement("section");
-      group.className = "public-release-survey-group";
-      group.dataset.surveyId = surveyId;
-      group.dataset.hasPackage = String(packageSurveyIds.has(surveyId));
-      const heading = document.createElement("header");
-      const title = document.createElement("strong"); title.textContent = releases[0]?.mission ?? surveyId;
-      const count = document.createElement("span"); count.textContent = `${releases.length} RELEASE`;
-      heading.append(title, count);
-      const list = document.createElement("div");
-      list.className = "public-release-catalog-releases";
-      list.append(...releases.map((detail) => {
-        const row = document.createElement("button");
-        row.type = "button";
-        row.className = "public-release-catalog-row";
-        row.dataset.releaseId = detail.releaseId;
-        row.setAttribute("aria-label", `查看 ${detail.label} 版本详情`);
-        row.addEventListener("click", () => this.#onReleaseSelected(detail.surveyId, detail.releaseId));
-        const identity = document.createElement("span");
-        const name = document.createElement("strong"); name.textContent = detail.label;
-        const metadata = document.createElement("small"); metadata.textContent = `${detail.releasedYear ?? "年份未注明"} · ${detail.kind.replaceAll("_", " ")}`;
-        identity.append(name, metadata);
-        const acquired = detail.products.filter((product) => product.coverageStatus === "acquired").length;
-        const status = document.createElement("span");
-        status.className = "public-release-catalog-status";
-        status.dataset.available = String(acquired > 0);
-        status.textContent = acquired ? `${acquired} / ${detail.products.length} 已收录` : "待收录";
-        row.append(identity, status);
-        return row;
-      }));
-      group.append(heading, list);
-      return group;
-    }));
-    byId("public-release-catalog-count").textContent = `${groups.size} 个巡天 / ${details.length} 个 Release`;
-  }
-
   #render(): void {
     if (!this.#active) return;
     const visible = this.#visibleRecords();
-    this.#renderReleaseCatalog();
     const selectedIsVisible = visible.some((record) => record.id === this.#selectedId);
     if (!selectedIsVisible) {
       this.#selectedId = visible[0]?.id ?? null;
@@ -260,6 +238,7 @@ export class ResourcePackagePanel {
     }
     const list = byId("resource-package-list");
     list.replaceChildren(...visible.map((record) => {
+      const resourceRecord = record as ResourceRow;
       const row = document.createElement("article");
       row.className = "resource-package-row";
       row.dataset.status = record.status;
@@ -273,12 +252,12 @@ export class ResourcePackagePanel {
       });
 
       const draft = this.#draftReleases.get(record.id) ?? new Set<string>();
-      const available = this.#catalogReleaseIds(record);
+      const available = this.#catalogReleaseIds(resourceRecord);
       const toggle = document.createElement("input");
       toggle.type = "checkbox";
       toggle.checked = available.length > 0 && draft.size === available.length;
       toggle.indeterminate = draft.size > 0 && draft.size < available.length;
-      toggle.disabled = this.#busy || available.length === 0;
+      toggle.disabled = this.#busy || !resourceRecord.hasPackage || available.length === 0;
       toggle.setAttribute("aria-label", `选择${record.name}的全部发布版本`);
       toggle.addEventListener("click", (event) => event.stopPropagation());
       toggle.addEventListener("change", () => {
@@ -412,7 +391,7 @@ export class ResourcePackagePanel {
     };
     try {
       await Promise.all(Array.from({ length: Math.min(3, queue.length) }, () => worker()));
-      this.#records = await workspaceApi.resourcePackages();
+      this.#records = (await workspaceApi.resourcePackages()).map((record) => ({ ...record, hasPackage: true }));
       this.#renderFilters();
     } finally {
       this.#busy = false;
@@ -445,7 +424,7 @@ export class ResourcePackagePanel {
     this.#render();
     const before = this.#records;
     try {
-      this.#records = await workspaceApi.setActiveResourcePackages(loads);
+      this.#records = (await workspaceApi.setActiveResourcePackages(loads)).map((record) => ({ ...record, hasPackage: true }));
       this.#baselineReleases = this.#releaseMapFromRecords();
       this.#draftReleases = this.#cloneReleaseMap(this.#baselineReleases);
       await this.#onApplied(before, this.#records);

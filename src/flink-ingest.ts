@@ -43,6 +43,19 @@ export interface FlinkResourceClient {
   request<T>(method: string, path: string, body?: unknown): Promise<{ status: number; ok: boolean; value?: T; text: string }>;
 }
 
+export class DataWarehouseDisabledError extends Error {
+  constructor() {
+    super("Data warehouse is disabled");
+    this.name = "DataWarehouseDisabledError";
+  }
+}
+
+export function dataWarehouseEnabled(value = process.env.ASTRO_DATA_WAREHOUSE_ENABLED): boolean {
+  if (value === undefined || value === "false") return false;
+  if (value === "true") return true;
+  throw new RangeError("ASTRO_DATA_WAREHOUSE_ENABLED must be true or false");
+}
+
 class KubernetesResourceClient implements FlinkResourceClient {
   readonly #apiUrl: string;
   readonly #tokenPath: string;
@@ -116,6 +129,7 @@ function statusFromTask(task: KubernetesResource): "queued" | "running" | "succe
 }
 
 export interface FlinkScanServiceOptions {
+  enabled: boolean;
   connectors: ConnectorRegistry;
   dataCatalog: DataCatalogRegistry;
   credentials: ConnectorCredentialStore;
@@ -129,6 +143,7 @@ export interface FlinkScanServiceOptions {
 }
 
 export class FlinkScanService {
+  readonly #enabled: boolean;
   readonly #connectors: ConnectorRegistry;
   readonly #dataCatalog: DataCatalogRegistry;
   readonly #credentials: ConnectorCredentialStore;
@@ -143,6 +158,7 @@ export class FlinkScanService {
   #polling = false;
 
   constructor(options: FlinkScanServiceOptions) {
+    this.#enabled = options.enabled;
     this.#connectors = options.connectors;
     this.#dataCatalog = options.dataCatalog;
     this.#credentials = options.credentials;
@@ -152,11 +168,13 @@ export class FlinkScanService {
     this.#esUrl = options.esUrl.replace(/\/+$/, "");
     this.#esIndex = options.esIndex;
     this.#pollMs = Math.max(1000, options.pollMs);
-    this.#client = options.resourceClient ?? (process.env.KUBERNETES_SERVICE_HOST ? new KubernetesResourceClient() : undefined);
+    this.#client = this.#enabled
+      ? options.resourceClient ?? (process.env.KUBERNETES_SERVICE_HOST ? new KubernetesResourceClient() : undefined)
+      : undefined;
   }
 
   start(): void {
-    if (!this.#client) return;
+    if (!this.#enabled || !this.#client) return;
     void this.poll();
     this.#timer = setInterval(() => { void this.poll(); }, this.#pollMs);
   }
@@ -167,8 +185,9 @@ export class FlinkScanService {
   }
 
   async submitPilot(connectorId: string): Promise<ConnectorIngestRun[]> {
+    if (!this.#enabled) throw new DataWarehouseDisabledError();
     if (!this.#client) throw new Error("Flink scan submission is only available inside Kubernetes");
-    const connector = this.#connectors.get(connectorId);
+    const connector = await this.#connectors.get(connectorId);
     if (connector.kind !== "s3") throw new RangeError("Pilot scanning currently supports S3/OSS connectors only");
     if (connector.status !== "ready" && connector.lastCheck?.status !== "ok") throw new RangeError("Connector must pass connection detection before scanning");
     const stored = connector.credentialRef ? await this.#credentials.get(connector.credentialRef) : undefined;
@@ -188,8 +207,8 @@ export class FlinkScanService {
     const created: ConnectorIngestRun[] = [];
     try {
       for (const entry of selected) {
-        const asset = this.#dataCatalog.get(entry.definition.assetId);
-        const ownership = this.#scanOwnership(asset, connector);
+        const asset = await this.#dataCatalog.get(entry.definition.assetId);
+        const ownership = await this.#scanOwnership(asset, connector);
         const taskName = safeName(`euclid-q1-mer-pilot-${entry.definition.key}-${token}`).slice(0, 63).replace(/-+$/g, "");
         const batchId = `workspace-pilot-${token}-${entry.definition.key}`;
         const run = await this.#runs.add(connector.locationKey, {
@@ -228,12 +247,13 @@ export class FlinkScanService {
   }
 
   async submitScan(connectorId: string, input: GenericScanInput): Promise<ConnectorIngestRun> {
+    if (!this.#enabled) throw new DataWarehouseDisabledError();
     if (!this.#client) throw new Error("Flink scan submission is only available inside Kubernetes");
-    const connector = this.#connectors.get(connectorId);
+    const connector = await this.#connectors.get(connectorId);
     if (connector.kind !== "s3") throw new RangeError("Generic scanning currently supports S3/OSS connectors only");
     if (connector.status !== "ready" && connector.lastCheck?.status !== "ok") throw new RangeError("Connector must pass connection detection before scanning");
-    const asset = this.#dataCatalog.get(input.assetId);
-    const ownership = this.#scanOwnership(asset, connector);
+    const asset = await this.#dataCatalog.get(input.assetId);
+    const ownership = await this.#scanOwnership(asset, connector);
     const spatialMode = input.spatial?.mode ?? "auto";
     if (!["auto", "none", "catalog", "healpix"].includes(spatialMode)) throw new RangeError("spatial.mode must be auto, none, catalog, or healpix");
     if (spatialMode === "catalog" && (!input.spatial?.raColumn?.trim() || !input.spatial?.decColumn?.trim())) {
@@ -281,14 +301,14 @@ export class FlinkScanService {
     }
     await this.#cleanupSecret(secretName);
     await this.poll();
-    return this.#runs.list(connector.locationKey).find((candidate) => candidate.id === run.id) ?? run;
+    return (await this.#runs.list(connector.locationKey)).find((candidate) => candidate.id === run.id) ?? run;
   }
 
   async poll(): Promise<void> {
-    if (!this.#client || this.#polling) return;
+    if (!this.#enabled || !this.#client || this.#polling) return;
     this.#polling = true;
     try {
-      for (const run of this.#runs.list()) {
+      for (const run of await this.#runs.list()) {
         if (!run.jobId || (run.status !== "queued" && run.status !== "running")) continue;
         try {
           await this.#pollRun(run);
@@ -381,7 +401,7 @@ export class FlinkScanService {
 
   async #cleanupSecret(name?: string): Promise<void> {
     if (!name || !this.#client) return;
-    const active = this.#runs.list().some((run) => run.secretName === name && (run.status === "queued" || run.status === "running"));
+    const active = (await this.#runs.list()).some((run) => run.secretName === name && (run.status === "queued" || run.status === "running"));
     if (active) return;
     const result = await this.#client.request("DELETE", `/api/v1/namespaces/${encodeURIComponent(this.#secretNamespace)}/secrets/${encodeURIComponent(name)}`);
     if (!result.ok && result.status !== 404) console.warn(`Unable to remove scan Secret ${name} (HTTP ${result.status})`);
@@ -458,7 +478,7 @@ export class FlinkScanService {
     if (!result.ok) throw new Error(`Unable to create FlinkIngestTask (HTTP ${result.status}): ${result.text.slice(0, 240)}`);
   }
 
-  #scanOwnership(asset: DataAssetRecord, connector: ConnectorRecord): EffectiveDataOwnership {
+  async #scanOwnership(asset: DataAssetRecord, connector: ConnectorRecord): Promise<EffectiveDataOwnership> {
     // A scan path is itself an association with an assigned Connector. This
     // also makes legacy assets (which predate connectorIds) inherit the
     // Connector's survey/release in newly written ES documents. An unassigned
@@ -472,7 +492,7 @@ export class FlinkScanService {
       connectorIds: connector.surveyId || alreadyLinked ? [...new Set([...(asset.connectorIds ?? []), connector.id])] : asset.connectorIds,
       connectorLocationKeys: connector.surveyId || alreadyLinked ? [...new Set([...(asset.connectorLocationKeys ?? []), connector.locationKey])] : asset.connectorLocationKeys,
     } as DataAssetRecord;
-    const ownership = resolveDataOwnership(linkedAsset, this.#connectors.list());
+    const ownership = resolveDataOwnership(linkedAsset, await this.#connectors.list());
     if (ownership.source === "conflict") throw new RangeError(ownership.message ?? "关联 Connector 的巡天归属不一致");
     return ownership;
   }

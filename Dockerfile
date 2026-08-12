@@ -15,11 +15,15 @@ FROM node:22.22.1-bookworm-slim AS runtime
 ENV NODE_ENV=production \
     HOST=0.0.0.0 \
     PORT=3000 \
+    ASTRO_DATA_WAREHOUSE_ENABLED=false \
+    ASTRO_METADATA_STORE=sqlite \
+    ASTRO_SQLITE_PATH=/state/workspace.sqlite \
     ASTRO_WORKSPACE_STATE=/state/registry.json \
     ASTRO_DATA_CATALOG_BOOTSTRAP=/app/bootstrap/catalogs.json \
     ASTRO_DATA_CATALOG_STATE=/state/data-catalog.json \
     ASTRO_CONNECTOR_BOOTSTRAP=/app/bootstrap/connectors.json \
     ASTRO_CONNECTOR_STATE=/state/connectors.json \
+    ASTRO_CONNECTOR_RUN_STATE=/state/connector-ingest-runs.json \
     ASTRO_RESOURCE_CATALOG_URL=file:///app/bootstrap/resource-packages/catalog.json \
     ASTRO_RESOURCE_PACKAGE_ROOT=/resource-packages \
     ASTRO_RESOURCE_PACKAGE_STATE=/state/resource-package-state.json \

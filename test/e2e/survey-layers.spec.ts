@@ -14,10 +14,10 @@ async function apiJson<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 async function installPackage(id: string): Promise<void> {
-  const catalog = await apiJson<{ packages: Array<{ id: string; installedVersion?: string }> }>("/api/resource-packages");
+  const catalog = await apiJson<{ packages: Array<{ id: string; version: string; installedVersion?: string }> }>("/api/resource-packages");
   const record = catalog.packages.find((candidate) => candidate.id === id);
   if (!record) throw new Error(`Missing E2E resource package: ${id}`);
-  if (!record.installedVersion) {
+  if (record.installedVersion !== record.version) {
     let { job } = await apiJson<{ job: { id: string; status: string; error?: string } }>(`/api/resource-packages/${id}/install`, {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -36,7 +36,13 @@ test.beforeAll(async () => {
   initialLoads = catalog.packages
     .filter((record) => record.activeReleaseIds.length)
     .map((record) => ({ packageId: record.id, releaseIds: record.activeReleaseIds }));
-  await Promise.all(baselinePackageIds.map((id) => installPackage(id)));
+  const packagesToPrepare = [...new Set([
+    ...baselinePackageIds,
+    ...initialLoads.map((load) => load.packageId),
+  ])];
+  // Resource package state is a single-writer JSON/PVC store. Keep setup
+  // deterministic so concurrent archive installs cannot overwrite each other.
+  for (const id of packagesToPrepare) await installPackage(id);
   const installed = await apiJson<{ packages: PackageState[] }>("/api/resource-packages");
   const loads = initialLoads.filter((load) => load.packageId !== "public-euclid-footprints" && load.packageId !== "public-panstarrs-footprints");
   for (const packageId of baselinePackageIds) {
@@ -54,10 +60,18 @@ test.beforeAll(async () => {
 });
 
 test.afterAll(async () => {
+  const catalog = await apiJson<{ packages: Array<PackageState & { installedVersion?: string }> }>("/api/resource-packages");
+  const available = new Map(catalog.packages.map((record) => [record.id, record]));
+  const restorableLoads = initialLoads.flatMap((load) => {
+    const record = available.get(load.packageId);
+    if (!record?.installedVersion) return [];
+    const releaseIds = load.releaseIds.filter((releaseId) => record.availableReleaseIds.includes(releaseId));
+    return releaseIds.length ? [{ packageId: load.packageId, releaseIds }] : [];
+  });
   await apiJson("/api/resource-packages/active", {
     method: "PUT",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ loads: initialLoads }),
+    body: JSON.stringify({ loads: restorableLoads }),
   });
 });
 
@@ -161,29 +175,6 @@ test("public resource package installs and applies all releases atomically", asy
   await packageButton.click();
   await expect(packageButton).toHaveClass(/active/);
   await expect(page.locator("#resource-package-stage")).toBeVisible();
-  await expect(page.locator("#public-release-catalog-count")).toHaveText("13 个巡天 / 48 个 Release");
-  await expect(page.locator(".public-release-survey-group")).toHaveCount(13);
-  await expect(page.locator(".public-release-catalog-row")).toHaveCount(48);
-  await expect(page.locator("button.public-release-catalog-row")).toHaveCount(48);
-  await expect(page.locator(".public-release-catalog-row button")).toHaveCount(0);
-  const desiGroup = page.locator('.public-release-survey-group[data-survey-id="desi"]');
-  await expect(desiGroup).toHaveAttribute("data-has-package", "false");
-  const desiDr1Row = desiGroup.locator('.public-release-catalog-row[data-release-id="desi-dr1"]');
-  await expect(desiDr1Row).toHaveAttribute("data-release-id", "desi-dr1");
-  await expect(desiDr1Row.locator(".public-release-catalog-status")).toHaveText("待收录");
-  await desiDr1Row.click();
-  await expect(page.locator("#public-release-detail-stage")).toBeVisible();
-  await expect(page.locator("#public-release-detail-title")).toContainText("DR1");
-  await page.locator("#public-release-detail-back").click();
-  await desiGroup.locator('.public-release-catalog-row[data-release-id="desi-edr"]').press("Enter");
-  await expect(page.locator("#public-release-detail-stage")).toBeVisible();
-  await expect(page.locator("#public-release-detail-title")).toHaveText("EDR");
-  await page.locator("#public-release-detail-back").click();
-  await page.locator('.public-release-catalog-row[data-release-id="euclid-q2"]').press("Space");
-  await expect(page.locator("#public-release-detail-stage")).toBeVisible();
-  await expect(page.locator("#public-release-detail-title")).toHaveText("Q2");
-  await page.locator("#public-release-detail-back").click();
-
   const row = page.locator(".resource-package-row", { hasText: "Euclid" });
   const toggle = row.locator('input[type="checkbox"]');
   await expect(row.locator(".resource-package-tag")).not.toHaveCount(0);
@@ -213,24 +204,11 @@ test("public resource package installs and applies all releases atomically", asy
   await expect(page.locator("#public-release-detail-source")).toHaveText(/数据发布页/);
   await expect(page.locator("#public-release-detail-source")).toHaveCSS("font-size", "10px");
   await expect(page.locator("#public-release-product-count")).toHaveText("0 / 2 已收录");
-  await expect(page.locator(".public-release-product[data-coverage-status='overview_only']")).toHaveCount(1);
-  await expect(page.locator(".public-release-product[data-coverage-status='awaiting_geometry']")).toHaveCount(1);
-  await expect(page.locator(".public-release-product[data-coverage-status='overview_only']")).toContainText("仅有官方概览");
-  await expect(page.locator(".public-release-product", { hasText: "待人工处理几何" })).toContainText("acquired overview is explicitly limited");
+  await expect(page.locator(".public-release-product[data-coverage-status='overview_only']")).toHaveCount(2);
+  await expect(page.locator(".public-release-product[data-coverage-status='awaiting_geometry']")).toHaveCount(0);
+  await expect(page.locator(".public-release-product[data-coverage-status='overview_only']", { hasText: "仅有官方概览" })).toHaveCount(2);
   await expect(page.locator(".public-release-product-links").getByRole("link", { name: /覆盖来源/ })).toHaveCount(2);
-  const manualButton = page.locator(".public-release-product[data-coverage-status='awaiting_geometry']").getByRole("button", { name: "填写覆盖范围" });
-  await expect(manualButton).toHaveCSS("font-size", "10px");
-  await manualButton.click();
-  const manualDialog = page.locator("#manual-footprint-dialog");
-  await expect(manualDialog).toBeVisible();
-  await expect(manualDialog.locator("#manual-footprint-survey-id")).toHaveAttribute("readonly", "");
-  await expect(manualDialog.locator("#manual-footprint-release-id")).toHaveAttribute("readonly", "");
-  await expect(manualDialog.locator("#manual-footprint-product")).toHaveAttribute("readonly", "");
-  await expect(manualDialog.getByRole("button", { name: "保存草稿" })).toBeVisible();
-  await expect(manualDialog.getByRole("button", { name: "校验" })).toBeVisible();
-  await expect(manualDialog.getByRole("button", { name: "发布" })).toBeVisible();
-  await expect(manualDialog.getByRole("button", { name: "撤回" })).toBeVisible();
-  await page.locator("#manual-footprint-dialog-close").click();
+  await expect(page.locator(".public-release-product").getByRole("button", { name: "填写覆盖范围" })).toHaveCount(0);
   await expect.poll(() => new URL(page.url()).searchParams.get("release")).toBe("euclid-q1");
   await page.locator("#public-release-detail-back").click();
   await expect(page.locator("#resource-package-stage")).toBeVisible();

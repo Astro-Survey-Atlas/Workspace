@@ -63,6 +63,11 @@ import type { PublicResourcePackage, ResourcePackageJob, ResourcePackageLoad } f
 import type { PublicReleaseDetail } from "../../src/public-release-details";
 import type { AstroCoverageResponse, AstroOverviewResponse, AstroSkyQueryInput, AstroSpatialSummary } from "../../src/astro-index";
 
+export interface WorkspaceCapabilities {
+  dataWarehouse: { enabled: boolean };
+  metadataStore: { engine: string };
+}
+
 async function getJson<T>(url: string): Promise<T> {
   const response = await fetch(url, { headers: { Accept: "application/json" } });
   if (!response.ok) {
@@ -123,6 +128,9 @@ function manualFootprintUrl(identity: Pick<ManualFootprintInput, "surveyId" | "r
 }
 
 export const workspaceApi = {
+  async capabilities(): Promise<WorkspaceCapabilities> {
+    return getJson<WorkspaceCapabilities>("/api/capabilities");
+  },
   async dataAssets(origin?: "user" | "builtin"): Promise<DataAssetRecord[]> {
     const parameters = origin ? `?${new URLSearchParams({ origin })}` : "";
     return (await getJson<{ assets: DataAssetRecord[] }>(`/api/data-assets${parameters}`)).assets;
@@ -165,6 +173,9 @@ export const workspaceApi = {
   },
   async connectorRuns(id: string): Promise<ConnectorIngestRun[]> {
     return (await getJson<{ runs: ConnectorIngestRun[] }>(`/api/connectors/${encodeURIComponent(id)}/ingest-runs`)).runs;
+  },
+  async connectorIngestRuns(): Promise<ConnectorIngestRun[]> {
+    return (await getJson<{ runs: ConnectorIngestRun[] }>('/api/connector-ingest-runs')).runs;
   },
   async submitConnectorPilotScan(id: string): Promise<ConnectorIngestRun[]> {
     return (await postJson<{ runs: ConnectorIngestRun[] }>(`/api/connectors/${encodeURIComponent(id)}/scans`, { mode: "pilot" })).runs;

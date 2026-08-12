@@ -4,6 +4,7 @@ metadata:
   name: {{ include "astro-data-workspace.fullname" . }}
   labels:
     {{- include "astro-data-workspace.labels" . | nindent 4 }}
+spec:
   replicas: {{ .Values.replicaCount }}
   strategy:
     type: Recreate
@@ -16,6 +17,7 @@ metadata:
       labels:
         {{- include "astro-data-workspace.labels" . | nindent 8 }}
     spec:
+      automountServiceAccountToken: {{ .Values.dataWarehouse.enabled }}
       {{- with .Values.imagePullSecrets }}
       imagePullSecrets: {{ toYaml . | nindent 8 }}
       {{- end }}
@@ -55,35 +57,25 @@ metadata:
               value: /state/resource-packages
             - name: ASTRO_RESOURCE_PACKAGE_STATE
               value: /state/resource-package-state.json
-            - name: ASTRO_METADATA_STORE_MODE
-              value: {{ .Values.metadataStore.mode | quote }}
-            - name: METADATA_STORE_MODE
-              value: {{ .Values.metadataStore.mode | quote }}
+            - name: ASTRO_METADATA_STORE
+              value: {{ ternary "sqlite" "postgres" (eq .Values.metadataStore.mode "sqlite") | quote }}
             {{- if eq .Values.metadataStore.mode "sqlite" }}
-            - name: ASTRO_METADATA_SQLITE_PATH
-              value: {{ .Values.metadataStore.sqlite.path | quote }}
-            - name: SQLITE_PATH
+            - name: ASTRO_SQLITE_PATH
               value: {{ .Values.metadataStore.sqlite.path | quote }}
             {{- else if eq .Values.metadataStore.mode "bundled-postgresql" }}
-            - name: ASTRO_METADATA_DATABASE_HOST
-              value: {{ printf "%s-postgresql" (include "astro-data-workspace.fullname" .) | quote }}
-            - name: ASTRO_METADATA_DATABASE_PORT
-              value: "5432"
-            - name: ASTRO_METADATA_DATABASE_NAME
-              value: {{ .Values.postgresql.auth.database | quote }}
-            - name: ASTRO_METADATA_DATABASE_USER
-              value: {{ .Values.postgresql.auth.username | quote }}
-            - name: ASTRO_METADATA_DATABASE_PASSWORD
+            - name: ASTRO_DATABASE_PASSWORD
               valueFrom:
                 secretKeyRef:
-                  name: {{ default (printf "%s-postgresql" (include "astro-data-workspace.fullname" .)) .Values.postgresql.auth.existingSecret }}
-                  key: postgres-password
+                  name: {{ default (include "astro-data-workspace.postgresqlFullname" .) .Values.postgresql.auth.existingSecret | quote }}
+                  key: {{ .Values.postgresql.auth.secretKeys.userPasswordKey | quote }}
+            - name: ASTRO_DATABASE_URL
+              value: {{ printf "postgresql://%s:$(ASTRO_DATABASE_PASSWORD)@%s:5432/%s" .Values.postgresql.auth.username (include "astro-data-workspace.postgresqlFullname" .) .Values.postgresql.auth.database | quote }}
             {{- else }}
-            - name: ASTRO_METADATA_DATABASE_URL
+            - name: ASTRO_DATABASE_URL
               valueFrom:
                 secretKeyRef:
-                  name: {{ .Values.metadataStore.external.existingSecret }}
-                  key: {{ .Values.metadataStore.external.existingSecretKey }}
+                  name: {{ .Values.metadataStore.external.existingSecret | quote }}
+                  key: {{ .Values.metadataStore.external.existingSecretKey | quote }}
             {{- end }}
             {{- if .Values.dataWarehouse.enabled }}
             - name: ASTRO_FLINK_NAMESPACE
@@ -106,10 +98,18 @@ metadata:
             httpGet:
               path: /healthz
               port: http
+            initialDelaySeconds: 2
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 6
           livenessProbe:
             httpGet:
               path: /healthz
               port: http
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 2
+            failureThreshold: 3
           resources: {{ toYaml .Values.resources | nindent 12 }}
           securityContext: {{ toYaml .Values.containerSecurityContext | nindent 12 }}
           volumeMounts:

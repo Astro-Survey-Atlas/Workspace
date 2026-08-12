@@ -14,6 +14,7 @@ const outputRoot = path.join(root, "bootstrap", "resource-packages");
 const source = JSON.parse(await readFile(path.join(root, "src", "footprints", "survey-footprints.json"), "utf8")) as SurveyFootprintManifest;
 const generatedAt = source.generatedAt;
 const catalogOnly = process.argv.includes("--catalog-only");
+const packageVersion = "2.0.1";
 
 interface PackageDefinition {
   surveyId: string;
@@ -92,7 +93,7 @@ const definitions: readonly PackageDefinition[] = [
 ];
 
 async function createArchive(definition: PackageDefinition): Promise<{ fileName: string; sizeBytes: number; sha256: string }> {
-  const version = "2.0.0";
+  const version = packageVersion;
   const id = `public-${definition.surveyId}-footprints`;
   const manifest = {
     schemaVersion: 2,
@@ -137,7 +138,7 @@ for (const definition of definitions) {
     id: `public-${definition.surveyId}-footprints`,
     releases,
     releaseLabels: Object.fromEntries(releases.map((releaseId) => [releaseId, survey?.releases.find((release) => release.id === releaseId)?.label ?? releaseId])),
-    version: "2.0.0",
+    version: packageVersion,
     archiveUrl: archive.fileName,
     sizeBytes: archive.sizeBytes,
     sha256: archive.sha256,

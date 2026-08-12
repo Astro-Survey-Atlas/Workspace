@@ -16,7 +16,7 @@ import { ConnectorRegistry, connectorLocationKey, validateConnectorInput, type C
 import { ConnectorIngestRunCatalog, type ConnectorIngestRunInput } from "./connector-history.js";
 import { DataCatalogRegistry, type DataAssetAccess, type DataAssetRecord, type DataAssetRegistrationInput } from "./data-catalog.js";
 import { ownershipKey, resolveDataOwnership, type EffectiveDataOwnership } from "./data-ownership.js";
-import { FlinkScanService, type GenericScanInput } from "./flink-ingest.js";
+import { DataWarehouseDisabledError, dataWarehouseEnabled, FlinkScanService, type GenericScanInput } from "./flink-ingest.js";
 import { ManualFootprintRegistry, ManualFootprintRevisionError } from "./manual-footprints.js";
 import { createAstroMcpServer } from "./mcp.js";
 import { ScanRunCatalog } from "./provenance.js";
@@ -31,6 +31,7 @@ import { publicVolumeManifest, VolumeCatalog } from "./volume.js";
 import { WorkflowEngine } from "./workflow-engine.js";
 import { WorkflowStore } from "./workflow-store.js";
 import { listTags } from "./tags.js";
+import { createMetadataStore, importJsonState } from "./storage/index.js";
 
 const projectRoot = fileURLToPath(new URL("../", import.meta.url));
 const port = Number(process.env.PORT ?? "3000");
@@ -71,6 +72,8 @@ const flinkSecretNamespace = process.env.ASTRO_FLINK_SECRET_NAMESPACE ?? flinkNa
 const flinkPollMs = Number(process.env.ASTRO_FLINK_POLL_MS ?? "5000");
 const astroEsUrl = process.env.ASTRO_ES_URL ?? "";
 const astroEsIndex = process.env.ASTRO_ES_ASTRO_INDEX ?? "astro_file_index_v1";
+const warehouseEnabled = dataWarehouseEnabled();
+const metadataStoreEngine = process.env.ASTRO_METADATA_STORE || "sqlite";
 
 const registry = new JsonDatasetRegistry({ statePath, allowedRoots });
 const skyIndexes = new CatalogSkyIndexService();
@@ -79,11 +82,13 @@ const atlases = new AtlasCatalog(atlasRoot);
 const scanRuns = new ScanRunCatalog(provenanceRoot);
 const workflowStore = new WorkflowStore(workflowRoot);
 const surveys = new SurveyRegistry(surveyRegistryStatePath);
-const dataCatalog = new DataCatalogRegistry(dataCatalogBootstrapPath, dataCatalogStatePath);
-const connectors = new ConnectorRegistry(connectorStatePath, connectorBootstrapPath);
+const metadataStore = createMetadataStore();
+const dataCatalog = new DataCatalogRegistry(dataCatalogBootstrapPath, metadataStore);
+const connectors = new ConnectorRegistry(metadataStore, connectorBootstrapPath);
 const connectorCredentials = createConnectorCredentialStore();
-const connectorRuns = new ConnectorIngestRunCatalog(connectorRunStatePath);
+const connectorRuns = new ConnectorIngestRunCatalog(metadataStore);
 const flinkScans = new FlinkScanService({
+  enabled: warehouseEnabled,
   connectors,
   dataCatalog,
   credentials: connectorCredentials,
@@ -98,7 +103,7 @@ const resourcePackages = new ResourcePackageManager({ catalogUrl: resourceCatalo
 let publicReleaseProductStatuses: PublicReleaseProductStatus[] = [];
 let bundledFootprintManifest: SurveyFootprintManifest;
 let manualFootprints: ManualFootprintRegistry;
-const astroIndex = new AstroIndexService();
+const astroIndex = new AstroIndexService({ baseUrl: warehouseEnabled ? astroEsUrl : "" });
 const workflowEngine = new WorkflowEngine(workflowStore, new McpCatalogQueryClient(catalogMcpUrl, catalogMcpTimeoutMs, 1));
 const agentService = new AgentService(workflowStore, workflowEngine);
 const app = createMcpExpressApp({ host, allowedHosts });
@@ -107,6 +112,10 @@ app.use("/api", express.json({ limit: "64kb" }));
 
 app.get("/healthz", (_request: Request, response: Response) => {
   response.json({ status: "ok", service: "astro-data-workspace", version: "0.10.38" });
+});
+
+app.get("/api/capabilities", (_request: Request, response: Response) => {
+  response.json({ dataWarehouse: { enabled: warehouseEnabled }, metadataStore: { engine: metadataStoreEngine } });
 });
 
 function publicDataset(record: DatasetRecord) {
@@ -170,7 +179,7 @@ function validateConnectorSurveyBinding(input: ConnectorRegistrationInput): void
   }
 }
 
-function validateAssetConnectorOwnership(input: DataAssetRegistrationInput): EffectiveDataOwnership {
+async function validateAssetConnectorOwnership(input: DataAssetRegistrationInput): Promise<EffectiveDataOwnership> {
   const access = input.accesses?.[0] ?? {
     connector: input.connector ?? "metadata",
     uri: input.sourceUri ?? "asset://validation",
@@ -191,18 +200,18 @@ function validateAssetConnectorOwnership(input: DataAssetRegistrationInput): Eff
     origin: "user",
     createdAt: "",
     updatedAt: "",
-  } as DataAssetRecord, connectors.list());
+  } as DataAssetRecord, await connectors.list());
   if (ownership.source === "conflict") throw new RangeError(ownership.message ?? "关联 Connector 的巡天归属不一致");
   return ownership;
 }
 
-function publicDataAsset(asset: DataAssetRecord): DataAssetRecord {
-  const connectorRecords = connectors.list();
+async function publicDataAsset(asset: DataAssetRecord): Promise<DataAssetRecord> {
+  const connectorRecords = await connectors.list();
   const ownership = resolveDataOwnership(asset, connectorRecords);
   const resolvedRecords = [
     ...(asset.connectorLocationKeys ?? []).flatMap((key) => connectorRecords.filter((record) => record.locationKey === key)),
     ...(asset.connectorIds ?? []).flatMap((id) => {
-      try { return [connectors.get(id)]; } catch { return []; }
+      return connectorRecords.filter((record) => record.id === id);
     }),
   ];
   const uniqueRecords = [...new Map(resolvedRecords.map((record) => [record.locationKey, record])).values()];
@@ -220,12 +229,13 @@ function publicDataAsset(asset: DataAssetRecord): DataAssetRecord {
   return { ...effective, connectorIds: uniqueRecords.map((record) => record.id), connectorLocationKeys: uniqueRecords.map((record) => record.locationKey), access: accesses[0]!, accesses };
 }
 
-function validateConnectorIds(input: DataAssetRegistrationInput): void {
+async function validateConnectorIds(input: DataAssetRegistrationInput): Promise<void> {
+  const records = await connectors.list();
   for (const id of input.connectorIds ?? []) {
-    try { connectors.get(id); } catch { throw new RangeError(`connectorIds contains unknown connector: ${id}`); }
+    if (!records.some((record) => record.id === id)) throw new RangeError(`connectorIds contains unknown connector: ${id}`);
   }
   for (const key of input.connectorLocationKeys ?? []) {
-    if (!connectors.list().some((record) => record.locationKey === key)) throw new RangeError(`connectorLocationKeys contains unknown path: ${key}`);
+    if (!records.some((record) => record.locationKey === key)) throw new RangeError(`connectorLocationKeys contains unknown path: ${key}`);
   }
 }
 
@@ -234,7 +244,7 @@ function sendApiError(response: Response, error: unknown): void {
   const notFound = message.startsWith("Dataset not found:") || message.startsWith("Data asset not found:") || message.startsWith("Connector not found:") || message.startsWith("Connector ingest run not found:") || message.startsWith("Volume not found:") || message.startsWith("Atlas not found:") || message.startsWith("Survey not found:") || message.startsWith("Resource package not found:") || message.startsWith("Resource package is not installed:") || message.startsWith("Resource package job not found:")
     || message.startsWith("Scan run not found:") || message.startsWith("Lineage not found:") || message.startsWith("Workflow not found:")
     || message.startsWith("Workflow run not found:") || message.startsWith("Workflow artifact not found:") || message.startsWith("Agent session not found:");
-  const status = error instanceof ManualFootprintRevisionError ? 412 : error instanceof RangeError ? 400 : notFound || message.startsWith("Manual footprint not found:") ? 404 : 500;
+  const status = error instanceof DataWarehouseDisabledError ? 503 : error instanceof ManualFootprintRevisionError ? 412 : error instanceof RangeError ? 400 : notFound || message.startsWith("Manual footprint not found:") ? 404 : 500;
   if (status === 500) console.error("API request failed", error);
   response.status(status).json({ error: message });
 }
@@ -311,13 +321,14 @@ app.get("/api/datasets", async (_request: Request, response: Response) => {
   }
 });
 
-app.get("/api/data-assets", (request: Request, response: Response) => {
+app.get("/api/data-assets", async (request: Request, response: Response) => {
   try {
     const origin = request.query.origin;
     if (origin !== undefined && origin !== "user" && origin !== "builtin") {
       throw new RangeError("origin must be user or builtin");
     }
-    response.json({ assets: dataCatalog.list().filter((asset) => origin === undefined || asset.origin === origin).map(publicDataAsset) });
+    const assets = (await dataCatalog.list()).filter((asset) => origin === undefined || asset.origin === origin);
+    response.json({ assets: await Promise.all(assets.map(publicDataAsset)) });
   } catch (error) {
     sendApiError(response, error);
   }
@@ -327,9 +338,9 @@ app.get("/api/tags", (_request: Request, response: Response) => {
   response.json({ tags: listTags() });
 });
 
-app.get("/api/data-assets/:id", (request: Request, response: Response) => {
+app.get("/api/data-assets/:id", async (request: Request, response: Response) => {
   try {
-    response.json({ asset: publicDataAsset(dataCatalog.get(datasetIdFrom(request))) });
+    response.json({ asset: await publicDataAsset(await dataCatalog.get(datasetIdFrom(request))) });
   } catch (error) {
     sendApiError(response, error);
   }
@@ -338,9 +349,9 @@ app.get("/api/data-assets/:id", (request: Request, response: Response) => {
 app.post("/api/data-assets", async (request: Request, response: Response) => {
   try {
     const input = request.body as DataAssetRegistrationInput;
-    validateConnectorIds(input);
-    validateAssetConnectorOwnership(input);
-    response.status(201).json({ asset: publicDataAsset(await dataCatalog.register(input)) });
+    await validateConnectorIds(input);
+    await validateAssetConnectorOwnership(input);
+    response.status(201).json({ asset: await publicDataAsset(await dataCatalog.register(input)) });
   } catch (error) {
     sendApiError(response, error);
   }
@@ -350,16 +361,16 @@ app.put("/api/data-assets/:id", async (request: Request, response: Response) => 
   try {
     const id = datasetIdFrom(request);
     const input = request.body as DataAssetRegistrationInput;
-    validateConnectorIds(input);
-    const current = dataCatalog.get(id);
-    validateAssetConnectorOwnership({
+    await validateConnectorIds(input);
+    const current = await dataCatalog.get(id);
+    await validateAssetConnectorOwnership({
       ...current,
       ...input,
       connectorIds: input.connectorIds ?? current.connectorIds,
       connectorLocationKeys: input.connectorLocationKeys ?? current.connectorLocationKeys,
       accesses: input.accesses ?? current.accesses,
     });
-    response.json({ asset: publicDataAsset(await dataCatalog.update(id, input)) });
+    response.json({ asset: await publicDataAsset(await dataCatalog.update(id, input)) });
   } catch (error) {
     sendApiError(response, error);
   }
@@ -375,12 +386,17 @@ app.delete("/api/data-assets/:id", async (request: Request, response: Response) 
 });
 
 app.get("/api/connectors", async (_request: Request, response: Response) => {
-  response.json({ connectors: await Promise.all(connectors.list().map(publicConnector)) });
+  response.json({ connectors: await Promise.all((await connectors.list()).map(publicConnector)) });
+});
+
+app.get("/api/connector-ingest-runs", async (_request: Request, response: Response) => {
+  if (warehouseEnabled) void flinkScans.poll();
+  response.json({ runs: await connectorRuns.list() });
 });
 
 app.get("/api/connectors/:id", async (request: Request, response: Response) => {
   try {
-    response.json({ connector: await publicConnector(connectors.get(datasetIdFrom(request))) });
+    response.json({ connector: await publicConnector(await connectors.get(datasetIdFrom(request))) });
   } catch (error) {
     sendApiError(response, error);
   }
@@ -388,9 +404,9 @@ app.get("/api/connectors/:id", async (request: Request, response: Response) => {
 
 app.get("/api/connectors/:id/ingest-runs", async (request: Request, response: Response) => {
   try {
-    const connector = connectors.get(datasetIdFrom(request));
-    void flinkScans.poll();
-    response.json({ runs: connectorRuns.list(connector.locationKey) });
+    const connector = await connectors.get(datasetIdFrom(request));
+    if (warehouseEnabled) void flinkScans.poll();
+    response.json({ runs: await connectorRuns.list(connector.locationKey) });
   } catch (error) {
     sendApiError(response, error);
   }
@@ -399,9 +415,9 @@ app.get("/api/connectors/:id/ingest-runs", async (request: Request, response: Re
 // Alias kept for integrations that call these records scan runs.
 app.get("/api/connectors/:id/runs", async (request: Request, response: Response) => {
   try {
-    const connector = connectors.get(datasetIdFrom(request));
-    void flinkScans.poll();
-    response.json({ runs: connectorRuns.list(connector.locationKey) });
+    const connector = await connectors.get(datasetIdFrom(request));
+    if (warehouseEnabled) void flinkScans.poll();
+    response.json({ runs: await connectorRuns.list(connector.locationKey) });
   } catch (error) {
     sendApiError(response, error);
   }
@@ -410,7 +426,7 @@ app.get("/api/connectors/:id/runs", async (request: Request, response: Response)
 app.post("/api/connectors/:id/check", async (request: Request, response: Response) => {
   try {
     const id = datasetIdFrom(request);
-    const current = connectors.get(id);
+    const current = await connectors.get(id);
     const credentials = current.credentialRef ? await connectorCredentials.get(current.credentialRef) : undefined;
     const connector = await connectors.check(id, credentials, current.kind === "s3");
     response.json({ connector: await publicConnector(connector), check: connector.lastCheck });
@@ -431,7 +447,7 @@ app.post("/api/connectors/check", async (request: Request, response: Response) =
 
 app.post("/api/connectors/:id/ingest-runs", async (request: Request, response: Response) => {
   try {
-    const connector = connectors.get(datasetIdFrom(request));
+    const connector = await connectors.get(datasetIdFrom(request));
     response.status(201).json({ run: await connectorRuns.add(connector.locationKey, request.body as ConnectorIngestRunInput) });
   } catch (error) {
     sendApiError(response, error);
@@ -440,6 +456,7 @@ app.post("/api/connectors/:id/ingest-runs", async (request: Request, response: R
 
 app.post("/api/connectors/:id/scans", async (request: Request, response: Response) => {
   try {
+    if (!warehouseEnabled) throw new DataWarehouseDisabledError();
     const mode = typeof request.body?.mode === "string" ? request.body.mode : "pilot";
     if (mode === "pilot") {
       response.status(202).json({ runs: await flinkScans.submitPilot(datasetIdFrom(request)) });
@@ -456,7 +473,7 @@ app.post("/api/connectors/:id/scans", async (request: Request, response: Respons
 
 app.delete("/api/connectors/:id/ingest-runs/:runId", async (request: Request, response: Response) => {
   try {
-    const connector = connectors.get(datasetIdFrom(request));
+    const connector = await connectors.get(datasetIdFrom(request));
     const runId = Array.isArray(request.params.runId) ? request.params.runId[0] : request.params.runId;
     if (!runId) throw new RangeError("run id is required");
     await connectorRuns.remove(connector.locationKey, runId);
@@ -471,7 +488,7 @@ app.post("/api/connectors", async (request: Request, response: Response) => {
     const input = request.body as ConnectorRegistrationInput;
     const value = validateConnectorInput(input);
     validateConnectorSurveyBinding(value);
-    const existing = connectors.list().find((record) => record.locationKey === connectorLocationKey(value.kind, value.config));
+    const existing = (await connectors.list()).find((record) => record.locationKey === connectorLocationKey(value.kind, value.config));
     const credentials = value.kind === "s3" ? resolvedS3Credentials(input) : undefined;
     const connector = await connectors.register(internalConnectorInput(value, existing?.credentialRef));
     if (credentials) {
@@ -496,7 +513,7 @@ app.put("/api/connectors/:id", async (request: Request, response: Response) => {
   try {
     const id = datasetIdFrom(request);
     const input = request.body as ConnectorRegistrationInput;
-    const current = connectors.get(id);
+    const current = await connectors.get(id);
     const value = validateConnectorInput(input);
     validateConnectorSurveyBinding(value);
     let credentialRef = current.credentialRef;
@@ -519,7 +536,7 @@ app.put("/api/connectors/:id", async (request: Request, response: Response) => {
 app.delete("/api/connectors/:id", async (request: Request, response: Response) => {
   try {
     const id = datasetIdFrom(request);
-    const current = connectors.get(id);
+    const current = await connectors.get(id);
     await connectors.remove(id);
     if (current.credentialRef) connectorCredentials.remove(current.credentialRef).catch((error) => console.error("Unable to remove managed connector credentials", error));
     response.status(204).end();
@@ -788,8 +805,8 @@ app.get("/api/sky/coverage", async (request: Request, response: Response) => {
       }>();
       for (const assetId of [...new Set(assetIds)]) {
         let asset: DataAssetRecord;
-        try { asset = dataCatalog.get(assetId); } catch { continue; }
-        const ownership = resolveDataOwnership(asset, connectors.list());
+        try { asset = await dataCatalog.get(assetId); } catch { continue; }
+        const ownership = resolveDataOwnership(asset, await connectors.list());
         if (survey && ownership.surveyId !== survey) continue;
         if (release && ownership.releaseId !== release) continue;
         const key = ownership.source === "conflict" ? `__conflict__:${asset.id}` : ownershipKey(ownership);
@@ -1202,6 +1219,8 @@ app.use(express.static(viewerRoot, { extensions: ["html"], index: "index.html" }
 let httpServer: ReturnType<typeof app.listen> | undefined;
 
 async function start(): Promise<void> {
+  await metadataStore.initialize();
+  await importJsonState(metadataStore, { connectorStatePath, dataCatalogStatePath, connectorRunStatePath });
   await workflowStore.initialize();
   await surveys.initialize();
   await dataCatalog.initialize();
@@ -1233,19 +1252,18 @@ async function start(): Promise<void> {
   });
 }
 
-void start().catch((error) => {
+void start().catch(async (error) => {
   console.error("Failed to start astro-data-workspace", error);
+  await metadataStore.close().catch(() => undefined);
   process.exit(1);
 });
 
-function shutdown(): void {
+async function shutdown(): Promise<void> {
   flinkScans.stop();
-  if (!httpServer) {
-    process.exit(0);
-    return;
-  }
-  httpServer.close(() => process.exit(0));
+  if (httpServer) await new Promise<void>((resolve) => httpServer!.close(() => resolve()));
+  await metadataStore.close();
+  process.exit(0);
 }
 
-process.on("SIGINT", shutdown);
-process.on("SIGTERM", shutdown);
+process.on("SIGINT", () => { void shutdown(); });
+process.on("SIGTERM", () => { void shutdown(); });

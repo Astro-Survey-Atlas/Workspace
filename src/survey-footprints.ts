@@ -31,13 +31,23 @@ export interface SurveyFootprintManifest {
 function assertManifest(value: unknown): asserts value is SurveyFootprintManifest {
   if (!value || typeof value !== "object") throw new Error("Survey footprint manifest must be an object");
   const manifest = value as Partial<SurveyFootprintManifest>;
-  if (manifest.schemaVersion !== SURVEY_FOOTPRINT_SCHEMA_VERSION || manifest.coordinateFrame !== "ICRS" || !Number.isInteger(manifest.nside) || !Array.isArray(manifest.footprints)) {
+  if (manifest.schemaVersion !== SURVEY_FOOTPRINT_SCHEMA_VERSION || manifest.coordinateFrame !== "ICRS" || !Number.isInteger(manifest.nside) || manifest.nside! <= 0 || (manifest.nside! & (manifest.nside! - 1)) !== 0 || !Number.isFinite(Date.parse(manifest.generatedAt ?? "")) || !Array.isArray(manifest.footprints)) {
     throw new Error("Survey footprint manifest has an unsupported schema");
   }
+  const identities = new Set<string>();
   for (const footprint of manifest.footprints) {
-    if (!footprint || typeof footprint.surveyId !== "string" || typeof footprint.releaseId !== "string" || typeof footprint.product !== "string" || !Array.isArray(footprint.pixels) || footprint.nside !== manifest.nside) {
+    if (!footprint || !footprint.surveyId?.trim() || !footprint.releaseId?.trim() || !footprint.product?.trim() || !footprint.label?.trim() || !footprint.notes?.trim() || !Array.isArray(footprint.pixels) || footprint.nside !== manifest.nside || !["moc", "official_overview"].includes(footprint.quality) || !Number.isFinite(Date.parse(footprint.retrievedAt))) {
       throw new Error("Survey footprint manifest contains an invalid footprint");
     }
+    try {
+      const sourceUrl = new URL(footprint.sourceUrl);
+      if (sourceUrl.protocol !== "https:") throw new Error();
+    } catch {
+      throw new Error(`Survey footprint contains an invalid source URL: ${footprint.surveyId}`);
+    }
+    const identity = `${footprint.surveyId}:${footprint.releaseId}:${footprint.product}`;
+    if (identities.has(identity)) throw new Error(`Survey footprint manifest contains a duplicate identity: ${identity}`);
+    identities.add(identity);
     if (footprint.pixels.some((pixel) => !Number.isInteger(pixel) || pixel < 0 || pixel >= 12 * manifest.nside! ** 2)) {
       throw new Error(`Survey footprint contains an invalid HEALPix cell: ${footprint.surveyId}`);
     }

@@ -11,10 +11,13 @@ Example entry:
   "product": "Example product",
   "label": "Example release product coverage",
   "sourceUrl": "https://official.example/release",
-  "method": "Converted official tile polygons to NESTED HEALPix NSIDE 16.",
-  "calculatedAt": "2026-08-12T00:00:00.000Z",
-  "pixels": [1, 2, 3]
+   "method": "Converted official tile polygons to NESTED HEALPix NSIDE 16.",
+   "calculatedAt": "2026-08-12T00:00:00.000Z",
+   "ordering": "NESTED",
+   "pixels": [1, 2, 3]
 }
 ```
 
 Run `npm run artifacts:footprints` to validate submissions. Validation does not publish or load a manual footprint automatically; reviewed geometry must still be promoted into the canonical manifest and rebuilt resource package.
+
+Do not submit geometry inferred from area summaries, field counts, illustrations, or another release/product. Keep the high-resolution official source separately and describe all coordinate conversion, polygon union, masking, and rasterization decisions in `method`.

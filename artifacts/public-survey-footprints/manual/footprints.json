@@ -1,6 +1,7 @@
 {
   "schemaVersion": 1,
   "coordinateFrame": "ICRS",
+  "ordering": "NESTED",
   "nside": 16,
   "footprints": []
 }

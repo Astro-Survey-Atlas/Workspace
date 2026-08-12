@@ -39,13 +39,10 @@ persistence:
 metadataStore:
   mode: sqlite
   sqlite:
-    path: /state/metadata.sqlite
+    path: /state/workspace.sqlite
   external:
     existingSecret: ""
     existingSecretKey: database-url
-  database:
-    name: astro
-    username: astro
 
 dataWarehouse:
   enabled: false
@@ -66,15 +63,21 @@ resources:
 
 postgresql:
   enabled: false
+  nameOverride: ""
+  fullnameOverride: ""
   architecture: standalone
   auth:
     database: astro
     username: astro
     existingSecret: ""
+    secretKeys:
+      userPasswordKey: password
 
 podSecurityContext:
   fsGroup: 10001
   fsGroupChangePolicy: OnRootMismatch
+  seccompProfile:
+    type: RuntimeDefault
 containerSecurityContext:
   allowPrivilegeEscalation: false
   capabilities:
@@ -82,3 +85,5 @@ containerSecurityContext:
   readOnlyRootFilesystem: true
   runAsNonRoot: true
   runAsUser: 10001
+  seccompProfile:
+    type: RuntimeDefault

@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
-import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
-import path from "node:path";
+import { readFile } from "node:fs/promises";
+
+import type { MetadataStore } from "./storage/types.js";
 
 export type DataAssetKind = "catalog" | "image" | "spectra" | "cube" | "timeseries" | "other";
 export type DataConnectorKind = "metadata" | "local" | "http" | "mcp" | "tap" | "s3" | "database" | "jdbc";
@@ -244,7 +245,7 @@ function validateInput(input: DataAssetRegistrationInput): DataAssetRegistration
   };
 }
 
-function normalizeRecord(entry: DataAssetRecord, origin: DataAssetOrigin): DataAssetRecord {
+export function normalizeDataAssetRecord(entry: DataAssetRecord, origin: DataAssetOrigin): DataAssetRecord {
   const accesses = entry.accesses?.length ? entry.accesses : [entry.access];
   const access = accesses[0] ?? entry.access;
   const inferredStates = inferProjectStates({ status: entry.status, access, accesses });
@@ -267,48 +268,51 @@ function normalizeRecord(entry: DataAssetRecord, origin: DataAssetOrigin): DataA
   };
 }
 
+export function normalizePersistedDataAsset(entry: unknown): DataAssetRecord | undefined {
+  if (!entry || typeof entry !== "object") throw new Error("data catalog state contains an invalid record");
+  const record = entry as DataAssetRecord;
+  if (record.origin === "builtin") return undefined;
+  if (record.origin !== "user" && record.origin !== "override") throw new Error("data catalog state contains an invalid origin");
+  if (typeof record.id !== "string" || !record.id || typeof record.createdAt !== "string" || typeof record.updatedAt !== "string") {
+    throw new Error("data catalog state contains an invalid record");
+  }
+  validateInput({
+    ...record,
+    connector: record.access?.connector,
+    sourceUri: record.access?.uri,
+    format: record.access?.format,
+  });
+  return normalizeDataAssetRecord(record, record.origin);
+}
+
 export class DataCatalogRegistry {
   readonly #bootstrapPath: string;
-  readonly #statePath: string;
+  readonly #store: MetadataStore;
   #builtin: DataAssetRecord[] = [];
-  #user: DataAssetRecord[] = [];
-  #overrides: DataAssetRecord[] = [];
 
-  constructor(bootstrapPath: string, statePath: string) {
+  constructor(bootstrapPath: string, store: MetadataStore) {
     this.#bootstrapPath = bootstrapPath;
-    this.#statePath = statePath;
+    this.#store = store;
   }
 
   async initialize(): Promise<void> {
     const builtin = JSON.parse(await readFile(this.#bootstrapPath, "utf8")) as unknown;
     if (!Array.isArray(builtin)) throw new Error("data catalog bootstrap must be an array");
-    this.#builtin = builtin.map((entry) => normalizeRecord(entry as DataAssetRecord, "builtin"));
-    try {
-      const persisted = JSON.parse(await readFile(this.#statePath, "utf8")) as unknown;
-      if (!Array.isArray(persisted)) throw new Error("data catalog state must be an array");
-      this.#user = persisted
-        .filter((entry): entry is DataAssetRecord => Boolean(entry) && typeof entry === "object" && (entry as DataAssetRecord).origin === "user")
-        .map((entry) => normalizeRecord(entry, "user"));
-      this.#overrides = persisted
-        .filter((entry): entry is DataAssetRecord => Boolean(entry) && typeof entry === "object" && (entry as DataAssetRecord).origin === "override")
-        .map((entry) => normalizeRecord(entry, "override"));
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-      await this.#persist();
-    }
+    this.#builtin = builtin.map((entry) => normalizeDataAssetRecord(entry as DataAssetRecord, "builtin"));
   }
 
-  list(): DataAssetRecord[] {
-    const overrides = new Map(this.#overrides.map((entry) => [entry.id, entry]));
+  async list(): Promise<DataAssetRecord[]> {
+    const persisted = await this.#store.listDataAssets();
+    const overrides = new Map(persisted.filter((entry) => entry.origin === "override").map((entry) => [entry.id, entry]));
     const builtin = this.#builtin.map((entry) => {
       const override = overrides.get(entry.id);
       return override ? { ...entry, ...override, origin: "builtin" as const } : entry;
     });
-    return [...builtin, ...this.#user].map((entry) => structuredClone(entry));
+    return [...builtin, ...persisted.filter((entry) => entry.origin === "user")].map((entry) => structuredClone(entry));
   }
 
-  get(id: string): DataAssetRecord {
-    const record = this.list().find((entry) => entry.id === id);
+  async get(id: string): Promise<DataAssetRecord> {
+    const record = (await this.list()).find((entry) => entry.id === id);
     if (!record) throw new Error(`Data asset not found: ${id}`);
     return structuredClone(record);
   }
@@ -348,17 +352,16 @@ export class DataCatalogRegistry {
       createdAt: now,
       updatedAt: now,
     };
-    this.#user.push(record);
-    await this.#persist();
+    await this.#store.putDataAsset(record);
     return structuredClone(record);
   }
 
   async update(id: string, input: DataAssetRegistrationInput): Promise<DataAssetRecord> {
-    const index = this.#user.findIndex((entry) => entry.id === id);
     const value = validateInput(input);
     const builtin = this.#builtin.find((entry) => entry.id === id);
-    if (index < 0 && !builtin) throw new Error(`Data asset not found: ${id}`);
-    const current = index >= 0 ? this.#user[index]! : this.get(id);
+    const persisted = await this.#store.getDataAsset(id);
+    if (!persisted && !builtin) throw new Error(`Data asset not found: ${id}`);
+    const current = persisted?.origin === "user" ? persisted : await this.get(id);
     const updated: DataAssetRecord = {
       ...current,
       name: value.name,
@@ -381,31 +384,16 @@ export class DataCatalogRegistry {
       footprintIds: value.footprintIds ?? [],
       updatedAt: new Date().toISOString(),
     };
-    if (index >= 0) this.#user[index] = { ...updated, origin: "user" };
-    else {
-      const override = { ...updated, origin: "override" as const };
-      const overrideIndex = this.#overrides.findIndex((entry) => entry.id === id);
-      if (overrideIndex >= 0) this.#overrides[overrideIndex] = override;
-      else this.#overrides.push(override);
-    }
-    await this.#persist();
-    return structuredClone(index >= 0 ? updated : { ...updated, origin: "builtin" as const });
+    await this.#store.putDataAsset({ ...updated, origin: persisted?.origin === "user" ? "user" : "override" });
+    return structuredClone(persisted?.origin === "user" ? updated : { ...updated, origin: "builtin" as const });
   }
 
   async remove(id: string): Promise<void> {
-    const index = this.#user.findIndex((entry) => entry.id === id);
-    if (index < 0) {
+    const record = await this.#store.getDataAsset(id);
+    if (!record || record.origin !== "user") {
       if (this.#builtin.some((entry) => entry.id === id)) throw new RangeError("built-in data assets are read-only");
       throw new Error(`Data asset not found: ${id}`);
     }
-    this.#user.splice(index, 1);
-    await this.#persist();
-  }
-
-  async #persist(): Promise<void> {
-    await mkdir(path.dirname(this.#statePath), { recursive: true });
-    const temporaryPath = `${this.#statePath}.${process.pid}.tmp`;
-    await writeFile(temporaryPath, JSON.stringify([...this.#user, ...this.#overrides], null, 2), "utf8");
-    await rename(temporaryPath, this.#statePath);
+    await this.#store.deleteDataAsset(id);
   }
 }

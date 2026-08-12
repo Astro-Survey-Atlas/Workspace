@@ -30,7 +30,7 @@ export interface PublicReleaseProductStatus {
   surveyId: string;
   releaseId: string;
   product: string;
-  status: "acquired" | "unavailable";
+  status: PublicCoverageStatus;
   sourceUrl: string;
   reason?: string;
 }
@@ -67,7 +67,11 @@ export function buildPublicReleaseDetails(
         const footprint = footprints.get(key);
         return {
           ...product,
-          coverageStatus: footprint?.quality === "moc" ? "acquired" : footprint ? "overview_only" : source?.status === "acquired" ? "overview_only" : "awaiting_geometry",
+          coverageStatus: footprint?.quality === "moc"
+            ? "acquired"
+            : footprint?.quality === "official_overview"
+              ? "overview_only"
+              : source?.status ?? "awaiting_geometry",
           sourceUrl: source?.sourceUrl ?? release.coverage.sourceUrl,
           reason: source?.reason,
           ...(footprint ? { artifactKey: key } : {}),

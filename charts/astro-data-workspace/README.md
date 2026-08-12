@@ -21,9 +21,18 @@ helm install workspace ./charts/astro-data-workspace \
   --set metadataStore.external.existingSecret=workspace-database
 ```
 
-The external Secret must contain the URL under `database-url` by default. Set
-`metadataStore.external.existingSecretKey` to use another key. The bundled
-PostgreSQL dependency is installed only when `postgresql.enabled=true`.
+The external Secret must contain a complete PostgreSQL URL under `database-url`
+by default. Set `metadataStore.external.existingSecretKey` to use another key.
+The bundled PostgreSQL dependency is installed only when
+`postgresql.enabled=true`; its generated application-user password is read from
+the dependency Secret and is not stored in chart values.
+When supplying `postgresql.auth.existingSecret`, its application-user password
+key must match `postgresql.auth.secretKeys.userPasswordKey` (`password` by
+default).
+
+The dependency archive and `Chart.lock` are vendored for reproducible source
+installs. Run `helm dependency build charts/astro-data-workspace` when updating
+or verifying the dependency.
 
 ## Warehouse integration
 

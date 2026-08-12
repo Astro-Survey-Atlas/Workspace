@@ -5,6 +5,7 @@ metadata:
   name: {{ include "astro-data-workspace.fullname" . }}-state
   labels:
     {{- include "astro-data-workspace.labels" . | nindent 4 }}
+spec:
   accessModes: {{ toYaml .Values.persistence.accessModes | nindent 4 }}
   resources:
     requests:

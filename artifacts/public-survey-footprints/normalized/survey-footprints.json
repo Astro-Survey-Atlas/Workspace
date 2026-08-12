@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "generatedAt": "2026-08-11T09:34:29.746Z",
+  "generatedAt": "2026-08-12T08:47:34.577Z",
   "coordinateFrame": "ICRS",
   "nside": 16,
   "footprints": [
@@ -33,7 +33,7 @@
       ],
       "quality": "official_overview",
       "sourceUrl": "https://www.euclid-ec.org/science/q1/",
-      "retrievedAt": "2026-08-11T09:34:29.746Z",
+      "retrievedAt": "2026-08-12T08:47:34.577Z",
       "notes": "Official Q1 field centers and areas rasterized to NSIDE 16. This overview is not a replacement for the Q1 DS9 field polygons."
     },
     {
@@ -3044,7 +3044,7 @@
       "quality": "moc",
       "sourceUrl": "https://alasky.cds.unistra.fr/MocServer/query?ID=CDS%2FP%2FGALEXGR6_7%2Fcolor&get=smoc&order=4&fmt=json",
       "sourceId": "CDS/P/GALEXGR6_7/color",
-      "retrievedAt": "2026-08-11T09:34:29.746Z",
+      "retrievedAt": "2026-08-12T08:47:34.577Z",
       "notes": "CDS HiPS MOC rasterized to NSIDE 16 for an overview. Coverage depth and band availability vary by pointing."
     },
     {
@@ -5305,7 +5305,7 @@
       "quality": "moc",
       "sourceUrl": "https://alasky.cds.unistra.fr/MocServer/query?ID=CDS%2FP%2FDESI-Legacy-Surveys%2FDR10%2Fcolor&get=smoc&order=4&fmt=json",
       "sourceId": "CDS/P/DESI-Legacy-Surveys/DR10/color",
-      "retrievedAt": "2026-08-11T09:34:29.746Z",
+      "retrievedAt": "2026-08-12T08:47:34.577Z",
       "notes": "CDS HiPS MOC for Legacy Surveys DR10 color imaging, rasterized to NSIDE 16. This is imaging coverage, not DESI spectroscopy."
     },
     {
@@ -6947,7 +6947,7 @@
       "quality": "moc",
       "sourceUrl": "https://alasky.cds.unistra.fr/MocServer/query?ID=CDS%2FP%2FSDSS9%2Fcolor&get=smoc&order=4&fmt=json",
       "sourceId": "CDS/P/SDSS9/color",
-      "retrievedAt": "2026-08-11T09:34:29.746Z",
+      "retrievedAt": "2026-08-12T08:47:34.577Z",
       "notes": "CDS MOC for SDSS DR9 imaging. Later SDSS releases and non-imaging products require their own product footprints."
     },
     {
@@ -7088,7 +7088,7 @@
       "quality": "moc",
       "sourceUrl": "https://alasky.cds.unistra.fr/MocServer/query?ID=CDS%2FP%2FHSC%2FDR2%2Fwide%2Fcolor-i-r-g%2CCDS%2FP%2FHSC%2FDR2%2Fdeep%2Fcolor-i-r-g&get=smoc&order=4&fmt=json",
       "sourceId": "CDS/P/HSC/DR2/wide/color-i-r-g,CDS/P/HSC/DR2/deep/color-i-r-g",
-      "retrievedAt": "2026-08-11T09:34:29.746Z",
+      "retrievedAt": "2026-08-12T08:47:34.577Z",
       "notes": "Union of CDS PDR2 Wide and Deep image MOCs, rasterized to NSIDE 16. PDR3 is registered separately and remains pending an artifact."
     },
     {
@@ -10019,7 +10019,7 @@
       "quality": "moc",
       "sourceUrl": "https://alasky.cds.unistra.fr/MocServer/query?ID=*P%2FHST%2F*&get=smoc&order=4&fmt=json",
       "sourceId": "*P/HST/*",
-      "retrievedAt": "2026-08-11T09:34:29.746Z",
+      "retrievedAt": "2026-08-12T08:47:34.577Z",
       "notes": "Aggregate CDS MOC for published HST HiPS products. It is a discovery overview, not a claim that every MAST product exists at every highlighted cell."
     },
     {
@@ -12433,7 +12433,7 @@
       "quality": "moc",
       "sourceUrl": "https://alasky.cds.unistra.fr/MocServer/query?ID=CDS%2FP%2FPanSTARRS%2FDR1%2Fcolor-i-r-g&get=smoc&order=4&fmt=json",
       "sourceId": "CDS/P/PanSTARRS/DR1/color-i-r-g",
-      "retrievedAt": "2026-08-11T09:34:29.746Z",
+      "retrievedAt": "2026-08-12T08:47:34.577Z",
       "notes": "CDS HiPS MOC for Pan-STARRS1 DR1 stacked color imaging. It does not represent DR2 catalogs or single-epoch warp coverage."
     },
     {
@@ -12925,7 +12925,7 @@
       "quality": "moc",
       "sourceUrl": "https://alasky.cds.unistra.fr/MocServer/query?ID=CDS%2FP%2FDES-DR2%2FColorIRG&get=smoc&order=4&fmt=json",
       "sourceId": "CDS/P/DES-DR2/ColorIRG",
-      "retrievedAt": "2026-08-11T09:34:29.746Z",
+      "retrievedAt": "2026-08-12T08:47:34.577Z",
       "notes": "CDS HiPS MOC for the DES DR2 color imaging product. Masks, single epochs and supernova products have different validity regions."
     },
     {
@@ -16011,7 +16011,7 @@
       "quality": "moc",
       "sourceUrl": "https://alasky.cds.unistra.fr/MocServer/query?ID=CDS%2FP%2F2MASS%2FJ&get=smoc&order=4&fmt=json",
       "sourceId": "CDS/P/2MASS/J",
-      "retrievedAt": "2026-08-11T09:34:29.746Z",
+      "retrievedAt": "2026-08-12T08:47:34.577Z",
       "notes": "CDS/IRSA HiPS MOC for the 2MASS All-Sky J-band image product. Special mosaics and 6x observations are separate products."
     },
     {
@@ -19097,7 +19097,7 @@
       "quality": "moc",
       "sourceUrl": "https://alasky.cds.unistra.fr/MocServer/query?ID=CDS%2FP%2FallWISE%2FW1&get=smoc&order=4&fmt=json",
       "sourceId": "CDS/P/allWISE/W1",
-      "retrievedAt": "2026-08-11T09:34:29.746Z",
+      "retrievedAt": "2026-08-12T08:47:34.577Z",
       "notes": "CDS/IRSA HiPS MOC for AllWISE W1 imaging. It is spatial coverage only and does not encode NEOWISE cadence or temporal completeness."
     },
     {
@@ -19279,7 +19279,7 @@
       "quality": "moc",
       "sourceUrl": "https://alasky.cds.unistra.fr/MocServer/query?ID=CDS%2FP%2FKiDS%2FDR5%2Fcolor-gri&get=smoc&order=4&fmt=json",
       "sourceId": "CDS/P/KiDS/DR5/color-gri",
-      "retrievedAt": "2026-08-11T09:34:29.746Z",
+      "retrievedAt": "2026-08-12T08:47:34.577Z",
       "notes": "KiDS survey-endorsed CDS-hosted DR5 gri HiPS MOC. Per-band masks and weak-lensing selections have different valid regions."
     },
     {
@@ -21885,7 +21885,7 @@
       "quality": "moc",
       "sourceUrl": "https://alasky.cds.unistra.fr/MocServer/query?ID=CDS%2FP%2FNVSS&get=smoc&order=4&fmt=json",
       "sourceId": "CDS/P/NVSS",
-      "retrievedAt": "2026-08-11T09:34:29.746Z",
+      "retrievedAt": "2026-08-12T08:47:34.577Z",
       "notes": "CDS HiPS MOC derived from the NVSS image grid. Stokes products and sensitivity thresholds require product-specific validity masks."
     }
   ]

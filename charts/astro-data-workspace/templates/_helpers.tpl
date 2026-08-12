@@ -13,3 +13,12 @@ helm.sh/chart: {{ .Chart.Name }}-{{ .Chart.Version | replace "+" "_" }}
 {{- define "astro-data-workspace.serviceAccountName" -}}
 {{- if .Values.serviceAccount.create }}{{ default (include "astro-data-workspace.fullname" .) .Values.serviceAccount.name }}{{- else }}{{ required "serviceAccount.name is required when serviceAccount.create is false" .Values.serviceAccount.name }}{{- end }}
 {{- end }}
+{{- define "astro-data-workspace.postgresqlFullname" -}}
+{{- if .Values.postgresql.fullnameOverride -}}
+{{- .Values.postgresql.fullnameOverride | trunc 63 | trimSuffix "-" -}}
+{{- else if .Values.postgresql.nameOverride -}}
+{{- printf "%s-%s" .Release.Name .Values.postgresql.nameOverride | trunc 63 | trimSuffix "-" -}}
+{{- else -}}
+{{- printf "%s-postgresql" .Release.Name | trunc 63 | trimSuffix "-" -}}
+{{- end -}}
+{{- end }}
