@@ -1,4 +1,5 @@
 ﻿import path from "node:path";
+import { readFile } from "node:fs/promises";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { createMcpExpressApp } from "@modelcontextprotocol/sdk/server/express.js";
@@ -16,11 +17,14 @@ import { ConnectorIngestRunCatalog, type ConnectorIngestRunInput } from "./conne
 import { DataCatalogRegistry, type DataAssetAccess, type DataAssetRecord, type DataAssetRegistrationInput } from "./data-catalog.js";
 import { ownershipKey, resolveDataOwnership, type EffectiveDataOwnership } from "./data-ownership.js";
 import { FlinkScanService, type GenericScanInput } from "./flink-ingest.js";
+import { ManualFootprintRegistry, ManualFootprintRevisionError } from "./manual-footprints.js";
 import { createAstroMcpServer } from "./mcp.js";
 import { ScanRunCatalog } from "./provenance.js";
 import { JsonDatasetRegistry } from "./registry.js";
 import { ResourcePackageManager, type ResourcePackageLoad } from "./resource-packages.js";
-import { SurveyRegistry, type SurveyRegistrationInput } from "./survey-registry.js";
+import { buildPublicReleaseDetails, type PublicReleaseProductStatus } from "./public-release-details.js";
+import { normalizeSurveyFootprintManifest, type SurveyFootprintManifest } from "./survey-footprints.js";
+import { CURATED_SURVEYS, SurveyRegistry, type SurveyRegistrationInput } from "./survey-registry.js";
 import { CatalogSkyIndexService } from "./sky-index.js";
 import type { DatasetRecord } from "./types.js";
 import { publicVolumeManifest, VolumeCatalog } from "./volume.js";
@@ -56,6 +60,10 @@ const connectorRunStatePath = process.env.ASTRO_CONNECTOR_RUN_STATE ?? path.join
 const resourcePackageRoot = process.env.ASTRO_RESOURCE_PACKAGE_ROOT ?? path.join(projectRoot, "data", "resource-packages");
 const resourcePackageStatePath = process.env.ASTRO_RESOURCE_PACKAGE_STATE ?? path.join(path.dirname(statePath), "resource-package-state.json");
 const resourceCatalogUrl = process.env.ASTRO_RESOURCE_CATALOG_URL ?? pathToFileURL(path.join(projectRoot, "bootstrap", "resource-packages", "catalog.json")).href;
+const publicReleaseDetailsPath = process.env.ASTRO_PUBLIC_RELEASE_DETAILS ?? path.join(projectRoot, "bootstrap", "resource-packages", "release-products.json");
+const bundledFootprintPath = process.env.ASTRO_SURVEY_FOOTPRINT_FILE ?? path.join(process.env.ASTRO_SURVEY_FOOTPRINT_ROOT ?? path.join(projectRoot, "src", "footprints"), "survey-footprints.json");
+const manualFootprintStatePath = process.env.ASTRO_MANUAL_FOOTPRINT_STATE ?? path.join(path.dirname(statePath), "manual-footprints.json");
+const manualFootprintAdminToken = process.env.ASTRO_MANUAL_FOOTPRINT_ADMIN_TOKEN;
 const catalogMcpUrl = process.env.ASTRO_CATALOG_MCP_URL ?? "http://eva24002-entrance.lab.zverse.space:30082/mcp";
 const catalogMcpTimeoutMs = Number(process.env.ASTRO_CATALOG_MCP_TIMEOUT_MS ?? "15000");
 const flinkNamespace = process.env.ASTRO_FLINK_NAMESPACE ?? "warehouse";
@@ -87,6 +95,9 @@ const flinkScans = new FlinkScanService({
   pollMs: flinkPollMs,
 });
 const resourcePackages = new ResourcePackageManager({ catalogUrl: resourceCatalogUrl, root: resourcePackageRoot, statePath: resourcePackageStatePath });
+let publicReleaseProductStatuses: PublicReleaseProductStatus[] = [];
+let bundledFootprintManifest: SurveyFootprintManifest;
+let manualFootprints: ManualFootprintRegistry;
 const astroIndex = new AstroIndexService();
 const workflowEngine = new WorkflowEngine(workflowStore, new McpCatalogQueryClient(catalogMcpUrl, catalogMcpTimeoutMs, 1));
 const agentService = new AgentService(workflowStore, workflowEngine);
@@ -223,9 +234,66 @@ function sendApiError(response: Response, error: unknown): void {
   const notFound = message.startsWith("Dataset not found:") || message.startsWith("Data asset not found:") || message.startsWith("Connector not found:") || message.startsWith("Connector ingest run not found:") || message.startsWith("Volume not found:") || message.startsWith("Atlas not found:") || message.startsWith("Survey not found:") || message.startsWith("Resource package not found:") || message.startsWith("Resource package is not installed:") || message.startsWith("Resource package job not found:")
     || message.startsWith("Scan run not found:") || message.startsWith("Lineage not found:") || message.startsWith("Workflow not found:")
     || message.startsWith("Workflow run not found:") || message.startsWith("Workflow artifact not found:") || message.startsWith("Agent session not found:");
-  const status = error instanceof RangeError ? 400 : notFound ? 404 : 500;
+  const status = error instanceof ManualFootprintRevisionError ? 412 : error instanceof RangeError ? 400 : notFound || message.startsWith("Manual footprint not found:") ? 404 : 500;
   if (status === 500) console.error("API request failed", error);
   response.status(status).json({ error: message });
+}
+
+function requireManualFootprintAdmin(request: Request, response: Response): boolean {
+  if (!manualFootprintAdminToken) {
+    response.status(503).json({ error: "Manual footprint administration is not configured" });
+    return false;
+  }
+  if (request.get("Authorization") !== `Bearer ${manualFootprintAdminToken}`) {
+    response.status(401).json({ error: "Unauthorized" });
+    return false;
+  }
+  return true;
+}
+
+function manualFootprintRevision(request: Request, response: Response): number | undefined {
+  const value = request.get("If-Match");
+  if (!value) {
+    response.status(428).json({ error: "If-Match revision is required" });
+    return undefined;
+  }
+  const match = /^(?:W\/)?\"?(\d+)\"?$/.exec(value.trim());
+  if (!match || !Number.isSafeInteger(Number(match[1])) || Number(match[1]) < 1) {
+    response.status(400).json({ error: "If-Match must contain a valid revision" });
+    return undefined;
+  }
+  return Number(match[1]);
+}
+
+function manualFootprintIdentity(request: Request): { surveyId: string; releaseId: string; product: string } {
+  const value = (name: "surveyId" | "releaseId" | "product") => {
+    const parameter = request.params[name];
+    const result = Array.isArray(parameter) ? parameter[0] : parameter;
+    if (!result) throw new RangeError(`${name} is required`);
+    return result;
+  };
+  return { surveyId: value("surveyId"), releaseId: value("releaseId"), product: value("product") };
+}
+
+function footprintEtag(response: Response, revision: number): void {
+  response.set("ETag", `\"${revision}\"`);
+  response.set("Cache-Control", "no-store");
+}
+
+function mergeFootprintManifests(left: SurveyFootprintManifest, right: SurveyFootprintManifest): SurveyFootprintManifest {
+  if (left.nside !== right.nside) throw new Error("Footprint manifests use different NSIDE values");
+  const footprints = new Map(left.footprints.map((footprint) => [`${footprint.surveyId}:${footprint.releaseId}:${footprint.product}`, footprint]));
+  for (const footprint of right.footprints) {
+    const identity = `${footprint.surveyId}:${footprint.releaseId}:${footprint.product}`;
+    const existing = footprints.get(identity);
+    if (existing?.quality === "moc") throw new RangeError(`Footprint identity conflict: ${identity}`);
+    footprints.set(identity, footprint);
+  }
+  return { schemaVersion: 1, generatedAt: new Date().toISOString(), coordinateFrame: "ICRS", nside: left.nside, footprints: [...footprints.values()] };
+}
+
+async function effectiveFootprints(): Promise<SurveyFootprintManifest> {
+  return mergeFootprintManifests(await resourcePackages.activeFootprints(), manualFootprints.publishedManifest());
 }
 
 function datasetIdFrom(request: Request): string {
@@ -243,8 +311,16 @@ app.get("/api/datasets", async (_request: Request, response: Response) => {
   }
 });
 
-app.get("/api/data-assets", (_request: Request, response: Response) => {
-  response.json({ assets: dataCatalog.list().map(publicDataAsset) });
+app.get("/api/data-assets", (request: Request, response: Response) => {
+  try {
+    const origin = request.query.origin;
+    if (origin !== undefined && origin !== "user" && origin !== "builtin") {
+      throw new RangeError("origin must be user or builtin");
+    }
+    response.json({ assets: dataCatalog.list().filter((asset) => origin === undefined || asset.origin === origin).map(publicDataAsset) });
+  } catch (error) {
+    sendApiError(response, error);
+  }
 });
 
 app.get("/api/tags", (_request: Request, response: Response) => {
@@ -464,10 +540,20 @@ app.get("/api/surveys/:id", (request: Request, response: Response) => {
   }
 });
 
+app.get("/api/public-release-details", async (_request: Request, response: Response) => {
+  try {
+    response.set("Cache-Control", "no-store");
+    const detailManifest = mergeFootprintManifests(bundledFootprintManifest, manualFootprints.publishedManifest());
+    response.json({ releases: buildPublicReleaseDetails(CURATED_SURVEYS, publicReleaseProductStatuses, detailManifest) });
+  } catch (error) {
+    sendApiError(response, error);
+  }
+});
+
 app.get("/api/survey-footprints", async (_request: Request, response: Response) => {
   try {
     response.set("Cache-Control", "no-store");
-    response.json(await resourcePackages.activeFootprints());
+    response.json(await effectiveFootprints());
   } catch (error) {
     sendApiError(response, error);
   }
@@ -481,11 +567,78 @@ app.get("/api/resource-packages", (_request: Request, response: Response) => {
 app.get("/api/resource-packages/active-footprints", async (_request: Request, response: Response) => {
   try {
     response.set("Cache-Control", "no-store");
-    response.json(await resourcePackages.activeFootprints());
+    response.json(await effectiveFootprints());
   } catch (error) {
     sendApiError(response, error);
   }
 });
+
+app.get("/api/manual-footprints", (_request: Request, response: Response) => {
+  response.set("Cache-Control", "no-store");
+  response.json({ footprints: manualFootprints.list() });
+});
+
+app.get("/api/manual-footprints/:surveyId/:releaseId/:product", (request: Request, response: Response) => {
+  try {
+    const { surveyId, releaseId, product } = manualFootprintIdentity(request);
+    const record = manualFootprints.get(surveyId, releaseId, product);
+    footprintEtag(response, record.revision);
+    response.json({ footprint: record });
+  } catch (error) {
+    sendApiError(response, error);
+  }
+});
+
+app.post("/api/manual-footprints", async (request: Request, response: Response) => {
+  if (!requireManualFootprintAdmin(request, response)) return;
+  try {
+    const record = await manualFootprints.create(request.body);
+    footprintEtag(response, record.revision);
+    response.status(201).json({ footprint: record });
+  } catch (error) {
+    sendApiError(response, error);
+  }
+});
+
+app.put("/api/manual-footprints/:surveyId/:releaseId/:product", async (request: Request, response: Response) => {
+  if (!requireManualFootprintAdmin(request, response)) return;
+  const revision = manualFootprintRevision(request, response);
+  if (revision === undefined) return;
+  try {
+    const { surveyId, releaseId, product } = manualFootprintIdentity(request);
+    const record = await manualFootprints.update(surveyId, releaseId, product, revision, request.body);
+    footprintEtag(response, record.revision);
+    response.json({ footprint: record });
+  } catch (error) {
+    sendApiError(response, error);
+  }
+});
+
+for (const action of ["validate", "publish", "unpublish"] as const) {
+  app.post(`/api/manual-footprints/:surveyId/:releaseId/:product/${action}`, async (request: Request, response: Response) => {
+    if (!requireManualFootprintAdmin(request, response)) return;
+    const revision = manualFootprintRevision(request, response);
+    if (revision === undefined) return;
+    try {
+      const { surveyId, releaseId, product } = manualFootprintIdentity(request);
+      let record;
+      if (action === "publish") {
+        const active = await resourcePackages.activeFootprints();
+        const existing = {
+          ...active,
+          footprints: [...active.footprints, ...bundledFootprintManifest.footprints.filter((footprint) => footprint.quality === "moc")],
+        };
+        record = await manualFootprints.publish(surveyId, releaseId, product, revision, existing);
+      } else {
+        record = await manualFootprints[action](surveyId, releaseId, product, revision);
+      }
+      footprintEtag(response, record.revision);
+      response.json({ footprint: record });
+    } catch (error) {
+      sendApiError(response, error);
+    }
+  });
+}
 
 app.get("/api/resource-packages/jobs/:id", (request: Request, response: Response) => {
   try {
@@ -1055,6 +1208,15 @@ async function start(): Promise<void> {
   await connectors.initialize();
   await connectorRuns.initialize();
   await resourcePackages.initialize();
+  const productStatus = JSON.parse(await readFile(publicReleaseDetailsPath, "utf8")) as { releases?: Array<{ surveyId: string; releaseId: string; products: Array<Omit<PublicReleaseProductStatus, "surveyId" | "releaseId">> }> };
+  publicReleaseProductStatuses = (productStatus.releases ?? []).flatMap((release) => release.products.map((product) => ({
+    ...product,
+    surveyId: release.surveyId,
+    releaseId: release.releaseId,
+  })));
+  bundledFootprintManifest = normalizeSurveyFootprintManifest(JSON.parse(await readFile(bundledFootprintPath, "utf8")) as SurveyFootprintManifest);
+  manualFootprints = new ManualFootprintRegistry({ statePath: manualFootprintStatePath, surveys: CURATED_SURVEYS, releaseProducts: publicReleaseProductStatuses });
+  await manualFootprints.initialize();
   flinkScans.start();
   const bootstrapCatalog = process.env.ASTRO_BOOTSTRAP_CATALOG;
   if (bootstrapCatalog) {

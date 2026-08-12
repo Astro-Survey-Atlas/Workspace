@@ -1,0 +1,51 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "properties": {
+    "metadataStore": {
+      "type": "object",
+      "properties": {
+        "mode": { "type": "string", "enum": ["sqlite", "bundled-postgresql", "external-postgresql"] },
+        "sqlite": { "type": "object", "properties": { "path": { "type": "string", "minLength": 1 } } },
+        "external": {
+          "type": "object",
+          "properties": {
+            "existingSecret": { "type": "string" },
+            "existingSecretKey": { "type": "string", "minLength": 1 }
+          }
+        }
+      },
+      "required": ["mode"]
+    },
+    "postgresql": { "type": "object", "properties": { "enabled": { "type": "boolean" } } }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "metadataStore": { "properties": { "mode": { "const": "sqlite" } } } } },
+      "then": {
+        "properties": {
+          "postgresql": { "properties": { "enabled": { "const": false } } },
+          "metadataStore": { "properties": { "external": { "properties": { "existingSecret": { "const": "" } } } } }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "metadataStore": { "properties": { "mode": { "const": "bundled-postgresql" } } } } },
+      "then": {
+        "properties": {
+          "postgresql": { "properties": { "enabled": { "const": true } } },
+          "metadataStore": { "properties": { "external": { "properties": { "existingSecret": { "const": "" } } } } }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "metadataStore": { "properties": { "mode": { "const": "external-postgresql" } } } } },
+      "then": {
+        "properties": {
+          "postgresql": { "properties": { "enabled": { "const": false } } },
+          "metadataStore": { "required": ["external"], "properties": { "external": { "required": ["existingSecret"] } } }
+        }
+      }
+    }
+  ]
+}

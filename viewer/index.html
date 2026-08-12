@@ -4,6 +4,20 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="theme-color" content="#080b0f" />
+    <script>
+      (() => {
+        const key = "astro-workspace:theme:v1";
+        let stored = null;
+        try {
+          stored = localStorage.getItem(key);
+        } catch {}
+        const theme = stored === "light" || stored === "dark"
+          ? stored
+          : matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+        document.documentElement.dataset.theme = theme;
+        document.querySelector('meta[name="theme-color"]').content = theme === "dark" ? "#080b0f" : "#f4f7f8";
+      })();
+    </script>
     <title>Astro Multi-Survey Workspace</title>
   </head>
   <body>
@@ -17,26 +31,26 @@
           </div>
         </div>
         <div class="mode-control" role="group" aria-label="视图模式">
-          <button type="button" class="mode-button" data-mode="packages">资源集</button>
+          <button type="button" class="mode-button" data-mode="packages">公开资源集</button>
           <button type="button" class="mode-button" data-mode="connectors">连接器</button>
-          <button type="button" class="mode-button active" data-mode="catalog">数据目录</button>
-          <button type="button" class="mode-button" data-mode="layers">项目态势</button>
+          <button type="button" class="mode-button active" data-mode="catalog">用户资产</button>
+          <button type="button" class="mode-button" data-mode="layers">数据覆盖</button>
           <button type="button" class="mode-button" data-mode="workflow">数据生产</button>
         </div>
         <div class="toolbar-actions">
+          <button id="theme-toggle" class="icon-button" type="button" aria-label="切换到浅色主题" title="切换到浅色主题">
+            <i data-lucide="sun"></i>
+          </button>
           <button id="controls-toggle" class="icon-button mobile-only" type="button" aria-label="显示控制" title="显示控制">
             <i data-lucide="sliders-horizontal"></i>
-          </button>
-          <button id="agent-toggle" class="icon-button agent-toggle" type="button" aria-label="显示 Agent" title="显示 Agent" hidden>
-            <i data-lucide="message-square"></i>
           </button>
         </div>
       </header>
 
       <aside id="controls-panel" class="controls-panel" aria-label="巡天与联合索引控制">
         <div id="context-summary">
-          <div class="panel-kicker" id="panel-kicker">PROJECT SKY STATUS</div>
-          <h1 id="panel-dataset-name">项目态势</h1>
+            <div class="panel-kicker" id="panel-kicker">DATA COVERAGE</div>
+            <h1 id="panel-dataset-name">数据覆盖</h1>
           <div class="dataset-state"><span></span><span id="dataset-state">索引载入中</span></div>
 
           <dl id="metric-grid" class="metric-grid">
@@ -50,88 +64,32 @@
 
         <div id="catalog-controls">
           <section class="control-section catalog-filters">
-            <div class="section-heading"><span>资产基本信息</span><output id="catalog-count">--</output></div>
-            <p class="control-note">选中资产后默认只读。公开来源、Connector 关联和血缘关系在资产详情中分别维护。</p>
-            <button id="catalog-new" class="command-button secondary" type="button">登记新资产</button>
+            <div class="section-heading"><span>用户资产筛选</span><output id="catalog-count">--</output></div>
+            <label class="field-label" for="catalog-kind-filter">数据类型</label>
+            <select id="catalog-kind-filter" class="field-input"><option value="all">全部类型</option><option value="catalog">星表</option><option value="image">图像</option><option value="spectra">光谱</option><option value="cube">数据立方</option><option value="timeseries">时序</option><option value="other">其他</option></select>
+            <label class="field-label" for="catalog-project-filter">项目阶段</label>
+            <select id="catalog-project-filter" class="field-input"><option value="all">全部阶段</option><option value="public_reference">公开参考</option><option value="acquired">已掌握</option><option value="processed">已加工</option><option value="deliverable">可交付</option><option value="planned">计划中</option></select>
+            <p class="control-note">这里只显示当前工作区中由用户登记的资产。筛选只改变中栏结果；新增资产在中栏完成，编辑和删除位于右栏详情。</p>
           </section>
-          <form id="catalog-registration-form" class="control-section catalog-registration">
-            <div class="section-heading"><span id="catalog-form-title">登记用户数据</span><span>METADATA</span></div>
-            <label class="field-label" for="catalog-name">名称</label>
-            <input id="catalog-name" class="field-input" maxlength="120" required />
-            <label class="field-label" for="catalog-description">说明</label>
-            <input id="catalog-description" class="field-input" maxlength="500" />
-            <div class="catalog-form-grid">
-              <label><span class="field-label">巡天</span><select id="catalog-survey" class="field-input"></select></label>
-              <label><span class="field-label">数据发布</span><select id="catalog-release" class="field-input"></select></label>
-              <label><span class="field-label">数据类型</span><select id="catalog-kind" class="field-input"><option value="catalog">星表</option><option value="image">图像</option><option value="spectra">光谱</option><option value="cube">数据立方</option><option value="timeseries">时序</option><option value="other">其他</option></select></label>
-            </div>
-            <label class="field-label" for="catalog-product">数据产品</label>
-            <input id="catalog-product" class="field-input" maxlength="160" placeholder="例如 source catalog" />
-            <div class="catalog-form-grid">
-              <label><span class="field-label">工程状态</span><select id="catalog-status-input" class="field-input"><option value="metadata_only">仅元数据</option><option value="ready">可访问</option><option value="unavailable">不可用</option></select></label>
-              <fieldset class="catalog-state-field"><legend class="field-label">项目阶段（可多选）</legend><div id="catalog-project-state-list" class="catalog-state-list"><label><input type="checkbox" value="public_reference" />公开参考</label><label><input type="checkbox" value="acquired" />已掌握</label><label><input type="checkbox" value="processed" />已加工</label><label><input type="checkbox" value="deliverable" />可交付</label><label><input type="checkbox" value="planned" />计划中</label></div></fieldset>
-            </div>
-            <div class="section-heading compact-heading"><span>全局 Tag</span></div>
-            <div id="catalog-tags" class="tag-picker" aria-label="数据 Tag"></div>
-            <div class="catalog-form-actions">
-              <button id="catalog-form-edit" class="command-button secondary" type="button" hidden>编辑数据资产</button>
-              <button id="catalog-form-submit" class="command-button" type="submit">登记数据</button>
-              <button id="catalog-form-cancel" class="command-button secondary" type="button" hidden>取消</button>
-              <button id="catalog-delete" class="command-button danger" type="button" hidden>删除</button>
-            </div>
-          </form>
         </div>
 
         <div id="resource-package-controls" hidden>
           <section class="control-section">
-            <div class="section-heading"><span>巡天资源筛选</span><span>PUBLIC COVERAGE</span></div>
-            <label class="field-label" for="resource-package-search">搜索巡天</label>
-            <input id="resource-package-search" class="field-input" type="search" placeholder="名称、设施、波段或产品" />
+            <div class="section-heading"><span>公开覆盖筛选</span><span>PUBLIC COVERAGE</span></div>
+            <div class="filter-summary"><output id="resource-package-filter-summary">全部公开资源</output><button id="resource-package-filter-clear" class="text-command" type="button" disabled>清除</button></div>
             <div id="resource-package-filters" class="resource-package-filters"></div>
-            <p class="control-note">同类标签取并集，不同维度取交集。勾选只修改草稿，不会立即下载或改变天球。</p>
+            <p class="control-note">同类标签取并集，不同维度取交集。这里筛选的是公开数据产品的天空覆盖，不是科学数据文件。</p>
           </section>
         </div>
 
         <div id="connector-controls" hidden>
           <section class="control-section">
-            <div class="section-heading"><span>连接配置</span><span>CONFIG ONLY</span></div>
-            <p class="control-note">登记数据位置与访问凭据。检测连接只验证当前路径和权限，不枚举或扫描目录。</p>
+            <div class="section-heading"><span>Connector 筛选</span><output id="connector-filter-count">--</output></div>
+            <label class="field-label" for="connector-kind-filter">类型</label><select id="connector-kind-filter" class="field-input"><option value="all">全部类型</option><option value="s3">S3 / OSS</option><option value="local">本地路径</option><option value="jdbc">JDBC 数据库</option></select>
+            <label class="field-label" for="connector-status-filter">状态</label><select id="connector-status-filter" class="field-input"><option value="all">全部状态</option><option value="draft">草稿</option><option value="ready">可用</option><option value="disabled">停用</option></select>
+            <label class="field-label" for="connector-survey-filter">巡天</label><select id="connector-survey-filter" class="field-input"><option value="all">全部巡天</option></select>
+            <p class="control-note">筛选只改变中栏结果；新增 Connector 在中栏完成，检测、扫描、编辑和删除位于右栏。</p>
           </section>
-          <form id="connector-registration-form" class="control-section connector-registration">
-            <div class="section-heading"><span id="connector-form-title">登记 Connector</span><span>METADATA</span></div>
-            <label class="field-label" for="connector-name">名称</label>
-            <input id="connector-name" name="name" class="field-input" maxlength="120" required placeholder="例如 euclid-q1-s3" />
-            <label class="field-label" for="connector-description">说明</label>
-            <input id="connector-description" name="description" class="field-input" maxlength="500" />
-            <div class="catalog-form-grid">
-              <label><span class="field-label">类型</span><select id="connector-kind" name="kind" class="field-input"><option value="s3">S3 / OSS</option><option value="local">本地路径</option><option value="jdbc">JDBC 数据库</option></select></label>
-              <label><span class="field-label">配置状态</span><select id="connector-status" name="status" class="field-input"><option value="draft">草稿</option><option value="ready">可用</option><option value="disabled">停用</option></select></label>
-              <label><span class="field-label">归属巡天</span><select id="connector-survey" name="surveyId" class="field-input"><option value="">未绑定巡天（可稍后补充）</option></select></label>
-              <label><span class="field-label">归属发布</span><select id="connector-release" name="releaseId" class="field-input"><option value="">未绑定发布</option></select></label>
-            </div>
-            <div id="connector-config-s3" data-config="s3" class="connector-config-grid">
-              <label><span class="field-label">Endpoint</span><input id="connector-s3-endpoint" name="endpoint" class="field-input" placeholder="https://s3.example" /></label>
-              <label><span class="field-label">Bucket</span><input id="connector-s3-bucket" name="bucket" class="field-input" required /></label>
-              <label><span class="field-label">Prefix</span><input id="connector-s3-prefix" name="prefix" class="field-input" /></label>
-              <label><span class="field-label">Region</span><input id="connector-s3-region" name="region" class="field-input" value="us-east-1" /></label>
-              <label><span class="field-label">Access Key</span><input name="accessKeyId" class="field-input" autocomplete="off" required /></label>
-              <label><span class="field-label">Secret Key</span><input name="secretAccessKey" class="field-input" type="password" autocomplete="new-password" required /></label>
-            </div>
-            <div id="connector-config-local" data-config="local" class="connector-config-grid" hidden>
-              <label><span class="field-label">根路径</span><input id="connector-local-root" name="rootPath" class="field-input" placeholder="/mnt/data/euclid" /></label>
-            </div>
-            <div id="connector-config-jdbc" data-config="jdbc" class="connector-config-grid" hidden>
-              <label><span class="field-label">JDBC URL</span><input id="connector-jdbc-url" name="url" class="field-input" placeholder="jdbc:postgresql://host:5432/db" /></label>
-              <label><span class="field-label">Database</span><input id="connector-jdbc-database" name="database" class="field-input" /></label>
-              <label><span class="field-label">Schema</span><input id="connector-jdbc-schema" name="schema" class="field-input" value="public" /></label>
-            </div>
-            <div class="connector-registration-actions"><button id="connector-check-form" class="command-button secondary" type="button">检测此配置</button><output id="connector-form-message" class="connector-check-feedback" aria-live="polite"><strong>尚未检测</strong></output></div>
-            <div class="catalog-form-actions">
-              <button id="connector-form-submit" class="command-button" type="submit">登记 Connector</button>
-              <button id="connector-form-cancel" class="command-button secondary" type="button" hidden>取消</button>
-              <button id="connector-delete" class="command-button danger" type="button" hidden>删除</button>
-            </div>
-          </form>
         </div>
 
         <div id="layer-controls" hidden>
@@ -217,27 +175,6 @@
         </div>
 
         <div id="workflow-controls" hidden>
-          <form id="workflow-form" class="workflow-form">
-            <section class="control-section">
-              <div class="section-heading"><span>Workflow</span><output>VERSION 1</output></div>
-              <label class="field-label" for="workflow-select">定义</label>
-              <select id="workflow-select" class="field-input" aria-label="工作流定义"></select>
-            </section>
-            <section class="control-section parameter-grid">
-              <div class="section-heading full"><span>ICRS region</span><output>DEGREES</output></div>
-              <label class="field-label" for="workflow-ra">RA</label>
-              <input id="workflow-ra" class="field-input" type="number" min="0" max="359.999999" step="0.000001" value="150.1" required />
-              <label class="field-label" for="workflow-dec">Dec</label>
-              <input id="workflow-dec" class="field-input" type="number" min="-90" max="90" step="0.000001" value="2.2" required />
-              <label class="field-label" for="workflow-query-radius">检索半径</label>
-              <div class="input-unit"><input id="workflow-query-radius" class="field-input" type="number" min="1" max="3600" step="1" value="600" required /><span>″</span></div>
-              <label class="field-label" for="workflow-match-radius">匹配半径</label>
-              <div class="input-unit"><input id="workflow-match-radius" class="field-input" type="number" min="0.1" max="10" step="0.1" value="1.5" required /><span>″</span></div>
-              <label class="field-label" for="workflow-limit">结果上限</label>
-              <input id="workflow-limit" class="field-input" type="number" min="1" max="1000" step="1" value="500" required />
-            </section>
-            <button class="primary-command" type="submit"><i data-lucide="play"></i><span>运行工作流</span></button>
-          </form>
           <section class="control-section workflow-run-summary">
             <div class="section-heading"><span>Current run</span><output id="workflow-run-state">IDLE</output></div>
             <dl>
@@ -254,73 +191,77 @@
         </div>
       </aside>
 
-      <section id="catalog-stage" class="catalog-stage" aria-label="数据目录">
+      <section id="catalog-stage" class="catalog-stage" aria-label="用户资产">
         <header class="catalog-stage-header">
           <div>
-            <span class="panel-kicker">DATA FOUNDATION</span>
-            <h2>数据目录</h2>
-            <p>内置巡天星表与用户数据统一登记。这里只保存元数据和访问描述，不复制原始科学数据。</p>
+            <span class="panel-kicker">USER ASSETS</span>
+            <h2>用户资产</h2>
+            <p>登记当前工作区中的用户数据及其访问描述。这里只保存元数据和访问方式，不复制原始科学数据；系统内置参考数据不在这里展示。</p>
           </div>
           <dl class="catalog-summary">
-            <div><dt>内置</dt><dd id="catalog-builtin-count">--</dd></div>
-            <div><dt>用户</dt><dd id="catalog-user-count">--</dd></div>
+            <div><dt>用户资产</dt><dd id="catalog-user-count">--</dd></div>
             <div><dt>可访问</dt><dd id="catalog-ready-count">--</dd></div>
           </dl>
         </header>
         <div class="catalog-search-bar">
           <label class="sr-only" for="catalog-search">搜索数据资产</label>
-          <input id="catalog-search" class="field-input" type="search" placeholder="搜索名称、巡天、发布、Tag、输入/输出路径或 Connector" />
-          <select id="catalog-origin-filter" class="field-input" aria-label="来源筛选">
-            <option value="all">全部来源</option><option value="builtin">系统内置</option><option value="user">用户登记</option>
-          </select>
-          <select id="catalog-kind-filter" class="field-input" aria-label="数据类型筛选">
-            <option value="all">全部类型</option><option value="catalog">星表</option><option value="image">图像</option><option value="spectra">光谱</option><option value="cube">数据立方</option><option value="timeseries">时序</option><option value="other">其他</option>
-          </select>
+          <input id="catalog-search" class="field-input" type="search" placeholder="搜索用户资产名称、巡天、发布、Tag、路径或 Connector" />
+          <button id="catalog-new" class="primary-command compact-command" type="button"><i data-lucide="plus"></i><span>新增用户资产</span></button>
           <output id="catalog-search-hint">搜索全部登记字段</output>
         </div>
         <div class="catalog-columns" aria-hidden="true"><span>数据资产</span><span>巡天</span><span>类型</span><span>状态</span></div>
         <div id="catalog-asset-list" class="catalog-asset-list"></div>
-        <div id="catalog-empty" class="catalog-empty" hidden>没有符合当前筛选条件的数据。</div>
+        <div id="catalog-empty" class="catalog-empty" hidden>没有符合当前筛选条件的用户资产。</div>
         <footer class="catalog-stage-footer">后续 data-warehouse connector 将读取这里登记的访问描述，并接收经过 MOC 精筛后的空间约束。</footer>
       </section>
 
-      <section id="asset-detail-stage" class="catalog-stage asset-detail-stage" aria-label="数据资产详情" hidden>
-        <header class="catalog-stage-header">
-          <div>
-            <button id="asset-detail-back" class="text-button" type="button">← 返回数据目录</button>
-            <span class="panel-kicker">DATA ASSET DETAIL</span>
-            <h2 id="asset-detail-title">数据资产</h2>
-            <p id="asset-detail-description"></p>
-          </div>
-          <dl id="asset-detail-stats" class="asset-detail-stats"></dl>
-        </header>
-        <div id="asset-detail-body" class="asset-detail-body"></div>
-      </section>
-
-      <section id="resource-package-stage" class="catalog-stage resource-package-stage" aria-label="公共覆盖资源集" hidden>
+      <section id="resource-package-stage" class="catalog-stage resource-package-stage" aria-label="公开资源集" hidden>
         <header class="catalog-stage-header">
           <div>
             <span class="panel-kicker">PUBLIC SURVEY COVERAGE</span>
-            <h2>资源集</h2>
-            <p>每个巡天独立下载。选择需要的公开覆盖，下载到当前服务器后再一次性加载到 3D 天球。</p>
+            <h2>公开巡天与望远镜覆盖</h2>
+            <p>这里只提供已公开巡天或望远镜数据产品的天空覆盖范围，不包含图像、星表或光谱数据本身，也不代表观测深度或完整档案内容。不同 Release、产品和波段的覆盖可能不同；Connector 专门处理用户自己的数据。</p>
           </div>
           <dl class="catalog-summary">
             <div><dt>可用</dt><dd id="resource-package-count">0</dd></div>
-            <div><dt>已安装</dt><dd id="resource-package-installed-count">0</dd></div>
-            <div><dt>已加载</dt><dd id="resource-package-active-count">0</dd></div>
+            <div><dt>已下载</dt><dd id="resource-package-installed-count">0</dd></div>
+            <div><dt>已应用</dt><dd id="resource-package-active-count">0</dd></div>
             <div><dt>已选</dt><dd id="resource-package-selected-count">0</dd></div>
           </dl>
         </header>
-        <div class="resource-package-actions">
-          <span id="resource-package-pending" aria-live="polite">草稿与天球一致</span>
-          <button id="resource-package-reset" class="command-button secondary" type="button">重置草稿</button>
-          <button id="resource-package-download" class="command-button secondary" type="button">下载所选</button>
-          <button id="resource-package-apply" class="command-button" type="button">批量加载</button>
+        <div class="catalog-search-bar">
+          <label class="sr-only" for="resource-package-search">搜索巡天资源</label>
+          <input id="resource-package-search" class="field-input" type="search" placeholder="搜索名称、设施、波段、发布或产品" />
+          <button id="resource-package-apply" class="primary-command compact-command" type="button" disabled><span>应用到天球</span></button>
+          <output id="resource-package-search-hint">0 / 0</output>
         </div>
-        <div class="resource-package-columns" aria-hidden="true"><span></span><span>巡天</span><span>版本 / 大小</span><span>服务器状态</span><span></span></div>
+        <div class="resource-package-columns" aria-hidden="true"><span></span><span>巡天</span><span>已收录覆盖</span><span>服务器状态</span></div>
         <div id="resource-package-list" class="resource-package-list"></div>
-        <div id="resource-package-empty" class="catalog-empty" hidden>中央目录当前没有可用资源包。</div>
-        <footer class="catalog-stage-footer">批量加载成功后可前往“项目态势”查看 3D 覆盖。Connector 中的用户数据保持独立。</footer>
+        <section class="public-release-catalog" aria-labelledby="public-release-catalog-heading">
+          <div class="section-heading"><span id="public-release-catalog-heading">公开版本目录</span><output id="public-release-catalog-count">0 个巡天 / 0 个 Release</output></div>
+          <p class="public-release-catalog-copy">汇总各巡天已公开的 Release。标记“真实覆盖已收录”的版本可加载到天球；其余版本提供官方资料和人工覆盖录入入口。点击任一版本查看详情。</p>
+          <div id="public-release-catalog-list" class="public-release-catalog-list"></div>
+        </section>
+        <div id="resource-package-empty" class="catalog-empty" hidden>暂无符合当前条件的公开覆盖资源。</div>
+        <footer class="catalog-stage-footer">应用后可前往“数据覆盖”查看 3D 天球。未下载的选择会先自动下载到当前服务器；用户数据始终由 Connector 独立管理。</footer>
+      </section>
+
+      <section id="public-release-detail-stage" class="catalog-stage public-release-detail-stage" aria-label="公开版本详情" hidden>
+        <header class="public-release-detail-header">
+          <button id="public-release-detail-back" class="command-button secondary" type="button">返回公开资源集</button>
+          <div>
+            <span id="public-release-detail-kicker" class="panel-kicker">PUBLIC RELEASE</span>
+            <h2 id="public-release-detail-title">公开版本</h2>
+            <p id="public-release-detail-summary"></p>
+          </div>
+          <a id="public-release-detail-source" class="release-detail-link" target="_blank" rel="noreferrer">数据发布页 ↗</a>
+        </header>
+        <dl id="public-release-detail-metadata" class="public-release-detail-metadata"></dl>
+        <section class="public-release-products-section">
+          <div class="section-heading"><span>数据产品与天空覆盖</span><output id="public-release-product-count">0 / 0 已收录</output></div>
+          <p class="catalog-stage-copy">状态按产品分别记录。只有带有真实几何制品的产品可用于天球；“待人工处理”表示官方资料已登记，但仍需从官方边界、tile、brick、tract 或 MOC 计算覆盖。</p>
+          <div id="public-release-product-list" class="public-release-product-list"></div>
+        </section>
       </section>
 
       <section id="connector-stage" class="catalog-stage connector-stage" aria-label="连接器目录" hidden>
@@ -336,18 +277,24 @@
             <div><dt>可用</dt><dd id="connector-ready-count">0</dd></div>
           </dl>
         </header>
+        <div class="catalog-search-bar connector-search-bar">
+          <label class="sr-only" for="connector-search">搜索连接器</label>
+          <input id="connector-search" class="field-input" type="search" placeholder="搜索名称、路径、类型、状态、巡天或发布" />
+          <button id="connector-new" class="primary-command compact-command" type="button"><i data-lucide="plus"></i><span>新增 Connector</span></button>
+          <output id="connector-search-hint">0 / 0 个 Connector 命中</output>
+        </div>
         <div class="connector-columns" aria-hidden="true"><span>连接器</span><span>路径</span><span>类型</span><span>状态</span></div>
         <div id="connector-list" class="connector-list"></div>
         <div id="connector-empty" class="catalog-empty" hidden>还没有登记 Connector。</div>
         <div id="connector-detail" class="connector-detail" hidden></div>
       </section>
 
-      <section id="scene-stage" class="volume-stage" aria-label="项目态势天球与数据空间" hidden>
+      <section id="scene-stage" class="volume-stage" aria-label="数据覆盖天球与数据空间" hidden>
         <canvas id="volume-canvas"></canvas>
         <div class="scene-hud-top">
           <div class="scene-readout">
             <span><b>FRAME</b> ICRS</span>
-            <span title="球面颜色表达公开覆盖和项目资产状态；层间偏移只用于显示，不代表物理距离。"><b id="scene-mode-label">PROJECT COVERAGE</b> <span id="scene-mode-value">PUBLIC + OWNED</span></span>
+            <span title="球面颜色表达公开覆盖和用户资产状态；层间偏移只用于显示，不代表物理距离。"><b id="scene-mode-label">DATA COVERAGE</b> <span id="scene-mode-value">PUBLIC + OWNED</span></span>
             <span><b>CAMERA</b> <output id="camera-distance">--</output></span>
           </div>
           <div class="scene-tools">
@@ -377,7 +324,7 @@
             <span class="panel-kicker">ASTRO-CODE DATA PRODUCTION</span>
             <h2 id="workflow-stage-title">交叉匹配 → cutout → 打包</h2>
           </div>
-          <span id="workflow-status-badge" class="run-status" data-status="idle">IDLE</span>
+          <div class="stage-primary-actions"><button id="workflow-new" class="primary-command compact-command" type="button"><i data-lucide="plus"></i><span>新建任务</span></button><span id="workflow-status-badge" class="run-status" data-status="idle">IDLE</span></div>
         </header>
         <div id="workflow-error" class="workflow-error" hidden></div>
         <section class="production-track" aria-label="astro-code 生产动作">
@@ -428,7 +375,7 @@
         </section>
       </section>
 
-      <aside id="inspector-panel" class="inspector-panel" aria-label="选中单元、星系或 Agent">
+      <aside id="inspector-panel" class="inspector-panel" aria-label="当前选中对象详情">
         <div id="inspector-view">
           <div class="panel-kicker" id="inspector-kicker">CELL INSPECTOR</div>
           <div id="inspector-empty" class="inspector-empty">
@@ -437,16 +384,55 @@
           </div>
           <div id="inspector-content" class="inspector-content" hidden></div>
         </div>
-        <div id="agent-panel" class="agent-panel" hidden>
-          <div class="agent-heading"><div><span class="panel-kicker">WORKFLOW AGENT</span><h2>确定性任务入口</h2></div><span class="agent-capability">RULES</span></div>
-          <div id="agent-messages" class="agent-messages" aria-live="polite"></div>
-          <form id="agent-form" class="agent-form">
-            <label for="agent-input" class="sr-only">向 Agent 发送消息</label>
-            <textarea id="agent-input" rows="3" maxlength="2000" placeholder="RA 150.1 Dec 2.2，匹配半径 1.5"></textarea>
-            <button type="submit" class="icon-button" aria-label="发送" title="发送"><i data-lucide="send"></i></button>
-          </form>
-        </div>
       </aside>
+
+      <dialog id="catalog-create-dialog" class="workspace-dialog">
+        <form id="catalog-registration-form" class="dialog-form">
+          <header><div><span class="panel-kicker">NEW DATA ASSET</span><h2 id="catalog-form-title">登记用户数据</h2></div><button id="catalog-dialog-close" class="icon-button" type="button" aria-label="关闭"><span aria-hidden="true">×</span></button></header>
+          <label class="field-label" for="catalog-name">名称</label><input id="catalog-name" class="field-input" maxlength="120" required />
+          <label class="field-label" for="catalog-description">说明</label><input id="catalog-description" class="field-input" maxlength="500" />
+          <div class="catalog-form-grid"><label><span class="field-label">巡天</span><select id="catalog-survey" class="field-input"></select></label><label><span class="field-label">数据发布</span><select id="catalog-release" class="field-input"></select></label><label><span class="field-label">数据类型</span><select id="catalog-kind" class="field-input"><option value="catalog">星表</option><option value="image">图像</option><option value="spectra">光谱</option><option value="cube">数据立方</option><option value="timeseries">时序</option><option value="other">其他</option></select></label></div>
+          <label class="field-label" for="catalog-product">数据产品</label><input id="catalog-product" class="field-input" maxlength="160" />
+          <label><span class="field-label">工程状态</span><select id="catalog-status-input" class="field-input"><option value="metadata_only">仅元数据</option><option value="ready">可访问</option><option value="unavailable">不可用</option></select></label>
+          <fieldset class="catalog-state-field"><legend class="field-label">项目阶段（可多选）</legend><div id="catalog-project-state-list" class="catalog-state-list"><label><input type="checkbox" value="public_reference" />公开参考</label><label><input type="checkbox" value="acquired" />已掌握</label><label><input type="checkbox" value="processed" />已加工</label><label><input type="checkbox" value="deliverable" />可交付</label><label><input type="checkbox" value="planned" />计划中</label></div></fieldset>
+          <div class="section-heading compact-heading"><span>全局 Tag</span></div><div id="catalog-tags" class="tag-picker"></div>
+          <footer><button id="catalog-form-cancel" class="command-button secondary" type="button">取消</button><button id="catalog-form-submit" class="command-button" type="submit">登记数据</button></footer>
+        </form>
+      </dialog>
+
+      <dialog id="connector-create-dialog" class="workspace-dialog wide-dialog">
+        <form id="connector-registration-form" class="dialog-form connector-registration">
+          <header><div><span class="panel-kicker">NEW CONNECTOR</span><h2 id="connector-form-title">登记 Connector</h2></div><button id="connector-dialog-close" class="icon-button" type="button" aria-label="关闭"><span aria-hidden="true">×</span></button></header>
+          <label class="field-label" for="connector-name">名称</label><input id="connector-name" name="name" class="field-input" maxlength="120" required />
+          <label class="field-label" for="connector-description">说明</label><input id="connector-description" name="description" class="field-input" maxlength="500" />
+          <div class="catalog-form-grid"><label><span class="field-label">类型</span><select id="connector-kind" name="kind" class="field-input"><option value="s3">S3 / OSS</option><option value="local">本地路径</option><option value="jdbc">JDBC 数据库</option></select></label><label><span class="field-label">状态</span><select id="connector-status" name="status" class="field-input"><option value="draft">草稿</option><option value="ready">可用</option><option value="disabled">停用</option></select></label><label><span class="field-label">巡天</span><select id="connector-survey" name="surveyId" class="field-input"></select></label><label><span class="field-label">发布</span><select id="connector-release" name="releaseId" class="field-input"></select></label></div>
+          <div id="connector-config-s3" data-config="s3" class="connector-config-grid"><label><span class="field-label">Endpoint</span><input id="connector-s3-endpoint" name="endpoint" class="field-input" /></label><label><span class="field-label">Bucket</span><input id="connector-s3-bucket" name="bucket" class="field-input" required /></label><label><span class="field-label">Prefix</span><input id="connector-s3-prefix" name="prefix" class="field-input" /></label><label><span class="field-label">Region</span><input id="connector-s3-region" name="region" class="field-input" value="us-east-1" /></label><label><span class="field-label">Access Key</span><input name="accessKeyId" class="field-input" autocomplete="off" required /></label><label><span class="field-label">Secret Key</span><input name="secretAccessKey" class="field-input" type="password" autocomplete="new-password" required /></label></div>
+          <div id="connector-config-local" data-config="local" class="connector-config-grid" hidden><label><span class="field-label">根路径</span><input id="connector-local-root" name="rootPath" class="field-input" /></label></div>
+          <div id="connector-config-jdbc" data-config="jdbc" class="connector-config-grid" hidden><label><span class="field-label">JDBC URL</span><input id="connector-jdbc-url" name="url" class="field-input" /></label><label><span class="field-label">Database</span><input id="connector-jdbc-database" name="database" class="field-input" /></label><label><span class="field-label">Schema</span><input id="connector-jdbc-schema" name="schema" class="field-input" value="public" /></label></div>
+          <div class="connector-registration-actions"><button id="connector-check-form" class="command-button secondary" type="button">检测此配置</button><output id="connector-form-message" class="connector-check-feedback" aria-live="polite"><strong>尚未检测</strong></output></div>
+          <footer><button id="connector-form-cancel" class="command-button secondary" type="button">取消</button><button id="connector-form-submit" class="command-button" type="submit">登记 Connector</button></footer>
+        </form>
+      </dialog>
+
+      <dialog id="manual-footprint-dialog" class="workspace-dialog wide-dialog">
+        <form id="manual-footprint-form" class="dialog-form manual-footprint-form">
+          <header><div><span class="panel-kicker">MANUAL FOOTPRINT</span><h2>填写覆盖范围</h2></div><button id="manual-footprint-dialog-close" class="icon-button" type="button" aria-label="关闭"><span aria-hidden="true">×</span></button></header>
+          <fieldset class="manual-footprint-identity"><legend class="field-label">产品身份</legend><label><span>Survey</span><input id="manual-footprint-survey-id" name="surveyId" class="field-input" readonly /></label><label><span>Release</span><input id="manual-footprint-release-id" name="releaseId" class="field-input" readonly /></label><label><span>Product</span><input id="manual-footprint-product" name="product" class="field-input" readonly /></label></fieldset>
+          <div class="manual-footprint-fields"><label><span class="field-label">Label</span><input id="manual-footprint-label" name="label" class="field-input" maxlength="160" required /></label><label><span class="field-label">Source URL</span><input id="manual-footprint-source-url" name="sourceUrl" class="field-input" type="url" required /></label><label><span class="field-label">Method</span><input id="manual-footprint-method" name="method" class="field-input" maxlength="160" required /></label><label><span class="field-label">Calculated at</span><input id="manual-footprint-calculated-at" name="calculatedAt" class="field-input" type="datetime-local" required /></label><label><span class="field-label">Admin token</span><input id="manual-footprint-token" class="field-input" type="password" autocomplete="off" required /></label></div>
+          <label class="field-label" for="manual-footprint-pixels">HEALPix pixels</label><textarea id="manual-footprint-pixels" name="pixels" class="field-input manual-footprint-pixels" rows="7" placeholder="以逗号、空格或换行分隔 pixel ID" required></textarea>
+          <output id="manual-footprint-feedback" class="manual-footprint-feedback" aria-live="polite">尚未保存</output>
+          <footer><button id="manual-footprint-unpublish" class="command-button secondary" type="button">撤回</button><button id="manual-footprint-validate" class="command-button secondary" type="button">校验</button><button id="manual-footprint-publish" class="command-button secondary" type="button">发布</button><button class="command-button" type="submit">保存草稿</button></footer>
+        </form>
+      </dialog>
+
+      <dialog id="workflow-create-dialog" class="workspace-dialog">
+        <form id="workflow-form" class="dialog-form workflow-form">
+          <header><div><span class="panel-kicker">NEW PRODUCTION RUN</span><h2>新建数据生产任务</h2></div><button id="workflow-dialog-close" class="icon-button" type="button" aria-label="关闭"><span aria-hidden="true">×</span></button></header>
+          <label class="field-label" for="workflow-select">定义</label><select id="workflow-select" class="field-input"></select>
+          <div class="parameter-grid"><label class="field-label" for="workflow-ra">RA</label><input id="workflow-ra" class="field-input" type="number" value="150.1" required /><label class="field-label" for="workflow-dec">Dec</label><input id="workflow-dec" class="field-input" type="number" value="2.2" required /><label class="field-label" for="workflow-query-radius">检索半径</label><div class="input-unit"><input id="workflow-query-radius" class="field-input" type="number" value="600" required /><span>″</span></div><label class="field-label" for="workflow-match-radius">匹配半径</label><div class="input-unit"><input id="workflow-match-radius" class="field-input" type="number" value="1.5" required /><span>″</span></div><label class="field-label" for="workflow-limit">结果上限</label><input id="workflow-limit" class="field-input" type="number" value="500" required /></div>
+          <footer><button class="primary-command" type="submit"><i data-lucide="play"></i><span>运行工作流</span></button></footer>
+        </form>
+      </dialog>
 
       <footer class="statusbar">
         <span><i class="status-light"></i><span id="service-status">SERVICE CONNECTING</span></span>

@@ -113,6 +113,27 @@ the DESI DR1 spectroscopic footprint remains pending until its official
 tile/product artifact is ingested; the application does not substitute Legacy
 imaging or local COSMOS data for it.
 
+### Public footprint artifacts
+
+The fixed public-footprint directory is `artifacts/public-survey-footprints/`.
+`sources.json` is the product-level acquisition ledger for every available
+release in `src/survey-registry.ts`: `acquired` identifies an existing manifest
+identity, while `unavailable` records only a valid source URL and a reason. An
+unavailable product never receives fabricated pixels. These are release and
+product coverage artifacts, not catalog rows, image pixels, or a claim that
+every product in a release shares one footprint.
+
+The checked-in bootstrap resources are copied once into this directory by:
+
+```bash
+npm run artifacts:footprints
+```
+
+The command validates sources, normalizes the existing manifest into
+`normalized/survey-footprints.json`, copies the bootstrap resource-package
+catalog and ZIP files without rewriting them, and writes SHA-256 provenance to
+`provenance.json`. It performs no network download.
+
 Rebuild the bundled metadata artifact explicitly when sources change:
 
 ```bash

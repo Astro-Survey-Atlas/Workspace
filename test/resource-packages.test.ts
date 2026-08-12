@@ -14,7 +14,7 @@ import type { SurveyFootprintManifest } from "../src/survey-footprints.js";
 
 const now = "2026-07-24T00:00:00.000Z";
 
-function manifestFor(surveyId: string, releases: string[], nside = 16): SurveyFootprintManifest {
+function manifestFor(surveyId: string, releases: string[], nside = 16, quality: "moc" | "official_overview" = "moc"): SurveyFootprintManifest {
   const footprints = releases.map((releaseId, index) => ({
     surveyId,
     releaseId,
@@ -22,7 +22,7 @@ function manifestFor(surveyId: string, releases: string[], nside = 16): SurveyFo
     label: `Fixture ${surveyId}`,
     nside,
     pixels: [index, index + 1],
-    quality: "moc" as const,
+    quality,
     sourceUrl: "https://example.test/coverage",
     retrievedAt: now,
     notes: "test fixture",
@@ -40,7 +40,7 @@ interface PackageFixture {
   releases: string[];
 }
 
-async function createPackage(directory: string, id: string, surveyId: string, options: { unsafeSymlink?: boolean; missingFile?: string; footprintSurveyId?: string; version?: string; releases?: string[]; nside?: number } = {}): Promise<PackageFixture> {
+async function createPackage(directory: string, id: string, surveyId: string, options: { unsafeSymlink?: boolean; missingFile?: string; footprintSurveyId?: string; version?: string; releases?: string[]; nside?: number; quality?: "moc" | "official_overview" } = {}): Promise<PackageFixture> {
   const version = options.version ?? "2.0.0";
   const releases = options.releases ?? ["release-a", "release-b"];
   const packageManifest = {
@@ -53,7 +53,7 @@ async function createPackage(directory: string, id: string, surveyId: string, op
     createdAt: now,
     footprintManifest: "footprints/survey-footprints.json",
   };
-  const footprints = manifestFor(options.footprintSurveyId ?? surveyId, releases, options.nside);
+  const footprints = manifestFor(options.footprintSurveyId ?? surveyId, releases, options.nside, options.quality);
   const zip = new yazl.ZipFile();
   zip.addBuffer(Buffer.from(`${JSON.stringify(packageManifest, null, 2)}\n`), "resource-package.json");
   zip.addBuffer(Buffer.from(`${JSON.stringify(footprints, null, 2)}\n`), "footprints/survey-footprints.json");
@@ -81,7 +81,8 @@ async function writeCatalog(directory: string, packages: { id: string; surveyId:
     coverageAuthorities: ["official-moc"],
     accessModes: ["public-archive"],
     releases: entry.releases ?? ["fixture-release"],
-    sources: [{ label: "Fixture source", url: "https://example.test/coverage", authority: "official-moc" }],
+    releaseLabels: Object.fromEntries((entry.releases ?? ["fixture-release"]).map((releaseId) => [releaseId, releaseId.toUpperCase()])),
+    sources: (entry.releases ?? ["fixture-release"]).map((releaseId) => ({ releaseId, label: "Fixture source", url: "https://example.test/coverage", authority: "official-moc" })),
     version: entry.version ?? "2.0.0",
     archiveUrl: path.basename(entry.archivePath),
     sizeBytes: entry.sizeBytes,
@@ -102,7 +103,7 @@ interface Fixture {
   packages: PackageFixture[];
 }
 
-async function fixture(options: { tamperSha256?: boolean; unsafeSymlink?: boolean; missingFile?: string; footprintSurveyId?: string; nside?: number } = {}): Promise<Fixture> {
+async function fixture(options: { tamperSha256?: boolean; unsafeSymlink?: boolean; missingFile?: string; footprintSurveyId?: string; nside?: number; quality?: "moc" | "official_overview" } = {}): Promise<Fixture> {
   const directory = await mkdtemp(path.join(os.tmpdir(), "astro-resource-packages-"));
   const root = path.join(directory, "resource-packages");
   const statePath = path.join(directory, "state", "resource-package-state.json");
@@ -142,20 +143,42 @@ test("resource packages list lifecycle status and survive a registry restart", a
 
     await paths.manager.activate("public-legacy-surveys-footprints");
     assert.equal(paths.manager.get("public-legacy-surveys-footprints").status, "active");
+    await waitForJob(paths.manager, paths.manager.install("public-galex-footprints"));
+    await paths.manager.activate("public-galex-footprints");
 
     const reloaded = new ResourcePackageManager({ catalogUrl: paths.catalogUrl, root: paths.root, statePath: paths.statePath });
     await reloaded.initialize();
     assert.equal(reloaded.get("public-legacy-surveys-footprints").status, "active");
+    assert.equal(reloaded.get("public-galex-footprints").status, "active");
 
-    await assert.rejects(() => reloaded.remove("public-legacy-surveys-footprints"), /Deactivate resource package before deleting/);
-    await reloaded.deactivate("public-legacy-surveys-footprints");
     await reloaded.remove("public-legacy-surveys-footprints");
     assert.equal(reloaded.get("public-legacy-surveys-footprints").status, "not_installed");
+    assert.ok((await reloaded.activeFootprints()).footprints.every((footprint) => footprint.surveyId === "galex"));
 
     const restarted = new ResourcePackageManager({ catalogUrl: paths.catalogUrl, root: paths.root, statePath: paths.statePath });
     await restarted.initialize();
     assert.equal(restarted.get("public-legacy-surveys-footprints").status, "not_installed");
-    assert.equal(restarted.get("public-galex-footprints").status, "not_installed");
+    assert.equal(restarted.get("public-galex-footprints").status, "active");
+  } finally {
+    await rm(paths.directory, { recursive: true, force: true });
+  }
+});
+
+test("overview-only releases are retained on disk but removed from legacy active state", async () => {
+  const paths = await fixture({ quality: "official_overview" });
+  try {
+    await waitForJob(paths.manager, paths.manager.install("public-legacy-surveys-footprints"));
+    const state = JSON.parse(await readFile(paths.statePath, "utf8")) as { packages: Array<{ id: string; activeReleaseIds: string[] }> };
+    state.packages.find((record) => record.id === "public-legacy-surveys-footprints")!.activeReleaseIds = ["release-a"];
+    await writeFile(paths.statePath, `${JSON.stringify({ schemaVersion: 2, packages: state.packages }, null, 2)}\n`, "utf8");
+
+    const restarted = new ResourcePackageManager({ catalogUrl: paths.catalogUrl, root: paths.root, statePath: paths.statePath });
+    await restarted.initialize();
+    const record = restarted.get("public-legacy-surveys-footprints");
+    assert.equal(record.status, "installed");
+    assert.deepEqual(record.availableReleaseIds, []);
+    assert.deepEqual(record.activeReleaseIds, []);
+    assert.deepEqual((await restarted.activeFootprints()).footprints, []);
   } finally {
     await rm(paths.directory, { recursive: true, force: true });
   }

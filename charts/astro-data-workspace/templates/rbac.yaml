@@ -1,0 +1,31 @@
+{{- if .Values.dataWarehouse.enabled }}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "astro-data-workspace.fullname" . }}
+  namespace: {{ .Values.dataWarehouse.namespace }}
+  labels:
+    {{- include "astro-data-workspace.labels" . | nindent 4 }}
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["flink.apache.org"]
+    resources: ["flinkdeployments", "flinkdeployments/status"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "astro-data-workspace.fullname" . }}
+  namespace: {{ .Values.dataWarehouse.namespace }}
+  labels:
+    {{- include "astro-data-workspace.labels" . | nindent 4 }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "astro-data-workspace.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "astro-data-workspace.fullname" . }}
+{{- end }}

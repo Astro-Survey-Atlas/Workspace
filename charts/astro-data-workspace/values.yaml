@@ -1,0 +1,84 @@
+replicaCount: 1
+
+image:
+  repository: crpi-wixjy6gci86ms14e.cn-hongkong.personal.cr.aliyuncs.com/ay-dev/astro-data-workspace-mcp
+  tag: "0.10.38-20260812062146"
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+serviceAccount:
+  create: true
+  name: ""
+
+service:
+  type: ClusterIP
+  port: 3000
+
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+  hosts:
+    - host: astro-data-workspace.local
+      paths:
+        - path: /
+          pathType: Prefix
+  tls: []
+
+persistence:
+  enabled: true
+  storageClass: ""
+  accessModes:
+    - ReadWriteOnce
+  size: 1Gi
+  existingClaim: ""
+
+metadataStore:
+  mode: sqlite
+  sqlite:
+    path: /state/metadata.sqlite
+  external:
+    existingSecret: ""
+    existingSecretKey: database-url
+  database:
+    name: astro
+    username: astro
+
+dataWarehouse:
+  enabled: false
+  namespace: warehouse
+  pollIntervalMs: 5000
+  elasticsearch:
+    url: ""
+    index: astro_file_index_v1
+
+env: []
+resources:
+  requests:
+    cpu: 25m
+    memory: 64Mi
+  limits:
+    cpu: 250m
+    memory: 256Mi
+
+postgresql:
+  enabled: false
+  architecture: standalone
+  auth:
+    database: astro
+    username: astro
+    existingSecret: ""
+
+podSecurityContext:
+  fsGroup: 10001
+  fsGroupChangePolicy: OnRootMismatch
+containerSecurityContext:
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop: [ALL]
+  readOnlyRootFilesystem: true
+  runAsNonRoot: true
+  runAsUser: 10001

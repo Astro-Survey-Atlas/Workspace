@@ -123,6 +123,7 @@ export class VolumeViewer {
   readonly #scene = new THREE.Scene();
   readonly #camera = new THREE.PerspectiveCamera(52, 1, 0.015, 20);
   readonly #renderer: THREE.WebGLRenderer;
+  readonly #starField: THREE.Points;
   readonly #controls: OrbitControls;
   readonly #raycaster = new THREE.Raycaster();
   readonly #pointer = new THREE.Vector2();
@@ -169,7 +170,6 @@ export class VolumeViewer {
       alpha: false,
       powerPreference: "high-performance",
     });
-    this.#renderer.setClearColor(0x05080b, 1);
     this.#renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     this.#renderer.outputColorSpace = THREE.SRGBColorSpace;
     this.#renderer.debug.checkShaderErrors = true;
@@ -177,7 +177,9 @@ export class VolumeViewer {
     const dataAxis = asVector(manifest.coverage.centerRaDeg, manifest.coverage.centerDecDeg).normalize();
     this.#cutRotation.setFromUnitVectors(new THREE.Vector3(-1, 0, 0), dataAxis);
     this.#shellLayer.quaternion.copy(this.#cutRotation);
-    this.#scene.add(this.#createBackgroundStars(), this.#shellLayer, this.#voxelLayer, this.#dataLayer, this.#selectionLayer);
+    this.#starField = this.#createBackgroundStars();
+    this.#scene.add(this.#starField, this.#shellLayer, this.#voxelLayer, this.#dataLayer, this.#selectionLayer);
+    this.setTheme(document.documentElement.dataset.theme === "light" ? "light" : "dark");
 
     this.#controls = new OrbitControls(this.#camera, canvas);
     this.#controls.target.set(0, 0, 0);
@@ -201,6 +203,14 @@ export class VolumeViewer {
 
   get webglVersion(): string {
     return this.#renderer.capabilities.isWebGL2 ? "WEBGL2" : "WEBGL1";
+  }
+
+  setTheme(theme: "light" | "dark"): void {
+    this.#canvas.dataset.theme = theme;
+    this.#renderer.setClearColor(theme === "light" ? 0xe8eef0 : 0x05080b, 1);
+    (this.#starField.material as THREE.PointsMaterial).color.setHex(theme === "light" ? 0x65757d : 0x8793a0);
+    (this.#starField.material as THREE.PointsMaterial).opacity = theme === "light" ? 0.24 : 0.22;
+    this.#requestRender();
   }
 
   get state(): VolumeViewState {

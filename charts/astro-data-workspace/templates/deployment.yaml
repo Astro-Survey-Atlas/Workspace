@@ -1,0 +1,132 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "astro-data-workspace.fullname" . }}
+  labels:
+    {{- include "astro-data-workspace.labels" . | nindent 4 }}
+  replicas: {{ .Values.replicaCount }}
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "astro-data-workspace.name" . }}
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  template:
+    metadata:
+      labels:
+        {{- include "astro-data-workspace.labels" . | nindent 8 }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets: {{ toYaml . | nindent 8 }}
+      {{- end }}
+      {{- if .Values.dataWarehouse.enabled }}
+      serviceAccountName: {{ include "astro-data-workspace.serviceAccountName" . }}
+      {{- end }}
+      securityContext: {{ toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: workspace
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: 3000
+          env:
+            - name: HOST
+              value: 0.0.0.0
+            - name: PORT
+              value: "3000"
+            - name: ASTRO_WORKSPACE_STATE
+              value: /state/registry.json
+            - name: ASTRO_DATA_CATALOG_STATE
+              value: /state/data-catalog.json
+            - name: ASTRO_SURVEY_REGISTRY_STATE
+              value: /state/survey-registrations.json
+            - name: ASTRO_MANUAL_FOOTPRINT_STATE
+              value: /state/manual-footprints.json
+            - name: ASTRO_CONNECTOR_STATE
+              value: /state/connectors.json
+            - name: ASTRO_CONNECTOR_RUN_STATE
+              value: /state/connector-ingest-runs.json
+            - name: ASTRO_CONNECTOR_BOOTSTRAP
+              value: /app/bootstrap/connectors.json
+            - name: ASTRO_ALLOWED_ROOTS
+              value: /state
+            - name: ASTRO_RESOURCE_PACKAGE_ROOT
+              value: /state/resource-packages
+            - name: ASTRO_RESOURCE_PACKAGE_STATE
+              value: /state/resource-package-state.json
+            - name: ASTRO_METADATA_STORE_MODE
+              value: {{ .Values.metadataStore.mode | quote }}
+            - name: METADATA_STORE_MODE
+              value: {{ .Values.metadataStore.mode | quote }}
+            {{- if eq .Values.metadataStore.mode "sqlite" }}
+            - name: ASTRO_METADATA_SQLITE_PATH
+              value: {{ .Values.metadataStore.sqlite.path | quote }}
+            - name: SQLITE_PATH
+              value: {{ .Values.metadataStore.sqlite.path | quote }}
+            {{- else if eq .Values.metadataStore.mode "bundled-postgresql" }}
+            - name: ASTRO_METADATA_DATABASE_HOST
+              value: {{ printf "%s-postgresql" (include "astro-data-workspace.fullname" .) | quote }}
+            - name: ASTRO_METADATA_DATABASE_PORT
+              value: "5432"
+            - name: ASTRO_METADATA_DATABASE_NAME
+              value: {{ .Values.postgresql.auth.database | quote }}
+            - name: ASTRO_METADATA_DATABASE_USER
+              value: {{ .Values.postgresql.auth.username | quote }}
+            - name: ASTRO_METADATA_DATABASE_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ default (printf "%s-postgresql" (include "astro-data-workspace.fullname" .)) .Values.postgresql.auth.existingSecret }}
+                  key: postgres-password
+            {{- else }}
+            - name: ASTRO_METADATA_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.metadataStore.external.existingSecret }}
+                  key: {{ .Values.metadataStore.external.existingSecretKey }}
+            {{- end }}
+            {{- if .Values.dataWarehouse.enabled }}
+            - name: ASTRO_FLINK_NAMESPACE
+              value: {{ .Values.dataWarehouse.namespace | quote }}
+            - name: ASTRO_FLINK_SECRET_NAMESPACE
+              value: {{ .Values.dataWarehouse.namespace | quote }}
+            - name: ASTRO_FLINK_POLL_MS
+              value: {{ .Values.dataWarehouse.pollIntervalMs | quote }}
+            {{- with .Values.dataWarehouse.elasticsearch.url }}
+            - name: ASTRO_ES_URL
+              value: {{ . | quote }}
+            {{- end }}
+            - name: ASTRO_ES_ASTRO_INDEX
+              value: {{ .Values.dataWarehouse.elasticsearch.index | quote }}
+            {{- end }}
+            {{- with .Values.env }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+          resources: {{ toYaml .Values.resources | nindent 12 }}
+          securityContext: {{ toYaml .Values.containerSecurityContext | nindent 12 }}
+          volumeMounts:
+            - name: state
+              mountPath: /state
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: state
+          {{- if .Values.persistence.existingClaim }}
+          persistentVolumeClaim:
+            claimName: {{ .Values.persistence.existingClaim }}
+          {{- else if .Values.persistence.enabled }}
+          persistentVolumeClaim:
+            claimName: {{ include "astro-data-workspace.fullname" . }}-state
+          {{- else }}
+          emptyDir: {}
+          {{- end }}
+        - name: tmp
+          emptyDir: {}

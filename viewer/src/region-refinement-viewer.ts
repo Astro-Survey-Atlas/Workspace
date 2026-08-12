@@ -67,6 +67,7 @@ export class RegionRefinementViewer {
   readonly #scene = new THREE.Scene();
   readonly #camera = new THREE.PerspectiveCamera(42, 1, 0.01, 20);
   readonly #renderer: THREE.WebGLRenderer;
+  readonly #starField: THREE.Points;
   readonly #controls: OrbitControls;
   readonly #raycaster = new THREE.Raycaster();
   readonly #pointer = new THREE.Vector2();
@@ -99,7 +100,6 @@ export class RegionRefinementViewer {
     this.setCoveredBasePixels(coveredBasePixels, false);
 
     this.#renderer = new THREE.WebGLRenderer({ canvas, antialias: true, powerPreference: "high-performance" });
-    this.#renderer.setClearColor(0x03070a, 1);
     this.#renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     this.#renderer.outputColorSpace = THREE.SRGBColorSpace;
     this.#controls = new OrbitControls(this.#camera, canvas);
@@ -109,7 +109,9 @@ export class RegionRefinementViewer {
     this.#controls.minDistance = 0.26;
     this.#controls.maxDistance = 5;
     this.#controls.addEventListener("change", this.#handleControlsChange);
-    this.#scene.add(this.#backgroundStars(), this.#regionGroup);
+    this.#starField = this.#backgroundStars();
+    this.#scene.add(this.#starField, this.#regionGroup);
+    this.setTheme(document.documentElement.dataset.theme === "light" ? "light" : "dark");
     this.#canvas.addEventListener("pointerdown", this.#handlePointerDown);
     this.#canvas.addEventListener("pointerup", this.#handlePointerUp);
     this.#canvas.addEventListener("pointermove", this.#handlePointerMove);
@@ -123,6 +125,14 @@ export class RegionRefinementViewer {
 
   get webglVersion(): string {
     return this.#renderer.capabilities.isWebGL2 ? "WEBGL2" : "WEBGL1";
+  }
+
+  setTheme(theme: "light" | "dark"): void {
+    this.#canvas.dataset.theme = theme;
+    this.#renderer.setClearColor(theme === "light" ? 0xe8eef0 : 0x03070a, 1);
+    (this.#starField.material as THREE.PointsMaterial).color.setHex(theme === "light" ? 0x65757d : 0x71808b);
+    (this.#starField.material as THREE.PointsMaterial).opacity = theme === "light" ? 0.24 : 0.24;
+    this.#requestRender();
   }
 
   get state(): RegionRefinementState {

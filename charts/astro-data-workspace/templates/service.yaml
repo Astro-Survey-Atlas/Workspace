@@ -1,0 +1,14 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "astro-data-workspace.fullname" . }}
+  labels:
+    {{- include "astro-data-workspace.labels" . | nindent 4 }}
+  type: {{ .Values.service.type }}
+  selector:
+    app.kubernetes.io/name: {{ include "astro-data-workspace.name" . }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+  ports:
+    - name: http
+      port: {{ .Values.service.port }}
+      targetPort: http

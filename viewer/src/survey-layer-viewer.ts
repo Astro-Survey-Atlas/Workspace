@@ -216,6 +216,7 @@ export class SurveyLayerViewer {
   readonly #scene = new THREE.Scene();
   readonly #camera = new THREE.PerspectiveCamera(48, 1, 0.015, 24);
   readonly #renderer: THREE.WebGLRenderer;
+  readonly #starField: THREE.Points;
   readonly #controls: OrbitControls;
   readonly #raycaster = new THREE.Raycaster();
   readonly #pointer = new THREE.Vector2();
@@ -273,7 +274,6 @@ export class SurveyLayerViewer {
     surveys.forEach((survey) => this.#colorBySurvey.set(survey.id, displayColor(survey.color)));
 
     this.#renderer = new THREE.WebGLRenderer({ canvas, antialias: true, powerPreference: "high-performance" });
-    this.#renderer.setClearColor(0x03070a, 1);
     this.#renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     this.#renderer.outputColorSpace = THREE.SRGBColorSpace;
     this.#renderer.debug.checkShaderErrors = true;
@@ -284,7 +284,9 @@ export class SurveyLayerViewer {
     this.#controls.minDistance = this.#outerRadius + 0.18;
     this.#controls.maxDistance = 7.5;
     this.#controls.addEventListener("change", this.#handleControlsChange);
-    this.#scene.add(this.#backgroundStars(), this.#coverageGroup, this.#workspaceCoverageGroup, this.#retiredGroup, this.#selectionGroup, this.#explosionGroup);
+    this.#starField = this.#backgroundStars();
+    this.#scene.add(this.#starField, this.#coverageGroup, this.#workspaceCoverageGroup, this.#retiredGroup, this.#selectionGroup, this.#explosionGroup);
+    this.setTheme(document.documentElement.dataset.theme === "light" ? "light" : "dark");
     this.#canvas.addEventListener("pointerdown", this.#handlePointerDown);
     this.#canvas.addEventListener("pointerup", this.#handlePointerUp);
     this.#canvas.addEventListener("pointermove", this.#handlePointerMove);
@@ -300,6 +302,14 @@ export class SurveyLayerViewer {
 
   get webglVersion(): string {
     return this.#renderer.capabilities.isWebGL2 ? "WEBGL2" : "WEBGL1";
+  }
+
+  setTheme(theme: "light" | "dark"): void {
+    this.#canvas.dataset.theme = theme;
+    this.#renderer.setClearColor(theme === "light" ? 0xe8eef0 : 0x03070a, 1);
+    (this.#starField.material as THREE.PointsMaterial).color.setHex(theme === "light" ? 0x65757d : 0x71808b);
+    (this.#starField.material as THREE.PointsMaterial).opacity = theme === "light" ? 0.25 : 0.28;
+    this.#requestRender();
   }
 
   get state(): SurveyLayerState {

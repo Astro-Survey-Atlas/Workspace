@@ -1,5 +1,5 @@
 import { workspaceApi } from "./api";
-import type { AgentSession, ToolDescriptor, WorkflowDefinition, WorkflowRun } from "../../src/workflow";
+import type { ToolDescriptor, WorkflowDefinition, WorkflowRun } from "../../src/workflow";
 
 function byId<T extends HTMLElement>(id: string): T {
   const element = document.getElementById(id);
@@ -33,7 +33,6 @@ const STATUS_LABELS: Record<string, string> = {
 export class WorkflowPanel {
   private workflows: WorkflowDefinition[] = [];
   private tools: ToolDescriptor[] = [];
-  private session: AgentSession | null = null;
   private currentRun: WorkflowRun | null = null;
   private pollTimer: ReturnType<typeof setTimeout> | null = null;
   private initialized = false;
@@ -41,6 +40,9 @@ export class WorkflowPanel {
   private productionAction: "crossmatch" | "cutout" | "package" = "crossmatch";
 
   constructor(private readonly onError: (error: unknown) => void) {
+    const dialog = byId<HTMLDialogElement>("workflow-create-dialog");
+    byId<HTMLButtonElement>("workflow-new").addEventListener("click", () => dialog.showModal());
+    byId<HTMLButtonElement>("workflow-dialog-close").addEventListener("click", () => dialog.close());
     byId<HTMLFormElement>("workflow-form").addEventListener("submit", (event) => {
       event.preventDefault();
       void this.createRun().catch((error) => this.showError(error));
@@ -62,10 +64,6 @@ export class WorkflowPanel {
     byId<HTMLButtonElement>("workflow-adjust-region").addEventListener("click", () => void this.decide({ action: "adjust_region", input: this.formInput() }));
     byId<HTMLButtonElement>("workflow-retry").addEventListener("click", () => void this.decide({ action: "retry" }));
     byId<HTMLButtonElement>("workflow-open-layers").addEventListener("click", () => this.navigate("layers"));
-    byId<HTMLFormElement>("agent-form").addEventListener("submit", (event) => {
-      event.preventDefault();
-      void this.sendAgentMessage().catch((error) => this.showError(error));
-    });
   }
 
   async activate(): Promise<void> {
@@ -86,7 +84,6 @@ export class WorkflowPanel {
       workflowRunId: this.currentRun?.id,
       workflowStatus: this.currentRun?.status,
       workflowPreviewRows: this.currentRun?.preview.length ?? 0,
-      workflowSessionId: this.session?.id,
     };
   }
 
@@ -102,8 +99,6 @@ export class WorkflowPanel {
     }));
     this.renderTools();
     this.renderDefinition(this.workflows[0]!);
-    this.session = await workspaceApi.createAgentSession(this.workflows[0]!.key);
-    this.renderSession();
     this.initialized = true;
   }
 
@@ -122,6 +117,7 @@ export class WorkflowPanel {
     this.clearError();
     const workflowId = byId<HTMLSelectElement>("workflow-select").value;
     this.currentRun = await workspaceApi.createWorkflowRun(workflowId, this.formInput());
+    byId<HTMLDialogElement>("workflow-create-dialog").close();
     this.renderRun();
     this.schedulePoll(100);
   }
@@ -156,23 +152,6 @@ export class WorkflowPanel {
     }
   }
 
-  private async sendAgentMessage(): Promise<void> {
-    if (!this.session) return;
-    const input = byId<HTMLTextAreaElement>("agent-input");
-    const content = input.value.trim();
-    if (!content) return;
-    input.value = "";
-    const result = await workspaceApi.sendAgentMessage(this.session.id, content);
-    this.session = result.session;
-    this.renderSession();
-    if (result.run) {
-      this.currentRun = result.run;
-      this.syncFormFromRun(result.run);
-      this.renderRun();
-      if (["queued", "running"].includes(result.run.status)) this.schedulePoll(100);
-    }
-  }
-
   private renderDefinition(definition: WorkflowDefinition): void {
     byId("workflow-stage-title").textContent = definition.title;
     const list = byId<HTMLOListElement>("workflow-steps");
@@ -191,7 +170,12 @@ export class WorkflowPanel {
       const state = document.createElement("span");
       state.className = "step-state";
       state.textContent = "PENDING";
-      item.append(number, copy, state);
+      const progress = document.createElement("span");
+      progress.className = "item-progress";
+      progress.dataset.status = "pending";
+      progress.dataset.mode = "inactive";
+      progress.setAttribute("aria-hidden", "true");
+      item.append(number, copy, state, progress);
       return item;
     }));
   }
@@ -253,6 +237,15 @@ export class WorkflowPanel {
       item.dataset.status = step.status;
       const state = item.querySelector<HTMLElement>(".step-state");
       if (state) state.textContent = STATUS_LABELS[step.status] ?? step.status.toUpperCase();
+      const progress = item.querySelector<HTMLElement>(".item-progress");
+      if (progress) {
+        progress.dataset.status = step.status;
+        progress.dataset.mode = step.status === "running" ? "indeterminate" : step.status === "succeeded" ? "complete" : step.status === "waiting_for_input" ? "waiting" : step.status === "failed" ? "failed" : "inactive";
+        const active = !["pending", "skipped"].includes(step.status);
+        progress.setAttribute("aria-hidden", String(!active));
+        if (active) progress.setAttribute("aria-label", `步骤“${step.title}”${step.status === "running" ? "正在运行" : step.status === "succeeded" ? "已成功完成" : step.status === "waiting_for_input" ? "正在等待输入" : "执行失败"}`);
+        else progress.removeAttribute("aria-label");
+      }
       const detail = item.querySelector<HTMLElement>("small");
       if (detail && step.durationMs !== undefined) detail.textContent = `${step.toolId ?? "HUMAN DECISION"} · ${step.durationMs.toFixed(1)} ms`;
     });
@@ -315,32 +308,6 @@ export class WorkflowPanel {
         tableRow.append(cell);
       });
       body.append(tableRow);
-    });
-  }
-
-  private renderSession(): void {
-    if (!this.session) return;
-    const container = byId("agent-messages");
-    container.replaceChildren(...this.session.messages.map((entry) => {
-      const article = document.createElement("article");
-      article.className = `agent-message ${entry.role}`;
-      const meta = document.createElement("span");
-      meta.textContent = entry.role === "assistant" ? "AGENT" : "YOU";
-      const copy = document.createElement("p");
-      copy.textContent = entry.content;
-      article.append(meta, copy);
-      return article;
-    }));
-    container.scrollTop = container.scrollHeight;
-  }
-
-  private syncFormFromRun(run: WorkflowRun): void {
-    const mappings: Array<[string, string]> = [
-      ["workflow-ra", "raDeg"], ["workflow-dec", "decDeg"], ["workflow-query-radius", "queryRadiusArcsec"],
-      ["workflow-match-radius", "matchRadiusArcsec"], ["workflow-limit", "limit"],
-    ];
-    mappings.forEach(([elementId, key]) => {
-      if (run.input[key] !== undefined) byId<HTMLInputElement>(elementId).value = String(run.input[key]);
     });
   }
 

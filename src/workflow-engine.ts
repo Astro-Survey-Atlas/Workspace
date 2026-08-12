@@ -372,6 +372,7 @@ export class WorkflowEngine {
     step.completedAt = undefined;
     step.error = undefined;
     run.events.push({ at: step.startedAt, type: "step", stepId, message: `${step.title}已开始` });
+    await this.store.save(run);
     const started = performance.now();
     try {
       const result = await this.tools.invoke(step.toolId, input, { runId: run.id, stepId }) as T;

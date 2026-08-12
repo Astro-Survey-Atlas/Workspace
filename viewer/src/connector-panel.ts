@@ -17,6 +17,7 @@ function field(form: HTMLFormElement, name: string): string {
 
 const KIND_LABELS: Record<ConnectorKind, string> = { s3: "S3 / OSS", local: "本地路径", jdbc: "JDBC 数据库" };
 const STATUS_LABELS: Record<ConnectorStatus, string> = { draft: "草稿", ready: "可用", disabled: "停用" };
+const SENSITIVE_CONFIG_KEY = /(auth|credential|secret|password|passphrase|token|access.?key|api.?key|private.?key|session|user(name)?)/i;
 
 function connectorLocation(record: ConnectorPublicRecord): string { return record.displayPath; }
 
@@ -58,14 +59,21 @@ export class ConnectorPanel {
 
   constructor(onError: (error: unknown) => void) {
     this.#onError = onError;
-    byId<HTMLSelectElement>("connector-kind").addEventListener("change", () => this.#renderConfigFieldsFrom(byId<HTMLFormElement>("connector-registration-form"), true));
-    byId<HTMLFormElement>("connector-registration-form").addEventListener("submit", (event) => {
+    const registrationForm = byId<HTMLFormElement>("connector-registration-form");
+    (registrationForm.elements.namedItem("kind") as HTMLSelectElement).addEventListener("change", () => this.#renderConfigFieldsFrom(registrationForm, true));
+    registrationForm.addEventListener("submit", (event) => {
       event.preventDefault();
       void this.#register().catch((error) => this.#registrationFeedback("failed", "登记失败", error));
     });
-    byId<HTMLButtonElement>("connector-form-cancel").addEventListener("click", () => this.#resetRegistrationForm());
-    byId<HTMLButtonElement>("connector-delete").addEventListener("click", () => void this.#remove().catch(this.#onError));
+    byId<HTMLButtonElement>("connector-form-cancel").addEventListener("click", () => this.#closeCreateDialog());
     byId<HTMLButtonElement>("connector-check-form").addEventListener("click", () => void this.#checkRegistrationInput());
+    byId<HTMLButtonElement>("connector-new").addEventListener("click", () => this.#openCreateDialog());
+    byId<HTMLButtonElement>("connector-dialog-close").addEventListener("click", () => this.#closeCreateDialog());
+    byId<HTMLDialogElement>("connector-create-dialog").addEventListener("cancel", () => this.#resetRegistrationForm());
+    byId<HTMLInputElement>("connector-search").addEventListener("input", () => this.#render());
+    ["connector-kind-filter", "connector-status-filter", "connector-survey-filter"].forEach((id) => {
+      byId<HTMLSelectElement>(id).addEventListener("change", () => this.#render());
+    });
   }
 
   async activate(selectedId?: string): Promise<void> {
@@ -74,6 +82,7 @@ export class ConnectorPanel {
     const records = await Promise.all(this.#surveys.map((survey) => workspaceApi.survey(survey.id)));
     this.#surveyRecords = new Map(records.map((record) => [record.id, record]));
     this.#populateSurveySelects(byId<HTMLFormElement>("connector-registration-form"), "", "");
+    this.#populateSurveyFilter();
     if (selectedId && this.#records.some((record) => record.id === selectedId)) this.#selectedId = selectedId;
     if (!this.#selectedId || !this.#records.some((record) => record.id === this.#selectedId)) this.#selectedId = this.#records[0]?.id ?? null;
     this.#resetRegistrationForm();
@@ -105,8 +114,13 @@ export class ConnectorPanel {
 
   #render(): void {
     if (!this.#active) return;
+    const records = this.#filteredRecords();
+    if (!records.some((record) => record.id === this.#selectedId)) {
+      this.#selectedId = records[0]?.id ?? null;
+      this.#editingId = null;
+    }
     const list = byId("connector-list");
-    list.replaceChildren(...this.#records.map((record) => {
+    list.replaceChildren(...records.map((record) => {
       const row = document.createElement("button");
       row.type = "button";
       row.className = "connector-row";
@@ -121,11 +135,59 @@ export class ConnectorPanel {
       row.append(identity, location, kind, statusPill(record));
       return row;
     }));
-    byId("connector-empty").hidden = this.#records.length > 0;
+    const empty = byId("connector-empty");
+    empty.hidden = records.length > 0;
+    empty.textContent = this.#records.length ? "没有符合当前搜索和筛选条件的 Connector。" : "还没有登记 Connector。";
     byId("connector-count").textContent = String(this.#records.length);
     byId("connector-draft-count").textContent = String(this.#records.filter((record) => record.status === "draft").length);
     byId("connector-ready-count").textContent = String(this.#records.filter((record) => record.status === "ready" || record.lastCheck?.status === "ok").length);
+    byId("connector-search-hint").textContent = `${records.length} / ${this.#records.length} 个 Connector 命中`;
+    const facetCount = document.getElementById("connector-filter-count");
+    if (facetCount) facetCount.textContent = `${records.length} / ${this.#records.length}`;
     this.#renderDetail();
+  }
+
+  #filteredRecords(): ConnectorPublicRecord[] {
+    const query = byId<HTMLInputElement>("connector-search").value.trim().toLocaleLowerCase();
+    const kind = byId<HTMLSelectElement>("connector-kind-filter").value;
+    const status = byId<HTMLSelectElement>("connector-status-filter").value;
+    const survey = byId<HTMLSelectElement>("connector-survey-filter").value;
+    return this.#records.filter((record) => {
+      if (kind !== "all" && record.kind !== kind) return false;
+      if (status !== "all" && record.status !== status) return false;
+      if (survey !== "all" && (survey === "unbound" ? Boolean(record.surveyId) : record.surveyId !== survey)) return false;
+      if (!query) return true;
+      const config = Object.entries(record.config)
+        .filter(([key]) => !SENSITIVE_CONFIG_KEY.test(key))
+        .flatMap(([key, value]) => [key, value
+          .replace(/\/\/[^/@\s]+@/g, "//")
+          .replace(/([?;&](?:auth|credential|secret|password|passphrase|token|access.?key|api.?key|private.?key|session|user(?:name)?)=)[^&;\s]*/gi, "$1")]);
+      const searchable = [record.name, record.description, record.kind, record.status, record.displayPath, record.surveyId, record.releaseId, record.locationKey, ...config]
+        .filter(Boolean)
+        .join(" ")
+        .toLocaleLowerCase();
+      return searchable.includes(query);
+    });
+  }
+
+  #populateSurveyFilter(): void {
+    const select = byId<HTMLSelectElement>("connector-survey-filter");
+    const selected = select.value || "all";
+    select.replaceChildren(new Option("全部巡天", "all"), new Option("未绑定巡天", "unbound"));
+    this.#surveys.forEach((survey) => select.append(new Option(survey.name, survey.id)));
+    select.value = [...select.options].some((option) => option.value === selected) ? selected : "all";
+  }
+
+  #openCreateDialog(): void {
+    this.#resetRegistrationForm();
+    const dialog = byId<HTMLDialogElement>("connector-create-dialog");
+    if (!dialog.open) dialog.showModal();
+  }
+
+  #closeCreateDialog(): void {
+    this.#resetRegistrationForm();
+    const dialog = byId<HTMLDialogElement>("connector-create-dialog");
+    if (dialog.open) dialog.close();
   }
 
   #populateSurveySelects(form: HTMLFormElement, selectedSurveyId: string, selectedReleaseId: string): void {
@@ -189,7 +251,7 @@ export class ConnectorPanel {
     if (!assets.length) {
       const empty = document.createElement("p");
       empty.className = "connector-scan-empty";
-      empty.textContent = "没有与此 Connector 关联的数据资产。请先在数据目录 → 数据资产详情 → 访问位置中关联它。";
+      empty.textContent = "没有与此 Connector 关联的用户资产。请先在用户资产详情的“访问位置与 Connector”中关联它。";
       section.append(empty);
       return section;
     }
@@ -350,7 +412,7 @@ export class ConnectorPanel {
     if (!form.reportValidity()) { this.#registrationFeedback("failed", "信息不完整", "请补全当前 Connector 所需字段。 "); return; }
     this.#registrationFeedback("checking", "正在保存 Connector…");
     const record = await workspaceApi.registerConnector(this.#inputFromForm(form));
-    this.#records = await workspaceApi.connectors(); this.#selectedId = record.id; this.#resetRegistrationForm(); this.#render();
+    this.#records = await workspaceApi.connectors(); this.#selectedId = record.id; this.#closeCreateDialog(); this.#render();
   }
 
   async #saveEdit(record: ConnectorPublicRecord, form: HTMLFormElement): Promise<void> {
@@ -412,9 +474,14 @@ export class ConnectorPanel {
 
   #runRow(run: ConnectorIngestRun): HTMLElement {
     const row = document.createElement("div"); row.className = "connector-run-row";
+    row.dataset.status = run.status;
     const title = document.createElement("strong"); title.textContent = run.jobId ?? run.batchId ?? run.id;
     const meta = document.createElement("small"); meta.textContent = `${run.status} · ${run.assetName ?? "未绑定资产"} · ${run.fileCount ?? 0} files`;
-    row.append(title, meta); return row;
+    const progress = document.createElement("span"); progress.className = "item-progress";
+    progress.dataset.status = run.status;
+    progress.dataset.mode = run.status === "queued" || run.status === "running" ? "indeterminate" : run.status === "succeeded" ? "complete" : "failed";
+    progress.setAttribute("aria-label", run.status === "queued" ? "扫描任务排队中" : run.status === "running" ? "扫描任务运行中" : run.status === "succeeded" ? "扫描任务已成功完成" : "扫描任务失败");
+    row.append(title, meta, progress); return row;
   }
 
   #emptyRunRow(): HTMLElement { const row = document.createElement("div"); row.className = "connector-run-empty"; row.textContent = "还没有 FlinkIngest / 扫描记录。"; return row; }

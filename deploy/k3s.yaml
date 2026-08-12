@@ -151,7 +151,7 @@ spec:
         fsGroupChangePolicy: OnRootMismatch
       containers:
         - name: mcp
-          image: crpi-wixjy6gci86ms14e.cn-hongkong.personal.cr.aliyuncs.com/ay-dev/astro-data-workspace-mcp:0.10.38-20260811094806
+          image: crpi-wixjy6gci86ms14e.cn-hongkong.personal.cr.aliyuncs.com/ay-dev/astro-data-workspace-mcp:0.10.38-20260812062146
           imagePullPolicy: Always
           ports:
             - name: http
@@ -165,6 +165,14 @@ spec:
               value: /var/run/secrets/kubernetes.io/serviceaccount/ca.crt
             - name: ASTRO_WORKSPACE_STATE
               value: /state/registry.json
+            - name: ASTRO_MANUAL_FOOTPRINT_STATE
+              value: /state/manual-footprints.json
+            - name: ASTRO_MANUAL_FOOTPRINT_ADMIN_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: astro-data-workspace-manual-footprints
+                  key: admin-token
+                  optional: true
             - name: ASTRO_ALLOWED_ROOTS
               value: /catalogs
             - name: ASTRO_BOOTSTRAP_CATALOG

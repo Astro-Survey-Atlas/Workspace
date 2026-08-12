@@ -1,0 +1,122 @@
+{
+  "schemaVersion": 1,
+  "generatedAt": "2026-08-12T03:07:28.389Z",
+  "statistics": {
+    "releases": 48,
+    "products": 67,
+    "acquired": 12,
+    "unavailable": 55,
+    "manifestFootprints": 12,
+    "packages": 14
+  },
+  "files": {
+    "manifest": {
+      "path": "normalized/survey-footprints.json",
+      "sha256": "8438e6f2b8fc5053ec9b0c2e7a645284f4108c62bd0b48c70882488ac7b6d39d"
+    },
+    "catalog": {
+      "path": "packages/catalog.json",
+      "sha256": "ca405ac5ecd70b717748347dfd8d90481e49824ae9c37d13f433b3537d36e2a5"
+    },
+    "packages": [
+      {
+        "id": "public-euclid-footprints",
+        "version": "2.0.0",
+        "archive": "packages/public-euclid-footprints-2.0.0.zip",
+        "sizeBytes": 1124,
+        "sha256": "99a65f986da4c5e1014618f9dccc7bbf4564cec33f32e86bb9c5817dbde0f2ed"
+      },
+      {
+        "id": "public-galex-footprints",
+        "version": "2.0.0",
+        "archive": "packages/public-galex-footprints-2.0.0.zip",
+        "sizeBytes": 8602,
+        "sha256": "d7abfd4e22758cb34d3bbfb89f38376cdad8910899b48c01e3db8148ce3c1112"
+      },
+      {
+        "id": "public-legacy-surveys-footprints",
+        "version": "2.0.0",
+        "archive": "packages/public-legacy-surveys-footprints-2.0.0.zip",
+        "sizeBytes": 6823,
+        "sha256": "235c80367099b1af56640c0f7754f41ce837964fa247f260715e48f63b6f2057"
+      },
+      {
+        "id": "public-sdss-footprints",
+        "version": "2.0.0",
+        "archive": "packages/public-sdss-footprints-2.0.0.zip",
+        "sizeBytes": 5297,
+        "sha256": "0f1572b2792a2d4dbbc76ba53d819dfa61e016c7aed492f9847f9cb3bef469b9"
+      },
+      {
+        "id": "public-hsc-ssp-footprints",
+        "version": "2.0.0",
+        "archive": "packages/public-hsc-ssp-footprints-2.0.0.zip",
+        "sizeBytes": 1483,
+        "sha256": "11c972fd0f52a6581c4e2e5af6055b9f0831c5452b987940c63ab2e68e34338e"
+      },
+      {
+        "id": "public-hst-footprints",
+        "version": "2.0.0",
+        "archive": "packages/public-hst-footprints-2.0.0.zip",
+        "sizeBytes": 8545,
+        "sha256": "7e45711b3803c88bbab26cd0e0f99335d699e6a090671e4820dac36ade8020f4"
+      },
+      {
+        "id": "public-panstarrs-footprints",
+        "version": "2.0.0",
+        "archive": "packages/public-panstarrs-footprints-2.0.0.zip",
+        "sizeBytes": 7278,
+        "sha256": "65f44c111e2da732f1b6f8e9ff7c5de42ee7e76ee23c9325c64e10d933d22c62"
+      },
+      {
+        "id": "public-des-footprints",
+        "version": "2.0.0",
+        "archive": "packages/public-des-footprints-2.0.0.zip",
+        "sizeBytes": 2265,
+        "sha256": "b6c4fee08a10c7a6592dd446d51b9b8c533f6d141ee0575f226640bf50c4a8ff"
+      },
+      {
+        "id": "public-2mass-footprints",
+        "version": "2.0.0",
+        "archive": "packages/public-2mass-footprints-2.0.0.zip",
+        "sizeBytes": 8710,
+        "sha256": "12533f4fc673ad1f20ea08e384911a9232062304580e76dbe11bb44c3176c46f"
+      },
+      {
+        "id": "public-allwise-footprints",
+        "version": "2.0.0",
+        "archive": "packages/public-allwise-footprints-2.0.0.zip",
+        "sizeBytes": 8776,
+        "sha256": "bb4e263a450ddbab8187ec71c28b8d32141bdbe8dbc266bd20a7a21cc4f16a7e"
+      },
+      {
+        "id": "public-kids-footprints",
+        "version": "2.0.0",
+        "archive": "packages/public-kids-footprints-2.0.0.zip",
+        "sizeBytes": 1506,
+        "sha256": "ef23d8cad01fc7768fe3ae0b14fd4c21e9c92f3ec629332a1be91305bf196667"
+      },
+      {
+        "id": "public-nvss-footprints",
+        "version": "2.0.0",
+        "archive": "packages/public-nvss-footprints-2.0.0.zip",
+        "sizeBytes": 7714,
+        "sha256": "250c2da6c2b61e89969ffa086989a66a71bd7425a734adf49af0ee03548188da"
+      },
+      {
+        "id": "public-imaging-footprints",
+        "version": "1.0.0",
+        "archive": "packages/public-imaging-footprints-1.0.0.zip",
+        "sizeBytes": 14059,
+        "sha256": "147055d5f40e36e8b33629f26192dbbbbba8860069f558f151ba4917c1f851d5"
+      },
+      {
+        "id": "public-ultraviolet-footprints",
+        "version": "1.0.0",
+        "archive": "packages/public-ultraviolet-footprints-1.0.0.zip",
+        "sizeBytes": 8704,
+        "sha256": "c9d3d9c35297e206abcd12fc7c12041ac91d2cf0f95b4878a5808edea1d0fdf0"
+      }
+    ]
+  }
+}

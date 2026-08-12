@@ -17,6 +17,7 @@
     "build:atlas": "tsx scripts/build_survey_atlas.ts",
     "build:footprints": "tsx scripts/build_survey_footprints.ts",
     "build:resource-packages": "tsx scripts/build_resource_package_fixtures.ts",
+    "artifacts:footprints": "tsx scripts/public_footprint_artifacts.ts sync",
     "benchmark:atlas": "tsx scripts/benchmark_joint_index.ts",
     "smoke:http": "tsx scripts/mcp-http-smoke.ts",
     "smoke:workflow-real": "tsx scripts/smoke_real_workflow.ts",

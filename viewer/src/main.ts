@@ -1,4 +1,4 @@
-import { createIcons, Download, Globe2, Layers3, MessageSquare, Play, Plus, RefreshCw, RotateCcw, Send, SlidersHorizontal } from "lucide";
+import { createIcons, Download, Globe2, Layers3, Moon, Play, Plus, RefreshCw, RotateCcw, SlidersHorizontal, Sun } from "lucide";
 
 import "./styles.css";
 import {
@@ -28,6 +28,8 @@ import {
   type SurveyLayerState,
 } from "./survey-layer-viewer";
 import type { PublicResourcePackage } from "../../src/resource-packages";
+import type { PublicCoverageStatus, PublicReleaseDetail } from "../../src/public-release-details";
+import type { ManualFootprintInput, ManualFootprintRecord } from "../../src/manual-footprints";
 import {
   VolumeViewer,
   type JointCellSelection,
@@ -37,7 +39,7 @@ import {
 import { WorkflowPanel } from "./workflow-panel";
 import { DataCatalogPanel } from "./data-catalog-panel";
 import { ConnectorPanel } from "./connector-panel";
-import { ResourcePackagePanel } from "./resource-package-panel";
+import { ResourcePackagePanel, type ResourcePackageSelectionCallbacks } from "./resource-package-panel";
 import { RegionRefinementViewer, type RegionRefinementState } from "./region-refinement-viewer";
 
 type ViewMode = "catalog" | "packages" | "connectors" | "layers" | "refine" | "volume" | "workflow";
@@ -190,6 +192,10 @@ let atlas: SurveyAtlasManifest | null = null;
 let angularCells: AtlasAngularCellData | null = null;
 let surveyCards: SurveyCard[] = [];
 let surveyFootprints: SurveyFootprintManifest | null = null;
+let publicReleaseDetails: PublicReleaseDetail[] = [];
+let manualFootprintRecords: ManualFootprintRecord[] = [];
+let releaseDetailInspectorWasOpen = false;
+let editingManualFootprint: ManualFootprintRecord | null = null;
 let selectedSurvey: SurveyRecord | null = null;
 const surveyRecordsById = new Map<string, SurveyRecord>();
 let selectedLayerRegion: SurveyLayerSelection | null = null;
@@ -200,6 +206,7 @@ let refinementSurveyIds = new Set<string>();
 let refinementModalities = new Set<string>();
 let visibleSurveyIds = new Set<string>();
 let workspaceSurveyIds = new Set<string>();
+let hasUnassignedWorkspaceCoverage = false;
 let unassignedWorkspaceVisible = false;
 let layerLayoutMode: SurveyLayerLayoutMode = "layers";
 let layerInteractionMode: SurveyLayerInteractionMode = "inspect";
@@ -234,12 +241,57 @@ const dataCatalogPanel = new DataCatalogPanel((error) => showFatal(error), (conn
 const connectorPanel = new ConnectorPanel((error) => showFatal(error));
 const resourcePackagePanel = new ResourcePackagePanel(
   (before, after) => refreshActiveFootprints(before, after),
-  (record) => renderResourcePackageDetails(record),
+  (record, draftReleaseIds, callbacks) => renderResourcePackageDetails(record, draftReleaseIds, callbacks),
+  (surveyId, releaseId) => showPublicReleaseDetail(surveyId, releaseId),
   (error) => showFatal(error),
 );
 const LAYER_PREFERENCES_KEY = "astro-workspace:survey-layer-preferences:v1";
+const THEME_PREFERENCE_KEY = "astro-workspace:theme:v1";
+type WorkspaceTheme = "light" | "dark";
 
-createIcons({ icons: { Download, Globe2, Layers3, MessageSquare, Play, Plus, RefreshCw, RotateCcw, Send, SlidersHorizontal } });
+createIcons({ icons: { Download, Globe2, Layers3, Moon, Play, Plus, RefreshCw, RotateCcw, SlidersHorizontal, Sun } });
+
+const themeQuery = window.matchMedia("(prefers-color-scheme: dark)");
+const themeToggle = byId<HTMLButtonElement>("theme-toggle");
+
+function storedTheme(): WorkspaceTheme | null {
+  try {
+    const value = localStorage.getItem(THEME_PREFERENCE_KEY);
+    return value === "light" || value === "dark" ? value : null;
+  } catch {
+    return null;
+  }
+}
+
+function applyTheme(theme: WorkspaceTheme, source: "initial" | "user" | "system"): void {
+  document.documentElement.dataset.theme = theme;
+  document.querySelector<HTMLMetaElement>('meta[name="theme-color"]')?.setAttribute("content", theme === "dark" ? "#080b0f" : "#f4f7f8");
+  const target = theme === "dark" ? "light" : "dark";
+  const targetLabel = target === "light" ? "浅色" : "深色";
+  themeToggle.setAttribute("aria-label", `切换到${targetLabel}主题`);
+  themeToggle.title = `切换到${targetLabel}主题`;
+  themeToggle.replaceChildren();
+  const icon = document.createElement("i");
+  icon.dataset.lucide = target === "light" ? "sun" : "moon";
+  themeToggle.append(icon);
+  createIcons({ icons: { Moon, Sun }, attrs: { "aria-hidden": "true" } });
+  layerViewer?.setTheme(theme);
+  refinementViewer?.setTheme(theme);
+  volumeViewer?.setTheme(theme);
+  window.dispatchEvent(new CustomEvent("astro:theme-change", { detail: { theme, source } }));
+}
+
+applyTheme((document.documentElement.dataset.theme === "light" ? "light" : "dark"), "initial");
+themeToggle.addEventListener("click", () => {
+  const next = document.documentElement.dataset.theme === "dark" ? "light" : "dark";
+  try {
+    localStorage.setItem(THEME_PREFERENCE_KEY, next);
+  } catch {}
+  applyTheme(next, "user");
+});
+themeQuery.addEventListener("change", (event) => {
+  if (!storedTheme()) applyTheme(event.matches ? "dark" : "light", "system");
+});
 
 function showFatal(error: unknown): void {
   console.error(error);
@@ -591,12 +643,15 @@ async function loadWorkspaceAssetCoverage(): Promise<void> {
   const assetIds = dataAssets.map((asset) => asset.id).filter(Boolean);
   if (!assetIds.length) {
     workspaceSurveyIds.clear();
+    hasUnassignedWorkspaceCoverage = false;
     layerViewer?.setWorkspaceCoverageLayers([], 16);
+    buildSurveyList();
     return;
   }
   const coverage = await workspaceApi.skyCoverage({ nside: 16, assetIds });
   const layers = coverage.layers?.map((layer) => ({ ...layer, nside: coverage.nside })) ?? [{ key: "__workspace__", surveyId: undefined, releaseId: undefined, nside: coverage.nside, pixels: coverage.pixels }];
   workspaceSurveyIds = new Set(layers.filter((layer) => layer.pixels.length > 0).map((layer) => layer.surveyId).filter((surveyId): surveyId is string => Boolean(surveyId)));
+  hasUnassignedWorkspaceCoverage = layers.some((layer) => layer.pixels.length > 0 && !layer.surveyId);
   layerViewer?.setWorkspaceCoverageLayers(layers, coverage.nside);
   layerViewer?.setVisibleSurveys(new Set([...visibleSurveyIds, ...(unassignedWorkspaceVisible ? ["__unassigned__"] : [])]));
   buildSurveyList();
@@ -736,9 +791,9 @@ document.addEventListener("pointerdown", (event) => {
 });
 
 function footprintLabel(status: SurveyCard["coverageStatus"]): string {
-  if (status === "verified") return "FOOTPRINT READY";
-  if (status === "summary_only") return "SUMMARY ONLY";
-  return "FOOTPRINT PENDING";
+  if (status === "verified") return "覆盖范围可用";
+  if (status === "summary_only") return "仅有范围说明";
+  return "暂无覆盖范围";
 }
 
 function footprintSurveyIds(): string[] {
@@ -859,7 +914,7 @@ function renderRefinementInspector(): void {
     assets: assets.map((asset) => ({ id: asset.id, surveyId: asset.surveyBinding?.surveyId ?? asset.surveyId, releaseId: asset.surveyBinding?.releaseId ?? asset.releaseId, product: asset.product, connector: asset.access.connector, uri: asset.access.uri })),
   }));
   download.dataset.action = "export-refined-query";
-  const back = actionButton("返回项目态势", () => void activateMode("layers").catch(showFatal));
+  const back = actionButton("返回数据覆盖", () => void activateMode("layers").catch(showFatal));
   back.classList.add("secondary");
   inspectorRows(`已筛得 ${assets.length} 个数据资产`, [
     ["精细选区", `NESTED · NSIDE ${state.nside} · ${state.selectedPixels.length} cells`],
@@ -868,7 +923,7 @@ function renderRefinementInspector(): void {
     ["发布", releaseIds.join(" / ") || "无匹配覆盖"],
     ["模态", [...refinementModalities].join(" / ") || "未选择"],
     ["覆盖精度", `登记 footprint NSIDE ${selection.nside}；细块继承父块覆盖`],
-    ["候选资产", assets.map((asset) => `${asset.name} [${asset.status}]`).join(" · ") || "数据目录中暂无匹配资产"],
+    ["候选资产", assets.map((asset) => `${asset.name} [${asset.status}]`).join(" · ") || "用户资产中暂无匹配项"],
   ], [download, back]);
   byId<HTMLButtonElement>("refinement-next").disabled = !state.canRefine;
   byId<HTMLButtonElement>("refinement-back").disabled = !state.canGoBack;
@@ -955,7 +1010,11 @@ async function refreshActiveFootprints(before: PublicResourcePackage[], after: P
   if (mode === "layers" || mode === "refine") await activateMode("layers");
 }
 
-function renderResourcePackageDetails(record: PublicResourcePackage): void {
+function renderResourcePackageDetails(
+  record: PublicResourcePackage,
+  draftReleaseIds: ReadonlySet<string>,
+  callbacks: ResourcePackageSelectionCallbacks,
+): void {
   const survey = surveyRecordsById.get(record.surveyId);
   const empty = byId("inspector-empty");
   const content = byId("inspector-content");
@@ -968,15 +1027,11 @@ function renderResourcePackageDetails(record: PublicResourcePackage): void {
   summary.textContent = survey?.description ?? record.description;
   const metadata = document.createElement("dl");
   const rows: Array<[string, string]> = [
-    ["Mission", survey?.mission ?? record.facilities.join(" / ")],
-    ["Modalities", record.modalities.join(" / ")],
-    ["Wavelengths", record.wavelengths.join(" / ")],
-    ["Products", record.productTypes.join(" / ")],
-    ["Coverage authority", record.coverageAuthorities.join(" / ")],
-    ["Releases", record.releases.join(" / ")],
-    ["Package", `${record.version} / ${(record.sizeBytes / 1024).toFixed(1)} KB`],
-    ["SHA256", record.sha256],
-    ["Server state", record.active ? "已加载" : record.installedVersion ? "已下载，未加载" : "未下载"],
+    ["巡天 / 望远镜", survey?.mission ?? record.facilities.join(" / ")],
+    ["观测类型", record.modalities.join(" / ")],
+    ["波段", record.wavelengths.join(" / ")],
+    ["数据产品", record.productTypes.join(" / ")],
+    ["服务器状态", record.active ? "已应用到数据覆盖" : record.installedVersion ? "已下载，尚未应用" : "尚未下载"],
   ];
   for (const [label, value] of rows) {
     const row = document.createElement("div");
@@ -985,34 +1040,298 @@ function renderResourcePackageDetails(record: PublicResourcePackage): void {
     row.append(term, detail);
     metadata.append(row);
   }
-  const releases = document.createElement("div");
-  releases.className = "release-list";
-  for (const entry of survey?.releases ?? []) {
-    const item = document.createElement("article");
-    item.className = "release-row";
-    const line = document.createElement("div");
-    const title = document.createElement("strong"); title.textContent = entry.label;
-    const status = document.createElement("span"); status.textContent = entry.coverage.status.toUpperCase(); status.dataset.status = entry.coverage.status;
-    line.append(title, status);
-    const detail = document.createElement("p");
-    detail.textContent = `${entry.modalities.join(", ")} / ${entry.products.map((product) => product.name).join(", ")} / ${entry.coverage.summary}`;
-    const source = document.createElement("a"); source.href = entry.coverage.sourceUrl; source.target = "_blank"; source.rel = "noreferrer"; source.textContent = "Release source";
-    item.append(line, detail, source);
-    releases.append(item);
+  const releaseSection = document.createElement("section");
+  releaseSection.className = "resource-release-section";
+  const releaseHeading = document.createElement("div");
+  releaseHeading.className = "section-heading";
+  const releaseTitle = document.createElement("span");
+  releaseTitle.textContent = "公开版本";
+  const releaseCount = document.createElement("output");
+  const releaseIds = [...new Set(publicReleaseDetails
+    .filter((detail) => detail.surveyId === record.surveyId && detail.products.some((product) => product.coverageStatus === "acquired"))
+    .map((detail) => detail.releaseId))];
+  const publicReleases = survey?.releases.filter((entry) => entry.availability === "available") ?? [];
+  releaseCount.textContent = `${releaseIds.length} 个已收录 / ${publicReleases.length || releaseIds.length} 个公开`;
+  releaseHeading.append(releaseTitle, releaseCount);
+  const releaseChoices = document.createElement("div");
+  releaseChoices.className = "resource-release-choices";
+  const displayedReleases = publicReleases.length
+    ? publicReleases
+    : releaseIds.map((releaseId) => survey?.releases.find((candidate) => candidate.id === releaseId)).filter((entry) => entry !== undefined);
+  for (const entry of displayedReleases) {
+    const releaseId = entry.id;
+    const hasCoverage = releaseIds.includes(releaseId);
+    const releaseDetail = publicReleaseDetails.find((detail) => detail.surveyId === record.surveyId && detail.releaseId === releaseId);
+    const label = document.createElement("label");
+    label.dataset.coverageAvailable = String(hasCoverage);
+    const checkbox = document.createElement("input");
+    checkbox.type = "checkbox";
+    checkbox.checked = hasCoverage && draftReleaseIds.has(releaseId);
+    checkbox.disabled = !hasCoverage;
+    checkbox.setAttribute("aria-label", hasCoverage ? `选择 ${entry.label} 天空覆盖` : `${entry.label} 天空覆盖尚未收录`);
+    checkbox.addEventListener("change", () => {
+      const next = new Set(draftReleaseIds);
+      if (checkbox.checked) next.add(releaseId); else next.delete(releaseId);
+      callbacks.setDraftReleases(next);
+    });
+    const copy = document.createElement("span");
+    copy.className = "resource-release-copy";
+    const header = document.createElement("span");
+    header.className = "resource-release-header";
+    const title = document.createElement("strong");
+    title.textContent = entry.label;
+    const availability = document.createElement("small");
+    availability.className = "resource-release-availability";
+    availability.dataset.available = String(hasCoverage);
+    availability.textContent = hasCoverage ? "天空覆盖已收录" : "覆盖范围尚未收录";
+    header.append(title, availability);
+    const detail = document.createElement("small");
+    detail.textContent = `${releaseDetail?.releasedYear ?? entry.releasedYear ?? "年份未注明"} · ${(releaseDetail?.kind ?? entry.kind).replaceAll("_", " ")}`;
+    const links = document.createElement("span");
+    links.className = "resource-release-links";
+    const details = document.createElement("button");
+    details.type = "button";
+    details.className = "release-detail-link";
+    details.textContent = "查看版本详情";
+    details.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      showPublicReleaseDetail(record.surveyId, releaseId);
+    });
+    links.append(details);
+    copy.append(header, detail, links);
+    label.append(checkbox, copy);
+    releaseChoices.append(label);
   }
-  for (const entry of record.sources) {
-    const item = document.createElement("article");
-    item.className = "release-row";
-    const line = document.createElement("div");
-    const title = document.createElement("strong"); title.textContent = entry.label;
-    const status = document.createElement("span"); status.textContent = entry.authority; status.dataset.status = "verified";
-    line.append(title, status);
-    const detail = document.createElement("p"); detail.textContent = entry.license ? `Artifact license: ${entry.license}` : "Upstream terms apply";
-    const source = document.createElement("a"); source.href = entry.url; source.target = "_blank"; source.rel = "noreferrer"; source.textContent = "Coverage source";
-    item.append(line, detail, source);
-    releases.append(item);
+  const releaseBulk = document.createElement("div");
+  releaseBulk.className = "inspector-actions compact-actions";
+  const selectAll = document.createElement("button");
+  selectAll.type = "button";
+  selectAll.className = "command-button secondary";
+  selectAll.textContent = "选择全部版本";
+  selectAll.addEventListener("click", () => callbacks.setDraftReleases(releaseIds));
+  const clearAll = document.createElement("button");
+  clearAll.type = "button";
+  clearAll.className = "command-button secondary";
+  clearAll.textContent = "全部取消";
+  clearAll.addEventListener("click", () => callbacks.setDraftReleases([]));
+  releaseBulk.append(selectAll, clearAll);
+  releaseSection.append(releaseHeading, releaseChoices, releaseBulk);
+
+  const actions = document.createElement("div");
+  actions.className = "inspector-actions resource-inspector-actions";
+  if (record.installedVersion) {
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.className = "command-button danger";
+    remove.textContent = "卸载资源";
+    remove.title = "从天球移除并删除当前服务器中的公开覆盖文件";
+    remove.addEventListener("click", () => void callbacks.remove().catch(showFatal));
+    actions.append(remove);
   }
-  content.replaceChildren(heading, summary, metadata, releases);
+  content.replaceChildren(heading, summary, metadata, releaseSection, actions);
+}
+
+const PUBLIC_COVERAGE_LABELS: Record<PublicCoverageStatus, string> = {
+  acquired: "真实几何已收录",
+  overview_only: "仅有官方概览",
+  awaiting_geometry: "待人工处理几何",
+  not_applicable: "不适用天空覆盖",
+};
+
+function showPublicReleaseDetail(surveyId: string, releaseId: string, updateUrl = true): void {
+  const detail = publicReleaseDetails.find((entry) => entry.surveyId === surveyId && entry.releaseId === releaseId);
+  if (!detail) return;
+  byId("resource-package-stage").hidden = true;
+  byId("public-release-detail-stage").hidden = false;
+  const inspector = byId("inspector-panel");
+  releaseDetailInspectorWasOpen = inspector.classList.contains("mobile-open");
+  inspector.classList.remove("mobile-open");
+  byId("public-release-detail-kicker").textContent = `${detail.mission} / PUBLIC RELEASE`;
+  byId("public-release-detail-title").textContent = detail.label;
+  byId("public-release-detail-summary").textContent = detail.description;
+  const source = byId<HTMLAnchorElement>("public-release-detail-source");
+  source.href = detail.officialSourceUrl;
+
+  const acquired = detail.products.filter((product) => product.coverageStatus === "acquired").length;
+  const metadata = byId("public-release-detail-metadata");
+  metadata.replaceChildren(...([
+    ["巡天 / 望远镜", detail.mission],
+    ["发布类型", detail.kind.replaceAll("_", " ")],
+    ["发布时间", detail.releasedYear ? String(detail.releasedYear) : "官方页面未注明"],
+    ["观测类型", detail.modalities.join(" / ")],
+    ["覆盖状态", acquired ? `${acquired} 个产品有真实几何` : "尚无产品可用于天球"],
+  ] as Array<[string, string]>).map(([label, value]) => {
+    const row = document.createElement("div");
+    const term = document.createElement("dt"); term.textContent = label;
+    const description = document.createElement("dd"); description.textContent = value;
+    row.append(term, description);
+    return row;
+  }));
+  byId("public-release-product-count").textContent = `${acquired} / ${detail.products.length} 已收录`;
+  const list = byId("public-release-product-list");
+  list.replaceChildren(...detail.products.map((product) => {
+    const article = document.createElement("article");
+    article.className = "public-release-product";
+    article.dataset.coverageStatus = product.coverageStatus;
+    const header = document.createElement("header");
+    const identity = document.createElement("div");
+    const name = document.createElement("h3"); name.textContent = product.name;
+    const modality = document.createElement("span"); modality.textContent = product.modality;
+    identity.append(name, modality);
+    const status = document.createElement("strong"); status.textContent = PUBLIC_COVERAGE_LABELS[product.coverageStatus];
+    header.append(identity, status);
+    const description = document.createElement("p"); description.textContent = product.description;
+    const explanation = document.createElement("p");
+    explanation.className = "public-release-product-reason";
+    explanation.textContent = product.coverageStatus === "acquired"
+      ? "已保存可验证的天空几何制品，可在安装并应用对应公开资源后显示于 3D 天球。"
+      : product.reason ?? "官方资料已登记，但尚未获得可验证的产品级天空几何。";
+    const links = document.createElement("div"); links.className = "public-release-product-links";
+    if (product.sourceUrl) {
+      const link = document.createElement("a");
+      link.href = product.sourceUrl; link.target = "_blank"; link.rel = "noreferrer";
+      link.textContent = "覆盖来源 ↗";
+      links.append(link);
+    }
+    if (product.artifactKey) {
+      const artifact = document.createElement("code"); artifact.textContent = product.artifactKey;
+      artifact.title = "覆盖制品的稳定身份";
+      links.append(artifact);
+    }
+    const manualRecord = manualFootprintRecords.find((record) => record.surveyId === detail.surveyId
+      && record.releaseId === detail.releaseId && record.product === product.name);
+    if (product.coverageStatus === "awaiting_geometry" || manualRecord) {
+      const edit = document.createElement("button");
+      edit.type = "button";
+      edit.className = "release-detail-link";
+      edit.textContent = manualRecord ? "维护覆盖范围" : "填写覆盖范围";
+      edit.addEventListener("click", () => void openManualFootprintDialog(detail, product.name, product.sourceUrl));
+      links.append(edit);
+    }
+    article.append(header, description, explanation, links);
+    return article;
+  }));
+  if (updateUrl) {
+    const url = new URL(window.location.href);
+    url.searchParams.set("mode", "packages");
+    url.searchParams.set("survey", surveyId);
+    url.searchParams.set("release", releaseId);
+    history.pushState(null, "", url);
+  }
+}
+
+function closePublicReleaseDetail(updateUrl = true): void {
+  byId("public-release-detail-stage").hidden = true;
+  byId("resource-package-stage").hidden = mode !== "packages";
+  if (releaseDetailInspectorWasOpen && window.innerWidth <= 1040) byId("inspector-panel").classList.add("mobile-open");
+  releaseDetailInspectorWasOpen = false;
+  if (updateUrl) {
+    const url = new URL(window.location.href);
+    url.searchParams.set("mode", "packages");
+    url.searchParams.delete("survey");
+    url.searchParams.delete("release");
+    history.pushState(null, "", url);
+  }
+}
+
+function manualFootprintInput(): ManualFootprintInput {
+  const pixels = byId<HTMLTextAreaElement>("manual-footprint-pixels").value.split(/[\s,]+/).filter(Boolean).map(Number);
+  if (!pixels.length || pixels.some((pixel) => !Number.isSafeInteger(pixel) || pixel < 0)) throw new Error("pixels 必须是非负整数列表");
+  return {
+    surveyId: byId<HTMLInputElement>("manual-footprint-survey-id").value,
+    releaseId: byId<HTMLInputElement>("manual-footprint-release-id").value,
+    product: byId<HTMLInputElement>("manual-footprint-product").value,
+    label: byId<HTMLInputElement>("manual-footprint-label").value.trim(),
+    sourceUrl: byId<HTMLInputElement>("manual-footprint-source-url").value.trim(),
+    method: byId<HTMLInputElement>("manual-footprint-method").value.trim(),
+    calculatedAt: new Date(byId<HTMLInputElement>("manual-footprint-calculated-at").value).toISOString(),
+    ordering: "NESTED",
+    nside: 16,
+    pixels,
+  };
+}
+
+function setManualFootprintFeedback(message: string, status = "idle"): void {
+  const feedback = byId("manual-footprint-feedback");
+  feedback.textContent = message;
+  feedback.dataset.status = status;
+}
+
+async function openManualFootprintDialog(detail: PublicReleaseDetail, product: string, sourceUrl?: string): Promise<void> {
+  manualFootprintRecords = await workspaceApi.manualFootprints();
+  editingManualFootprint = manualFootprintRecords.find((record) => record.surveyId === detail.surveyId && record.releaseId === detail.releaseId && record.product === product) ?? null;
+  byId<HTMLInputElement>("manual-footprint-survey-id").value = detail.surveyId;
+  byId<HTMLInputElement>("manual-footprint-release-id").value = detail.releaseId;
+  byId<HTMLInputElement>("manual-footprint-product").value = product;
+  byId<HTMLInputElement>("manual-footprint-label").value = editingManualFootprint?.label ?? `${detail.label} ${product}`;
+  byId<HTMLInputElement>("manual-footprint-source-url").value = editingManualFootprint?.sourceUrl ?? sourceUrl ?? detail.officialSourceUrl;
+  byId<HTMLInputElement>("manual-footprint-method").value = editingManualFootprint?.method ?? "manual-healpix";
+  byId<HTMLInputElement>("manual-footprint-calculated-at").value = (editingManualFootprint?.calculatedAt ?? new Date().toISOString()).slice(0, 16);
+  byId<HTMLTextAreaElement>("manual-footprint-pixels").value = editingManualFootprint?.pixels.join(", ") ?? "";
+  byId<HTMLButtonElement>("manual-footprint-validate").disabled = editingManualFootprint?.status !== "draft";
+  byId<HTMLButtonElement>("manual-footprint-publish").disabled = editingManualFootprint?.status !== "validated";
+  byId<HTMLButtonElement>("manual-footprint-unpublish").disabled = editingManualFootprint?.status !== "published";
+  setManualFootprintFeedback(editingManualFootprint ? `当前状态：${editingManualFootprint.status ?? "draft"}` : "尚未保存");
+  byId<HTMLDialogElement>("manual-footprint-dialog").showModal();
+}
+
+async function saveManualFootprint(): Promise<ManualFootprintRecord> {
+  const input = manualFootprintInput();
+  const token = byId<HTMLInputElement>("manual-footprint-token").value;
+  editingManualFootprint = editingManualFootprint
+    ? await workspaceApi.updateManualFootprint(input, editingManualFootprint.revision, token)
+    : await workspaceApi.createManualFootprint(input, token);
+  manualFootprintRecords = manualFootprintRecords.filter((record) => !(record.surveyId === input.surveyId
+    && record.releaseId === input.releaseId && record.product === input.product));
+  manualFootprintRecords.push(editingManualFootprint);
+  byId<HTMLButtonElement>("manual-footprint-validate").disabled = false;
+  byId<HTMLButtonElement>("manual-footprint-publish").disabled = true;
+  byId<HTMLButtonElement>("manual-footprint-unpublish").disabled = true;
+  setManualFootprintFeedback("草稿已保存", "ok");
+  showPublicReleaseDetail(input.surveyId, input.releaseId, false);
+  return editingManualFootprint;
+}
+
+async function refreshManualCoverage(surveyId: string, releaseId: string): Promise<void> {
+  const previousSurveyIds = new Set(footprintSurveyIds());
+  const [footprints, releases, records] = await Promise.all([
+    workspaceApi.surveyFootprints(),
+    workspaceApi.publicReleaseDetails(),
+    workspaceApi.manualFootprints(),
+  ]);
+  surveyFootprints = footprints;
+  publicReleaseDetails = releases;
+  manualFootprintRecords = records;
+  resourcePackagePanel.setReleaseDetails(releases);
+  const available = new Set(footprintSurveyIds());
+  visibleSurveyIds = new Set([...visibleSurveyIds].filter((id) => available.has(id)));
+  for (const id of available) if (!previousSurveyIds.has(id)) visibleSurveyIds.add(id);
+  selectedLayerRegion = null;
+  refinementSourceRegion = null;
+  refinementState = null;
+  refinementSurveyIds = new Set();
+  refinementModalities = new Set();
+  buildSurveyList();
+  persistLayerPreferences();
+  if (mode === "packages") showPublicReleaseDetail(surveyId, releaseId, false);
+  else if (mode === "layers" || mode === "refine") await activateMode("layers");
+}
+
+async function runManualFootprintAction(action: "validate" | "publish" | "unpublish"): Promise<void> {
+  const record = editingManualFootprint ?? await saveManualFootprint();
+  const identity = { surveyId: record.surveyId, releaseId: record.releaseId, product: record.product };
+  const token = byId<HTMLInputElement>("manual-footprint-token").value;
+  editingManualFootprint = action === "validate"
+    ? await workspaceApi.validateManualFootprint(identity, record.revision, token)
+    : action === "publish"
+      ? await workspaceApi.publishManualFootprint(identity, record.revision, token)
+      : await workspaceApi.unpublishManualFootprint(identity, record.revision, token);
+  byId<HTMLButtonElement>("manual-footprint-validate").disabled = editingManualFootprint.status !== "draft";
+  byId<HTMLButtonElement>("manual-footprint-publish").disabled = editingManualFootprint.status !== "validated";
+  byId<HTMLButtonElement>("manual-footprint-unpublish").disabled = editingManualFootprint.status !== "published";
+  setManualFootprintFeedback(action === "validate" ? "校验通过" : action === "publish" ? "已发布" : "已撤回", "ok");
+  await refreshManualCoverage(record.surveyId, record.releaseId);
 }
 
 function applyLayerPreferences(): void {
@@ -1166,22 +1485,19 @@ function renderVolumeSelection(selection: VolumeSelection | JointCellSelection |
 
 function buildSurveyList(): void {
   const list = byId("survey-list");
-  list.replaceChildren(...surveyCards.map((survey) => {
+  const cards = surveyCards.filter((survey) => footprintsForSurvey(survey.id).length > 0 || workspaceSurveyIds.has(survey.id)).map((survey) => {
     const footprints = footprintsForSurvey(survey.id);
     const hasFootprint = footprints.length > 0;
     const hasWorkspaceCoverage = workspaceSurveyIds.has(survey.id);
-    const available = hasFootprint || hasWorkspaceCoverage;
     const card = document.createElement("article");
     card.className = "survey-card";
     card.classList.toggle("visible", visibleSurveyIds.has(survey.id));
-    card.classList.toggle("pending", !available);
     const visibility = document.createElement("label");
     visibility.className = "survey-visibility";
-    visibility.title = available ? `Show ${survey.name}` : `${survey.name} footprint is pending`;
+    visibility.title = `Show ${survey.name}`;
     const checkbox = document.createElement("input");
     checkbox.type = "checkbox";
     checkbox.checked = visibleSurveyIds.has(survey.id);
-    checkbox.disabled = !available;
     checkbox.setAttribute("aria-label", `Show ${survey.name}`);
     checkbox.addEventListener("change", () => setSurveyVisibility(survey.id, checkbox.checked));
     const swatch = document.createElement("i");
@@ -1189,24 +1505,33 @@ function buildSurveyList(): void {
     visibility.append(checkbox, swatch);
     const body = document.createElement("div");
     body.className = "survey-card-body";
-    body.tabIndex = available ? 0 : -1;
-    body.addEventListener("click", () => available && setSurveyVisibility(survey.id, !visibleSurveyIds.has(survey.id)));
+    body.tabIndex = 0;
+    body.addEventListener("click", () => void selectSurvey(survey.id).catch(showFatal));
     body.addEventListener("keydown", (event) => {
-      if (available && (event.key === "Enter" || event.key === " ")) {
+      if (event.key === "Enter" || event.key === " ") {
         event.preventDefault();
-        setSurveyVisibility(survey.id, !visibleSurveyIds.has(survey.id));
+        void selectSurvey(survey.id).catch(showFatal);
       }
     });
     const name = document.createElement("span");
     name.textContent = survey.name;
     const count = document.createElement("b");
-    count.textContent = hasFootprint ? `${footprints.length}/${survey.releaseCount} MOC` : hasWorkspaceCoverage ? "WORKSPACE" : "PENDING";
+    count.textContent = hasFootprint ? `${footprints.length}/${survey.releaseCount} MOC` : "WORKSPACE";
     const metadata = document.createElement("small");
-    metadata.textContent = `${survey.mission} · ${footprintLabel(survey.coverageStatus)}`;
+    metadata.textContent = `${survey.mission} · ${hasFootprint ? "FOOTPRINT READY" : "WORKSPACE COVERAGE"}`;
     body.append(name, count, metadata);
     card.append(visibility, body);
     return card;
-  }));
+  });
+  list.replaceChildren(...cards);
+  if (!cards.length && !hasUnassignedWorkspaceCoverage) {
+    const empty = document.createElement("p");
+    empty.className = "survey-list-empty";
+    empty.textContent = "暂无可显示的巡天覆盖。请前往公开资源集应用公开覆盖，或通过连接器扫描工作区数据。";
+    list.append(empty);
+    return;
+  }
+  if (!hasUnassignedWorkspaceCoverage) return;
   const unassigned = document.createElement("article");
   unassigned.className = "survey-card workspace-unassigned";
   unassigned.classList.toggle("visible", unassignedWorkspaceVisible);
@@ -1222,8 +1547,6 @@ function buildSurveyList(): void {
   visibility.append(checkbox, swatch);
   const body = document.createElement("div");
   body.className = "survey-card-body";
-  body.tabIndex = 0;
-  body.addEventListener("click", () => setUnassignedWorkspaceVisibility(!unassignedWorkspaceVisible));
   const name = document.createElement("span");
   name.textContent = "未关联巡天";
   const count = document.createElement("b");
@@ -1309,7 +1632,7 @@ function updateJointControls(): void {
 
 async function activateMode(nextMode: ViewMode): Promise<void> {
   if (nextMode === "layers" && !surveyFootprints) throw new Error("Survey footprint catalog is not configured");
-  if (nextMode === "refine" && !refinementSourceRegion && !selectedLayerRegion) throw new Error("请先在项目态势中选择连续天区");
+  if (nextMode === "refine" && !refinementSourceRegion && !selectedLayerRegion) throw new Error("请先在数据覆盖中选择连续天区");
   if (nextMode === "volume" && (!atlas || !angularCells || !volumeManifest)) throw new Error("Joint volume is not configured");
   const sourceRegion = refinementSourceRegion ?? selectedLayerRegion;
   const returningLayerRegion = nextMode === "layers" && sourceRegion
@@ -1328,17 +1651,11 @@ async function activateMode(nextMode: ViewMode): Promise<void> {
   byId("volume-controls").hidden = mode !== "volume";
   byId("workflow-controls").hidden = mode !== "workflow";
   byId("catalog-stage").hidden = mode !== "catalog";
-  byId("asset-detail-stage").hidden = true;
   byId("resource-package-stage").hidden = mode !== "packages";
+  byId("public-release-detail-stage").hidden = true;
   byId("connector-stage").hidden = mode !== "connectors";
   byId("scene-stage").hidden = mode === "workflow" || mode === "catalog" || mode === "connectors" || mode === "packages";
   byId("workflow-stage").hidden = mode !== "workflow";
-  byId("inspector-view").hidden = mode === "workflow";
-  byId("agent-panel").hidden = mode !== "workflow";
-  byId("agent-toggle").hidden = mode === "volume";
-  const inspectorLabel = mode === "workflow" ? "显示 Agent" : mode === "catalog" ? "显示数据详情" : mode === "packages" ? "显示巡天信息" : mode === "refine" ? "显示检索详情" : "显示覆盖详情";
-  byId("agent-toggle").setAttribute("aria-label", inspectorLabel);
-  byId("agent-toggle").setAttribute("title", inspectorLabel);
   document.querySelectorAll<HTMLElement>(".scene-action").forEach((element) => { element.hidden = mode === "workflow" || mode === "catalog" || mode === "connectors" || mode === "packages"; });
   byId("layer-tool-strip").hidden = mode !== "layers";
   byId("scene-legend").hidden = mode === "refine";
@@ -1354,15 +1671,24 @@ async function activateMode(nextMode: ViewMode): Promise<void> {
   if (mode === "catalog") {
     workflowPanel.deactivate();
     resourcePackagePanel.deactivate();
-    byId("panel-kicker").textContent = "DATA CATALOG";
-    byId("panel-dataset-name").textContent = "数据资产登记";
-    byId("dataset-state").textContent = "内置与用户数据目录已加载";
-    renderProjectMetrics();
-    byId("render-status").textContent = "CATALOG REGISTRY";
+    byId("panel-kicker").textContent = "USER ASSETS";
+    byId("panel-dataset-name").textContent = "用户资产";
+    byId("dataset-state").textContent = "当前工作区的用户资产已加载";
+    byId("metric-one-label").textContent = "USER ASSETS";
+    byId("metric-two-label").textContent = "READY";
+    byId("metric-three-label").textContent = "FILTERED";
+    byId("metric-four-label").textContent = "SOURCE";
+    byId("metric-four").textContent = "USER";
+    byId("metric-five-label").textContent = "STORAGE";
+    byId("metric-five").textContent = "METADATA";
+    byId("render-status").textContent = "USER ASSET REGISTRY";
     byId("object-status").textContent = "NO RAW DATA COPIED";
     loadingIndicator.classList.remove("visible");
     await dataCatalogPanel.activate(surveyCards, surveyRecordsById);
-    byId("metric-one").textContent = String((dataCatalogPanel.debugState().catalogAssetCount as number | undefined) ?? 0);
+    const userAssetCount = (dataCatalogPanel.debugState().catalogAssetCount as number | undefined) ?? 0;
+    byId("metric-one").textContent = String(userAssetCount);
+    byId("metric-two").textContent = byId("catalog-ready-count").textContent ?? "0";
+    byId("metric-three").textContent = byId("catalog-count").textContent?.split(" /")[0] ?? String(userAssetCount);
     return;
   }
 
@@ -1371,9 +1697,9 @@ async function activateMode(nextMode: ViewMode): Promise<void> {
   if (mode === "packages") {
     workflowPanel.deactivate();
     byId("inspector-kicker").textContent = "SURVEY INFORMATION";
-    byId("panel-kicker").textContent = "PUBLIC COVERAGE PACKAGES";
-    byId("panel-dataset-name").textContent = "资源集";
-    byId("dataset-state").textContent = "公开覆盖包目录已加载";
+    byId("panel-kicker").textContent = "PUBLIC SURVEY COVERAGE";
+    byId("panel-dataset-name").textContent = "公开资源集";
+    byId("dataset-state").textContent = "公开巡天与望远镜覆盖目录已加载";
     const records = await workspaceApi.resourcePackages();
     byId("metric-one-label").textContent = "PACKAGES";
     byId("metric-one").textContent = String(records.length);
@@ -1381,14 +1707,18 @@ async function activateMode(nextMode: ViewMode): Promise<void> {
     byId("metric-two").textContent = String(records.filter((record) => record.installedVersion).length);
     byId("metric-three-label").textContent = "ACTIVE";
     byId("metric-three").textContent = String(records.filter((record) => record.active).length);
-    byId("metric-four-label").textContent = "SURVEYS";
-    byId("metric-four").textContent = String(new Set(records.filter((record) => record.active).map((record) => record.surveyId)).size);
-    byId("metric-five-label").textContent = "FOOTPRINTS";
+    byId("metric-four-label").textContent = "ACTIVE SURVEYS";
+    byId("metric-four").textContent = String(new Set(surveyFootprints?.footprints.map((footprint) => footprint.surveyId) ?? []).size);
+    byId("metric-five-label").textContent = "ACTIVE PRODUCTS";
     byId("metric-five").textContent = String(surveyFootprints?.footprints.length ?? 0);
-    byId("render-status").textContent = "PUBLIC COVERAGE PACKAGES";
+    byId("render-status").textContent = "PUBLIC SURVEY COVERAGE";
     byId("object-status").textContent = `${surveyFootprints?.footprints.length ?? 0} COVERAGE SOURCES`;
     loadingIndicator.classList.remove("visible");
     await resourcePackagePanel.activate();
+    const query = new URL(window.location.href).searchParams;
+    const surveyId = query.get("survey");
+    const releaseId = query.get("release");
+    if (surveyId && releaseId) showPublicReleaseDetail(surveyId, releaseId, false);
     return;
   }
   if (mode === "connectors") {
@@ -1440,14 +1770,14 @@ async function activateMode(nextMode: ViewMode): Promise<void> {
   const targetCanvas = freshCanvas();
 
   if (mode === "layers") {
-    byId("inspector-kicker").textContent = "PROJECT SKY STATUS";
-    byId("panel-kicker").textContent = "PROJECT SKY STATUS";
-    byId("panel-dataset-name").textContent = "项目态势";
-    byId("dataset-state").textContent = "公开覆盖与项目资产状态已载入";
+    byId("inspector-kicker").textContent = "DATA COVERAGE";
+    byId("panel-kicker").textContent = "DATA COVERAGE";
+    byId("panel-dataset-name").textContent = "数据覆盖";
+    byId("dataset-state").textContent = "公开覆盖与用户资产状态已载入";
     renderProjectMetrics();
-    byId("scene-mode-label").textContent = "PROJECT COVERAGE";
+    byId("scene-mode-label").textContent = "DATA COVERAGE";
     byId("scene-mode-value").textContent = "PUBLIC + OWNED";
-    byId("scene-badge").textContent = "项目覆盖态势";
+    byId("scene-badge").textContent = "数据覆盖";
     byId("legend-min").textContent = "公开覆盖";
     byId("legend-max").textContent = "项目资产";
     byId("object-status").textContent = `${surveyFootprints?.footprints.length ?? 0} COVERAGE SOURCES`;
@@ -1609,10 +1939,49 @@ window.addEventListener("keydown", (event) => {
   event.preventDefault();
 });
 byId<HTMLButtonElement>("controls-toggle").addEventListener("click", () => controlsPanel.classList.toggle("mobile-open"));
-byId<HTMLButtonElement>("agent-toggle").addEventListener("click", () => byId("inspector-panel").classList.toggle("mobile-open"));
+byId<HTMLButtonElement>("public-release-detail-back").addEventListener("click", () => closePublicReleaseDetail());
+byId<HTMLButtonElement>("manual-footprint-dialog-close").addEventListener("click", () => byId<HTMLDialogElement>("manual-footprint-dialog").close());
+byId<HTMLFormElement>("manual-footprint-form").addEventListener("submit", (event) => {
+  event.preventDefault();
+  void saveManualFootprint().catch((error) => setManualFootprintFeedback(error instanceof Error ? error.message : String(error), "error"));
+});
+for (const action of ["validate", "publish", "unpublish"] as const) {
+  byId<HTMLButtonElement>(`manual-footprint-${action}`).addEventListener("click", () => {
+    setManualFootprintFeedback("处理中…", "busy");
+    void runManualFootprintAction(action).catch((error) => setManualFootprintFeedback(error instanceof Error ? error.message : String(error), "error"));
+  });
+}
+window.addEventListener("popstate", () => {
+  if (mode !== "packages") return;
+  const query = new URL(window.location.href).searchParams;
+  const surveyId = query.get("survey");
+  const releaseId = query.get("release");
+  if (surveyId && releaseId) showPublicReleaseDetail(surveyId, releaseId, false);
+  else closePublicReleaseDetail(false);
+});
 window.addEventListener("astro:navigate", (event) => {
   const nextMode = (event as CustomEvent<{ mode?: ViewMode }>).detail?.mode;
   if (nextMode === "layers" || nextMode === "volume") void activateMode(nextMode).catch(showFatal);
+});
+
+const scrollTimers = new WeakMap<HTMLElement, number>();
+document.querySelectorAll<HTMLElement>([
+  ".controls-panel",
+  ".inspector-panel",
+  ".catalog-stage",
+  ".workflow-stage",
+  ".workspace-dialog",
+  ".dialog-form > ul",
+  ".coverage-hover",
+  ".result-table-wrap",
+].join(",")).forEach((region) => {
+  region.classList.add("interactive-scroll-region");
+  region.addEventListener("scroll", () => {
+    region.classList.add("is-scrolling");
+    const previous = scrollTimers.get(region);
+    if (previous !== undefined) window.clearTimeout(previous);
+    scrollTimers.set(region, window.setTimeout(() => region.classList.remove("is-scrolling"), 700));
+  }, { passive: true });
 });
 
 declare global {
@@ -1622,10 +1991,19 @@ declare global {
 }
 
 async function start(): Promise<void> {
-  const [surveys, footprints, assets] = await Promise.all([workspaceApi.surveys(), workspaceApi.surveyFootprints(), workspaceApi.dataAssets()]);
+  const [surveys, footprints, assets, releases, manualRecords] = await Promise.all([
+    workspaceApi.surveys(),
+    workspaceApi.surveyFootprints(),
+    workspaceApi.dataAssets(),
+    workspaceApi.publicReleaseDetails(),
+    workspaceApi.manualFootprints(),
+  ]);
   surveyCards = surveys;
   surveyFootprints = footprints;
   dataAssets = assets;
+  publicReleaseDetails = releases;
+  manualFootprintRecords = manualRecords;
+  resourcePackagePanel.setReleaseDetails(releases);
   const surveyRecords = await Promise.all(surveys.map((survey) => workspaceApi.survey(survey.id)));
   surveyRecordsById.clear();
   surveyRecords.forEach((survey) => surveyRecordsById.set(survey.id, survey));

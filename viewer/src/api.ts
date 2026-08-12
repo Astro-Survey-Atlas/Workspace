@@ -58,7 +58,9 @@ import type { GenericScanInput } from "../../src/flink-ingest";
 import type { TagDefinition } from "../../src/tags";
 import type { SurveyCard, SurveyRecord, SurveyRegistrationInput } from "../../src/survey-registry";
 import type { SurveyFootprintManifest } from "../../src/survey-footprints";
+import type { ManualFootprintInput, ManualFootprintRecord } from "../../src/manual-footprints";
 import type { PublicResourcePackage, ResourcePackageJob, ResourcePackageLoad } from "../../src/resource-packages";
+import type { PublicReleaseDetail } from "../../src/public-release-details";
 import type { AstroCoverageResponse, AstroOverviewResponse, AstroSkyQueryInput, AstroSpatialSummary } from "../../src/astro-index";
 
 async function getJson<T>(url: string): Promise<T> {
@@ -104,9 +106,26 @@ async function deleteRequest(url: string): Promise<void> {
   }
 }
 
+async function manualFootprintRequest<T>(url: string, method: "POST" | "PUT", token: string, revision?: number, body?: unknown): Promise<T> {
+  const headers: Record<string, string> = { Accept: "application/json", Authorization: `Bearer ${token}` };
+  if (body !== undefined) headers["Content-Type"] = "application/json";
+  if (revision !== undefined) headers["If-Match"] = String(revision);
+  const response = await fetch(url, { method, headers, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
+  if (!response.ok) {
+    const payload = (await response.json().catch(() => ({}))) as { error?: string };
+    throw new Error(payload.error ?? `Request failed: ${response.status}`);
+  }
+  return response.json() as Promise<T>;
+}
+
+function manualFootprintUrl(identity: Pick<ManualFootprintInput, "surveyId" | "releaseId" | "product">): string {
+  return `/api/manual-footprints/${encodeURIComponent(identity.surveyId)}/${encodeURIComponent(identity.releaseId)}/${encodeURIComponent(identity.product)}`;
+}
+
 export const workspaceApi = {
-  async dataAssets(): Promise<DataAssetRecord[]> {
-    return (await getJson<{ assets: DataAssetRecord[] }>("/api/data-assets")).assets;
+  async dataAssets(origin?: "user" | "builtin"): Promise<DataAssetRecord[]> {
+    const parameters = origin ? `?${new URLSearchParams({ origin })}` : "";
+    return (await getJson<{ assets: DataAssetRecord[] }>(`/api/data-assets${parameters}`)).assets;
   },
   async dataAsset(id: string): Promise<DataAssetRecord> {
     return (await getJson<{ asset: DataAssetRecord }>(`/api/data-assets/${encodeURIComponent(id)}`)).asset;
@@ -167,6 +186,30 @@ export const workspaceApi = {
   },
   async surveyFootprints(): Promise<SurveyFootprintManifest> {
     return getJson<SurveyFootprintManifest>("/api/survey-footprints");
+  },
+  async manualFootprints(): Promise<ManualFootprintRecord[]> {
+    return (await getJson<{ footprints: ManualFootprintRecord[] }>("/api/manual-footprints")).footprints;
+  },
+  async manualFootprint(identity: Pick<ManualFootprintInput, "surveyId" | "releaseId" | "product">): Promise<ManualFootprintRecord> {
+    return (await getJson<{ footprint: ManualFootprintRecord }>(manualFootprintUrl(identity))).footprint;
+  },
+  async createManualFootprint(input: ManualFootprintInput, token: string): Promise<ManualFootprintRecord> {
+    return (await manualFootprintRequest<{ footprint: ManualFootprintRecord }>("/api/manual-footprints", "POST", token, undefined, input)).footprint;
+  },
+  async updateManualFootprint(input: ManualFootprintInput, revision: number, token: string): Promise<ManualFootprintRecord> {
+    return (await manualFootprintRequest<{ footprint: ManualFootprintRecord }>(manualFootprintUrl(input), "PUT", token, revision, input)).footprint;
+  },
+  async validateManualFootprint(identity: Pick<ManualFootprintInput, "surveyId" | "releaseId" | "product">, revision: number, token: string): Promise<ManualFootprintRecord> {
+    return (await manualFootprintRequest<{ footprint: ManualFootprintRecord }>(`${manualFootprintUrl(identity)}/validate`, "POST", token, revision)).footprint;
+  },
+  async publishManualFootprint(identity: Pick<ManualFootprintInput, "surveyId" | "releaseId" | "product">, revision: number, token: string): Promise<ManualFootprintRecord> {
+    return (await manualFootprintRequest<{ footprint: ManualFootprintRecord }>(`${manualFootprintUrl(identity)}/publish`, "POST", token, revision)).footprint;
+  },
+  async unpublishManualFootprint(identity: Pick<ManualFootprintInput, "surveyId" | "releaseId" | "product">, revision: number, token: string): Promise<ManualFootprintRecord> {
+    return (await manualFootprintRequest<{ footprint: ManualFootprintRecord }>(`${manualFootprintUrl(identity)}/unpublish`, "POST", token, revision)).footprint;
+  },
+  async publicReleaseDetails(): Promise<PublicReleaseDetail[]> {
+    return (await getJson<{ releases: PublicReleaseDetail[] }>("/api/public-release-details")).releases;
   },
   async resourcePackages(): Promise<PublicResourcePackage[]> {
     return (await getJson<{ packages: PublicResourcePackage[] }>("/api/resource-packages")).packages;
@@ -306,6 +349,8 @@ export type {
   SurveyRecord,
   SurveyRegistrationInput,
   SurveyFootprintManifest,
+  ManualFootprintInput,
+  ManualFootprintRecord,
   AstroOverviewResponse,
   AstroSkyQueryInput,
   AstroSpatialSummary,

@@ -31,7 +31,8 @@ export interface ResourcePackageCatalogEntry {
   coverageAuthorities: string[];
   accessModes: string[];
   releases: string[];
-  sources: Array<{ label: string; url: string; authority: string; license?: string }>;
+  releaseLabels: Record<string, string>;
+  sources: Array<{ releaseId: string; label: string; url: string; authority: string; license?: string }>;
   version: string;
   archiveUrl: string;
   sizeBytes: number;
@@ -135,12 +136,20 @@ function sources(value: unknown, label: string): ResourcePackageCatalogEntry["so
   return value.map((item) => {
     const source = object(item, label);
     return {
+      releaseId: text(source.releaseId, `${label} release id`, 120),
       label: text(source.label, `${label} label`, 160),
       url: text(source.url, `${label} URL`),
       authority: text(source.authority, `${label} authority`, 80),
       ...(source.license === undefined ? {} : { license: text(source.license, `${label} license`, 160) }),
     };
   });
+}
+
+function releaseLabels(value: unknown, releases: string[], label: string): Record<string, string> {
+  const labels = object(value, label);
+  const result: Record<string, string> = {};
+  for (const releaseId of releases) result[releaseId] = text(labels[releaseId], `${label} ${releaseId}`, 160);
+  return result;
 }
 
 function parseEntry(value: unknown): ResourcePackageCatalogEntry {
@@ -150,6 +159,9 @@ function parseEntry(value: unknown): ResourcePackageCatalogEntry {
   const sha256 = text(entry.sha256, "Resource package SHA-256", 64).toLowerCase();
   if (!PACKAGE_ID.test(id) || !VERSION.test(version) || !/^[a-f0-9]{64}$/.test(sha256)) throw new Error(`Resource package catalog contains an invalid identity: ${id}`);
   if (!Number.isSafeInteger(entry.sizeBytes) || Number(entry.sizeBytes) <= 0) throw new Error(`Resource package catalog contains an invalid archive size: ${id}`);
+  const releases = stringList(entry.releases, "Resource package releases");
+  const parsedSources = sources(entry.sources, "Resource package sources");
+  if (parsedSources.some((source) => !releases.includes(source.releaseId))) throw new Error(`Resource package catalog contains a source for an unknown release: ${id}`);
   return {
     id,
     name: text(entry.name, "Resource package name", 160),
@@ -161,8 +173,9 @@ function parseEntry(value: unknown): ResourcePackageCatalogEntry {
     facilities: stringList(entry.facilities, "Resource package facilities"),
     coverageAuthorities: stringList(entry.coverageAuthorities, "Resource package coverage authorities"),
     accessModes: stringList(entry.accessModes, "Resource package access modes"),
-    releases: stringList(entry.releases, "Resource package releases"),
-    sources: sources(entry.sources, "Resource package sources"),
+    releases,
+    releaseLabels: releaseLabels(entry.releaseLabels, releases, "Resource package release labels"),
+    sources: parsedSources,
     version,
     archiveUrl: text(entry.archiveUrl, "Resource package archive URL"),
     sizeBytes: Number(entry.sizeBytes),
@@ -188,7 +201,8 @@ function parseLegacyEntry(value: unknown): ResourcePackageCatalogEntry {
     surveyId: surveys[0]!,
     modalities: [text(entry.modality, "Resource package modality", 80)],
     wavelengths: ["legacy"], productTypes: ["coverage"], facilities: ["multiple"], coverageAuthorities: ["legacy"], accessModes: ["archive"], releases: ["legacy"],
-    sources: [{ label: "Legacy bundled coverage", url: "https://astro.workspace.dev.72602.space", authority: "legacy" }],
+    releaseLabels: { legacy: "Legacy" },
+    sources: [{ releaseId: "legacy", label: "Legacy bundled coverage", url: "https://astro.workspace.dev.72602.space", authority: "legacy" }],
     version, archiveUrl: text(entry.archiveUrl, "Resource package archive URL"), sizeBytes: Number(entry.sizeBytes), sha256,
     updatedAt: text(entry.updatedAt, "Resource package update time", 80), hidden: true, deprecated: true, replacedBy: optionalStringList(entry.replacedBy, "Resource package replacements"),
   };
@@ -368,13 +382,20 @@ export class ResourcePackageManager {
     try {
       const parsed = parseState(JSON.parse(await readFile(this.#statePath, "utf8")) as unknown);
       this.#state = parsed.state;
+      let stateChanged = parsed.legacy;
       for (const installed of this.#state.packages) {
         const manifest = await this.#validateInstalled(installed);
         this.#installedFootprints.set(installed.id, manifest);
         if (parsed.legacy && (installed as InstalledPackage & { legacyActive?: boolean }).legacyActive) installed.activeReleaseIds = this.#releaseIds(manifest);
+        const available = new Set(this.#releaseIds(manifest));
+        const retained = installed.activeReleaseIds.filter((releaseId) => available.has(releaseId));
+        if (retained.length !== installed.activeReleaseIds.length) {
+          installed.activeReleaseIds = retained;
+          stateChanged = true;
+        }
         delete (installed as InstalledPackage & { legacyActive?: boolean }).legacyActive;
       }
-      if (parsed.legacy) await this.#persist();
+      if (stateChanged) await this.#persist();
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
       await this.#persist();
@@ -445,7 +466,7 @@ export class ResourcePackageManager {
         const available = new Set(this.#releaseIds(manifest));
         for (const releaseId of load.releaseIds) if (!available.has(releaseId)) throw new RangeError(`Unknown release for resource package ${load.packageId}: ${releaseId}`);
         installed.activeReleaseIds = [...load.releaseIds];
-        if (load.releaseIds.length) selected.push({ ...manifest, footprints: manifest.footprints.filter((footprint) => load.releaseIds.includes(footprint.releaseId)) });
+        if (load.releaseIds.length) selected.push({ ...manifest, footprints: manifest.footprints.filter((footprint) => footprint.quality === "moc" && load.releaseIds.includes(footprint.releaseId)) });
       }
       this.#validateSelection(selected);
       await this.#persist(draft);
@@ -456,11 +477,17 @@ export class ResourcePackageManager {
 
   async remove(id: string): Promise<void> {
     await this.#mutate(async () => {
-      const installed = this.#installed(id);
-      if (installed.activeReleaseIds.length) throw new RangeError(`Deactivate resource package before deleting it: ${id}`);
-      await rm(path.join(this.#root, "installed", id), { recursive: true, force: true });
-      this.#state.packages = this.#state.packages.filter((record) => record.id !== id);
-      await this.#persist();
+      this.#installed(id);
+      const previous = this.#state.packages.map((record) => ({ ...record, activeReleaseIds: [...record.activeReleaseIds] }));
+      const next = previous.filter((record) => record.id !== id);
+      await this.#persist(next);
+      try {
+        await rm(path.join(this.#root, "installed", id), { recursive: true, force: true });
+      } catch (error) {
+        await this.#persist(previous);
+        throw error;
+      }
+      this.#state = { schemaVersion: STATE_SCHEMA_VERSION, packages: next };
       this.#installedFootprints.delete(id);
     });
   }
@@ -469,7 +496,7 @@ export class ResourcePackageManager {
     const manifests = this.#state.packages.filter((record) => record.activeReleaseIds.length).map((record) => {
       const manifest = this.#installedFootprints.get(record.id);
       if (!manifest) throw new Error(`Installed resource package manifest is unavailable: ${record.id}`);
-      return { ...manifest, footprints: manifest.footprints.filter((footprint) => record.activeReleaseIds.includes(footprint.releaseId)) };
+      return { ...manifest, footprints: manifest.footprints.filter((footprint) => footprint.quality === "moc" && record.activeReleaseIds.includes(footprint.releaseId)) };
     });
     if (!manifests.length) return { schemaVersion: 1, generatedAt: new Date().toISOString(), coordinateFrame: "ICRS", nside: 16, footprints: [] };
     this.#validateSelection(manifests);
@@ -510,7 +537,8 @@ export class ResourcePackageManager {
       await this.#mutate(async () => {
         const current = this.#state.packages.find((record) => record.id === entry.id);
         this.#state.packages = this.#state.packages.filter((record) => record.id !== entry.id);
-        const activeReleaseIds = current?.activeReleaseIds.filter((releaseId) => footprints.footprints.some((footprint) => footprint.releaseId === releaseId)) ?? [];
+        const loadableReleaseIds = new Set(this.#releaseIds(footprints));
+        const activeReleaseIds = current?.activeReleaseIds.filter((releaseId) => loadableReleaseIds.has(releaseId)) ?? [];
         this.#state.packages.push({ id: entry.id, version: entry.version, sha256: entry.sha256, installedAt: new Date().toISOString(), activeReleaseIds });
         this.#installedFootprints.set(entry.id, footprints);
         await this.#persist();
@@ -547,8 +575,6 @@ export class ResourcePackageManager {
     const entry = this.#catalog.packages.find((candidate) => candidate.id === record.id);
     if (!entry || (entry.version === record.version && entry.sha256 !== record.sha256)) throw new Error(`Installed resource package is absent from the trusted catalog: ${record.id}@${record.version}`);
     const manifest = await this.#readFootprints(record);
-    const available = new Set(this.#releaseIds(manifest));
-    if (record.activeReleaseIds.some((releaseId) => !available.has(releaseId))) throw new Error(`Installed resource package state contains an unknown release: ${record.id}`);
     return manifest;
   }
 
@@ -570,7 +596,7 @@ export class ResourcePackageManager {
   }
 
   #releaseIds(manifest: SurveyFootprintManifest): string[] {
-    return [...new Set(manifest.footprints.map((footprint) => footprint.releaseId))];
+    return [...new Set(manifest.footprints.filter((footprint) => footprint.quality === "moc").map((footprint) => footprint.releaseId))];
   }
 
   #availableReleaseIds(installed: InstalledPackage): string[] {

@@ -1,0 +1,10 @@
+Astro Data Workspace is available at:
+
+  kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "astro-data-workspace.fullname" . }} {{ .Values.service.port }}:{{ .Values.service.port }}
+
+Metadata store: {{ .Values.metadataStore.mode }}
+Warehouse integration: {{ ternary "enabled" "disabled" .Values.dataWarehouse.enabled }}
+{{- if .Values.ingress.enabled }}
+Ingress hosts:{{ range .Values.ingress.hosts }}
+  {{ .host }}{{ end }}
+{{- end }}

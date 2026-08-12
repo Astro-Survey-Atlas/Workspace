@@ -49,31 +49,23 @@ export class DataCatalogPanel {
   #surveys: SurveyCard[] = [];
   #surveyRecords = new Map<string, SurveyRecord>();
   #selectedId: string | null = null;
-  #editingId: string | null = null;
   #detailEditing: DetailSection = null;
   #active = false;
-  #detailOpen = false;
-  #formEditable = false;
 
   constructor(onError: (error: unknown) => void, onConnectorSelected?: (connectorId: string) => void) {
     this.#onError = onError;
     this.#onConnectorSelected = onConnectorSelected;
     byId<HTMLInputElement>("catalog-search").addEventListener("input", () => this.#render());
-    byId<HTMLSelectElement>("catalog-origin-filter").addEventListener("change", () => this.#render());
     byId<HTMLSelectElement>("catalog-kind-filter").addEventListener("change", () => this.#render());
+    byId<HTMLSelectElement>("catalog-project-filter").addEventListener("change", () => this.#render());
     byId<HTMLSelectElement>("catalog-survey").addEventListener("change", () => this.#syncReleaseOptions());
     byId<HTMLFormElement>("catalog-registration-form").addEventListener("submit", (event) => {
       event.preventDefault();
       void this.#save().catch(this.#onError);
     });
-    byId<HTMLButtonElement>("catalog-form-cancel").addEventListener("click", () => this.#resetForm());
+    byId<HTMLButtonElement>("catalog-form-cancel").addEventListener("click", () => this.#closeCreateDialog());
+    byId<HTMLButtonElement>("catalog-dialog-close").addEventListener("click", () => this.#closeCreateDialog());
     byId<HTMLButtonElement>("catalog-new").addEventListener("click", () => this.#startNew());
-    byId<HTMLButtonElement>("catalog-form-edit").addEventListener("click", () => {
-      const asset = this.#assets.find((candidate) => candidate.id === this.#selectedId);
-      if (asset) this.#beginEdit(asset);
-    });
-    byId<HTMLButtonElement>("catalog-delete").addEventListener("click", () => void this.#remove().catch(this.#onError));
-    byId<HTMLButtonElement>("asset-detail-back").addEventListener("click", () => this.#closeDetail());
   }
 
   async activate(surveys: SurveyCard[], records: Map<string, SurveyRecord>): Promise<void> {
@@ -81,9 +73,8 @@ export class DataCatalogPanel {
     this.#surveys = surveys;
     this.#surveyRecords = records;
     this.#renderSurveyOptions();
-    [this.#assets, this.#connectors, this.#tags] = await Promise.all([workspaceApi.dataAssets(), workspaceApi.connectors(), workspaceApi.tags()]);
+    [this.#assets, this.#connectors, this.#tags] = await Promise.all([this.#loadUserAssets(), workspaceApi.connectors(), workspaceApi.tags()]);
     this.#renderTags();
-    this.#closeDetail();
     if (!this.#selectedId || !this.#assets.some((asset) => asset.id === this.#selectedId)) this.#selectedId = this.#assets[0]?.id ?? null;
     this.#render();
   }
@@ -92,6 +83,10 @@ export class DataCatalogPanel {
 
   debugState(): Record<string, unknown> {
     return { catalogAssetCount: this.#assets.length, selectedCatalogAssetId: this.#selectedId };
+  }
+
+  async #loadUserAssets(): Promise<DataAssetRecord[]> {
+    return (await workspaceApi.dataAssets("user")).filter((asset) => asset.origin === "user");
   }
 
   #connectorRecordsFor(asset: DataAssetRecord): ConnectorPublicRecord[] {
@@ -113,11 +108,12 @@ export class DataCatalogPanel {
 
   #filteredAssets(): DataAssetRecord[] {
     const query = inputValue("catalog-search").toLocaleLowerCase();
-    const origin = byId<HTMLSelectElement>("catalog-origin-filter").value;
     const kind = byId<HTMLSelectElement>("catalog-kind-filter").value;
+    const project = byId<HTMLSelectElement>("catalog-project-filter").value;
     return this.#assets.filter((asset) => {
-      if (origin !== "all" && asset.origin !== origin) return false;
       if (kind !== "all" && asset.kind !== kind) return false;
+      const projectStates = asset.projectStates?.length ? asset.projectStates : [asset.projectState];
+      if (project !== "all" && !projectStates.includes(project as DataAssetProjectState)) return false;
       if (!query) return true;
       const connectorText = this.#connectorRecordsFor(asset).flatMap((connector) => [connector.name, connector.kind, connectorLocation(connector), connector.locationKey, ...Object.values(connector.config)]);
       const sources = (asset.sources ?? []).flatMap((source) => [source.label, source.url, source.description ?? ""]);
@@ -131,6 +127,10 @@ export class DataCatalogPanel {
   #render(): void {
     if (!this.#active) return;
     const assets = this.#filteredAssets();
+    if (!assets.some((asset) => asset.id === this.#selectedId)) {
+      this.#selectedId = assets[0]?.id ?? null;
+      this.#detailEditing = null;
+    }
     const list = byId("catalog-asset-list");
     list.replaceChildren(...assets.map((asset) => {
       const row = document.createElement("button");
@@ -139,7 +139,7 @@ export class DataCatalogPanel {
       row.classList.toggle("selected", asset.id === this.#selectedId);
       row.addEventListener("click", () => {
         this.#selectedId = asset.id;
-        this.#openDetail(asset);
+        this.#detailEditing = null;
         this.#render();
         if (window.innerWidth <= 1040) byId("inspector-panel").classList.add("mobile-open");
       });
@@ -164,59 +164,20 @@ export class DataCatalogPanel {
     }));
     byId("catalog-empty").hidden = assets.length > 0;
     byId("catalog-count").textContent = `${assets.length} / ${this.#assets.length}`;
-    byId("catalog-search-hint").textContent = `${assets.length} 个资产命中 · 搜索名称、来源、Tag、路径和 Connector`;
-    byId("catalog-builtin-count").textContent = String(this.#assets.filter((asset) => asset.origin === "builtin").length);
-    byId("catalog-user-count").textContent = String(this.#assets.filter((asset) => asset.origin === "user").length);
+    const query = inputValue("catalog-search");
+    byId("catalog-search-hint").textContent = query
+      ? `${assets.length} 个资产命中“${query}” · 搜索名称、来源、Tag、路径和 Connector`
+      : `${assets.length} 个资产命中 · 可搜索名称、来源、Tag、路径和 Connector`;
+    byId("catalog-user-count").textContent = String(this.#assets.length);
     byId("catalog-ready-count").textContent = String(this.#assets.filter((asset) => asset.status === "ready").length);
     this.#renderInspector();
-    this.#renderBasicForm(this.#assets.find((asset) => asset.id === this.#selectedId));
-    if (this.#detailOpen) this.#renderDetailPage();
-  }
-
-  #setFormDisabled(disabled: boolean): void {
-    this.#formEditable = !disabled;
-    byId<HTMLFormElement>("catalog-registration-form").querySelectorAll<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>("input, select, textarea").forEach((field) => {
-      field.disabled = disabled;
-    });
-    byId<HTMLButtonElement>("catalog-form-edit").hidden = !disabled;
-    byId<HTMLButtonElement>("catalog-form-submit").hidden = disabled;
-    byId<HTMLButtonElement>("catalog-form-cancel").hidden = disabled;
-  }
-
-  #renderBasicForm(asset: DataAssetRecord | undefined): void {
-    if (this.#formEditable) return;
-    if (!asset) {
-      byId<HTMLFormElement>("catalog-registration-form").reset();
-      byId("catalog-form-title").textContent = "登记用户数据";
-      this.#setFormDisabled(false);
-      byId<HTMLButtonElement>("catalog-form-edit").hidden = true;
-      byId<HTMLButtonElement>("catalog-form-cancel").hidden = true;
-      byId<HTMLButtonElement>("catalog-form-submit").hidden = false;
-      return;
-    }
-    byId<HTMLInputElement>("catalog-name").value = asset.name;
-    byId<HTMLInputElement>("catalog-description").value = asset.description;
-    byId<HTMLSelectElement>("catalog-survey").value = this.#effectiveSurveyId(asset) ?? "";
-    this.#syncReleaseOptions();
-    byId<HTMLSelectElement>("catalog-release").value = this.#effectiveReleaseId(asset) ?? "";
-    byId<HTMLInputElement>("catalog-product").value = asset.product;
-    byId<HTMLSelectElement>("catalog-kind").value = asset.kind;
-    byId<HTMLSelectElement>("catalog-status-input").value = asset.status;
-    this.#setProjectStates(asset.projectStates?.length ? asset.projectStates : [asset.projectState]);
-    this.#renderTags(asset.tags ?? asset.modalities);
-    const inherited = asset.surveyBinding?.source === "connector";
-    byId<HTMLSelectElement>("catalog-survey").disabled = inherited;
-    byId<HTMLSelectElement>("catalog-release").disabled = inherited;
-    byId("catalog-form-title").textContent = "资产基本信息";
-    byId<HTMLButtonElement>("catalog-delete").hidden = true;
-    this.#setFormDisabled(true);
   }
 
   #renderInspector(): void {
     const asset = this.#assets.find((candidate) => candidate.id === this.#selectedId);
     const empty = byId("inspector-empty");
     const content = byId("inspector-content");
-    byId("inspector-kicker").textContent = "LINEAGE NAVIGATOR";
+    byId("inspector-kicker").textContent = "DATA ASSET DETAIL";
     if (!asset) { empty.hidden = false; content.hidden = true; content.replaceChildren(); return; }
     empty.hidden = true;
     content.hidden = false;
@@ -224,30 +185,17 @@ export class DataCatalogPanel {
     heading.textContent = asset.name;
     const note = document.createElement("p");
     note.className = "catalog-detail-copy";
-    note.textContent = `${this.#surveyName(this.#effectiveSurveyId(asset))} · ${asset.product}`;
-    const summary = document.createElement("dl");
-    const summaryItems: Array<[string, string]> = [["状态", statusLabel(asset.status)], ["访问", this.#resolvedAccesses(asset).map((access) => access.uri).join(" · ")]];
-    summaryItems.forEach(([label, value]) => {
-      const row = document.createElement("div"); const term = document.createElement("dt"); const detail = document.createElement("dd"); term.textContent = label; detail.textContent = value; row.append(term, detail); summary.append(row);
-    });
-    const tree = document.createElement("ul");
-    tree.className = "lineage-tree";
-    const root = document.createElement("li");
-    root.textContent = asset.name;
-    tree.append(root);
-    const children = asset.lineage ?? [];
-    children.forEach((entry) => {
-      const item = document.createElement("li");
-      item.textContent = `${entry.relation} · ${entry.label}`;
-      tree.append(item);
-    });
-    if (!children.length) {
-      const item = document.createElement("li");
-      item.className = "lineage-empty";
-      item.textContent = "暂无派生关系";
-      tree.append(item);
-    }
-    content.replaceChildren(heading, note, summary, tree);
+    note.textContent = asset.description || "暂无说明";
+    const basic = this.#detailEditing === "basic" ? this.#basicEditor(asset) : this.#rows([["资产 ID", asset.id], ["来源", asset.origin === "builtin" ? "系统内置" : "用户登记"], ["巡天 / 发布", `${this.#surveyName(this.#effectiveSurveyId(asset))} / ${this.#effectiveReleaseId(asset) ?? "未关联"}`], ["产品 / 类型", `${asset.product} / ${asset.kind}`], ["Tag", this.#tagText(asset.tags ?? asset.modalities) || "未标注"], ["项目阶段", projectStatesLabel(asset)], ["工程状态", statusLabel(asset.status)]]);
+    const sourceList = this.#detailEditing === "sources" ? this.#sourceEditor(asset) : document.createElement("ul");
+    if (this.#detailEditing !== "sources") { (asset.sources ?? []).forEach((source) => { const item = document.createElement("li"); const link = document.createElement("a"); link.href = source.url; link.target = "_blank"; link.rel = "noreferrer"; link.textContent = `${source.label}: ${source.url}`; item.append(link); source.description && item.append(` · ${source.description}`); sourceList.append(item); }); if (!sourceList.childElementCount) sourceList.textContent = "尚未登记公开来源"; }
+    const accessList = this.#detailEditing === "access" ? this.#accessEditor(asset) : document.createElement("ul");
+    if (this.#detailEditing !== "access") { this.#resolvedAccesses(asset).forEach((access) => { const item = document.createElement("li"); if (access.connectorId && this.#connectors.some((connector) => connector.id === access.connectorId)) { const link = document.createElement("button"); link.type = "button"; link.className = "access-connector-link"; link.textContent = `${access.label ? `${access.label} · ` : ""}${access.connector} · ${access.uri} · ${access.format}`; link.addEventListener("click", () => this.#onConnectorSelected?.(access.connectorId!)); item.append(link); } else item.textContent = `${access.label ? `${access.label} · ` : ""}${access.connector} · ${access.uri} · ${access.format}`; accessList.append(item); }); if (!accessList.childElementCount) accessList.textContent = "尚未登记访问位置"; }
+    const lineage = this.#detailEditing === "lineage" ? this.#lineageEditor(asset) : document.createElement("div"); lineage.classList.add("lineage-detail-tree");
+    if (this.#detailEditing !== "lineage") { (asset.lineage ?? []).forEach((entry) => { const item = document.createElement("div"); item.textContent = `${entry.relation} · ${entry.label}`; lineage.append(item); }); if (!lineage.childElementCount) lineage.textContent = "暂无血缘关系。"; }
+    const sections = [this.#detailSection("基本信息", basic, "编辑基本信息", () => { this.#detailEditing = "basic"; this.#renderInspector(); }), this.#detailSection("公开来源", sourceList, "编辑公开来源", () => { this.#detailEditing = "sources"; this.#renderInspector(); }), this.#detailSection("访问位置与 Connector", accessList, "编辑 Connector 关联", () => { this.#detailEditing = "access"; this.#renderInspector(); }), this.#detailSection("数据血缘", lineage, "编辑血缘关系", () => { this.#detailEditing = "lineage"; this.#renderInspector(); })];
+    if (asset.origin !== "builtin") { const remove = document.createElement("button"); remove.type = "button"; remove.className = "command-button danger"; remove.textContent = "删除数据资产"; remove.addEventListener("click", () => void this.#remove(asset).catch(this.#onError)); sections.push(remove); }
+    content.replaceChildren(heading, note, ...sections);
   }
 
   #renderSurveyOptions(): void {
@@ -295,10 +243,7 @@ export class DataCatalogPanel {
       releaseId: byId<HTMLSelectElement>("catalog-release").value || undefined,
       product: inputValue("catalog-product") || undefined,
       kind: byId<HTMLSelectElement>("catalog-kind").value as DataAssetKind,
-      tags: this.#selectedTags(), connectorIds: this.#assets.find((asset) => asset.id === this.#editingId)?.connectorIds ?? [], connectorLocationKeys: this.#assets.find((asset) => asset.id === this.#editingId)?.connectorLocationKeys ?? [],
-      accesses: this.#assets.find((asset) => asset.id === this.#editingId)?.accesses,
-      sources: this.#assets.find((asset) => asset.id === this.#editingId)?.sources,
-      lineage: this.#assets.find((asset) => asset.id === this.#editingId)?.lineage,
+      tags: this.#selectedTags(), connectorIds: [], connectorLocationKeys: [],
       status: byId<HTMLSelectElement>("catalog-status-input").value as DataAssetRegistrationInput["status"],
       projectStates: this.#readProjectStates(),
     };
@@ -306,36 +251,14 @@ export class DataCatalogPanel {
 
   async #save(): Promise<void> {
     const input = this.#input();
-    const asset = this.#editingId ? await workspaceApi.updateDataAsset(this.#editingId, input) : await workspaceApi.registerDataAsset(input);
-    this.#assets = await workspaceApi.dataAssets();
+    const asset = await workspaceApi.registerDataAsset(input);
+    this.#assets = await this.#loadUserAssets();
     this.#selectedId = asset.id;
-    this.#resetForm();
+    this.#closeCreateDialog();
     this.#render();
   }
 
-  #beginEdit(asset: DataAssetRecord): void {
-    this.#editingId = asset.id;
-    byId<HTMLInputElement>("catalog-name").value = asset.name;
-    byId<HTMLInputElement>("catalog-description").value = asset.description;
-    byId<HTMLSelectElement>("catalog-survey").value = this.#effectiveSurveyId(asset) ?? "";
-    this.#syncReleaseOptions(); byId<HTMLSelectElement>("catalog-release").value = this.#effectiveReleaseId(asset) ?? "";
-    byId<HTMLInputElement>("catalog-product").value = asset.product;
-    byId<HTMLSelectElement>("catalog-kind").value = asset.kind;
-    byId<HTMLSelectElement>("catalog-status-input").value = asset.status;
-    this.#setProjectStates(asset.projectStates?.length ? asset.projectStates : [asset.projectState]);
-    this.#renderTags(asset.tags ?? asset.modalities);
-    const inherited = asset.surveyBinding?.source === "connector";
-    byId<HTMLSelectElement>("catalog-survey").disabled = inherited;
-    byId<HTMLSelectElement>("catalog-release").disabled = inherited;
-    byId("catalog-form-title").textContent = "编辑基本信息";
-    byId("catalog-form-submit").textContent = "保存基本信息";
-    byId<HTMLButtonElement>("catalog-delete").hidden = asset.origin === "builtin";
-    this.#setFormDisabled(false);
-    byId("controls-panel").scrollTo({ top: byId("catalog-registration-form").offsetTop, behavior: "smooth" });
-  }
-
   #startNew(): void {
-    this.#editingId = null;
     byId<HTMLFormElement>("catalog-registration-form").reset();
     this.#renderSurveyOptions();
     byId<HTMLSelectElement>("catalog-kind").value = "catalog";
@@ -344,15 +267,10 @@ export class DataCatalogPanel {
     this.#renderTags();
     byId("catalog-form-title").textContent = "登记用户数据";
     byId("catalog-form-submit").textContent = "登记数据";
-    byId<HTMLButtonElement>("catalog-delete").hidden = true;
-    byId<HTMLButtonElement>("catalog-form-edit").hidden = true;
-    this.#setFormDisabled(false);
-    byId<HTMLButtonElement>("catalog-form-cancel").hidden = false;
-    byId("controls-panel").scrollTo({ top: byId("catalog-registration-form").offsetTop, behavior: "smooth" });
+    byId<HTMLDialogElement>("catalog-create-dialog").showModal();
   }
 
-  #resetForm(): void {
-    this.#editingId = null;
+  #closeCreateDialog(): void {
     byId<HTMLFormElement>("catalog-registration-form").reset();
     this.#renderSurveyOptions();
     byId<HTMLSelectElement>("catalog-kind").value = "catalog";
@@ -361,19 +279,18 @@ export class DataCatalogPanel {
     this.#renderTags();
     byId("catalog-form-title").textContent = "登记用户数据";
     byId("catalog-form-submit").textContent = "登记数据";
-    byId<HTMLButtonElement>("catalog-delete").hidden = true;
-    this.#setFormDisabled(true);
-    byId<HTMLButtonElement>("catalog-form-edit").hidden = true;
+    const dialog = byId<HTMLDialogElement>("catalog-create-dialog");
+    if (dialog.open) dialog.close();
   }
 
-  async #remove(): Promise<void> {
-    if (!this.#editingId) return;
-    await workspaceApi.deleteDataAsset(this.#editingId);
-    this.#assets = await workspaceApi.dataAssets(); this.#selectedId = this.#assets[0]?.id ?? null; this.#resetForm(); this.#render();
+  async #remove(asset: DataAssetRecord): Promise<void> {
+    if (asset.origin === "builtin") return;
+    await workspaceApi.deleteDataAsset(asset.id);
+    this.#assets = await this.#loadUserAssets();
+    this.#selectedId = null;
+    this.#detailEditing = null;
+    this.#render();
   }
-
-  #openDetail(asset: DataAssetRecord): void { this.#detailOpen = true; this.#detailEditing = null; byId("catalog-stage").hidden = true; byId("asset-detail-stage").hidden = false; this.#renderDetailPage(); }
-  #closeDetail(): void { this.#detailOpen = false; this.#detailEditing = null; byId("catalog-stage").hidden = false; byId("asset-detail-stage").hidden = true; }
 
   #detailSection(title: string, content: HTMLElement, action: string, callback: () => void): HTMLElement {
     const wrapper = document.createElement("section"); wrapper.className = "asset-detail-section";
@@ -399,7 +316,7 @@ export class DataCatalogPanel {
 
   #saveDetail(input: DataAssetRegistrationInput): void {
     if (!this.#selectedId) return;
-    void workspaceApi.updateDataAsset(this.#selectedId, input).then(async () => { this.#assets = await workspaceApi.dataAssets(); this.#detailEditing = null; this.#render(); }).catch(this.#onError);
+    void workspaceApi.updateDataAsset(this.#selectedId, input).then(async () => { this.#assets = await this.#loadUserAssets(); this.#detailEditing = null; this.#render(); }).catch(this.#onError);
   }
 
   #basicEditor(asset: DataAssetRecord): HTMLElement {
@@ -407,7 +324,7 @@ export class DataCatalogPanel {
     form.innerHTML = `<label>名称<input name="name" class="field-input" required></label><label>说明<input name="description" class="field-input"></label><label>数据产品<input name="product" class="field-input"></label><label>类型<select name="kind" class="field-input"><option value="catalog">星表</option><option value="image">图像</option><option value="spectra">光谱</option><option value="cube">数据立方</option><option value="timeseries">时序</option><option value="other">其他</option></select></label><div class="detail-editor-actions"><button class="command-button" type="submit">保存</button><button class="text-button" type="button" data-cancel>取消</button></div>`;
     (form.elements.namedItem("name") as HTMLInputElement).value = asset.name; (form.elements.namedItem("description") as HTMLInputElement).value = asset.description; (form.elements.namedItem("product") as HTMLInputElement).value = asset.product; (form.elements.namedItem("kind") as HTMLSelectElement).value = asset.kind;
     form.addEventListener("submit", (event) => { event.preventDefault(); const data = new FormData(form); this.#saveDetail(this.#assetInput(asset, { name: String(data.get("name") ?? "").trim(), description: String(data.get("description") ?? "").trim(), product: String(data.get("product") ?? "").trim(), kind: String(data.get("kind")) as DataAssetKind })); });
-    form.querySelector("[data-cancel]")?.addEventListener("click", () => { this.#detailEditing = null; this.#renderDetailPage(); }); return form;
+    form.querySelector("[data-cancel]")?.addEventListener("click", () => { this.#detailEditing = null; this.#renderInspector(); }); return form;
   }
 
   #sourceEditor(asset: DataAssetRecord): HTMLElement {
@@ -416,7 +333,7 @@ export class DataCatalogPanel {
     form.innerHTML = `${rows}<button type="button" class="text-button" data-add-source>添加来源</button><div class="detail-editor-actions"><button class="command-button" type="submit">保存</button><button class="text-button" type="button" data-cancel>取消</button></div>`;
     form.querySelector("[data-add-source]")?.addEventListener("click", () => { const row = document.createElement("div"); row.className = "detail-source-row"; row.innerHTML = `<input class="field-input source-label" placeholder="名称"><input class="field-input source-url" placeholder="https://..."><input class="field-input source-description" placeholder="说明">`; form.insertBefore(row, form.querySelector("[data-add-source]")); });
     form.addEventListener("submit", (event) => { event.preventDefault(); const sources: DataAssetSource[] = [...form.querySelectorAll<HTMLElement>(".detail-source-row")].map((row) => ({ label: (row.querySelector(".source-label") as HTMLInputElement).value.trim(), url: (row.querySelector(".source-url") as HTMLInputElement).value.trim(), description: (row.querySelector(".source-description") as HTMLInputElement).value.trim() || undefined })).filter((source) => source.label && source.url); this.#saveDetail(this.#assetInput(asset, { sources })); });
-    form.querySelector("[data-cancel]")?.addEventListener("click", () => { this.#detailEditing = null; this.#renderDetailPage(); }); return form;
+    form.querySelector("[data-cancel]")?.addEventListener("click", () => { this.#detailEditing = null; this.#renderInspector(); }); return form;
   }
 
   #accessEditor(asset: DataAssetRecord): HTMLElement {
@@ -433,7 +350,7 @@ export class DataCatalogPanel {
     });
     const actions = document.createElement("div"); actions.className = "detail-editor-actions"; actions.innerHTML = `<button class="command-button" type="submit">保存关联</button><button class="text-button" type="button" data-cancel>取消</button>`; form.append(actions);
     form.addEventListener("submit", (event) => { event.preventDefault(); const connectorLocationKeys = [...form.querySelectorAll<HTMLInputElement>("input:checked")].map((input) => input.value); const connectorIds = this.#connectors.filter((connector) => connectorLocationKeys.includes(connector.locationKey)).map((connector) => connector.id); this.#saveDetail(this.#assetInput(asset, { connectorIds, connectorLocationKeys })); });
-    form.querySelector("[data-cancel]")?.addEventListener("click", () => { this.#detailEditing = null; this.#renderDetailPage(); }); return form;
+    form.querySelector("[data-cancel]")?.addEventListener("click", () => { this.#detailEditing = null; this.#renderInspector(); }); return form;
   }
 
   #lineageEditor(asset: DataAssetRecord): HTMLElement {
@@ -465,30 +382,8 @@ export class DataCatalogPanel {
       })).filter((entry) => entry.relation && entry.label);
       this.#saveDetail(this.#assetInput(asset, { lineage }));
     });
-    form.querySelector("[data-cancel]")?.addEventListener("click", () => { this.#detailEditing = null; this.#renderDetailPage(); });
+    form.querySelector("[data-cancel]")?.addEventListener("click", () => { this.#detailEditing = null; this.#renderInspector(); });
     return form;
-  }
-
-  #renderDetailPage(): void {
-    const asset = this.#assets.find((candidate) => candidate.id === this.#selectedId); if (!asset) return;
-    byId("asset-detail-title").textContent = asset.name; byId("asset-detail-description").textContent = asset.description;
-    const stats = byId("asset-detail-stats"); stats.replaceChildren(); const statItems: Array<[string, string]> = [["状态", statusLabel(asset.status)], ["Tag", String((asset.tags ?? asset.modalities).length)], ["Connector", String(this.#connectorRecordsFor(asset).length)], ["文件", "待扫描"]]; statItems.forEach(([label, value]) => { const row = document.createElement("div"); const dt = document.createElement("dt"); const dd = document.createElement("dd"); dt.textContent = label; dd.textContent = value; row.append(dt, dd); stats.append(row); });
-    const basic = this.#detailEditing === "basic" ? this.#basicEditor(asset) : this.#rows([["来源", asset.origin === "builtin" ? "系统内置" : "用户登记"], ["巡天 / 发布", `${this.#surveyName(this.#effectiveSurveyId(asset))} / ${this.#effectiveReleaseId(asset) ?? "未关联"}`], ["产品 / 类型", `${asset.product} / ${asset.kind}`], ["Tag", this.#tagText(asset.tags ?? asset.modalities) || "未标注"], ["项目阶段", projectStatesLabel(asset)], ["工程状态", statusLabel(asset.status)]]);
-    const sourceList = this.#detailEditing === "sources" ? this.#sourceEditor(asset) : document.createElement("ul");
-    if (this.#detailEditing !== "sources") { (asset.sources ?? []).forEach((source) => { const item = document.createElement("li"); const link = document.createElement("a"); link.href = source.url; link.target = "_blank"; link.rel = "noreferrer"; link.textContent = `${source.label}: ${source.url}`; item.append(link); source.description && item.append(` · ${source.description}`); (sourceList as HTMLUListElement).append(item); }); if (!(sourceList as HTMLUListElement).childElementCount) sourceList.textContent = "尚未登记公开来源"; }
-    const accessList = this.#detailEditing === "access" ? this.#accessEditor(asset) : document.createElement("ul");
-    if (this.#detailEditing !== "access") {
-      this.#resolvedAccesses(asset).forEach((access) => {
-        const item = document.createElement("li");
-        if (access.connectorId && this.#connectors.some((connector) => connector.id === access.connectorId)) {
-          const link = document.createElement("button"); link.type = "button"; link.className = "access-connector-link"; link.textContent = `${access.label ? `${access.label} · ` : ""}${access.connector} · ${access.uri} · ${access.format}`;
-          link.addEventListener("click", () => this.#onConnectorSelected?.(access.connectorId!)); item.append(link);
-        } else item.textContent = `${access.label ? `${access.label} · ` : ""}${access.connector} · ${access.uri} · ${access.format}`;
-        (accessList as HTMLUListElement).append(item);
-      });
-    }
-    const lineage = this.#detailEditing === "lineage" ? this.#lineageEditor(asset) : document.createElement("div"); lineage.className = "lineage-detail-tree"; if (this.#detailEditing !== "lineage") { (asset.lineage ?? []).forEach((entry) => { const item = document.createElement("div"); item.textContent = `${entry.relation} · ${entry.label}`; lineage.append(item); }); if (!lineage.childElementCount) lineage.textContent = "暂无血缘关系。交叉匹配、Cutout 或打包任务完成后，这里会记录来源资产和派生结果。"; }
-    const body = byId("asset-detail-body"); body.replaceChildren(this.#detailSection("基本信息", basic, "编辑基本信息", () => { this.#detailEditing = "basic"; this.#renderDetailPage(); }), this.#detailSection("公开来源", sourceList, "编辑公开来源", () => { this.#detailEditing = "sources"; this.#renderDetailPage(); }), this.#detailSection("访问位置", accessList, "编辑 Connector 关联", () => { this.#detailEditing = "access"; this.#renderDetailPage(); }), this.#detailSection("数据血缘", lineage, "编辑血缘关系", () => { this.#detailEditing = "lineage"; this.#renderDetailPage(); }));
   }
 
   #setProjectStates(states: DataAssetProjectState[]): void { byId("catalog-project-state-list").querySelectorAll<HTMLInputElement>("input[type=checkbox]").forEach((input) => { input.checked = states.includes(input.value as DataAssetProjectState); }); }

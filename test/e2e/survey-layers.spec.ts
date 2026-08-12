@@ -4,7 +4,8 @@ import { Healpix } from "healpixjs";
 
 const apiRoot = process.env.ASTRO_E2E_API ?? "http://astro.workspace.dev.72602.space:32080";
 const baselinePackageIds = ["public-legacy-surveys-footprints", "public-sdss-footprints", "public-hst-footprints"];
-let initialActivePackageIds: string[] = [];
+type PackageState = { id: string; activeReleaseIds: string[]; availableReleaseIds: string[] };
+let initialLoads: Array<{ packageId: string; releaseIds: string[] }> = [];
 
 async function apiJson<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(`${apiRoot}${path}`, init);
@@ -31,13 +32,24 @@ async function installPackage(id: string): Promise<void> {
 }
 
 test.beforeAll(async () => {
-  const catalog = await apiJson<{ packages: Array<{ id: string; active: boolean }> }>("/api/resource-packages");
-  initialActivePackageIds = catalog.packages.filter((record) => record.active).map((record) => record.id);
+  const catalog = await apiJson<{ packages: PackageState[] }>("/api/resource-packages");
+  initialLoads = catalog.packages
+    .filter((record) => record.activeReleaseIds.length)
+    .map((record) => ({ packageId: record.id, releaseIds: record.activeReleaseIds }));
   await Promise.all(baselinePackageIds.map((id) => installPackage(id)));
+  const installed = await apiJson<{ packages: PackageState[] }>("/api/resource-packages");
+  const loads = initialLoads.filter((load) => load.packageId !== "public-euclid-footprints" && load.packageId !== "public-panstarrs-footprints");
+  for (const packageId of baselinePackageIds) {
+    const record = installed.packages.find((candidate) => candidate.id === packageId);
+    if (!record) throw new Error(`Missing installed E2E resource package: ${packageId}`);
+    const existing = loads.find((load) => load.packageId === packageId);
+    if (existing) existing.releaseIds = record.availableReleaseIds;
+    else loads.push({ packageId, releaseIds: record.availableReleaseIds });
+  }
   await apiJson("/api/resource-packages/active", {
     method: "PUT",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ ids: [...new Set([...initialActivePackageIds.filter((id) => id !== "public-euclid-footprints"), ...baselinePackageIds])] }),
+    body: JSON.stringify({ loads }),
   });
 });
 
@@ -45,7 +57,7 @@ test.afterAll(async () => {
   await apiJson("/api/resource-packages/active", {
     method: "PUT",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ ids: initialActivePackageIds }),
+    body: JSON.stringify({ loads: initialLoads }),
   });
 });
 
@@ -87,6 +99,20 @@ function brightScenePixelCount(buffer: Buffer): number {
   return count;
 }
 
+function averagePixelBrightness(buffer: Buffer): number {
+  const image = PNG.sync.read(buffer);
+  let total = 0;
+  let count = 0;
+  for (let y = 8; y < Math.min(40, image.height); y += 1) {
+    for (let x = 8; x < Math.min(40, image.width); x += 1) {
+      const index = (y * image.width + x) * 4;
+      total += (image.data[index]! + image.data[index + 1]! + image.data[index + 2]!) / 3;
+      count += 1;
+    }
+  }
+  return count ? total / count : 0;
+}
+
 function fragmentPoint(buffer: Buffer): { x: number; y: number } {
   const image = PNG.sync.read(buffer);
   const saturated = (x: number, y: number): boolean => {
@@ -103,7 +129,10 @@ function fragmentPoint(buffer: Buffer): { x: number; y: number } {
 }
 
 async function openFresh(page: Page): Promise<void> {
-  await page.addInitScript(() => localStorage.clear());
+  await page.addInitScript(() => {
+    localStorage.clear();
+    localStorage.setItem("astro-workspace:theme:v1", "dark");
+  });
   await proxyApi(page);
   await page.goto("/");
   await expect(page.locator('[data-mode="catalog"]')).toHaveClass(/active/);
@@ -117,7 +146,7 @@ async function openFresh(page: Page): Promise<void> {
   await page.waitForTimeout(900);
 }
 
-test("resource package draft downloads and loads one survey explicitly", async ({ page }) => {
+test("public resource package installs and applies all releases atomically", async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
   await page.addInitScript(() => localStorage.clear());
   await proxyApi(page);
@@ -127,39 +156,141 @@ test("resource package draft downloads and loads one survey explicitly", async (
 
   const packageButton = page.locator('[data-mode="packages"]');
   await expect(packageButton).toHaveCount(1);
+  await expect(packageButton).toHaveText("公开资源集");
   await expect(packageButton.evaluate((button) => button.nextElementSibling?.getAttribute("data-mode"))).resolves.toBe("connectors");
   await packageButton.click();
   await expect(packageButton).toHaveClass(/active/);
   await expect(page.locator("#resource-package-stage")).toBeVisible();
+  await expect(page.locator("#public-release-catalog-count")).toHaveText("13 个巡天 / 48 个 Release");
+  await expect(page.locator(".public-release-survey-group")).toHaveCount(13);
+  await expect(page.locator(".public-release-catalog-row")).toHaveCount(48);
+  await expect(page.locator("button.public-release-catalog-row")).toHaveCount(48);
+  await expect(page.locator(".public-release-catalog-row button")).toHaveCount(0);
+  const desiGroup = page.locator('.public-release-survey-group[data-survey-id="desi"]');
+  await expect(desiGroup).toHaveAttribute("data-has-package", "false");
+  const desiDr1Row = desiGroup.locator('.public-release-catalog-row[data-release-id="desi-dr1"]');
+  await expect(desiDr1Row).toHaveAttribute("data-release-id", "desi-dr1");
+  await expect(desiDr1Row.locator(".public-release-catalog-status")).toHaveText("待收录");
+  await desiDr1Row.click();
+  await expect(page.locator("#public-release-detail-stage")).toBeVisible();
+  await expect(page.locator("#public-release-detail-title")).toContainText("DR1");
+  await page.locator("#public-release-detail-back").click();
+  await desiGroup.locator('.public-release-catalog-row[data-release-id="desi-edr"]').press("Enter");
+  await expect(page.locator("#public-release-detail-stage")).toBeVisible();
+  await expect(page.locator("#public-release-detail-title")).toHaveText("EDR");
+  await page.locator("#public-release-detail-back").click();
+  await page.locator('.public-release-catalog-row[data-release-id="euclid-q2"]').press("Space");
+  await expect(page.locator("#public-release-detail-stage")).toBeVisible();
+  await expect(page.locator("#public-release-detail-title")).toHaveText("Q2");
+  await page.locator("#public-release-detail-back").click();
 
   const row = page.locator(".resource-package-row", { hasText: "Euclid" });
   const toggle = row.locator('input[type="checkbox"]');
+  await expect(row.locator(".resource-package-tag")).not.toHaveCount(0);
+  await expect(row.locator(".resource-package-tag").first()).not.toHaveCSS("background-color", "rgba(0, 0, 0, 0)");
+  await expect(row.locator(".item-progress")).toHaveCount(1);
+  await expect(row.locator(".resource-package-version")).toHaveText("0 / 4 产品有真实覆盖");
+  await expect(row).not.toContainText("2.0.0");
   await row.click();
   await expect(page.locator("#inspector-content")).toContainText("Euclid");
-  await expect(page.locator("#inspector-content")).toContainText("official-overview");
+  await expect(page.locator("#inspector-content")).toContainText("覆盖范围尚未收录");
+  await expect(page.locator("#inspector-content").getByRole("link")).toHaveCount(0);
+  await expect(page.locator("#inspector-content")).not.toContainText("数据发布页");
+  await expect(page.locator("#inspector-content")).not.toContainText("覆盖来源");
+  await expect(page.locator("#inspector-content")).not.toContainText("official-overview");
+  const releaseToggle = page.locator("#inspector-content .resource-release-choices input");
+  await expect(releaseToggle).toHaveCount(3);
+  await expect(page.locator("#inspector-content .resource-release-availability", { hasText: "覆盖范围尚未收录" })).toHaveCount(3);
+  await expect(releaseToggle.nth(0)).toBeDisabled();
+  await expect(releaseToggle.nth(1)).toBeDisabled();
+  await expect(releaseToggle.nth(1)).not.toBeChecked();
+  await expect(releaseToggle.nth(2)).toBeDisabled();
+  const inspectorDetailButton = page.locator("#inspector-content .resource-release-choices label", { hasText: "Q1" }).getByRole("button", { name: "查看版本详情" });
+  await expect(inspectorDetailButton).toHaveCSS("font-size", "10px");
+  await inspectorDetailButton.click();
+  await expect(page.locator("#public-release-detail-stage")).toBeVisible();
+  await expect(page.locator("#public-release-detail-title")).toHaveText("Q1");
+  await expect(page.locator("#public-release-detail-source")).toHaveText(/数据发布页/);
+  await expect(page.locator("#public-release-detail-source")).toHaveCSS("font-size", "10px");
+  await expect(page.locator("#public-release-product-count")).toHaveText("0 / 2 已收录");
+  await expect(page.locator(".public-release-product[data-coverage-status='overview_only']")).toHaveCount(1);
+  await expect(page.locator(".public-release-product[data-coverage-status='awaiting_geometry']")).toHaveCount(1);
+  await expect(page.locator(".public-release-product[data-coverage-status='overview_only']")).toContainText("仅有官方概览");
+  await expect(page.locator(".public-release-product", { hasText: "待人工处理几何" })).toContainText("acquired overview is explicitly limited");
+  await expect(page.locator(".public-release-product-links").getByRole("link", { name: /覆盖来源/ })).toHaveCount(2);
+  const manualButton = page.locator(".public-release-product[data-coverage-status='awaiting_geometry']").getByRole("button", { name: "填写覆盖范围" });
+  await expect(manualButton).toHaveCSS("font-size", "10px");
+  await manualButton.click();
+  const manualDialog = page.locator("#manual-footprint-dialog");
+  await expect(manualDialog).toBeVisible();
+  await expect(manualDialog.locator("#manual-footprint-survey-id")).toHaveAttribute("readonly", "");
+  await expect(manualDialog.locator("#manual-footprint-release-id")).toHaveAttribute("readonly", "");
+  await expect(manualDialog.locator("#manual-footprint-product")).toHaveAttribute("readonly", "");
+  await expect(manualDialog.getByRole("button", { name: "保存草稿" })).toBeVisible();
+  await expect(manualDialog.getByRole("button", { name: "校验" })).toBeVisible();
+  await expect(manualDialog.getByRole("button", { name: "发布" })).toBeVisible();
+  await expect(manualDialog.getByRole("button", { name: "撤回" })).toBeVisible();
+  await page.locator("#manual-footprint-dialog-close").click();
+  await expect.poll(() => new URL(page.url()).searchParams.get("release")).toBe("euclid-q1");
+  await page.locator("#public-release-detail-back").click();
+  await expect(page.locator("#resource-package-stage")).toBeVisible();
+  await expect(toggle).toBeDisabled();
+
+  const loadableRow = page.locator(".resource-package-row", { hasText: "Pan-STARRS1" });
+  const loadableToggle = loadableRow.locator('input[type="checkbox"]');
+  await loadableRow.click();
+  const loadableReleaseToggle = page.locator("#inspector-content .resource-release-choices input:enabled");
+  await expect(loadableReleaseToggle).toHaveCount(1);
   const activeBefore = await page.locator("#resource-package-active-count").textContent();
-  await expect(toggle).not.toBeChecked();
-  await toggle.check();
-  await expect(page.locator("#resource-package-pending")).toContainText("待加载");
+  await expect(loadableToggle).not.toBeChecked();
+  await loadableToggle.check();
+  await expect(loadableReleaseToggle).toBeChecked();
   await expect(page.locator("#resource-package-active-count")).toHaveText(activeBefore ?? "0");
   await expect(packageButton).toHaveClass(/active/);
 
-  const download = page.locator("#resource-package-download");
-  if (await download.isEnabled()) await download.click();
-  await expect(download).toBeDisabled();
-  await page.locator("#resource-package-apply").click();
-  await expect(page.locator("#resource-package-pending")).toHaveText("草稿与天球一致");
-  await expect(row.locator(".resource-package-status")).toHaveText("已加载");
+  const apply = page.locator("#resource-package-apply");
+  await expect(apply).toBeVisible();
+  await expect(page.locator("#resource-package-pending, #resource-package-download, #resource-package-download-dialog")).toHaveCount(0);
+  await expect(page.locator("#inspector-content").getByRole("button", { name: /应用|重置/ })).toHaveCount(0);
+  await apply.click();
+  await expect(apply).toBeDisabled();
+  await expect(loadableRow.locator(".resource-package-status")).toHaveText("已应用");
   await expect(packageButton).toHaveClass(/active/);
 
-  await toggle.uncheck();
-  await page.locator("#resource-package-apply").click();
-  await expect(row.locator(".resource-package-status")).toHaveText("已下载");
+  await loadableToggle.uncheck();
+  await expect(loadableReleaseToggle).not.toBeChecked();
+  await expect(apply).toBeVisible();
+  await apply.click();
+  await expect(apply).toBeDisabled();
+  await expect(loadableRow.locator(".resource-package-status")).toHaveText("已下载");
   await page.locator('[data-mode="layers"]').click();
   const canvas = page.locator("#volume-canvas");
   await expect(canvas).toBeVisible();
   const visibleSurveys = new Set((await canvas.getAttribute("data-visible-survey-ids"))?.split(",") ?? []);
   expect(visibleSurveys.has("euclid")).toBe(false);
+  expect(visibleSurveys.has("panstarrs")).toBe(false);
+});
+
+test("light theme switches the 3D sky to a soft observation canvas", async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.addInitScript(() => {
+    localStorage.clear();
+    localStorage.setItem("astro-workspace:theme:v1", "dark");
+  });
+  await proxyApi(page);
+  await page.goto("/");
+  await expect(page.locator("#service-status")).toHaveText("SERVICE ONLINE");
+  await page.locator('[data-mode="layers"]').click();
+  const canvas = page.locator("#volume-canvas");
+  await expect(canvas).toBeVisible();
+  await page.waitForTimeout(500);
+  const darkBrightness = averagePixelBrightness(await canvas.screenshot());
+  await page.locator("#theme-toggle").click();
+  await expect(page.locator("html")).toHaveAttribute("data-theme", "light");
+  await page.waitForTimeout(250);
+  const lightBrightness = averagePixelBrightness(await canvas.screenshot());
+  expect(lightBrightness).toBeGreaterThan(darkBrightness + 80);
+  await expect(canvas).toHaveAttribute("data-theme", "light");
 });
 
 async function findCanvasPoint(page: Page, predicate: (state: { pixel: number; covered: boolean; selectable: boolean }) => boolean): Promise<{ x: number; y: number; pixel: number }> {
@@ -227,7 +358,8 @@ test("desktop survey footprints are selectable fragments with layer and overlap 
   await openFresh(page);
   const canvas = page.locator("#volume-canvas");
   await expect(canvas).toHaveAttribute("data-visible-survey-ids", "legacy-surveys");
-  await expect(page.locator(".survey-card", { hasText: "DESI" }).locator("input")).toBeDisabled();
+  await expect(page.locator(".survey-card", { hasText: "DESI" })).toHaveCount(0);
+  await expect(page.locator("#survey-list")).not.toContainText("PENDING");
   await expect(page.locator("#focus-button")).toHaveCount(0);
   await expect(page.locator(".scene-hud-top #reset-button")).toBeVisible();
 
@@ -286,7 +418,7 @@ test("desktop survey footprints are selectable fragments with layer and overlap 
   await expect(canvas).toHaveAttribute("data-refinement-nside", "32");
   await expect(page.locator("#refinement-level-output")).toHaveText("NSIDE 32");
   await expect(page.locator("#scene-legend")).toBeHidden();
-  await expect(page.locator("#agent-toggle")).not.toHaveAttribute("hidden", "");
+  await expect(page.locator("#agent-toggle")).toHaveCount(0);
   await expect(page.locator("#inspector-content")).toContainText("Legacy Surveys DR10 Tractor catalog");
   const candidateCount = Number(await page.locator("#refinement-candidate-count").textContent());
   const selectedCount = Number(await page.locator("#refinement-selected-count").textContent());

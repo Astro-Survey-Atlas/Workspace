@@ -58,6 +58,8 @@ export class SkyViewer {
   readonly #scene = new THREE.Scene();
   readonly #camera = new THREE.PerspectiveCamera(45, 1, 0.01, 2.5);
   readonly #renderer: THREE.WebGLRenderer;
+  readonly #starField: THREE.Points;
+  readonly #coordinateGrid: THREE.Group;
   readonly #raycaster = new THREE.Raycaster();
   readonly #pointer = new THREE.Vector2();
   readonly #dataLayer = new THREE.Group();
@@ -86,12 +88,14 @@ export class SkyViewer {
       alpha: false,
       powerPreference: "high-performance",
     });
-    this.#renderer.setClearColor(0x05070a, 1);
     this.#renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     this.#renderer.outputColorSpace = THREE.SRGBColorSpace;
     this.#camera.position.set(0, 0, 0);
     this.#camera.up.set(0, 1, 0);
-    this.#scene.add(this.#createStarField(), this.#createCoordinateGrid(), this.#dataLayer);
+    this.#starField = this.#createStarField();
+    this.#coordinateGrid = this.#createCoordinateGrid();
+    this.#scene.add(this.#starField, this.#coordinateGrid, this.#dataLayer);
+    this.setTheme(document.documentElement.dataset.theme === "light" ? "light" : "dark");
 
     this.#bindInteraction();
     this.#resizeObserver = new ResizeObserver(() => this.#resize());
@@ -106,6 +110,17 @@ export class SkyViewer {
 
   get webglVersion(): string {
     return this.#renderer.capabilities.isWebGL2 ? "WEBGL2" : "WEBGL1";
+  }
+
+  setTheme(theme: "light" | "dark"): void {
+    this.#canvas.dataset.theme = theme;
+    this.#renderer.setClearColor(theme === "light" ? 0xe8eef0 : 0x05070a, 1);
+    (this.#starField.material as THREE.PointsMaterial).color.setHex(theme === "light" ? 0x65757d : 0xa8b0bc);
+    this.#coordinateGrid.traverse((object) => {
+      const material = (object as THREE.Line).material;
+      if (material instanceof THREE.LineBasicMaterial) material.color.setHex(theme === "light" ? 0x66747c : 0x8d98a8);
+    });
+    this.#requestRender();
   }
 
   setDefaultView(view: SkyViewState): void {
