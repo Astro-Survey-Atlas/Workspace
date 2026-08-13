@@ -13,10 +13,10 @@ import { AstroIndexService, ASTRO_OVERVIEW_NSIDE, type AstroCoverageLayer, type 
 import { McpCatalogQueryClient } from "./catalog-mcp-client.js";
 import { createConnectorCredentialStore, type StoredConnectorCredentials } from "./connector-credentials.js";
 import { ConnectorRegistry, connectorLocationKey, validateConnectorInput, type ConnectorCheckInput, type ConnectorPublicRecord, type ConnectorRecord, type ConnectorRegistrationInput } from "./connectors.js";
-import { ConnectorIngestRunCatalog, type ConnectorIngestRunInput } from "./connector-history.js";
+import { ConnectorIngestRunCatalog, publicConnectorIngestRun, type ConnectorIngestRunFilter, type ConnectorIngestRunInput, type ConnectorIngestRunRecord, type ConnectorIngestRunStatus } from "./connector-history.js";
 import { DataCatalogRegistry, type DataAssetAccess, type DataAssetRecord, type DataAssetRegistrationInput } from "./data-catalog.js";
 import { ownershipKey, resolveDataOwnership, type EffectiveDataOwnership } from "./data-ownership.js";
-import { DataWarehouseDisabledError, dataWarehouseEnabled, FlinkScanService, type GenericScanInput } from "./flink-ingest.js";
+import { ConnectorScanCapabilityError, ConnectorScanPreconditionError, DataWarehouseDisabledError, dataWarehouseEnabled, FlinkScanService, parseLegacyConnectorScanCommand, validateConnectorSelfScanBody } from "./flink-ingest.js";
 import { ManualFootprintRegistry, ManualFootprintRevisionError } from "./manual-footprints.js";
 import { createAstroMcpServer } from "./mcp.js";
 import { ScanRunCatalog } from "./provenance.js";
@@ -127,6 +127,39 @@ function publicDataset(record: DatasetRecord) {
     createdAt: record.createdAt,
     updatedAt: record.updatedAt,
   };
+}
+
+function publicConnectorRuns(records: ConnectorIngestRunRecord[]) {
+  return records.map(publicConnectorIngestRun);
+}
+
+async function connectorRunHistory(connector: ConnectorRecord): Promise<ConnectorIngestRunRecord[]> {
+  return (await connectorRuns.list()).filter((run) => run.connectorId === connector.id
+    || (!run.connectorId && run.locationKey === connector.locationKey));
+}
+
+function connectorRunFilter(request: Request): ConnectorIngestRunFilter {
+  const value = (name: string): string | undefined => {
+    const raw = request.query[name];
+    if (raw === undefined) return undefined;
+    if (typeof raw !== "string" || !raw.trim()) throw new RangeError(`${name} must be a non-empty string`);
+    return raw.trim();
+  };
+  const connectorKind = value("connectorKind");
+  const status = value("status");
+  if (connectorKind !== undefined && !["s3", "local", "jdbc"].includes(connectorKind)) throw new RangeError("connectorKind is not supported");
+  if (status !== undefined && !["queued", "running", "succeeded", "failed"].includes(status)) throw new RangeError("status is not supported");
+  return {
+    connectorId: value("connectorId"),
+    connectorKind: connectorKind as ConnectorIngestRunFilter["connectorKind"],
+    status: status as ConnectorIngestRunStatus | undefined,
+  };
+}
+
+function idempotencyKey(request: Request): string | undefined {
+  const value = request.get("Idempotency-Key");
+  if (value !== undefined && !value.trim()) throw new RangeError("Idempotency-Key must not be empty");
+  return value;
 }
 
 function connectorAccess(record: ConnectorRecord): DataAssetAccess {
@@ -244,7 +277,12 @@ function sendApiError(response: Response, error: unknown): void {
   const notFound = message.startsWith("Dataset not found:") || message.startsWith("Data asset not found:") || message.startsWith("Connector not found:") || message.startsWith("Connector ingest run not found:") || message.startsWith("Volume not found:") || message.startsWith("Atlas not found:") || message.startsWith("Survey not found:") || message.startsWith("Resource package not found:") || message.startsWith("Resource package is not installed:") || message.startsWith("Resource package job not found:")
     || message.startsWith("Scan run not found:") || message.startsWith("Lineage not found:") || message.startsWith("Workflow not found:")
     || message.startsWith("Workflow run not found:") || message.startsWith("Workflow artifact not found:") || message.startsWith("Agent session not found:");
-  const status = error instanceof DataWarehouseDisabledError ? 503 : error instanceof ManualFootprintRevisionError ? 412 : error instanceof RangeError ? 400 : notFound || message.startsWith("Manual footprint not found:") ? 404 : 500;
+  const status = error instanceof DataWarehouseDisabledError ? 503
+    : error instanceof ConnectorScanCapabilityError ? 422
+    : error instanceof ConnectorScanPreconditionError ? 409
+    : error instanceof ManualFootprintRevisionError ? 412
+    : error instanceof RangeError ? 400
+    : notFound || message.startsWith("Manual footprint not found:") ? 404 : 500;
   if (status === 500) console.error("API request failed", error);
   response.status(status).json({ error: message });
 }
@@ -389,9 +427,13 @@ app.get("/api/connectors", async (_request: Request, response: Response) => {
   response.json({ connectors: await Promise.all((await connectors.list()).map(publicConnector)) });
 });
 
-app.get("/api/connector-ingest-runs", async (_request: Request, response: Response) => {
-  if (warehouseEnabled) void flinkScans.poll();
-  response.json({ runs: await connectorRuns.list() });
+app.get("/api/connector-ingest-runs", async (request: Request, response: Response) => {
+  try {
+    if (warehouseEnabled) void flinkScans.poll();
+    response.json({ runs: publicConnectorRuns(await connectorRuns.list(connectorRunFilter(request))) });
+  } catch (error) {
+    sendApiError(response, error);
+  }
 });
 
 app.get("/api/connectors/:id", async (request: Request, response: Response) => {
@@ -406,7 +448,7 @@ app.get("/api/connectors/:id/ingest-runs", async (request: Request, response: Re
   try {
     const connector = await connectors.get(datasetIdFrom(request));
     if (warehouseEnabled) void flinkScans.poll();
-    response.json({ runs: await connectorRuns.list(connector.locationKey) });
+    response.json({ runs: publicConnectorRuns(await connectorRunHistory(connector)) });
   } catch (error) {
     sendApiError(response, error);
   }
@@ -417,7 +459,7 @@ app.get("/api/connectors/:id/runs", async (request: Request, response: Response)
   try {
     const connector = await connectors.get(datasetIdFrom(request));
     if (warehouseEnabled) void flinkScans.poll();
-    response.json({ runs: await connectorRuns.list(connector.locationKey) });
+    response.json({ runs: publicConnectorRuns(await connectorRunHistory(connector)) });
   } catch (error) {
     sendApiError(response, error);
   }
@@ -448,7 +490,23 @@ app.post("/api/connectors/check", async (request: Request, response: Response) =
 app.post("/api/connectors/:id/ingest-runs", async (request: Request, response: Response) => {
   try {
     const connector = await connectors.get(datasetIdFrom(request));
-    response.status(201).json({ run: await connectorRuns.add(connector.locationKey, request.body as ConnectorIngestRunInput) });
+    const run = await connectorRuns.add(connector.locationKey, {
+      ...(request.body as ConnectorIngestRunInput),
+      connectorId: connector.id,
+      connectorName: connector.name,
+      connectorKind: connector.kind,
+    });
+    response.status(201).json({ run: publicConnectorIngestRun(run) });
+  } catch (error) {
+    sendApiError(response, error);
+  }
+});
+
+app.post("/api/connectors/:id/scan-runs", async (request: Request, response: Response) => {
+  try {
+    validateConnectorSelfScanBody(request.body);
+    const run = await flinkScans.submitConnectorScan(datasetIdFrom(request), idempotencyKey(request));
+    response.status(202).json({ run: publicConnectorIngestRun(run) });
   } catch (error) {
     sendApiError(response, error);
   }
@@ -456,16 +514,13 @@ app.post("/api/connectors/:id/ingest-runs", async (request: Request, response: R
 
 app.post("/api/connectors/:id/scans", async (request: Request, response: Response) => {
   try {
+    const command = parseLegacyConnectorScanCommand(request.body);
     if (!warehouseEnabled) throw new DataWarehouseDisabledError();
-    const mode = typeof request.body?.mode === "string" ? request.body.mode : "pilot";
-    if (mode === "pilot") {
-      response.status(202).json({ runs: await flinkScans.submitPilot(datasetIdFrom(request)) });
+    if (command.mode === "pilot") {
+      response.status(202).json({ runs: publicConnectorRuns(await flinkScans.submitPilot(datasetIdFrom(request))) });
       return;
     }
-    if (mode !== "scan") throw new RangeError("scan mode must be pilot or scan");
-    const input = request.body as Partial<GenericScanInput>;
-    if (typeof input.assetId !== "string" || !input.assetId.trim()) throw new RangeError("assetId is required for a generic scan");
-    response.status(202).json({ run: await flinkScans.submitScan(datasetIdFrom(request), input as GenericScanInput) });
+    response.status(202).json({ run: publicConnectorIngestRun(await flinkScans.submitScan(datasetIdFrom(request), command.input)) });
   } catch (error) {
     sendApiError(response, error);
   }
@@ -489,7 +544,12 @@ app.post("/api/connectors", async (request: Request, response: Response) => {
     const value = validateConnectorInput(input);
     validateConnectorSurveyBinding(value);
     const existing = (await connectors.list()).find((record) => record.locationKey === connectorLocationKey(value.kind, value.config));
-    const credentials = value.kind === "s3" ? resolvedS3Credentials(input) : undefined;
+    const existingCredentials = existing?.credentialRef ? await connectorCredentials.get(existing.credentialRef) : undefined;
+    const credentials = value.kind === "s3" ? resolvedS3Credentials(input, existingCredentials) : undefined;
+    const credentialsChanged = Boolean(existing && credentials && (!existingCredentials
+      || credentials.accessKeyId !== existingCredentials.accessKeyId
+      || credentials.secretAccessKey !== existingCredentials.secretAccessKey
+      || credentials.endpoint !== existingCredentials.endpoint));
     const connector = await connectors.register(internalConnectorInput(value, existing?.credentialRef));
     if (credentials) {
       const reference = connectorCredentials.managedReference(connector.id);
@@ -499,7 +559,8 @@ app.post("/api/connectors", async (request: Request, response: Response) => {
         if (!existing) await connectors.remove(connector.id);
         throw error;
       }
-      const saved = await connectors.setCredentialReference(connector.id, reference);
+      let saved = await connectors.setCredentialReference(connector.id, reference);
+      if (credentialsChanged) saved = await connectors.invalidateCheck(connector.id);
       response.status(201).json({ connector: await publicConnector(saved) });
       return;
     }
@@ -516,14 +577,17 @@ app.put("/api/connectors/:id", async (request: Request, response: Response) => {
     const current = await connectors.get(id);
     const value = validateConnectorInput(input);
     validateConnectorSurveyBinding(value);
-    let credentialRef = current.credentialRef;
+    let credentialRef = value.kind === "s3" ? current.credentialRef : undefined;
     if (value.kind === "s3") {
       const existing = current.credentialRef ? await connectorCredentials.get(current.credentialRef) : undefined;
       const credentials = resolvedS3Credentials(input, existing);
+      const credentialsChanged = !existing || credentials.accessKeyId !== existing.accessKeyId
+        || credentials.secretAccessKey !== existing.secretAccessKey || credentials.endpoint !== existing.endpoint;
       credentialRef = current.credentialRef && connectorCredentials.isManaged(current.credentialRef)
         ? current.credentialRef
         : connectorCredentials.managedReference(current.id);
       await connectorCredentials.put(credentialRef, credentials);
+      if (credentialsChanged) await connectors.invalidateCheck(id);
     }
     const connector = await connectors.update(id, internalConnectorInput(value, credentialRef));
     if (value.kind !== "s3" && current.credentialRef) await connectorCredentials.remove(current.credentialRef);

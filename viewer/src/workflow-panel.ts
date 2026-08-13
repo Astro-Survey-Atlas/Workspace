@@ -21,13 +21,13 @@ function shortId(value: string): string {
 }
 
 const STATUS_LABELS: Record<string, string> = {
-  queued: "QUEUED",
-  running: "RUNNING",
-  waiting_for_input: "WAITING",
-  succeeded: "SUCCEEDED",
-  failed: "FAILED",
-  pending: "PENDING",
-  skipped: "SKIPPED",
+  queued: "排队中",
+  running: "执行中",
+  waiting_for_input: "等待输入",
+  succeeded: "完成",
+  failed: "失败",
+  pending: "未开始",
+  skipped: "已跳过",
 };
 
 export class WorkflowPanel {

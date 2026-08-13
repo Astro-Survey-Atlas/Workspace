@@ -7,7 +7,7 @@ import test from "node:test";
 
 import { Pool } from "pg";
 
-import type { ConnectorIngestRun } from "../src/connector-history.js";
+import type { ConnectorIngestRunRecord } from "../src/connector-history.js";
 import type { ConnectorRecord } from "../src/connectors.js";
 import type { DataAssetRecord } from "../src/data-catalog.js";
 import { createMetadataStore, PostgresMetadataStore, SqliteMetadataStore, type MetadataStore } from "../src/storage/index.js";
@@ -53,7 +53,7 @@ function asset(overrides: Partial<DataAssetRecord> = {}): DataAssetRecord {
   };
 }
 
-function ingestRun(overrides: Partial<ConnectorIngestRun> = {}): ConnectorIngestRun {
+function ingestRun(overrides: Partial<ConnectorIngestRunRecord> = {}): ConnectorIngestRunRecord {
   return {
     id: "ingest-one",
     locationKey: "s3://survey/release",
@@ -121,7 +121,7 @@ test("SQLite metadata store satisfies the storage contract and persists one DELE
 
     const database = new DatabaseSync(filename);
     assert.equal(database.prepare("PRAGMA journal_mode").get()?.journal_mode, "delete");
-    assert.deepEqual(database.prepare("SELECT version FROM schema_migrations ORDER BY version").all().map((row) => row.version), [1]);
+    assert.deepEqual(database.prepare("SELECT version FROM schema_migrations ORDER BY version").all().map((row) => row.version), [1, 2]);
     database.close();
 
     const reopened = new SqliteMetadataStore(filename);
@@ -131,6 +131,50 @@ test("SQLite metadata store satisfies the storage contract and persists one DELE
     await reopened.close();
   } finally {
     await store.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("SQLite v2 migration retains legacy connector ingest runs", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "astro-metadata-sqlite-v1-"));
+  const filename = path.join(directory, "workspace.sqlite");
+  const legacy = ingestRun({ id: "legacy-ingest", locationKey: "local:///legacy", sourcePath: "/legacy" });
+  try {
+    const database = new DatabaseSync(filename);
+    database.exec(`CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL) STRICT;
+      CREATE TABLE import_markers (name TEXT PRIMARY KEY, value TEXT NOT NULL, imported_at TEXT NOT NULL) STRICT;
+      CREATE TABLE connectors (
+        id TEXT PRIMARY KEY, location_key TEXT NOT NULL UNIQUE, kind TEXT NOT NULL CHECK (kind IN ('s3', 'local', 'jdbc')),
+        status TEXT NOT NULL CHECK (status IN ('draft', 'ready', 'disabled')), updated_at TEXT NOT NULL,
+        record TEXT NOT NULL CHECK (json_valid(record)), CHECK (json_extract(record, '$.id') = id),
+        CHECK (json_extract(record, '$.locationKey') = location_key)
+      ) STRICT;
+      CREATE TABLE data_assets (
+        id TEXT PRIMARY KEY, origin TEXT NOT NULL CHECK (origin IN ('user', 'override')), survey_id TEXT,
+        kind TEXT NOT NULL CHECK (kind IN ('catalog', 'image', 'spectra', 'cube', 'timeseries', 'other')),
+        status TEXT NOT NULL CHECK (status IN ('ready', 'metadata_only', 'unavailable')), updated_at TEXT NOT NULL,
+        record TEXT NOT NULL CHECK (json_valid(record)), CHECK (json_extract(record, '$.id') = id),
+        CHECK (json_extract(record, '$.origin') = origin)
+      ) STRICT;
+      CREATE TABLE connector_ingest_runs (
+        id TEXT PRIMARY KEY, location_key TEXT NOT NULL,
+        status TEXT NOT NULL CHECK (status IN ('queued', 'running', 'succeeded', 'failed')), created_at TEXT NOT NULL,
+        record TEXT NOT NULL CHECK (json_valid(record)), CHECK (json_extract(record, '$.id') = id),
+        CHECK (json_extract(record, '$.locationKey') = location_key)
+      ) STRICT;`);
+    database.prepare("INSERT INTO schema_migrations (version, applied_at) VALUES (1, ?)").run(timestamp);
+    database.prepare("INSERT INTO connector_ingest_runs (id, location_key, status, created_at, record) VALUES (?, ?, ?, ?, ?)")
+      .run(legacy.id, legacy.locationKey, legacy.status, legacy.createdAt, JSON.stringify(legacy));
+    database.close();
+
+    const store = new SqliteMetadataStore(filename);
+    await store.initialize();
+    assert.deepEqual(await store.getConnectorIngestRun(legacy.id), legacy);
+    const migrated = new DatabaseSync(filename);
+    assert.deepEqual(migrated.prepare("SELECT version FROM schema_migrations ORDER BY version").all().map((row) => row.version), [1, 2]);
+    migrated.close();
+    await store.close();
+  } finally {
     await rm(directory, { recursive: true, force: true });
   }
 });

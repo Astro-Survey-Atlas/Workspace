@@ -87,6 +87,34 @@ test("light theme keeps metrics, actions, overlays, and scroll regions legible",
     .not.toBe("rgba(0, 0, 0, 0) rgba(0, 0, 0, 0)");
 });
 
+test("status explanations are available where records are evaluated", async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto("/");
+  await waitForWorkspace(page);
+
+  const assetHelp = page.locator(".catalog-columns .status-help");
+  await expect(assetHelp.locator("svg")).toBeVisible();
+  await assetHelp.focus();
+  const assetTooltip = page.locator(`#${await assetHelp.getAttribute("aria-describedby")}`);
+  await expect(assetTooltip).toBeVisible();
+  await expect(assetTooltip).toContainText("计划中");
+
+  await page.locator('[data-mode="packages"]').click();
+  const coverageHelp = page.locator(".resource-package-columns .status-help").first();
+  await coverageHelp.focus();
+  await expect(page.locator(`#${await coverageHelp.getAttribute("aria-describedby")}`)).toContainText("真实覆盖");
+
+  await page.locator('[data-mode="connectors"]').click();
+  const connectorHelp = page.locator(".connector-columns .status-help");
+  await connectorHelp.focus();
+  await expect(page.locator(`#${await connectorHelp.getAttribute("aria-describedby")}`)).toContainText("未检测");
+
+  await page.locator('[data-mode="workflow"]').click();
+  const workflowHelp = page.locator("#pipeline-heading .status-help");
+  await workflowHelp.focus();
+  await expect(page.locator(`#${await workflowHelp.getAttribute("aria-describedby")}`)).toContainText("等待输入");
+});
+
 test("user assets are the default workspace view", async ({ page }) => {
   const { assets } = await apiJson<{ assets: Array<{ name: string; origin: string; status: string }> }>("/api/data-assets?origin=user");
   const catalogRequests: string[] = [];
@@ -151,6 +179,27 @@ test("mobile catalog keeps creation modal and details reachable", async ({ page 
   await page.locator("#catalog-new").click();
   await expect(page.locator("#catalog-create-dialog")).toBeVisible();
   await expect(page.locator("#catalog-registration-form")).toBeVisible();
+  await expect(page.locator("#catalog-product")).toHaveCount(0);
+  await expect(page.locator("#catalog-status-input")).toHaveCount(0);
+  await expect(page.locator("#catalog-project-state-list")).toHaveCount(0);
+  await expect(page.locator("#catalog-tags")).toHaveCount(0);
+  await expect(page.locator("#catalog-new-connector")).toBeVisible();
+  await expect(page.locator(".catalog-connector-field legend")).toContainText("Connector");
+  await expect(page.locator(".catalog-connector-field legend")).toContainText("必选");
+  await expect(page.locator(".catalog-connector-field")).not.toContainText("可选");
+  const connectorChoices = page.locator('#catalog-connector-list input[type="radio"]');
+  if (await connectorChoices.count()) {
+    await expect(connectorChoices.first()).toHaveAttribute("required", "");
+    await connectorChoices.first().check();
+    if (await connectorChoices.count() > 1) {
+      await connectorChoices.nth(1).check();
+      await expect(connectorChoices.first()).not.toBeChecked();
+      await expect(connectorChoices.nth(1)).toBeChecked();
+    }
+  } else {
+    await expect(page.locator("#catalog-connector-list")).toContainText("请先新建一个 Connector");
+  }
+  await expect(page.locator("#catalog-description")).toBeVisible();
   await page.locator("#catalog-dialog-close").click();
   await expect(page.locator("#catalog-create-dialog")).toBeHidden();
   const first = page.locator("#catalog-asset-list .catalog-row").first();
@@ -180,12 +229,7 @@ test("data production keeps cross-match runnable and exposes cutout/package cont
   await expect(page.locator("#production-action-copy")).toContainText("打包");
 });
 
-test("connector view exposes S3, local path, and JDBC registration without scan controls", async ({ page }) => {
-  await page.route(/\/api\/connectors\/check$/, async (route) => route.fulfill({
-    status: 200,
-    contentType: "application/json",
-    body: JSON.stringify({ check: { status: "ok", checkedAt: new Date().toISOString(), summary: "连接正常，凭据与 Bucket 均已验证", detail: "未列举或扫描 Prefix。" } }),
-  }));
+test("connector view exposes S3, local path, and JDBC registration without scan parameter controls", async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
   await page.goto("/");
   await waitForWorkspace(page);
@@ -197,6 +241,8 @@ test("connector view exposes S3, local path, and JDBC registration without scan 
   await expect(page.locator("#connector-create-dialog")).toBeVisible();
   await expect(page.locator("#connector-registration-form")).toBeVisible();
   await expect(page.locator("#connector-kind option")).toHaveCount(3);
+  await expect(page.locator("#connector-status")).toHaveCount(0);
+  await expect(page.locator('#connector-registration-form [name="status"]')).toHaveCount(0);
   await expect(page.locator('#connector-registration-form [name="accessKeyId"]')).toBeVisible();
   await expect(page.locator('#connector-registration-form [name="secretAccessKey"]')).toBeVisible();
   await expect(page.locator("#connector-registration-form")).not.toContainText("凭据引用");
@@ -205,9 +251,17 @@ test("connector view exposes S3, local path, and JDBC registration without scan 
   await page.locator("#connector-s3-bucket").fill("fixture");
   await page.locator('#connector-registration-form [name="accessKeyId"]').fill("fixture-access");
   await page.locator('#connector-registration-form [name="secretAccessKey"]').fill("fixture-secret");
-  await page.locator("#connector-check-form").click();
-  await expect(page.locator("#connector-form-message")).toHaveAttribute("data-status", "ok");
-  await expect(page.locator("#connector-form-message")).toContainText("连接正常");
+  await expect(page.locator("#connector-check-form")).toBeEnabled();
+  await expect(page.locator("#connector-form-message")).toContainText("尚未检测");
+  await expect(page.locator("#connector-form-message")).toContainText("填写后可先检测连接，也可以直接登记");
+  const registrationActionsShareLine = await page.locator(".connector-registration-actions").evaluate((element) => {
+    const button = element.querySelector<HTMLElement>("#connector-check-form")!;
+    const feedback = element.querySelector<HTMLElement>("#connector-form-message")!;
+    const buttonRect = button.getBoundingClientRect();
+    const feedbackRect = feedback.getBoundingClientRect();
+    return Math.abs(buttonRect.top - feedbackRect.top) < 2 && feedbackRect.left >= buttonRect.right;
+  });
+  expect(registrationActionsShareLine).toBe(true);
   await page.locator("#connector-kind").selectOption("local");
   await expect(page.locator("#connector-local-root")).toBeVisible();
   await page.locator("#connector-kind").selectOption("jdbc");
@@ -215,19 +269,125 @@ test("connector view exposes S3, local path, and JDBC registration without scan 
   await expect(page.locator("#connector-config-s3")).toBeHidden();
   await page.locator("#connector-dialog-close").click();
   await expect(page.locator("#connector-create-dialog")).toBeHidden();
-  await page.locator("#connector-search").fill("Euclid Q1");
-  await expect(page.locator("#connector-list .connector-row")).toHaveCount(1);
-  await expect(page.locator("#connector-search-hint")).toContainText("1 /");
-  await expect(page.locator("#inspector-view")).toBeVisible();
-  await page.locator("#connector-list .connector-row").filter({ hasText: "Euclid Q1" }).click();
-  await expect(page.locator("#inspector-content")).toContainText("Access Key");
-  await expect(page.locator("#inspector-content")).toContainText("Secret Key");
-  await expect(page.locator("#inspector-content")).not.toContainText("凭据引用");
-  await page.locator("#inspector-content").getByRole("button", { name: "检测连接" }).click();
-  await expect(page.locator("#inspector-content .connector-check-feedback"))
-    .toContainText(/连接正常|没有可用的已保存凭据/, { timeout: 20_000 });
-  await page.locator("#inspector-content").getByRole("button", { name: "编辑配置" }).click();
-  await expect(page.locator("#inspector-content .connector-inline-editor")).toBeVisible();
-  await expect(page.locator("#inspector-content .connector-inspector-detail > h2")).toHaveCount(0);
-  await expect(page.locator('#inspector-content [name="secretAccessKey"]')).toHaveValue("");
+  const connectorRows = page.locator("#connector-list .connector-row");
+  if (await connectorRows.count()) {
+    const connector = connectorRows.first();
+    const name = (await connector.locator("strong").textContent())?.trim() ?? "";
+    await page.locator("#connector-search").fill(name);
+    await expect(connectorRows).toHaveCount(1);
+    await expect(page.locator("#inspector-view")).toBeVisible();
+    await connector.click();
+    await expect(page.locator("#inspector-content")).toContainText(name);
+    const edit = page.locator("#inspector-content").getByRole("button", { name: "编辑配置" });
+    await expect(edit).toHaveAttribute("title", "编辑配置");
+    await expect(edit.locator("svg")).toBeVisible();
+    await edit.click();
+    await expect(page.locator("#inspector-content .connector-inline-editor")).toBeVisible();
+    await expect(page.locator("#inspector-content .connector-inspector-detail > h2")).toHaveCount(0);
+  }
+});
+
+test("connector actions and unified scan history expose only supported execution", async ({ page }) => {
+  const now = "2026-08-13T10:00:00.000Z";
+  let warehouseEnabled = true;
+  let submittedBody: unknown;
+  const connectors = [
+    {
+      id: "connector-s3-fixture", locationKey: "s3://fixture/catalog", displayPath: "s3://fixture/catalog",
+      name: "S3 science archive", description: "Fixture S3 connector", kind: "s3", config: { bucket: "fixture", prefix: "catalog", region: "us-east-1" },
+      status: "ready", createdAt: now, updatedAt: now, origin: "user",
+      lastCheck: { status: "ok", checkedAt: now, summary: "连接正常" }, credentials: { accessKeyId: "fixture-access", secretConfigured: true },
+    },
+    {
+      id: "connector-local-fixture", locationKey: "local:///data/catalog", displayPath: "/data/catalog",
+      name: "Local mounted catalog", description: "Fixture local connector", kind: "local", config: { rootPath: "/data/catalog" },
+      status: "ready", createdAt: now, updatedAt: now, origin: "user", credentials: { accessKeyId: "", secretConfigured: false },
+    },
+    {
+      id: "connector-jdbc-fixture", locationKey: "jdbc:fixture", displayPath: "jdbc:postgresql://db/catalog/public",
+      name: "JDBC science database", description: "Fixture JDBC connector", kind: "jdbc", config: { url: "jdbc:postgresql://db/catalog", schema: "public" },
+      status: "ready", createdAt: now, updatedAt: now, origin: "user", credentials: { accessKeyId: "", secretConfigured: false },
+    },
+  ];
+  const runs = [
+    {
+      id: "run-flink", locationKey: "s3://fixture/catalog", connectorId: "connector-s3-fixture", connectorName: "S3 science archive", connectorKind: "s3", executor: "flink-ingest",
+      target: { uri: "s3://fixture/catalog" }, assetIds: ["asset-s3"], status: "running", startedAt: now, createdAt: now, jobId: "flink-scan-01", fileCount: 12,
+    },
+    {
+      id: "run-local", locationKey: "local:///data/catalog", connectorId: "connector-local-fixture", connectorName: "Local mounted catalog", connectorKind: "local", executor: "local-filesystem",
+      target: { uri: "file:///data/catalog" }, assetIds: ["asset-local"], status: "succeeded", startedAt: now, completedAt: now, createdAt: now, fileCount: 8, documentCount: 8,
+    },
+    {
+      id: "run-jdbc", locationKey: "jdbc:fixture", connectorId: "connector-jdbc-fixture", connectorName: "JDBC science database", connectorKind: "jdbc", executor: "jdbc-query",
+      target: { uri: "jdbc:postgresql://db/catalog/public" }, assetIds: ["asset-jdbc"], status: "failed", startedAt: now, completedAt: now, createdAt: now, error: "Query executor unavailable",
+    },
+  ];
+
+  await page.route("**/api/capabilities", (route) => route.fulfill({ json: { dataWarehouse: { enabled: warehouseEnabled }, metadataStore: { engine: "postgres" } } }));
+  await page.route("**/api/connectors", (route) => route.fulfill({ json: { connectors } }));
+  await page.route("**/api/connector-ingest-runs", (route) => route.fulfill({ json: { runs } }));
+  await page.route("**/api/connectors/connector-s3-fixture/scan-runs", async (route) => {
+    submittedBody = route.request().postDataJSON();
+    const run = { ...runs[0]!, id: "run-submitted", jobId: "flink-scan-02", status: "queued" };
+    runs.unshift(run);
+    await route.fulfill({ status: 202, json: { run } });
+  });
+
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto("/");
+  await waitForWorkspace(page);
+  await page.locator('[data-mode="connectors"]').click();
+
+  const inspector = page.locator("#inspector-content");
+  await expect(inspector).toContainText("S3 science archive");
+  await expect(inspector.locator(".connector-scan-form")).toHaveCount(0);
+  await expect(inspector).not.toContainText(/扫描路径|文件后缀|空间模式|小批|pilot/i);
+  for (const label of ["检测连接", "编辑配置", "删除 Connector"]) {
+    const action = inspector.getByRole("button", { name: label });
+    await expect(action).toHaveAttribute("title", label);
+    await expect(action.locator("svg")).toBeVisible();
+  }
+  const iconTops = await inspector.locator(".connector-icon-actions button").evaluateAll((buttons) => buttons.map((button) => button.getBoundingClientRect().top));
+  expect(new Set(iconTops.map((top) => Math.round(top))).size).toBe(1);
+
+  const execute = inspector.getByRole("button", { name: "执行扫描" });
+  await expect(execute).toBeEnabled();
+  await expect(execute).toHaveClass(/primary-command/);
+  await execute.click();
+  await expect(inspector).toContainText("扫描任务已提交");
+  expect(submittedBody).toEqual({});
+
+  await page.getByRole("tab", { name: "扫描记录" }).click();
+  await expect(page.locator("#connector-history-view")).toBeVisible();
+  await expect(page.locator("#connector-list-view")).toBeHidden();
+  await expect(page.locator("#connector-history-list .connector-history-row")).toHaveCount(4);
+  await expect(page.locator("#connector-history-list")).toContainText("flink-ingest");
+  await expect(page.locator("#connector-history-list")).toContainText("local-filesystem");
+  await expect(page.locator("#connector-history-list")).toContainText("jdbc-query");
+  await page.locator("#connector-run-kind-filter").selectOption("local");
+  await expect(page.locator("#connector-history-list .connector-history-row")).toHaveCount(1);
+  await page.locator("#connector-history-list .connector-history-row").click();
+  await expect(page.locator("#inspector-kicker")).toHaveText("SCAN RUN DETAIL");
+  await expect(inspector).toContainText("local-filesystem");
+  await expect(inspector).toContainText("file:///data/catalog");
+  await page.locator("#connector-run-kind-filter").selectOption("all");
+  await page.locator("#connector-run-status-filter").selectOption("failed");
+  await expect(page.locator("#connector-history-list .connector-history-row")).toHaveCount(1);
+  await expect(page.locator("#connector-history-list")).toContainText("JDBC science database");
+
+  await page.getByRole("tab", { name: "Connector list" }).click();
+  await page.locator("#connector-list .connector-row", { hasText: "Local mounted catalog" }).click();
+  await expect(inspector.getByRole("button", { name: "执行扫描" })).toBeDisabled();
+  await expect(inspector).toContainText("本地路径扫描执行器尚未接入");
+  await page.locator("#connector-list .connector-row", { hasText: "JDBC science database" }).click();
+  await expect(inspector.getByRole("button", { name: "执行扫描" })).toBeDisabled();
+  await expect(inspector).toContainText("JDBC 扫描执行器尚未接入");
+
+  warehouseEnabled = false;
+  await page.locator('[data-mode="catalog"]').click();
+  await page.locator('[data-mode="connectors"]').click();
+  await page.locator("#connector-list .connector-row", { hasText: "S3 science archive" }).click();
+  await expect(inspector.getByRole("button", { name: "执行扫描" })).toBeDisabled();
+  await expect(inspector).toContainText("数据仓库不可用");
 });

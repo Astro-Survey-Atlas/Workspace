@@ -42,13 +42,13 @@ export type ResourcePackageSelectedHandler = (
   callbacks: ResourcePackageSelectionCallbacks,
 ) => void;
 
-export type ResourcePackageReleaseHandler = (surveyId: string, releaseId: string) => void;
+export type ResourcePackageSurveyHandler = (surveyId: string) => void;
 type ResourceRow = PublicResourcePackage & { hasPackage: boolean };
 
 export class ResourcePackagePanel {
   readonly #onApplied: (before: PublicResourcePackage[], after: PublicResourcePackage[]) => Promise<void>;
   readonly #onSelected: ResourcePackageSelectedHandler;
-  readonly #onReleaseSelected: ResourcePackageReleaseHandler;
+  readonly #onSurveySelected: ResourcePackageSurveyHandler;
   readonly #onError: (error: unknown) => void;
   #records: ResourceRow[] = [];
   #releaseDetails: PublicReleaseDetail[] = [];
@@ -64,12 +64,12 @@ export class ResourcePackagePanel {
   constructor(
     onApplied: (before: PublicResourcePackage[], after: PublicResourcePackage[]) => Promise<void>,
     onSelected: ResourcePackageSelectedHandler,
-    onReleaseSelected: ResourcePackageReleaseHandler,
+    onSurveySelected: ResourcePackageSurveyHandler,
     onError: (error: unknown) => void,
   ) {
     this.#onApplied = onApplied;
     this.#onSelected = onSelected;
-    this.#onReleaseSelected = onReleaseSelected;
+    this.#onSurveySelected = onSurveySelected;
     this.#onError = onError;
     byId<HTMLInputElement>("resource-package-search").addEventListener("input", (event) => {
       this.#search = (event.currentTarget as HTMLInputElement).value.trim().toLocaleLowerCase();
@@ -244,27 +244,32 @@ export class ResourcePackagePanel {
       row.dataset.status = record.status;
       row.dataset.selected = String(record.id === this.#selectedId);
       row.dataset.dirty = String(this.#packageIsDirty(record.id));
-      row.addEventListener("click", () => {
+      row.addEventListener("click", (event) => {
+        if ((event.target as HTMLElement).closest("input")) return;
         this.#selectedId = record.id;
-        this.#render();
         this.#showSelected();
-        if (window.innerWidth <= 1040) byId("inspector-panel").classList.add("mobile-open");
+        this.#onSurveySelected(record.surveyId);
       });
 
       const draft = this.#draftReleases.get(record.id) ?? new Set<string>();
       const available = this.#catalogReleaseIds(resourceRecord);
+      row.dataset.loadable = String(resourceRecord.hasPackage && available.length > 0);
       const toggle = document.createElement("input");
       toggle.type = "checkbox";
       toggle.checked = available.length > 0 && draft.size === available.length;
       toggle.indeterminate = draft.size > 0 && draft.size < available.length;
       toggle.disabled = this.#busy || !resourceRecord.hasPackage || available.length === 0;
       toggle.setAttribute("aria-label", `选择${record.name}的全部发布版本`);
+      if (!resourceRecord.hasPackage || available.length === 0) {
+        toggle.title = "尚无经过校验的真实覆盖，不能应用到天球";
+      }
       toggle.addEventListener("click", (event) => event.stopPropagation());
       toggle.addEventListener("change", () => {
+        this.#selectedId = record.id;
         if (toggle.checked) this.#draftReleases.set(record.id, new Set(available));
         else this.#draftReleases.delete(record.id);
         this.#render();
-        if (record.id === this.#selectedId) this.#showSelected();
+        this.#showSelected();
       });
 
       const identity = document.createElement("div");
@@ -289,19 +294,13 @@ export class ResourcePackagePanel {
       }
       identity.append(heading, description, tags);
 
-      const version = document.createElement("button");
-      version.type = "button";
-      version.className = "resource-package-version release-detail-link";
+      const version = document.createElement("span");
+      version.className = "resource-package-version";
       const surveyReleases = this.#releaseDetails.filter((detail) => detail.surveyId === record.surveyId);
       const products = surveyReleases.flatMap((detail) => detail.products);
       const acquired = products.filter((product) => product.coverageStatus === "acquired").length;
       version.textContent = products.length ? `${acquired} / ${products.length} 产品有真实覆盖` : "覆盖状态待加载";
-      version.title = "查看公开版本详情";
-      version.addEventListener("click", (event) => {
-        event.stopPropagation();
-        const releaseId = surveyReleases[0]?.releaseId ?? record.releases[0];
-        if (releaseId) this.#onReleaseSelected(record.surveyId, releaseId);
-      });
+      version.title = "查看该巡天的公开版本列表";
 
       const status = document.createElement("span");
       status.className = "resource-package-status";
@@ -334,8 +333,7 @@ export class ResourcePackagePanel {
     byId("resource-package-installed-count").textContent = String(this.#records.filter((record) => record.installedVersion).length);
     byId("resource-package-active-count").textContent = String(this.#records.filter((record) => record.active).length);
     byId("resource-package-selected-count").textContent = String(selectedPackages);
-    byId("resource-package-search-hint").textContent = `${visible.length} / ${this.#records.length}`;
-    byId("resource-package-filter-summary").textContent = activeFilterCount ? `已选 ${activeFilterCount} 个筛选条件` : "全部公开资源";
+     byId("resource-package-filter-summary").textContent = activeFilterCount ? `已选 ${activeFilterCount} 个筛选条件` : "全部公开资源";
     byId<HTMLButtonElement>("resource-package-filter-clear").disabled = activeFilterCount === 0;
     const apply = byId<HTMLButtonElement>("resource-package-apply");
     apply.disabled = this.#busy || dirtyPackages === 0;

@@ -161,6 +161,10 @@ async function openFresh(page: Page): Promise<void> {
 }
 
 test("public resource package installs and applies all releases atomically", async ({ page }) => {
+  const { releases } = await apiJson<{ releases: Array<{ surveyId: string; releaseId: string; products: Array<{ coverageStatus: string }> }> }>("/api/public-release-details");
+  const euclidQ1 = releases.find((release) => release.surveyId === "euclid" && release.releaseId === "euclid-q1");
+  if (!euclidQ1) throw new Error("Missing Euclid Q1 public release detail");
+  const euclidQ1Statuses = euclidQ1.products.map((product) => product.coverageStatus);
   await page.setViewportSize({ width: 1440, height: 900 });
   await page.addInitScript(() => localStorage.clear());
   await proxyApi(page);
@@ -181,48 +185,61 @@ test("public resource package installs and applies all releases atomically", asy
   await expect(row.locator(".resource-package-tag").first()).not.toHaveCSS("background-color", "rgba(0, 0, 0, 0)");
   await expect(row.locator(".item-progress")).toHaveCount(1);
   await expect(row.locator(".resource-package-version")).toHaveText("0 / 4 产品有真实覆盖");
+  await expect(row.locator(".resource-package-version")).not.toHaveAttribute("role", "button");
   await expect(row).not.toContainText("2.0.0");
+  const resourceTitleStyle = await page.locator("#resource-package-stage .catalog-stage-header h2").evaluate((element) => {
+    const style = getComputedStyle(element);
+    const rect = element.getBoundingClientRect();
+    return { fontSize: style.fontSize, fontWeight: style.fontWeight, marginTop: style.marginTop, marginBottom: style.marginBottom, color: style.color, left: rect.left };
+  });
   await row.click();
-  await expect(page.locator("#inspector-content")).toContainText("Euclid");
-  await expect(page.locator("#inspector-content")).toContainText("覆盖范围尚未收录");
-  await expect(page.locator("#inspector-content").getByRole("link")).toHaveCount(0);
-  await expect(page.locator("#inspector-content")).not.toContainText("数据发布页");
-  await expect(page.locator("#inspector-content")).not.toContainText("覆盖来源");
-  await expect(page.locator("#inspector-content")).not.toContainText("official-overview");
-  const releaseToggle = page.locator("#inspector-content .resource-release-choices input");
-  await expect(releaseToggle).toHaveCount(3);
-  await expect(page.locator("#inspector-content .resource-release-availability", { hasText: "覆盖范围尚未收录" })).toHaveCount(3);
-  await expect(releaseToggle.nth(0)).toBeDisabled();
-  await expect(releaseToggle.nth(1)).toBeDisabled();
-  await expect(releaseToggle.nth(1)).not.toBeChecked();
-  await expect(releaseToggle.nth(2)).toBeDisabled();
-  const inspectorDetailButton = page.locator("#inspector-content .resource-release-choices label", { hasText: "Q1" }).getByRole("button", { name: "查看版本详情" });
-  await expect(inspectorDetailButton).toHaveCSS("font-size", "10px");
-  await inspectorDetailButton.click();
+  await expect(page.locator("#public-survey-overview-stage")).toBeVisible();
+  await expect(page.locator("#public-survey-overview-title")).toHaveText("Euclid");
+  const overviewTitleStyle = await page.locator("#public-survey-overview-title").evaluate((element) => {
+    const style = getComputedStyle(element);
+    const rect = element.getBoundingClientRect();
+    return { fontSize: style.fontSize, fontWeight: style.fontWeight, marginTop: style.marginTop, marginBottom: style.marginBottom, color: style.color, left: rect.left };
+  });
+  expect(overviewTitleStyle).toEqual(resourceTitleStyle);
+  await expect(page.locator("#public-survey-overview-stage > .public-survey-overview-header")).toBeVisible();
+  await expect(page.locator("#public-survey-overview-stage > .public-release-detail-header")).toHaveCount(0);
+  await expect(page.locator(".public-survey-overview-releases-section > .section-heading")).toHaveCount(0);
+  await expect(page.locator(".public-survey-overview-columns > span")).toHaveCount(2);
+  await expect(page.locator(".public-survey-overview-columns")).toContainText("公开版本");
+  await expect(page.locator(".public-survey-overview-columns")).toContainText("覆盖状态");
+  await expect(page.locator("#public-survey-overview-releases .public-survey-overview-release")).toHaveCount(3);
+  await expect.poll(() => new URL(page.url()).searchParams.get("survey")).toBe("euclid");
+  await expect.poll(() => new URL(page.url()).searchParams.get("release")).toBeNull();
+  await page.locator("#public-survey-overview-releases .public-survey-overview-release", { hasText: "Q1" }).click();
   await expect(page.locator("#public-release-detail-stage")).toBeVisible();
   await expect(page.locator("#public-release-detail-title")).toHaveText("Q1");
   await expect(page.locator("#public-release-detail-source")).toHaveText(/数据发布页/);
   await expect(page.locator("#public-release-detail-source")).toHaveCSS("font-size", "10px");
   await expect(page.locator("#public-release-product-count")).toHaveText("0 / 2 已收录");
-  await expect(page.locator(".public-release-product[data-coverage-status='overview_only']")).toHaveCount(2);
-  await expect(page.locator(".public-release-product[data-coverage-status='awaiting_geometry']")).toHaveCount(0);
-  await expect(page.locator(".public-release-product[data-coverage-status='overview_only']", { hasText: "仅有官方概览" })).toHaveCount(2);
+  await expect(page.locator(".public-release-product[data-coverage-status='acquired']")).toHaveCount(euclidQ1Statuses.filter((status) => status === "acquired").length);
+  await expect(page.locator(".public-release-product[data-coverage-status='overview_only']")).toHaveCount(euclidQ1Statuses.filter((status) => status === "overview_only").length);
+  await expect(page.locator(".public-release-product[data-coverage-status='awaiting_geometry']")).toHaveCount(euclidQ1Statuses.filter((status) => status === "awaiting_geometry").length);
+  if (euclidQ1Statuses.includes("overview_only")) {
+    await expect(page.locator(".public-release-product[data-coverage-status='overview_only']", { hasText: "仅有官方概览" })).not.toHaveCount(0);
+  }
   await expect(page.locator(".public-release-product-links").getByRole("link", { name: /覆盖来源/ })).toHaveCount(2);
-  await expect(page.locator(".public-release-product").getByRole("button", { name: "填写覆盖范围" })).toHaveCount(0);
+  await expect(page.locator(".public-release-product").getByRole("button", { name: "填写覆盖范围" })).toHaveCount(euclidQ1Statuses.filter((status) => status === "awaiting_geometry").length);
   await expect.poll(() => new URL(page.url()).searchParams.get("release")).toBe("euclid-q1");
-  await page.locator("#public-release-detail-back").click();
+  await packageButton.click();
   await expect(page.locator("#resource-package-stage")).toBeVisible();
+  await expect(page.locator("#public-survey-overview-stage")).toBeHidden();
+  await expect(page.locator("#public-release-detail-stage")).toBeHidden();
+  await expect.poll(() => new URL(page.url()).searchParams.get("release")).toBeNull();
   await expect(toggle).toBeDisabled();
+  await expect(row).toHaveAttribute("data-loadable", "false");
+  await expect(toggle).toHaveAttribute("title", /不能应用到天球/);
 
   const loadableRow = page.locator(".resource-package-row", { hasText: "Pan-STARRS1" });
   const loadableToggle = loadableRow.locator('input[type="checkbox"]');
-  await loadableRow.click();
-  const loadableReleaseToggle = page.locator("#inspector-content .resource-release-choices input:enabled");
-  await expect(loadableReleaseToggle).toHaveCount(1);
+  await expect(loadableRow).toHaveAttribute("data-loadable", "true");
   const activeBefore = await page.locator("#resource-package-active-count").textContent();
   await expect(loadableToggle).not.toBeChecked();
   await loadableToggle.check();
-  await expect(loadableReleaseToggle).toBeChecked();
   await expect(page.locator("#resource-package-active-count")).toHaveText(activeBefore ?? "0");
   await expect(packageButton).toHaveClass(/active/);
 
@@ -236,7 +253,6 @@ test("public resource package installs and applies all releases atomically", asy
   await expect(packageButton).toHaveClass(/active/);
 
   await loadableToggle.uncheck();
-  await expect(loadableReleaseToggle).not.toBeChecked();
   await expect(apply).toBeVisible();
   await apply.click();
   await expect(apply).toBeDisabled();
@@ -247,6 +263,50 @@ test("public resource package installs and applies all releases atomically", asy
   const visibleSurveys = new Set((await canvas.getAttribute("data-visible-survey-ids"))?.split(",") ?? []);
   expect(visibleSurveys.has("euclid")).toBe(false);
   expect(visibleSurveys.has("panstarrs")).toBe(false);
+});
+
+test("a release deep link opens its detail page directly", async ({ page }) => {
+  await page.addInitScript(() => localStorage.setItem("astro-workspace:theme:v1", "dark"));
+  await proxyApi(page);
+  await page.goto("/?mode=packages&survey=sdss&release=sdss-dr01");
+  await expect(page.locator("#service-status")).toHaveText("SERVICE ONLINE");
+  await expect(page.locator("#public-release-detail-stage")).toBeVisible();
+  await expect(page.locator("#public-release-detail-title")).not.toHaveText("");
+  await expect(page.locator("#public-release-product-list .public-release-product")).not.toHaveCount(0);
+  await expect.poll(() => new URL(page.url()).searchParams.get("release")).toBe("sdss-dr01");
+});
+
+test("public survey overview header remains aligned in light mobile layout", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.addInitScript(() => localStorage.setItem("astro-workspace:theme:v1", "light"));
+  await proxyApi(page);
+  await page.goto("/?mode=packages&survey=euclid");
+  await expect(page.locator("html")).toHaveAttribute("data-theme", "light");
+  await expect(page.locator("#public-survey-overview-stage")).toBeVisible();
+  await expect(page.locator("#public-survey-overview-title")).toBeVisible();
+  await expect(page.locator(".public-survey-overview-columns > span")).toHaveCount(2);
+  await expect(page.locator("#public-survey-overview-back")).toBeVisible();
+  const layout = await page.locator("#public-survey-overview-stage").evaluate((stage) => {
+    const title = stage.querySelector<HTMLElement>("#public-survey-overview-title")!;
+    const back = stage.querySelector<HTMLElement>("#public-survey-overview-back")!;
+    const columns = stage.querySelector<HTMLElement>(".public-survey-overview-columns")!;
+    const stageRect = stage.getBoundingClientRect();
+    const titleRect = title.getBoundingClientRect();
+    const backRect = back.getBoundingClientRect();
+    const columnsRect = columns.getBoundingClientRect();
+    return {
+      titleInside: titleRect.left >= stageRect.left && titleRect.right <= stageRect.right,
+      backInside: backRect.left >= stageRect.left && backRect.right <= stageRect.right,
+      columnsInside: columnsRect.left >= stageRect.left && columnsRect.right <= stageRect.right,
+      titleColor: getComputedStyle(title).color,
+      stageBackground: getComputedStyle(stage).backgroundColor,
+    };
+  });
+  expect(layout.titleInside).toBe(true);
+  expect(layout.backInside).toBe(true);
+  expect(layout.columnsInside).toBe(true);
+  expect(layout.titleColor).not.toBe("rgb(255, 255, 255)");
+  expect(layout.stageBackground).not.toBe("rgb(7, 11, 15)");
 });
 
 test("light theme switches the 3D sky to a soft observation canvas", async ({ page }) => {

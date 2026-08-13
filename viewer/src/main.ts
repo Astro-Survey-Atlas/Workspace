@@ -1,4 +1,4 @@
-import { createIcons, Download, Globe2, Layers3, Moon, Play, Plus, RefreshCw, RotateCcw, SlidersHorizontal, Sun } from "lucide";
+import { createIcons, Download, Globe2, Info, Layers3, Moon, Play, Plus, RefreshCw, RotateCcw, SlidersHorizontal, Sun } from "lucide";
 
 import "./styles.css";
 import {
@@ -237,6 +237,8 @@ let connectorSelectionRequest: string | null = null;
 const dataCatalogPanel = new DataCatalogPanel((error) => showFatal(error), (connectorId) => {
   connectorSelectionRequest = connectorId;
   void activateMode("connectors").catch(showFatal);
+}, () => {
+  void activateMode("connectors").then(() => byId<HTMLButtonElement>("connector-new").click()).catch(showFatal);
 });
 function renderConnectorMetrics(metrics: ConnectorMetrics): void {
   const values: Array<[string, string, number]> = [
@@ -255,14 +257,14 @@ const connectorPanel = new ConnectorPanel((error) => showFatal(error), renderCon
 const resourcePackagePanel = new ResourcePackagePanel(
   (before, after) => refreshActiveFootprints(before, after),
   (record, draftReleaseIds, callbacks) => renderResourcePackageDetails(record, draftReleaseIds, callbacks),
-  (surveyId, releaseId) => showPublicReleaseDetail(surveyId, releaseId),
+  (surveyId) => showPublicSurveyOverview(surveyId),
   (error) => showFatal(error),
 );
 const LAYER_PREFERENCES_KEY = "astro-workspace:survey-layer-preferences:v1";
 const THEME_PREFERENCE_KEY = "astro-workspace:theme:v1";
 type WorkspaceTheme = "light" | "dark";
 
-createIcons({ icons: { Download, Globe2, Layers3, Moon, Play, Plus, RefreshCw, RotateCcw, SlidersHorizontal, Sun } });
+createIcons({ icons: { Download, Globe2, Info, Layers3, Moon, Play, Plus, RefreshCw, RotateCcw, SlidersHorizontal, Sun } });
 
 const themeQuery = window.matchMedia("(prefers-color-scheme: dark)");
 const themeToggle = byId<HTMLButtonElement>("theme-toggle");
@@ -1075,8 +1077,9 @@ function renderResourcePackageDetails(
     const releaseId = entry.id;
     const hasCoverage = releaseIds.includes(releaseId);
     const releaseDetail = publicReleaseDetails.find((detail) => detail.surveyId === record.surveyId && detail.releaseId === releaseId);
-    const label = document.createElement("label");
-    label.dataset.coverageAvailable = String(hasCoverage);
+    const choice = document.createElement("div");
+    choice.className = "resource-release-choice";
+    choice.dataset.coverageAvailable = String(hasCoverage);
     const checkbox = document.createElement("input");
     checkbox.type = "checkbox";
     checkbox.checked = hasCoverage && draftReleaseIds.has(releaseId);
@@ -1087,6 +1090,11 @@ function renderResourcePackageDetails(
       if (checkbox.checked) next.add(releaseId); else next.delete(releaseId);
       callbacks.setDraftReleases(next);
     });
+    const details = document.createElement("button");
+    details.type = "button";
+    details.className = "resource-release-detail-button";
+    details.setAttribute("aria-label", `查看 ${entry.label} 版本详情`);
+    details.addEventListener("click", () => showPublicReleaseDetail(record.surveyId, releaseId));
     const copy = document.createElement("span");
     copy.className = "resource-release-copy";
     const header = document.createElement("span");
@@ -1100,21 +1108,10 @@ function renderResourcePackageDetails(
     header.append(title, availability);
     const detail = document.createElement("small");
     detail.textContent = `${releaseDetail?.releasedYear ?? entry.releasedYear ?? "年份未注明"} · ${(releaseDetail?.kind ?? entry.kind).replaceAll("_", " ")}`;
-    const links = document.createElement("span");
-    links.className = "resource-release-links";
-    const details = document.createElement("button");
-    details.type = "button";
-    details.className = "release-detail-link";
-    details.textContent = "查看版本详情";
-    details.addEventListener("click", (event) => {
-      event.preventDefault();
-      event.stopPropagation();
-      showPublicReleaseDetail(record.surveyId, releaseId);
-    });
-    links.append(details);
-    copy.append(header, detail, links);
-    label.append(checkbox, copy);
-    releaseChoices.append(label);
+    copy.append(header, detail);
+    details.append(copy);
+    choice.append(checkbox, details);
+    releaseChoices.append(choice);
   }
   const releaseBulk = document.createElement("div");
   releaseBulk.className = "inspector-actions compact-actions";
@@ -1156,6 +1153,7 @@ function showPublicReleaseDetail(surveyId: string, releaseId: string, updateUrl 
   const detail = publicReleaseDetails.find((entry) => entry.surveyId === surveyId && entry.releaseId === releaseId);
   if (!detail) return;
   byId("resource-package-stage").hidden = true;
+  byId("public-survey-overview-stage").hidden = true;
   byId("public-release-detail-stage").hidden = false;
   const inspector = byId("inspector-panel");
   releaseDetailInspectorWasOpen = inspector.classList.contains("mobile-open");
@@ -1234,8 +1232,44 @@ function showPublicReleaseDetail(surveyId: string, releaseId: string, updateUrl 
   }
 }
 
+function showPublicSurveyOverview(surveyId: string, updateUrl = true): void {
+  const survey = surveyRecordsById.get(surveyId);
+  const releases = publicReleaseDetails.filter((detail) => detail.surveyId === surveyId);
+  if (!survey || !releases.length) return;
+  byId("resource-package-stage").hidden = true;
+  byId("public-release-detail-stage").hidden = true;
+  const stage = byId("public-survey-overview-stage");
+  stage.hidden = false;
+  byId("public-survey-overview-title").textContent = survey.name;
+  byId("public-survey-overview-summary").textContent = survey.description;
+  const list = byId("public-survey-overview-releases");
+  list.replaceChildren(...releases.map((release) => {
+    const row = document.createElement("button");
+    row.type = "button";
+    row.className = "public-survey-overview-release";
+    row.addEventListener("click", () => showPublicReleaseDetail(surveyId, release.releaseId));
+    const title = document.createElement("strong"); title.textContent = release.label;
+    const meta = document.createElement("small");
+    const acquired = release.products.filter((product) => product.coverageStatus === "acquired").length;
+    meta.textContent = `${release.releasedYear ?? "年份未注明"} · ${acquired} / ${release.products.length} 个产品有真实覆盖`;
+    const status = document.createElement("span");
+    status.textContent = acquired ? "可加载覆盖" : "覆盖范围尚未收录";
+    status.dataset.available = String(acquired > 0);
+    row.append(title, meta, status);
+    return row;
+  }));
+  if (updateUrl) {
+    const url = new URL(window.location.href);
+    url.searchParams.set("mode", "packages");
+    url.searchParams.set("survey", surveyId);
+    url.searchParams.delete("release");
+    history.pushState(null, "", url);
+  }
+}
+
 function closePublicReleaseDetail(updateUrl = true): void {
   byId("public-release-detail-stage").hidden = true;
+  byId("public-survey-overview-stage").hidden = true;
   byId("resource-package-stage").hidden = mode !== "packages";
   if (releaseDetailInspectorWasOpen && window.innerWidth <= 1040) byId("inspector-panel").classList.add("mobile-open");
   releaseDetailInspectorWasOpen = false;
@@ -1285,7 +1319,12 @@ async function openManualFootprintDialog(detail: PublicReleaseDetail, product: s
   byId<HTMLButtonElement>("manual-footprint-validate").disabled = editingManualFootprint?.status !== "draft";
   byId<HTMLButtonElement>("manual-footprint-publish").disabled = editingManualFootprint?.status !== "validated";
   byId<HTMLButtonElement>("manual-footprint-unpublish").disabled = editingManualFootprint?.status !== "published";
-  setManualFootprintFeedback(editingManualFootprint ? `当前状态：${editingManualFootprint.status ?? "draft"}` : "尚未保存");
+  const manualStatusLabels: Record<ManualFootprintRecord["status"], string> = {
+    draft: "草稿，尚未校验",
+    validated: "已校验，尚未发布",
+    published: "已发布，正在用于数据覆盖",
+  };
+  setManualFootprintFeedback(editingManualFootprint ? `当前状态：${manualStatusLabels[editingManualFootprint.status]}` : "尚未保存");
   byId<HTMLDialogElement>("manual-footprint-dialog").showModal();
 }
 
@@ -1666,6 +1705,7 @@ async function activateMode(nextMode: ViewMode): Promise<void> {
   byId("catalog-stage").hidden = mode !== "catalog";
   byId("resource-package-stage").hidden = mode !== "packages";
   byId("public-release-detail-stage").hidden = true;
+  byId("public-survey-overview-stage").hidden = true;
   byId("connector-stage").hidden = mode !== "connectors";
   byId("scene-stage").hidden = mode === "workflow" || mode === "catalog" || mode === "connectors" || mode === "packages";
   byId("workflow-stage").hidden = mode !== "workflow";
@@ -1731,14 +1771,15 @@ async function activateMode(nextMode: ViewMode): Promise<void> {
     const query = new URL(window.location.href).searchParams;
     const surveyId = query.get("survey");
     const releaseId = query.get("release");
-    if (surveyId && releaseId) showPublicReleaseDetail(surveyId, releaseId, false);
+     if (surveyId && releaseId) showPublicReleaseDetail(surveyId, releaseId, false);
+     else if (surveyId) showPublicSurveyOverview(surveyId, false);
     return;
   }
   if (mode === "connectors") {
     workflowPanel.deactivate();
     byId("panel-kicker").textContent = "CONNECTOR REGISTRY";
     byId("panel-dataset-name").textContent = "连接器配置";
-    byId("dataset-state").textContent = "连接测试按需执行，目录扫描由 FlinkIngest 负责";
+    byId("dataset-state").textContent = "当前仅 S3 / OSS 可提交扫描；历史记录由执行器统一上报";
     byId("metric-one-label").textContent = "CONNECTORS";
     byId("metric-one").textContent = "--";
     byId("metric-two-label").textContent = "S3 / OSS";
@@ -1854,8 +1895,85 @@ async function activateMode(nextMode: ViewMode): Promise<void> {
 }
 
 document.querySelectorAll<HTMLButtonElement>("[data-mode]").forEach((button) => {
-  button.addEventListener("click", () => void activateMode(button.dataset.mode as ViewMode).catch(showFatal));
+  button.addEventListener("click", () => {
+    if (button.dataset.mode === "packages") closePublicReleaseDetail();
+    void activateMode(button.dataset.mode as ViewMode).catch(showFatal);
+  });
 });
+
+function setupStatusHelp(): void {
+  const openEntries = new Map<HTMLButtonElement, HTMLElement>();
+  let sequence = 0;
+
+  const position = (button: HTMLButtonElement, tooltip: HTMLElement): void => {
+    const buttonRect = button.getBoundingClientRect();
+    const viewportPadding = 12;
+    const width = Math.min(360, window.innerWidth - viewportPadding * 2);
+    tooltip.style.width = `${width}px`;
+    const tooltipRect = tooltip.getBoundingClientRect();
+    const left = Math.max(
+      viewportPadding,
+      Math.min(buttonRect.left, window.innerWidth - tooltipRect.width - viewportPadding),
+    );
+    const below = buttonRect.bottom + 8;
+    const top = below + tooltipRect.height <= window.innerHeight - viewportPadding
+      ? below
+      : Math.max(viewportPadding, buttonRect.top - tooltipRect.height - 8);
+    tooltip.style.left = `${left}px`;
+    tooltip.style.top = `${top}px`;
+  };
+
+  const close = (button: HTMLButtonElement, tooltip: HTMLElement): void => {
+    tooltip.classList.remove("is-visible");
+    tooltip.setAttribute("aria-hidden", "true");
+    openEntries.delete(button);
+  };
+
+  const register = (button: HTMLButtonElement): void => {
+    if (button.dataset.statusHelpReady === "true") return;
+    const tooltip = button.querySelector<HTMLElement>(".status-help-tooltip");
+    if (!tooltip) return;
+    button.dataset.statusHelpReady = "true";
+    const id = `status-help-tooltip-${sequence++}`;
+    tooltip.id = id;
+    tooltip.setAttribute("aria-hidden", "true");
+    button.setAttribute("aria-describedby", id);
+    document.body.append(tooltip);
+    createIcons({ icons: { Info }, attrs: { "aria-hidden": "true" } });
+
+    const open = (): void => {
+      openEntries.set(button, tooltip);
+      tooltip.classList.add("is-visible");
+      tooltip.setAttribute("aria-hidden", "false");
+      position(button, tooltip);
+    };
+    button.addEventListener("pointerenter", open);
+    button.addEventListener("focus", open);
+    button.addEventListener("pointerleave", () => {
+      if (!button.matches(":focus")) close(button, tooltip);
+    });
+    button.addEventListener("blur", () => close(button, tooltip));
+  };
+
+  document.querySelectorAll<HTMLButtonElement>(".status-help").forEach(register);
+  new MutationObserver((entries) => {
+    for (const entry of entries) {
+      for (const node of entry.addedNodes) {
+        if (!(node instanceof HTMLElement)) continue;
+        if (node.matches(".status-help")) register(node as HTMLButtonElement);
+        node.querySelectorAll<HTMLButtonElement>(".status-help").forEach(register);
+      }
+    }
+  }).observe(document.body, { childList: true, subtree: true });
+
+  const reposition = (): void => {
+    openEntries.forEach((tooltip, button) => position(button, tooltip));
+  };
+  window.addEventListener("resize", reposition);
+  window.addEventListener("scroll", reposition, true);
+}
+
+setupStatusHelp();
 document.querySelectorAll<HTMLButtonElement>("[data-layer-layout]").forEach((button) => {
   button.addEventListener("click", () => {
     layerLayoutMode = button.dataset.layerLayout as SurveyLayerLayoutMode;
@@ -1952,7 +2070,12 @@ window.addEventListener("keydown", (event) => {
   event.preventDefault();
 });
 byId<HTMLButtonElement>("controls-toggle").addEventListener("click", () => controlsPanel.classList.toggle("mobile-open"));
-byId<HTMLButtonElement>("public-release-detail-back").addEventListener("click", () => closePublicReleaseDetail());
+byId<HTMLButtonElement>("public-release-detail-back").addEventListener("click", () => {
+  const surveyId = new URL(window.location.href).searchParams.get("survey");
+  if (surveyId) showPublicSurveyOverview(surveyId);
+  else closePublicReleaseDetail();
+});
+byId<HTMLButtonElement>("public-survey-overview-back").addEventListener("click", () => closePublicReleaseDetail());
 byId<HTMLButtonElement>("manual-footprint-dialog-close").addEventListener("click", () => byId<HTMLDialogElement>("manual-footprint-dialog").close());
 byId<HTMLFormElement>("manual-footprint-form").addEventListener("submit", (event) => {
   event.preventDefault();
@@ -1969,8 +2092,9 @@ window.addEventListener("popstate", () => {
   const query = new URL(window.location.href).searchParams;
   const surveyId = query.get("survey");
   const releaseId = query.get("release");
-  if (surveyId && releaseId) showPublicReleaseDetail(surveyId, releaseId, false);
-  else closePublicReleaseDetail(false);
+   if (surveyId && releaseId) showPublicReleaseDetail(surveyId, releaseId, false);
+   else if (surveyId) showPublicSurveyOverview(surveyId, false);
+   else closePublicReleaseDetail(false);
 });
 window.addEventListener("astro:navigate", (event) => {
   const nextMode = (event as CustomEvent<{ mode?: ViewMode }>).detail?.mode;
@@ -2053,7 +2177,8 @@ async function start(): Promise<void> {
     ...dataCatalogPanel.debugState(),
     ...workflowPanel.debugState(),
   });
-  await activateMode("catalog");
+  const initialQuery = new URL(window.location.href).searchParams;
+  await activateMode(initialQuery.get("mode") === "packages" ? "packages" : "catalog");
 }
 
 void start().catch(showFatal);

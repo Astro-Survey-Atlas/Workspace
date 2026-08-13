@@ -6,10 +6,86 @@ import test from "node:test";
 
 import type { ConnectorCredentialStore } from "../src/connector-credentials.js";
 import { ConnectorIngestRunCatalog } from "../src/connector-history.js";
-import type { ConnectorRegistry } from "../src/connectors.js";
-import type { DataCatalogRegistry } from "../src/data-catalog.js";
-import { DataWarehouseDisabledError, dataWarehouseEnabled, FlinkScanService, type FlinkResourceClient } from "../src/flink-ingest.js";
+import { connectorConfigurationHash, type ConnectorRecord, type ConnectorRegistry } from "../src/connectors.js";
+import type { DataAssetRecord, DataCatalogRegistry } from "../src/data-catalog.js";
+import { ConnectorScanCapabilityError, ConnectorScanPreconditionError, connectorScanPath, connectorScanTarget, DataWarehouseDisabledError, dataWarehouseEnabled, FlinkScanService, parseLegacyConnectorScanCommand, validateConnectorSelfScanBody, type FlinkResourceClient } from "../src/flink-ingest.js";
 import { SqliteMetadataStore } from "../src/storage/index.js";
+
+const timestamp = "2026-08-13T12:00:00.000Z";
+
+function connector(overrides: Partial<ConnectorRecord> = {}): ConnectorRecord {
+  const hasLastCheckOverride = Object.prototype.hasOwnProperty.call(overrides, "lastCheck");
+  const record: ConnectorRecord = {
+    id: "connector-s3",
+    locationKey: "s3://survey/release",
+    displayPath: "s3://survey/release",
+    name: "Survey connector",
+    description: "Fixture",
+    kind: "s3",
+    config: { endpoint: "https://s3.example", bucket: "survey", prefix: "release" },
+    credentialRef: "astro/connector",
+    status: "ready",
+    createdAt: timestamp,
+    updatedAt: timestamp,
+    origin: "user",
+    ...overrides,
+  };
+  return {
+    ...record,
+    lastCheck: hasLastCheckOverride
+      ? overrides.lastCheck
+      : { status: "ok", checkedAt: timestamp, summary: "ok", configHash: connectorConfigurationHash(record) },
+  };
+}
+
+function asset(id: string, connectorRecord: ConnectorRecord): DataAssetRecord {
+  return {
+    id,
+    name: id,
+    description: "Fixture",
+    product: id,
+    kind: "catalog",
+    modalities: ["catalog"],
+    access: { connector: "s3", uri: connectorRecord.locationKey, format: "fits", connectorId: connectorRecord.id },
+    connectorIds: [connectorRecord.id],
+    connectorLocationKeys: [connectorRecord.locationKey],
+    status: "ready",
+    projectState: "acquired",
+    footprintIds: [],
+    origin: "user",
+    createdAt: timestamp,
+    updatedAt: timestamp,
+  };
+}
+
+async function scanFixture(connectorRecord: ConnectorRecord, assets: DataAssetRecord[] = []) {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "astro-flink-submit-"));
+  const store = new SqliteMetadataStore(path.join(directory, "workspace.sqlite"));
+  await store.initialize();
+  const runs = new ConnectorIngestRunCatalog(store);
+  const requests: Array<{ method: string; path: string; body?: unknown }> = [];
+  const resourceClient: FlinkResourceClient = {
+    async request(method, requestPath, body) {
+      requests.push({ method, path: requestPath, body });
+      if (method === "GET" && requestPath.includes("/flinkingesttasks/")) return { status: 404, ok: false, text: "not found" };
+      return { status: method === "POST" ? 201 : 200, ok: true, text: "{}" };
+    },
+  };
+  const service = new FlinkScanService({
+    enabled: true,
+    connectors: { get: async () => structuredClone(connectorRecord) } as unknown as ConnectorRegistry,
+    dataCatalog: { list: async () => structuredClone(assets) } as unknown as DataCatalogRegistry,
+    credentials: { get: async () => ({ accessKeyId: "access", secretAccessKey: "secret", endpoint: "https://s3.example" }) } as unknown as ConnectorCredentialStore,
+    runs,
+    namespace: "warehouse",
+    secretNamespace: "warehouse",
+    esUrl: "http://elasticsearch",
+    esIndex: "astro_file_index_v1",
+    pollMs: 1000,
+    resourceClient,
+  });
+  return { directory, store, runs, requests, service };
+}
 
 test("external Flink polling failures preserve the stored scan state", async () => {
   const directory = await mkdtemp(path.join(os.tmpdir(), "astro-flink-poll-"));
@@ -79,4 +155,103 @@ test("disabled warehouse neither polls nor submits scans", async () => {
   await assert.rejects(service.submitPilot("connector"), DataWarehouseDisabledError);
   service.stop();
   assert.equal(requests, 0);
+});
+
+test("S3 scan paths remain inside the exact configured bucket and prefix", () => {
+  const record = connector();
+  assert.deepEqual(connectorScanTarget(record), { uri: "s3://survey/release", bucket: "survey", prefix: "release" });
+  assert.equal(connectorScanPath(record, "release/catalog.fits"), "s3://survey/release/catalog.fits");
+  assert.equal(connectorScanPath(record, "child/catalog.fits"), "s3://survey/release/child/catalog.fits");
+  assert.throws(() => connectorScanPath(record, "s3://survey/release-other/catalog.fits"), /connector prefix/);
+  assert.throws(() => connectorScanPath(record, "s3://survey.evil/release/catalog.fits"), /connector bucket/);
+  assert.throws(() => connectorScanPath(record, "s3://survey/release/%2e%2e/private"), /dot segments/);
+});
+
+test("legacy scan route requires an explicit mode and never defaults to pilot", () => {
+  assert.throws(() => parseLegacyConnectorScanCommand(undefined), /scan mode is required/);
+  assert.throws(() => parseLegacyConnectorScanCommand({}), /scan mode is required/);
+  assert.deepEqual(parseLegacyConnectorScanCommand({ mode: "pilot" }), { mode: "pilot" });
+  assert.throws(() => parseLegacyConnectorScanCommand({ mode: "scan" }), /assetId is required/);
+  assert.deepEqual(parseLegacyConnectorScanCommand({ mode: "scan", assetId: "asset-one" }), {
+    mode: "generic",
+    input: { assetId: "asset-one" },
+  });
+});
+
+test("connector self-scan accepts no business body", () => {
+  assert.doesNotThrow(() => validateConnectorSelfScanBody(undefined));
+  assert.doesNotThrow(() => validateConnectorSelfScanBody({}));
+  assert.throws(() => validateConnectorSelfScanBody({ assetId: "client-selected" }), /do not accept a request body/);
+  assert.throws(() => validateConnectorSelfScanBody([]), /do not accept a request body/);
+});
+
+test("connector self-scan derives its target and snapshots zero or multiple linked assets", async () => {
+  for (const assetIds of [[], ["asset-two", "asset-one"]]) {
+    const record = connector();
+    const fixture = await scanFixture(record, assetIds.map((id) => asset(id, record)));
+    try {
+      const run = await fixture.service.submitConnectorScan(record.id, `key-${assetIds.length}`);
+      assert.equal(run.connectorId, record.id);
+      assert.equal(run.connectorKind, "s3");
+      assert.equal(run.executor, "flink-ingest");
+      assert.deepEqual(run.target, { uri: "s3://survey/release", bucket: "survey", prefix: "release" });
+      assert.deepEqual(run.assetIds, [...assetIds].sort());
+      const task = fixture.requests.find((request) => request.path.includes("/flinkingesttasks"));
+      assert.ok(task);
+      const body = task.body as { spec?: { paths?: string[] } };
+      assert.deepEqual(body.spec?.paths, ["s3://survey/release"]);
+    } finally {
+      await fixture.store.close();
+      await rm(fixture.directory, { recursive: true, force: true });
+    }
+  }
+});
+
+test("connector self-scan idempotency returns one run and submits one task", async () => {
+  const record = connector();
+  const fixture = await scanFixture(record, [asset("asset-one", record)]);
+  try {
+    const first = await fixture.service.submitConnectorScan(record.id, "same-request");
+    const retry = await fixture.service.submitConnectorScan(record.id, "same-request");
+    assert.equal(retry.id, first.id);
+    assert.equal((await fixture.runs.list()).length, 1);
+    assert.equal(fixture.requests.filter((request) => request.path.includes("/flinkingesttasks") && request.method === "POST").length, 1);
+  } finally {
+    await fixture.store.close();
+    await rm(fixture.directory, { recursive: true, force: true });
+  }
+});
+
+test("disabled and stale connectors are rejected before run creation", async () => {
+  for (const record of [
+    connector({ status: "disabled" }),
+    connector({ config: { endpoint: "https://s3.example", bucket: "survey", prefix: "edited" }, locationKey: "s3://survey/edited", lastCheck: { status: "ok", checkedAt: timestamp, summary: "old", configHash: connectorConfigurationHash(connector()) } }),
+  ]) {
+    const fixture = await scanFixture(record);
+    try {
+      await assert.rejects(fixture.service.submitConnectorScan(record.id), ConnectorScanPreconditionError);
+      assert.deepEqual(await fixture.runs.list(), []);
+      assert.equal(fixture.requests.length, 0);
+    } finally {
+      await fixture.store.close();
+      await rm(fixture.directory, { recursive: true, force: true });
+    }
+  }
+});
+
+test("local and JDBC connector scans report unsupported capability without a run", async () => {
+  for (const record of [
+    connector({ kind: "local", config: { rootPath: "/data" }, locationKey: "local:///data", displayPath: "/data", credentialRef: undefined }),
+    connector({ kind: "jdbc", config: { url: "jdbc:postgresql://db/catalog" }, locationKey: "jdbc:postgresql://db/catalog|database=|schema=", displayPath: "jdbc:postgresql://db/catalog", credentialRef: undefined }),
+  ]) {
+    const fixture = await scanFixture(record);
+    try {
+      await assert.rejects(fixture.service.submitConnectorScan(record.id), ConnectorScanCapabilityError);
+      assert.deepEqual(await fixture.runs.list(), []);
+      assert.equal(fixture.requests.length, 0);
+    } finally {
+      await fixture.store.close();
+      await rm(fixture.directory, { recursive: true, force: true });
+    }
+  }
 });

@@ -14,15 +14,11 @@ function inputValue(id: string): string {
   return byId<HTMLInputElement>(id).value.trim();
 }
 
-function statusLabel(status: DataAssetRecord["status"]): string {
-  return status === "ready" ? "可访问" : status === "unavailable" ? "不可用" : "仅元数据";
-}
-
 const PROJECT_LABELS: Record<DataAssetProjectState, string> = {
   public_reference: "公开参考",
   acquired: "已掌握",
   processed: "已加工",
-  deliverable: "可交付",
+  deliverable: "可用",
   planned: "计划中",
 };
 
@@ -43,6 +39,7 @@ type DetailSection = "basic" | "sources" | "access" | "lineage" | null;
 export class DataCatalogPanel {
   readonly #onError: (error: unknown) => void;
   readonly #onConnectorSelected?: (connectorId: string) => void;
+  readonly #onNewConnector?: () => void;
   #assets: DataAssetRecord[] = [];
   #connectors: ConnectorPublicRecord[] = [];
   #tags: TagDefinition[] = [];
@@ -52,9 +49,10 @@ export class DataCatalogPanel {
   #detailEditing: DetailSection = null;
   #active = false;
 
-  constructor(onError: (error: unknown) => void, onConnectorSelected?: (connectorId: string) => void) {
+  constructor(onError: (error: unknown) => void, onConnectorSelected?: (connectorId: string) => void, onNewConnector?: () => void) {
     this.#onError = onError;
     this.#onConnectorSelected = onConnectorSelected;
+    this.#onNewConnector = onNewConnector;
     byId<HTMLInputElement>("catalog-search").addEventListener("input", () => this.#render());
     byId<HTMLSelectElement>("catalog-kind-filter").addEventListener("change", () => this.#render());
     byId<HTMLSelectElement>("catalog-project-filter").addEventListener("change", () => this.#render());
@@ -66,6 +64,10 @@ export class DataCatalogPanel {
     byId<HTMLButtonElement>("catalog-form-cancel").addEventListener("click", () => this.#closeCreateDialog());
     byId<HTMLButtonElement>("catalog-dialog-close").addEventListener("click", () => this.#closeCreateDialog());
     byId<HTMLButtonElement>("catalog-new").addEventListener("click", () => this.#startNew());
+    byId<HTMLButtonElement>("catalog-new-connector").addEventListener("click", () => {
+      this.#closeCreateDialog();
+      this.#onNewConnector?.();
+    });
   }
 
   async activate(surveys: SurveyCard[], records: Map<string, SurveyRecord>): Promise<void> {
@@ -74,7 +76,7 @@ export class DataCatalogPanel {
     this.#surveyRecords = records;
     this.#renderSurveyOptions();
     [this.#assets, this.#connectors, this.#tags] = await Promise.all([this.#loadUserAssets(), workspaceApi.connectors(), workspaceApi.tags()]);
-    this.#renderTags();
+    this.#renderCreateConnectors();
     if (!this.#selectedId || !this.#assets.some((asset) => asset.id === this.#selectedId)) this.#selectedId = this.#assets[0]?.id ?? null;
     this.#render();
   }
@@ -164,10 +166,6 @@ export class DataCatalogPanel {
     }));
     byId("catalog-empty").hidden = assets.length > 0;
     byId("catalog-count").textContent = `${assets.length} / ${this.#assets.length}`;
-    const query = inputValue("catalog-search");
-    byId("catalog-search-hint").textContent = query
-      ? `${assets.length} 个资产命中“${query}” · 搜索名称、来源、Tag、路径和 Connector`
-      : `${assets.length} 个资产命中 · 可搜索名称、来源、Tag、路径和 Connector`;
     byId("catalog-user-count").textContent = String(this.#assets.length);
     byId("catalog-ready-count").textContent = String(this.#assets.filter((asset) => asset.status === "ready").length);
     this.#renderInspector();
@@ -186,7 +184,7 @@ export class DataCatalogPanel {
     const note = document.createElement("p");
     note.className = "catalog-detail-copy";
     note.textContent = asset.description || "暂无说明";
-    const basic = this.#detailEditing === "basic" ? this.#basicEditor(asset) : this.#rows([["资产 ID", asset.id], ["来源", asset.origin === "builtin" ? "系统内置" : "用户登记"], ["巡天 / 发布", `${this.#surveyName(this.#effectiveSurveyId(asset))} / ${this.#effectiveReleaseId(asset) ?? "未关联"}`], ["产品 / 类型", `${asset.product} / ${asset.kind}`], ["Tag", this.#tagText(asset.tags ?? asset.modalities) || "未标注"], ["项目阶段", projectStatesLabel(asset)], ["工程状态", statusLabel(asset.status)]]);
+    const basic = this.#detailEditing === "basic" ? this.#basicEditor(asset) : this.#rows([["资产 ID", asset.id], ["来源", asset.origin === "builtin" ? "系统内置" : "用户登记"], ["巡天 / 发布", `${this.#surveyName(this.#effectiveSurveyId(asset))} / ${this.#effectiveReleaseId(asset) ?? "未关联"}`], ["产品 / 类型", `${asset.product} / ${asset.kind}`], ["Tag", this.#tagText(asset.tags ?? asset.modalities) || "未标注"], ["使用阶段", projectStatesLabel(asset)]]);
     const sourceList = this.#detailEditing === "sources" ? this.#sourceEditor(asset) : document.createElement("ul");
     if (this.#detailEditing !== "sources") { (asset.sources ?? []).forEach((source) => { const item = document.createElement("li"); const link = document.createElement("a"); link.href = source.url; link.target = "_blank"; link.rel = "noreferrer"; link.textContent = `${source.label}: ${source.url}`; item.append(link); source.description && item.append(` · ${source.description}`); sourceList.append(item); }); if (!sourceList.childElementCount) sourceList.textContent = "尚未登记公开来源"; }
     const accessList = this.#detailEditing === "access" ? this.#accessEditor(asset) : document.createElement("ul");
@@ -223,29 +221,54 @@ export class DataCatalogPanel {
 
   #tagText(tags: string[]): string { return tags.map((tag) => this.#tagLabel(tag)).join(" · "); }
 
-  #renderTags(selected: string[] = []): void {
-    const root = byId("catalog-tags");
-    root.replaceChildren(...this.#tags.map((tag) => {
+  #renderCreateConnectors(): void {
+    const root = byId("catalog-connector-list");
+    if (!this.#connectors.length) {
+      const empty = document.createElement("p");
+      empty.className = "asset-detail-placeholder";
+      empty.textContent = "请先新建一个 Connector，再登记用户数据。";
+      root.replaceChildren(empty);
+      return;
+    }
+    root.replaceChildren(...this.#connectors.map((connector, index) => {
       const label = document.createElement("label");
-      label.className = "tag-option";
-      const checkbox = document.createElement("input"); checkbox.type = "checkbox"; checkbox.value = tag.id; checkbox.checked = selected.includes(tag.id);
-      const text = document.createElement("span"); text.textContent = tag.label;
-      label.append(checkbox, text); return label;
+      label.className = "connector-option";
+      const radio = document.createElement("input");
+      radio.type = "radio";
+      radio.name = "catalog-connector";
+      radio.value = connector.locationKey;
+      radio.required = index === 0;
+      const copy = document.createElement("span");
+      const name = document.createElement("strong");
+      name.textContent = connector.name;
+      const detail = document.createElement("small");
+      detail.textContent = `${connector.kind} · ${connector.displayPath}`;
+      copy.append(name, detail);
+      label.append(radio, copy);
+      return label;
     }));
   }
 
-  #selectedTags(): string[] { return [...byId("catalog-tags").querySelectorAll<HTMLInputElement>("input:checked")].map((input) => input.value); }
+  #selectedCreateConnectors(): ConnectorPublicRecord[] {
+    const selected = byId("catalog-connector-list").querySelector<HTMLInputElement>("input:checked");
+    const connector = selected ? this.#connectors.find((candidate) => candidate.locationKey === selected.value) : undefined;
+    return connector ? [connector] : [];
+  }
 
   #input(): DataAssetRegistrationInput {
+    const name = inputValue("catalog-name");
+    const connector = this.#selectedCreateConnectors()[0];
+    if (!connector) throw new RangeError("请选择一个 Connector");
     return {
-      name: inputValue("catalog-name"), description: inputValue("catalog-description") || undefined,
+      name, description: inputValue("catalog-description") || undefined,
       surveyId: byId<HTMLSelectElement>("catalog-survey").value || undefined,
       releaseId: byId<HTMLSelectElement>("catalog-release").value || undefined,
-      product: inputValue("catalog-product") || undefined,
+      product: name,
       kind: byId<HTMLSelectElement>("catalog-kind").value as DataAssetKind,
-      tags: this.#selectedTags(), connectorIds: [], connectorLocationKeys: [],
-      status: byId<HTMLSelectElement>("catalog-status-input").value as DataAssetRegistrationInput["status"],
-      projectStates: this.#readProjectStates(),
+      connectorIds: [connector.id],
+      connectorLocationKeys: [connector.locationKey],
+      status: "ready",
+      projectStates: ["deliverable"],
     };
   }
 
@@ -262,9 +285,7 @@ export class DataCatalogPanel {
     byId<HTMLFormElement>("catalog-registration-form").reset();
     this.#renderSurveyOptions();
     byId<HTMLSelectElement>("catalog-kind").value = "catalog";
-    byId<HTMLSelectElement>("catalog-status-input").value = "metadata_only";
-    this.#setProjectStates(["public_reference"]);
-    this.#renderTags();
+    this.#renderCreateConnectors();
     byId("catalog-form-title").textContent = "登记用户数据";
     byId("catalog-form-submit").textContent = "登记数据";
     byId<HTMLDialogElement>("catalog-create-dialog").showModal();
@@ -274,9 +295,7 @@ export class DataCatalogPanel {
     byId<HTMLFormElement>("catalog-registration-form").reset();
     this.#renderSurveyOptions();
     byId<HTMLSelectElement>("catalog-kind").value = "catalog";
-    byId<HTMLSelectElement>("catalog-status-input").value = "metadata_only";
-    this.#setProjectStates(["public_reference"]);
-    this.#renderTags();
+    this.#renderCreateConnectors();
     byId("catalog-form-title").textContent = "登记用户数据";
     byId("catalog-form-submit").textContent = "登记数据";
     const dialog = byId<HTMLDialogElement>("catalog-create-dialog");
@@ -386,6 +405,4 @@ export class DataCatalogPanel {
     return form;
   }
 
-  #setProjectStates(states: DataAssetProjectState[]): void { byId("catalog-project-state-list").querySelectorAll<HTMLInputElement>("input[type=checkbox]").forEach((input) => { input.checked = states.includes(input.value as DataAssetProjectState); }); }
-  #readProjectStates(): DataAssetProjectState[] { const states = [...byId("catalog-project-state-list").querySelectorAll<HTMLInputElement>("input:checked")].map((input) => input.value as DataAssetProjectState); return states.length ? states : ["planned"]; }
 }

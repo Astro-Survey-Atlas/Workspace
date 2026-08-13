@@ -1,6 +1,6 @@
 /// <reference path="./ali-oss.d.ts" />
 
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { access, constants, readFile, stat } from "node:fs/promises";
 import https from "node:https";
 import path from "node:path";
@@ -21,6 +21,8 @@ export interface ConnectorCheck {
   checkedAt: string;
   summary: string;
   detail?: string;
+  /** Hash of the scan-relevant configuration that was actually checked. */
+  configHash?: string;
 }
 
 export interface ConnectorRecord {
@@ -135,6 +137,15 @@ export function connectorDisplayPath(kind: ConnectorKind, config: Record<string,
   return scope ? `${url}/${scope}` : url;
 }
 
+export function connectorConfigurationHash(record: Pick<ConnectorRecord, "kind" | "config" | "credentialRef">): string {
+  const config = Object.fromEntries(Object.entries(record.config).sort(([left], [right]) => left.localeCompare(right)));
+  return createHash("sha256").update(JSON.stringify({ kind: record.kind, config, credentialRef: record.credentialRef ?? null })).digest("hex");
+}
+
+export function hasCurrentSuccessfulConnectorCheck(record: ConnectorRecord): boolean {
+  return record.lastCheck?.status === "ok" && record.lastCheck.configHash === connectorConfigurationHash(record);
+}
+
 function textValue(value: unknown, name: string, maximum: number, required = true): string {
   const result = typeof value === "string" ? value.trim() : "";
   if (required && !result) throw new RangeError(`${name} is required`);
@@ -222,6 +233,8 @@ export class ConnectorRegistry {
       const current = await transaction.getConnectorByLocationKey(locationKey);
       const now = new Date().toISOString();
       if (current) {
+      const credentialRef = value.credentialRef ?? current.credentialRef;
+      const scanConfigurationUnchanged = connectorConfigurationHash(current) === connectorConfigurationHash({ kind: value.kind, config: value.config, credentialRef });
       const updated: ConnectorRecord = {
         ...current,
         name: value.name,
@@ -230,10 +243,11 @@ export class ConnectorRegistry {
         config: value.config,
         surveyId: value.surveyId,
         releaseId: value.releaseId,
-        credentialRef: value.credentialRef ?? current.credentialRef,
+        credentialRef,
         status: value.status ?? current.status,
         locationKey,
         displayPath: connectorDisplayPath(value.kind, value.config),
+        lastCheck: scanConfigurationUnchanged ? current.lastCheck : undefined,
         updatedAt: now,
       };
         await transaction.putConnector(updated);
@@ -269,6 +283,7 @@ export class ConnectorRegistry {
       const locationKey = connectorLocationKey(value.kind, value.config);
       const duplicate = await transaction.getConnectorByLocationKey(locationKey);
       if (duplicate && duplicate.id !== current.id) throw new RangeError(`A connector already exists for path: ${duplicate.displayPath}`);
+      const scanConfigurationUnchanged = connectorConfigurationHash(current) === connectorConfigurationHash({ kind: value.kind, config: value.config, credentialRef: value.credentialRef });
       const updated: ConnectorRecord = {
       ...current,
       name: value.name,
@@ -281,6 +296,7 @@ export class ConnectorRegistry {
       status: value.status ?? current.status,
       locationKey,
       displayPath: connectorDisplayPath(value.kind, value.config),
+      lastCheck: scanConfigurationUnchanged ? current.lastCheck : undefined,
       updatedAt: new Date().toISOString(),
     };
       await transaction.putConnector(updated);
@@ -289,7 +305,17 @@ export class ConnectorRegistry {
   }
 
   async setCredentialReference(id: string, credentialRef: string): Promise<ConnectorRecord> {
-    return this.#updateRecord(id, (current) => ({ ...current, credentialRef: textValue(credentialRef, "credentialRef", 160), updatedAt: new Date().toISOString() }));
+    const value = textValue(credentialRef, "credentialRef", 160);
+    return this.#updateRecord(id, (current) => ({
+      ...current,
+      credentialRef: value,
+      lastCheck: current.credentialRef === value ? current.lastCheck : undefined,
+      updatedAt: new Date().toISOString(),
+    }));
+  }
+
+  async invalidateCheck(id: string): Promise<ConnectorRecord> {
+    return this.#updateRecord(id, (current) => ({ ...current, lastCheck: undefined, updatedAt: new Date().toISOString() }));
   }
 
   async remove(id: string): Promise<void> {
@@ -613,21 +639,24 @@ async function checkJdbc(record: ConnectorRecord): Promise<ConnectorCheck> {
 }
 
 export async function checkConnector(record: ConnectorRecord, credentials?: ConnectorCredentialsInput, requireCredentials = false): Promise<ConnectorCheck> {
+  let result: ConnectorCheck;
   if (record.kind === "local") {
     const checkedAt = new Date().toISOString();
     try {
       const rootPath = record.config.rootPath ?? "";
       await stat(rootPath);
       await access(rootPath, constants.R_OK);
-      return { status: "ok", checkedAt, summary: "Local path exists and is readable" };
+      result = { status: "ok", checkedAt, summary: "Local path exists and is readable" };
     } catch (error) {
-      return { status: "failed", checkedAt, summary: "Local path is not readable", detail: error instanceof Error ? error.message : String(error) };
+      result = { status: "failed", checkedAt, summary: "Local path is not readable", detail: error instanceof Error ? error.message : String(error) };
     }
-  }
-  if (record.kind === "s3") {
+  } else if (record.kind === "s3") {
     const resolved = validateResolvedCredentials(credentials);
-    if (isAlibabaOssEndpoint(cleanEndpoint(record.config.endpoint))) return checkAlibabaOss(record, resolved, requireCredentials);
-    return checkS3(record, resolved, requireCredentials);
+    result = isAlibabaOssEndpoint(cleanEndpoint(record.config.endpoint))
+      ? await checkAlibabaOss(record, resolved, requireCredentials)
+      : await checkS3(record, resolved, requireCredentials);
+  } else {
+    result = await checkJdbc(record);
   }
-  return checkJdbc(record);
+  return { ...result, configHash: connectorConfigurationHash(record) };
 }

@@ -1,4 +1,4 @@
-import type { ConnectorIngestRun } from "../connector-history.js";
+import type { ConnectorIngestRunFilter, ConnectorIngestRunRecord } from "../connector-history.js";
 import type { ConnectorRecord } from "../connectors.js";
 import type { DataAssetRecord } from "../data-catalog.js";
 
@@ -14,9 +14,10 @@ export interface MetadataTransaction {
   putDataAsset(record: DataAssetRecord): Promise<void>;
   deleteDataAsset(id: string): Promise<boolean>;
 
-  listConnectorIngestRuns(locationKey?: string): Promise<ConnectorIngestRun[]>;
-  getConnectorIngestRun(id: string): Promise<ConnectorIngestRun | undefined>;
-  putConnectorIngestRun(record: ConnectorIngestRun): Promise<void>;
+  listConnectorIngestRuns(filter?: ConnectorIngestRunFilter | string): Promise<ConnectorIngestRunRecord[]>;
+  getConnectorIngestRun(id: string): Promise<ConnectorIngestRunRecord | undefined>;
+  createConnectorIngestRun(record: ConnectorIngestRunRecord): Promise<{ record: ConnectorIngestRunRecord; created: boolean }>;
+  putConnectorIngestRun(record: ConnectorIngestRunRecord): Promise<void>;
   deleteConnectorIngestRun(id: string): Promise<boolean>;
 
   getImportMarker(name: string): Promise<string | undefined>;

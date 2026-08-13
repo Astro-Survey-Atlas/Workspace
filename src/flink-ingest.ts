@@ -1,9 +1,9 @@
 import { randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 
-import { listConnectorObjects, type ConnectorRecord } from "./connectors.js";
+import { connectorLocationKey, hasCurrentSuccessfulConnectorCheck, listConnectorObjects, type ConnectorRecord } from "./connectors.js";
 import type { ConnectorCredentialStore, StoredConnectorCredentials } from "./connector-credentials.js";
-import { ConnectorIngestRunCatalog, type ConnectorIngestRun } from "./connector-history.js";
+import { ConnectorIngestRunCatalog, type ConnectorIngestRunRecord, type ConnectorScanTargetSnapshot } from "./connector-history.js";
 import type { DataAssetRecord, DataCatalogRegistry } from "./data-catalog.js";
 import type { ConnectorRegistry } from "./connectors.js";
 import { resolveDataOwnership, type EffectiveDataOwnership } from "./data-ownership.js";
@@ -39,6 +39,31 @@ export interface GenericScanInput {
   };
 }
 
+export type LegacyConnectorScanCommand =
+  | { mode: "pilot" }
+  | { mode: "generic"; input: GenericScanInput };
+
+export function validateConnectorSelfScanBody(body: unknown): void {
+  if (body !== undefined && (typeof body !== "object" || body === null || Array.isArray(body) || Object.keys(body).length > 0)) {
+    throw new RangeError("Connector scan runs do not accept a request body");
+  }
+}
+
+export function parseLegacyConnectorScanCommand(body: unknown): LegacyConnectorScanCommand {
+  if (!body || typeof body !== "object" || Array.isArray(body)) {
+    throw new RangeError("scan mode is required; use POST /api/connectors/:id/scan-runs for a connector self-scan");
+  }
+  const input = body as Partial<GenericScanInput> & { mode?: unknown };
+  if (input.mode === "pilot") return { mode: "pilot" };
+  if (input.mode !== "scan") {
+    if (input.mode === undefined) throw new RangeError("scan mode is required; use POST /api/connectors/:id/scan-runs for a connector self-scan");
+    throw new RangeError("scan mode must be pilot or scan");
+  }
+  if (typeof input.assetId !== "string" || !input.assetId.trim()) throw new RangeError("assetId is required for a legacy generic scan");
+  const { mode: _mode, ...scanInput } = input;
+  return { mode: "generic", input: scanInput as GenericScanInput };
+}
+
 export interface FlinkResourceClient {
   request<T>(method: string, path: string, body?: unknown): Promise<{ status: number; ok: boolean; value?: T; text: string }>;
 }
@@ -47,6 +72,20 @@ export class DataWarehouseDisabledError extends Error {
   constructor() {
     super("Data warehouse is disabled");
     this.name = "DataWarehouseDisabledError";
+  }
+}
+
+export class ConnectorScanCapabilityError extends Error {
+  constructor(kind: ConnectorRecord["kind"]) {
+    super(`Connector scan executor is not implemented for ${kind} connectors`);
+    this.name = "ConnectorScanCapabilityError";
+  }
+}
+
+export class ConnectorScanPreconditionError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "ConnectorScanPreconditionError";
   }
 }
 
@@ -98,14 +137,38 @@ function s3Uri(connector: ConnectorRecord, key: string): string {
   return `s3://${connector.config.bucket}/${key}`;
 }
 
-function scanPath(connector: ConnectorRecord, requested?: string): string {
-  const base = (connector.config.prefix ?? "").replace(/^\/+|\/+$/g, "");
+function cleanS3Value(value: string | undefined): string {
+  return (value ?? "").trim().replace(/^\/+|\/+$/g, "").replace(/\/{2,}/g, "/");
+}
+
+export function connectorScanTarget(connector: ConnectorRecord): ConnectorScanTargetSnapshot {
+  if (connector.kind !== "s3") throw new ConnectorScanCapabilityError(connector.kind);
+  const bucket = cleanS3Value(connector.config.bucket).toLowerCase();
+  const prefix = cleanS3Value(connector.config.prefix);
+  if (!bucket || bucket.includes("/")) throw new RangeError("S3 connector bucket is invalid");
+  if (prefix.split("/").some((segment) => segment === "." || segment === "..")) throw new RangeError("S3 connector prefix cannot contain dot segments");
+  return { uri: connectorLocationKey("s3", { bucket, prefix }), bucket, prefix };
+}
+
+export function connectorScanPath(connector: ConnectorRecord, requested?: string): string {
+  const base = cleanS3Value(connector.config.prefix);
   const raw = (requested ?? base).trim();
   if (!raw) throw new RangeError("scan path is required");
   if (/^s3a?:\/\//i.test(raw)) {
-    const expected = [`s3://${connector.config.bucket}/`, `s3a://${connector.config.bucket}/`].map((value) => value.toLowerCase());
-    if (!expected.some((prefix) => raw.toLowerCase().startsWith(prefix))) throw new RangeError("scan path must stay inside the connector bucket");
-    return raw;
+    const rawPath = raw.replace(/^s3a?:\/\/[^/]+/i, "").split(/[?#]/, 1)[0] ?? "";
+    let decodedRawPath: string;
+    try { decodedRawPath = decodeURIComponent(rawPath); } catch { throw new RangeError("scan path contains invalid escaping"); }
+    if (decodedRawPath.split("/").some((segment) => segment === ".." || segment === ".")) {
+      throw new RangeError("scan path cannot contain dot segments");
+    }
+    let parsed: URL;
+    try { parsed = new URL(raw); } catch { throw new RangeError("scan path must be a valid S3 URI"); }
+    if (parsed.search || parsed.hash || parsed.hostname.toLowerCase() !== cleanS3Value(connector.config.bucket).toLowerCase()) {
+      throw new RangeError("scan path must stay inside the connector bucket");
+    }
+    const key = decodedRawPath.replace(/^\/+/, "");
+    if (base && key !== base && !key.startsWith(`${base}/`)) throw new RangeError("scan path must stay inside the connector prefix");
+    return s3Uri(connector, key);
   }
   const requestedKey = raw.replace(/^\/+/, "");
   if (requestedKey.split("/").some((segment) => segment === ".." || segment === ".")) {
@@ -184,12 +247,12 @@ export class FlinkScanService {
     this.#timer = undefined;
   }
 
-  async submitPilot(connectorId: string): Promise<ConnectorIngestRun[]> {
+  async submitPilot(connectorId: string): Promise<ConnectorIngestRunRecord[]> {
     if (!this.#enabled) throw new DataWarehouseDisabledError();
     if (!this.#client) throw new Error("Flink scan submission is only available inside Kubernetes");
     const connector = await this.#connectors.get(connectorId);
-    if (connector.kind !== "s3") throw new RangeError("Pilot scanning currently supports S3/OSS connectors only");
-    if (connector.status !== "ready" && connector.lastCheck?.status !== "ok") throw new RangeError("Connector must pass connection detection before scanning");
+    if (connector.kind !== "s3") throw new ConnectorScanCapabilityError(connector.kind);
+    this.#assertScannable(connector);
     const stored = connector.credentialRef ? await this.#credentials.get(connector.credentialRef) : undefined;
     if (!stored?.accessKeyId || !stored.secretAccessKey) throw new RangeError("Connector has no saved S3 credentials");
 
@@ -204,7 +267,7 @@ export class FlinkScanService {
     const token = randomUUID().replace(/-/g, "").slice(0, 12);
     const secretName = `astro-scan-${token}`;
     await this.#createSecret(secretName, stored, connector.config.endpoint ?? stored.endpoint, token);
-    const created: ConnectorIngestRun[] = [];
+    const created: ConnectorIngestRunRecord[] = [];
     try {
       for (const entry of selected) {
         const asset = await this.#dataCatalog.get(entry.definition.assetId);
@@ -212,6 +275,12 @@ export class FlinkScanService {
         const taskName = safeName(`euclid-q1-mer-pilot-${entry.definition.key}-${token}`).slice(0, 63).replace(/-+$/g, "");
         const batchId = `workspace-pilot-${token}-${entry.definition.key}`;
         const run = await this.#runs.add(connector.locationKey, {
+          connectorId: connector.id,
+          connectorName: connector.name,
+          connectorKind: connector.kind,
+          executor: "flink-ingest",
+          target: { ...connectorScanTarget(connector), uri: s3Uri(connector, entry.object.key) },
+          assetIds: [asset.id],
           jobId: taskName,
           batchId,
           assetId: asset.id,
@@ -246,12 +315,12 @@ export class FlinkScanService {
     return created;
   }
 
-  async submitScan(connectorId: string, input: GenericScanInput): Promise<ConnectorIngestRun> {
+  async submitScan(connectorId: string, input: GenericScanInput): Promise<ConnectorIngestRunRecord> {
     if (!this.#enabled) throw new DataWarehouseDisabledError();
     if (!this.#client) throw new Error("Flink scan submission is only available inside Kubernetes");
     const connector = await this.#connectors.get(connectorId);
-    if (connector.kind !== "s3") throw new RangeError("Generic scanning currently supports S3/OSS connectors only");
-    if (connector.status !== "ready" && connector.lastCheck?.status !== "ok") throw new RangeError("Connector must pass connection detection before scanning");
+    if (connector.kind !== "s3") throw new ConnectorScanCapabilityError(connector.kind);
+    this.#assertScannable(connector);
     const asset = await this.#dataCatalog.get(input.assetId);
     const ownership = await this.#scanOwnership(asset, connector);
     const spatialMode = input.spatial?.mode ?? "auto";
@@ -267,13 +336,19 @@ export class FlinkScanService {
     }
     const stored = connector.credentialRef ? await this.#credentials.get(connector.credentialRef) : undefined;
     if (!stored?.accessKeyId || !stored.secretAccessKey) throw new RangeError("Connector has no saved S3 credentials");
-    const path = scanPath(connector, input.path);
+    const path = connectorScanPath(connector, input.path);
     const token = randomUUID().replace(/-/g, "").slice(0, 12);
     const secretName = `astro-scan-${token}`;
     const taskName = safeName(`astro-scan-${asset.id}-${token}`).slice(0, 63).replace(/-+$/g, "");
     const batchId = `workspace-scan-${token}`;
     await this.#createSecret(secretName, stored, connector.config.endpoint ?? stored.endpoint, token);
     const run = await this.#runs.add(connector.locationKey, {
+      connectorId: connector.id,
+      connectorName: connector.name,
+      connectorKind: connector.kind,
+      executor: "flink-ingest",
+      target: { ...connectorScanTarget(connector), uri: path },
+      assetIds: [asset.id],
       jobId: taskName,
       batchId,
       assetId: asset.id,
@@ -304,6 +379,60 @@ export class FlinkScanService {
     return (await this.#runs.list(connector.locationKey)).find((candidate) => candidate.id === run.id) ?? run;
   }
 
+  async submitConnectorScan(connectorId: string, idempotencyKey?: string): Promise<ConnectorIngestRunRecord> {
+    const connector = await this.#connectors.get(connectorId);
+    if (connector.status === "disabled") throw new ConnectorScanPreconditionError("Disabled connectors cannot be scanned");
+    if (connector.kind !== "s3") throw new ConnectorScanCapabilityError(connector.kind);
+    this.#assertScannable(connector);
+    if (!this.#enabled) throw new DataWarehouseDisabledError();
+    if (!this.#client) throw new Error("Flink scan submission is only available inside Kubernetes");
+    const stored = connector.credentialRef ? await this.#credentials.get(connector.credentialRef) : undefined;
+    if (!stored?.accessKeyId || !stored.secretAccessKey) throw new ConnectorScanPreconditionError("Connector has no saved S3 credentials");
+    if (idempotencyKey !== undefined) {
+      const existing = await this.#runs.findIdempotent(connector.id, idempotencyKey);
+      if (existing) return existing;
+    }
+
+    const target = connectorScanTarget(connector);
+    const assets = (await this.#dataCatalog.list()).filter((asset) => asset.origin === "user" && this.#isLinkedAsset(asset, connector));
+    const assetIds = [...new Set(assets.map((asset) => asset.id))].sort();
+    const token = randomUUID().replace(/-/g, "").slice(0, 12);
+    const secretName = `astro-scan-${token}`;
+    const taskName = safeName(`astro-connector-scan-${connector.id}-${token}`).slice(0, 63).replace(/-+$/g, "");
+    const batchId = `workspace-connector-scan-${token}`;
+    const created = await this.#runs.create(connector.locationKey, {
+      connectorId: connector.id,
+      connectorName: connector.name,
+      connectorKind: connector.kind,
+      executor: "flink-ingest",
+      target,
+      assetIds,
+      jobId: taskName,
+      batchId,
+      status: "queued",
+      fileCount: 0,
+      sourcePath: target.uri,
+      esIndex: this.#esIndex,
+      secretName,
+    }, idempotencyKey);
+    if (!created.created) return created.run;
+
+    let run = created.run;
+    try {
+      await this.#createSecret(secretName, stored, connector.config.endpoint ?? stored.endpoint, token);
+      await this.#createConnectorTask({ connector, assets, path: target.uri, taskName, batchId, secretName });
+    } catch (error) {
+      run = await this.#runs.update(run.id, {
+        status: "failed",
+        error: error instanceof Error ? error.message : String(error),
+        completedAt: new Date().toISOString(),
+      });
+    }
+    await this.#cleanupSecret(secretName);
+    await this.poll();
+    return (await this.#runs.list({ connectorId: connector.id })).find((candidate) => candidate.id === run.id) ?? run;
+  }
+
   async poll(): Promise<void> {
     if (!this.#enabled || !this.#client || this.#polling) return;
     this.#polling = true;
@@ -321,7 +450,7 @@ export class FlinkScanService {
     }
   }
 
-  async #pollRun(run: ConnectorIngestRun): Promise<void> {
+  async #pollRun(run: ConnectorIngestRunRecord): Promise<void> {
     const result = await this.#client!.request<KubernetesResource>("GET", `${TASK_API}/namespaces/${encodeURIComponent(this.#namespace)}/flinkingesttasks/${encodeURIComponent(run.jobId!)}`);
     if (result.status === 404) return;
     if (!result.ok || !result.value) {
@@ -476,6 +605,86 @@ export class FlinkScanService {
     };
     const result = await this.#client!.request("POST", `${TASK_API}/namespaces/${encodeURIComponent(this.#namespace)}/flinkingesttasks`, body);
     if (!result.ok) throw new Error(`Unable to create FlinkIngestTask (HTTP ${result.status}): ${result.text.slice(0, 240)}`);
+  }
+
+  async #createConnectorTask(input: {
+    connector: ConnectorRecord;
+    assets: DataAssetRecord[];
+    path: string;
+    taskName: string;
+    batchId: string;
+    secretName: string;
+  }): Promise<void> {
+    const { connector, assets, path, taskName, batchId, secretName } = input;
+    const assetIds = [...new Set(assets.map((asset) => asset.id))].sort();
+    const tags = [...new Set(assets.flatMap((asset) => asset.tags ?? asset.modalities))].sort();
+    const modalities = [...new Set(assets.flatMap((asset) => asset.modalities))].sort();
+    const body = {
+      apiVersion: "org.zhejianglab.astro.metadata/v1",
+      kind: "FlinkIngestTask",
+      metadata: {
+        name: taskName,
+        namespace: this.#namespace,
+        labels: {
+          "app.kubernetes.io/managed-by": "astro-data-workspace",
+          "astro.zhejianglab.org/connector": connector.id,
+          "astro.zhejianglab.org/batch": batchId,
+          ...(assetIds.length === 1 ? { "astro.zhejianglab.org/asset": assetIds[0] } : {}),
+        },
+      },
+      spec: {
+        platform: "s3",
+        paths: [path],
+        batchId,
+        jobParallelism: 1,
+        allowedSuffixes: ["*"],
+        activatedHandlers: ["default", "fits", "catalog"],
+        tags,
+        astro: {
+          mode: "file",
+          wcs: "auto",
+          spatialMode: "auto",
+          coordinateFrame: "ICRS",
+          coordinateUnits: "deg",
+          coverageRole: "object_presence",
+          healpixOrder: 8,
+          survey: connector.surveyId ?? "",
+          release: connector.releaseId ?? "",
+          product: assets.length === 1 ? assets[0]!.product : connector.name,
+          modality: modalities.join("+"),
+          assetId: assetIds.length === 1 ? assetIds[0] : "",
+          connectorLocationKey: connector.locationKey,
+        },
+        extraEnvs: {
+          esHost: "warehouse-elasticsearch.warehouse.svc.cluster.local",
+          esPort: 9200,
+          datasetIndex: "datasetindex",
+          astroFileIndex: this.#esIndex,
+        },
+        extraSecret: {
+          name: secretName,
+          namespace: this.#secretNamespace,
+          accessKeyName: "access-key",
+          secretKeyName: "secret-key",
+          endpointKeyName: "s3-endpoint",
+        },
+      },
+    };
+    const result = await this.#client!.request("POST", `${TASK_API}/namespaces/${encodeURIComponent(this.#namespace)}/flinkingesttasks`, body);
+    if (!result.ok) throw new Error(`Unable to create FlinkIngestTask (HTTP ${result.status}): ${result.text.slice(0, 240)}`);
+  }
+
+  #assertScannable(connector: ConnectorRecord): void {
+    if (connector.status === "disabled") throw new ConnectorScanPreconditionError("Disabled connectors cannot be scanned");
+    if (!hasCurrentSuccessfulConnectorCheck(connector)) {
+      throw new ConnectorScanPreconditionError("Connector must have a current successful connection check for its current configuration before scanning");
+    }
+  }
+
+  #isLinkedAsset(asset: DataAssetRecord, connector: ConnectorRecord): boolean {
+    return (asset.connectorIds ?? []).includes(connector.id)
+      || (asset.connectorLocationKeys ?? []).includes(connector.locationKey)
+      || [asset.access, ...(asset.accesses ?? [])].some((access) => access.connectorId === connector.id);
   }
 
   async #scanOwnership(asset: DataAssetRecord, connector: ConnectorRecord): Promise<EffectiveDataOwnership> {

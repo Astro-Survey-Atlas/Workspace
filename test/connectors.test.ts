@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { ConnectorRegistry, connectorLocationKey } from "../src/connectors.js";
+import { ConnectorRegistry, connectorLocationKey, hasCurrentSuccessfulConnectorCheck } from "../src/connectors.js";
 import { SqliteMetadataStore } from "../src/storage/index.js";
 
 async function connectorRegistry(statePath: string, bootstrapPath?: string): Promise<ConnectorRegistry> {
@@ -111,10 +111,30 @@ test("local connector check does not enumerate the directory", async () => {
     const record = await registry.register({ name: "Local", kind: "local", config: { rootPath: directory } });
     const checked = await registry.check(record.id);
     assert.equal(checked.lastCheck?.status, "ok");
+    assert.equal(hasCurrentSuccessfulConnectorCheck(checked), true);
     assert.match(checked.lastCheck?.summary ?? "", /exists/);
     const preview = await registry.checkInput({ name: "Preview", kind: "local", config: { rootPath: directory } });
     assert.equal(preview.status, "ok");
     assert.equal((await registry.list()).length, 1);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("scan-relevant connector edits invalidate a successful check", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "astro-connectors-"));
+  try {
+    const registry = await connectorRegistry(path.join(directory, "connectors.json"));
+    const record = await registry.register({ name: "Local", kind: "local", config: { rootPath: directory } });
+    const checked = await registry.check(record.id);
+    assert.equal(hasCurrentSuccessfulConnectorCheck(checked), true);
+
+    const renamed = await registry.update(record.id, { name: "Renamed", kind: "local", config: { rootPath: directory } });
+    assert.equal(hasCurrentSuccessfulConnectorCheck(renamed), true);
+
+    const edited = await registry.update(record.id, { name: "Renamed", kind: "local", config: { rootPath: path.join(directory, "other") } });
+    assert.equal(edited.lastCheck, undefined);
+    assert.equal(hasCurrentSuccessfulConnectorCheck(edited), false);
   } finally {
     await rm(directory, { recursive: true, force: true });
   }

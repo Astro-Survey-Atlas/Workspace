@@ -2,7 +2,7 @@ import { mkdir } from "node:fs/promises";
 import path from "node:path";
 import { DatabaseSync, type StatementSync } from "node:sqlite";
 
-import type { ConnectorIngestRun } from "../connector-history.js";
+import type { ConnectorIngestRunFilter, ConnectorIngestRunRecord } from "../connector-history.js";
 import type { ConnectorRecord } from "../connectors.js";
 import type { DataAssetRecord } from "../data-catalog.js";
 import { assertPersistableDataAsset, type MetadataStore, type MetadataTransaction } from "./types.js";
@@ -49,6 +49,21 @@ const MIGRATIONS = [{
     ) STRICT;
     CREATE INDEX connector_ingest_runs_location_created_idx
       ON connector_ingest_runs(location_key, created_at DESC);
+  `,
+}, {
+  version: 2,
+  sql: `
+    ALTER TABLE connector_ingest_runs ADD COLUMN connector_id TEXT;
+    ALTER TABLE connector_ingest_runs ADD COLUMN connector_kind TEXT
+      CHECK (connector_kind IS NULL OR connector_kind IN ('s3', 'local', 'jdbc'));
+    ALTER TABLE connector_ingest_runs ADD COLUMN idempotency_key_hash TEXT;
+    CREATE INDEX connector_ingest_runs_connector_created_idx
+      ON connector_ingest_runs(connector_id, created_at DESC);
+    CREATE INDEX connector_ingest_runs_kind_created_idx
+      ON connector_ingest_runs(connector_kind, created_at DESC);
+    CREATE UNIQUE INDEX connector_ingest_runs_idempotency_idx
+      ON connector_ingest_runs(connector_id, idempotency_key_hash)
+      WHERE connector_id IS NOT NULL AND idempotency_key_hash IS NOT NULL;
   `,
 }];
 
@@ -102,22 +117,39 @@ class SqliteTransaction implements MetadataTransaction {
     return this.database.prepare("DELETE FROM data_assets WHERE id = ?").run(id).changes > 0;
   }
 
-  async listConnectorIngestRuns(locationKey?: string): Promise<ConnectorIngestRun[]> {
-    return locationKey === undefined
-      ? this.records<ConnectorIngestRun>("SELECT record FROM connector_ingest_runs ORDER BY created_at DESC, id DESC")
-      : this.records<ConnectorIngestRun>("SELECT record FROM connector_ingest_runs WHERE location_key = ? ORDER BY created_at DESC, id DESC", locationKey);
+  async listConnectorIngestRuns(value: ConnectorIngestRunFilter | string = {}): Promise<ConnectorIngestRunRecord[]> {
+    const filter = typeof value === "string" ? { locationKey: value } : value;
+    const clauses: string[] = [];
+    const parameters: string[] = [];
+    if (filter.locationKey !== undefined) { clauses.push("location_key = ?"); parameters.push(filter.locationKey); }
+    if (filter.connectorId !== undefined) { clauses.push("connector_id = ?"); parameters.push(filter.connectorId); }
+    if (filter.connectorKind !== undefined) { clauses.push("connector_kind = ?"); parameters.push(filter.connectorKind); }
+    if (filter.status !== undefined) { clauses.push("status = ?"); parameters.push(filter.status); }
+    const where = clauses.length ? ` WHERE ${clauses.join(" AND ")}` : "";
+    return this.records<ConnectorIngestRunRecord>(`SELECT record FROM connector_ingest_runs${where} ORDER BY created_at DESC, id DESC`, ...parameters);
   }
 
-  async getConnectorIngestRun(id: string): Promise<ConnectorIngestRun | undefined> {
-    return this.record<ConnectorIngestRun>("SELECT record FROM connector_ingest_runs WHERE id = ?", id);
+  async getConnectorIngestRun(id: string): Promise<ConnectorIngestRunRecord | undefined> {
+    return this.record<ConnectorIngestRunRecord>("SELECT record FROM connector_ingest_runs WHERE id = ?", id);
   }
 
-  async putConnectorIngestRun(record: ConnectorIngestRun): Promise<void> {
-    this.database.prepare(`INSERT INTO connector_ingest_runs (id, location_key, status, created_at, record)
-      VALUES (?, ?, ?, ?, ?)
+  async createConnectorIngestRun(record: ConnectorIngestRunRecord): Promise<{ record: ConnectorIngestRunRecord; created: boolean }> {
+    if (record.connectorId && record.idempotencyKeyHash) {
+      const current = this.record<ConnectorIngestRunRecord>("SELECT record FROM connector_ingest_runs WHERE connector_id = ? AND idempotency_key_hash = ?", record.connectorId, record.idempotencyKeyHash);
+      if (current) return { record: current, created: false };
+    }
+    await this.putConnectorIngestRun(record);
+    return { record, created: true };
+  }
+
+  async putConnectorIngestRun(record: ConnectorIngestRunRecord): Promise<void> {
+    this.database.prepare(`INSERT INTO connector_ingest_runs (id, location_key, connector_id, connector_kind, idempotency_key_hash, status, created_at, record)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT (id) DO UPDATE SET location_key = excluded.location_key, status = excluded.status,
-        created_at = excluded.created_at, record = excluded.record`)
-      .run(record.id, record.locationKey, record.status, record.createdAt, JSON.stringify(record));
+        connector_id = excluded.connector_id, connector_kind = excluded.connector_kind,
+        idempotency_key_hash = excluded.idempotency_key_hash, created_at = excluded.created_at, record = excluded.record`)
+      .run(record.id, record.locationKey, record.connectorId ?? null, record.connectorKind ?? null,
+        record.idempotencyKeyHash ?? null, record.status, record.createdAt, JSON.stringify(record));
   }
 
   async deleteConnectorIngestRun(id: string): Promise<boolean> {
@@ -219,9 +251,10 @@ export class SqliteMetadataStore implements MetadataStore {
   getDataAsset = (id: string) => this.read((transaction) => transaction.getDataAsset(id));
   putDataAsset = (record: DataAssetRecord) => this.transaction((transaction) => transaction.putDataAsset(record));
   deleteDataAsset = (id: string) => this.transaction((transaction) => transaction.deleteDataAsset(id));
-  listConnectorIngestRuns = (locationKey?: string) => this.read((transaction) => transaction.listConnectorIngestRuns(locationKey));
+  listConnectorIngestRuns = (filter?: ConnectorIngestRunFilter | string) => this.read((transaction) => transaction.listConnectorIngestRuns(filter));
   getConnectorIngestRun = (id: string) => this.read((transaction) => transaction.getConnectorIngestRun(id));
-  putConnectorIngestRun = (record: ConnectorIngestRun) => this.transaction((transaction) => transaction.putConnectorIngestRun(record));
+  createConnectorIngestRun = (record: ConnectorIngestRunRecord) => this.transaction((transaction) => transaction.createConnectorIngestRun(record));
+  putConnectorIngestRun = (record: ConnectorIngestRunRecord) => this.transaction((transaction) => transaction.putConnectorIngestRun(record));
   deleteConnectorIngestRun = (id: string) => this.transaction((transaction) => transaction.deleteConnectorIngestRun(id));
   getImportMarker = (name: string) => this.read((transaction) => transaction.getImportMarker(name));
   setImportMarker = (name: string, value: string) => this.transaction((transaction) => transaction.setImportMarker(name, value));

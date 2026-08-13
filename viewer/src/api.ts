@@ -54,7 +54,6 @@ import type { AgentSession, ToolDescriptor, WorkflowDefinition, WorkflowRun } fr
 import type { DataAssetRecord, DataAssetRegistrationInput } from "../../src/data-catalog";
 import type { ConnectorCheck, ConnectorCheckInput, ConnectorPublicRecord, ConnectorRegistrationInput } from "../../src/connectors";
 import type { ConnectorIngestRun, ConnectorIngestRunInput } from "../../src/connector-history";
-import type { GenericScanInput } from "../../src/flink-ingest";
 import type { TagDefinition } from "../../src/tags";
 import type { SurveyCard, SurveyRecord, SurveyRegistrationInput } from "../../src/survey-registry";
 import type { SurveyFootprintManifest } from "../../src/survey-footprints";
@@ -67,6 +66,8 @@ export interface WorkspaceCapabilities {
   dataWarehouse: { enabled: boolean };
   metadataStore: { engine: string };
 }
+
+export type ConnectorScanRun = ConnectorIngestRun;
 
 async function getJson<T>(url: string): Promise<T> {
   const response = await fetch(url, { headers: { Accept: "application/json" } });
@@ -171,17 +172,14 @@ export const workspaceApi = {
   async checkConnectorInput(input: ConnectorCheckInput): Promise<ConnectorCheck> {
     return (await postJson<{ check: ConnectorCheck }>("/api/connectors/check", input)).check;
   },
-  async connectorRuns(id: string): Promise<ConnectorIngestRun[]> {
-    return (await getJson<{ runs: ConnectorIngestRun[] }>(`/api/connectors/${encodeURIComponent(id)}/ingest-runs`)).runs;
+  async connectorRuns(id: string): Promise<ConnectorScanRun[]> {
+    return (await getJson<{ runs: ConnectorScanRun[] }>(`/api/connectors/${encodeURIComponent(id)}/ingest-runs`)).runs;
   },
-  async connectorIngestRuns(): Promise<ConnectorIngestRun[]> {
-    return (await getJson<{ runs: ConnectorIngestRun[] }>('/api/connector-ingest-runs')).runs;
+  async connectorIngestRuns(): Promise<ConnectorScanRun[]> {
+    return (await getJson<{ runs: ConnectorScanRun[] }>("/api/connector-ingest-runs")).runs;
   },
-  async submitConnectorPilotScan(id: string): Promise<ConnectorIngestRun[]> {
-    return (await postJson<{ runs: ConnectorIngestRun[] }>(`/api/connectors/${encodeURIComponent(id)}/scans`, { mode: "pilot" })).runs;
-  },
-  async submitConnectorScan(id: string, input: GenericScanInput): Promise<ConnectorIngestRun> {
-    return (await postJson<{ run: ConnectorIngestRun }>(`/api/connectors/${encodeURIComponent(id)}/scans`, { mode: "scan", ...input })).run;
+  async executeConnectorScan(id: string): Promise<ConnectorScanRun> {
+    return (await postJson<{ run: ConnectorScanRun }>(`/api/connectors/${encodeURIComponent(id)}/scan-runs`, {})).run;
   },
   async addConnectorRun(id: string, input: ConnectorIngestRunInput): Promise<ConnectorIngestRun> {
     return (await postJson<{ run: ConnectorIngestRun }>(`/api/connectors/${encodeURIComponent(id)}/ingest-runs`, input)).run;
