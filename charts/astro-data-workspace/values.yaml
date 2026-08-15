@@ -1,5 +1,11 @@
 replicaCount: 1
 
+# Bitnami moved Elasticsearch images to the legacy registry. The bundled
+# dependency intentionally uses that image and must opt into the chart check.
+global:
+  security:
+    allowInsecureImages: true
+
 image:
   repository: crpi-wixjy6gci86ms14e.cn-hongkong.personal.cr.aliyuncs.com/ay-dev/astro-data-workspace-mcp
   tag: "0.10.38-20260812062146"
@@ -36,6 +42,47 @@ persistence:
   size: 1Gi
   existingClaim: ""
 
+# Local connector data is opt-in. The service sees one controlled parent
+# directory and never receives a writable local-data mount.
+localData:
+  enabled: false
+  existingClaim: ""
+  nfs:
+    server: ""
+    path: ""
+  hostPath:
+    path: ""
+    type: Directory
+  nodeSelector: {}
+
+# Search is required independently of the optional data warehouse. In external
+# mode, the Secret value is the complete Elasticsearch base URL, including any
+# URL-encoded basic-auth credentials.
+search:
+  mode: bundled
+  localScanEnabled: true
+  index:
+    file: astro_file_index_v1
+    object: astro_object_index_v1
+    coverage: astro_coverage_index_v1
+  external:
+    existingSecret: ""
+    existingSecretKey: elasticsearch-url
+  initJob:
+    image:
+      repository: curlimages/curl
+      tag: "8.14.1"
+      pullPolicy: IfNotPresent
+    maxAttempts: 60
+    retryIntervalSeconds: 5
+    resources:
+      requests:
+        cpu: 10m
+        memory: 32Mi
+      limits:
+        cpu: 100m
+        memory: 64Mi
+
 metadataStore:
   mode: sqlite
   sqlite:
@@ -48,9 +95,6 @@ dataWarehouse:
   enabled: false
   namespace: warehouse
   pollIntervalMs: 5000
-  elasticsearch:
-    url: ""
-    index: astro_file_index_v1
 
 env: []
 resources:
@@ -72,6 +116,66 @@ postgresql:
     existingSecret: ""
     secretKeys:
       userPasswordKey: password
+
+# Optional dependency selected by search.mode through the strict
+# elasticsearch.enabled guard. Its PVC is separate from workspace state.
+elasticsearch:
+  enabled: true
+  nameOverride: ""
+  fullnameOverride: ""
+  clusterName: astro-search
+  image:
+    registry: docker.io
+    repository: bitnamilegacy/elasticsearch
+    tag: 8.18.0-debian-12-r2
+    pullPolicy: IfNotPresent
+  security:
+    enabled: false
+  extraConfig:
+    node:
+      store:
+        allow_mmap: false
+  master:
+    masterOnly: false
+    replicaCount: 1
+    pdb:
+      create: false
+    heapSize: 512m
+    resourcesPreset: none
+    resources:
+      requests:
+        cpu: 250m
+        memory: 768Mi
+      limits:
+        cpu: "1"
+        memory: 1Gi
+    persistence:
+      enabled: true
+      storageClass: ""
+      existingClaim: ""
+      accessModes:
+        - ReadWriteOnce
+      size: 20Gi
+    networkPolicy:
+      enabled: false
+    startupProbe:
+      enabled: true
+      initialDelaySeconds: 10
+      periodSeconds: 10
+      timeoutSeconds: 5
+      successThreshold: 1
+      failureThreshold: 30
+  data:
+    replicaCount: 0
+  coordinating:
+    replicaCount: 0
+  ingest:
+    enabled: false
+    replicaCount: 0
+  sysctlImage:
+    enabled: false
+  volumePermissions:
+    enabled: false
 
 podSecurityContext:
   fsGroup: 10001

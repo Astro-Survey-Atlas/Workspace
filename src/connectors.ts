@@ -1,7 +1,7 @@
 /// <reference path="./ali-oss.d.ts" />
 
 import { createHash, randomUUID } from "node:crypto";
-import { access, constants, readFile, stat } from "node:fs/promises";
+import { readFile } from "node:fs/promises";
 import https from "node:https";
 import path from "node:path";
 import net from "node:net";
@@ -9,6 +9,7 @@ import net from "node:net";
 import { HeadBucketCommand, ListObjectsV2Command, S3Client } from "@aws-sdk/client-s3";
 import OSS from "ali-oss";
 
+import { LocalConnectorRootsPolicy, localConnectorPolicyMessage, type LocalConnectorRootInfo } from "./local-connector-roots.js";
 import type { MetadataStore, MetadataTransaction } from "./storage/types.js";
 
 export type ConnectorKind = "s3" | "local" | "jdbc";
@@ -83,6 +84,8 @@ export interface ConnectorCheckInput extends ConnectorRegistrationInput {
 
 export interface ConnectorCheckRequest {}
 
+export type { LocalConnectorRootDescriptor, LocalConnectorRootInfo } from "./local-connector-roots.js";
+
 export interface ConnectorObject {
   key: string;
   size: number;
@@ -106,6 +109,20 @@ function cleanEndpoint(value: string | undefined): string {
   return (value ?? "").trim().replace(/\/+$/, "");
 }
 
+function sqliteContainerPath(url: string): string {
+  const filename = url.slice("jdbc:sqlite:".length).trim();
+  if (!filename || filename.startsWith("file:") || !path.isAbsolute(filename)) {
+    throw new RangeError("config.url SQLite path must be an absolute container path");
+  }
+  return filename;
+}
+
+function localContainerPath(value: string): string {
+  const trimmed = value.trim();
+  if (!path.isAbsolute(trimmed)) throw new RangeError("Local connector path must be an absolute container path");
+  return path.normalize(trimmed);
+}
+
 /** Return the stable location identity used for connector upserts. */
 export function connectorLocationKey(kind: ConnectorKind, config: Record<string, string>): string {
   if (kind === "s3") {
@@ -114,8 +131,7 @@ export function connectorLocationKey(kind: ConnectorKind, config: Record<string,
     return `s3://${bucket}${prefix ? `/${prefix}` : ""}`;
   }
   if (kind === "local") {
-    const root = path.normalize(path.resolve(config.rootPath ?? ""));
-    return `local://${root}`;
+    return `local://${localContainerPath(config.rootPath ?? "")}`;
   }
   const url = (config.url ?? "").trim().replace(/\/+$/, "");
   const database = (config.database ?? "").trim();
@@ -131,7 +147,7 @@ export function connectorDisplayPath(kind: ConnectorKind, config: Record<string,
     const pathValue = `${bucket}${prefix ? `/${prefix}` : ""}`;
     return endpoint ? `${endpoint}/${pathValue}` : `s3://${pathValue}`;
   }
-  if (kind === "local") return path.normalize(path.resolve(config.rootPath ?? ""));
+  if (kind === "local") return localContainerPath(config.rootPath ?? "");
   const url = (config.url ?? "").trim();
   const scope = [config.database?.trim(), config.schema?.trim()].filter(Boolean).join("/");
   return scope ? `${url}/${scope}` : url;
@@ -167,6 +183,16 @@ export function validateConnectorInput(input: ConnectorRegistrationInput): Conne
   for (const key of REQUIRED_CONFIG[value.kind as ConnectorKind]) {
     if (!config[key]) throw new RangeError(`config.${key} is required`);
   }
+  if (value.kind === "local" && !path.isAbsolute(config.rootPath ?? "")) {
+    throw new RangeError("config.rootPath must be an absolute container path");
+  }
+  if (value.kind === "local") {
+    config.rootPath = localContainerPath(config.rootPath!);
+  }
+  if (value.kind === "jdbc" && config.url?.startsWith("jdbc:sqlite:")) {
+    const sqlitePath = sqliteContainerPath(config.url);
+    config.url = `jdbc:sqlite:${path.normalize(sqlitePath)}`;
+  }
   const surveyId = textValue(value.surveyId, "surveyId", 120, false) || undefined;
   const releaseId = textValue(value.releaseId, "releaseId", 120, false) || undefined;
   if (releaseId && !surveyId) throw new RangeError("releaseId requires surveyId");
@@ -196,11 +222,13 @@ function validateResolvedCredentials(input: unknown): ResolvedConnectorCredentia
 export class ConnectorRegistry {
   readonly #store: MetadataStore;
   readonly #bootstrapPath?: string;
+  readonly #localRoots: LocalConnectorRootsPolicy;
   #legacyAliases = new Map<string, string>();
 
-  constructor(store: MetadataStore, bootstrapPath?: string) {
+  constructor(store: MetadataStore, bootstrapPath?: string, localRoots = LocalConnectorRootsPolicy.fromEnvironment()) {
     this.#store = store;
     this.#bootstrapPath = bootstrapPath;
+    this.#localRoots = localRoots;
   }
 
   async initialize(): Promise<void> {
@@ -220,6 +248,10 @@ export class ConnectorRegistry {
     return (await this.#store.listConnectors()).map((record) => structuredClone(record));
   }
 
+  async listLocalRoots(): Promise<LocalConnectorRootInfo[]> {
+    return this.#localRoots.list();
+  }
+
   async get(id: string): Promise<ConnectorRecord> {
     const record = await this.#store.getConnector(this.#legacyAliases.get(id) ?? id);
     if (!record) throw new Error(`Connector not found: ${id}`);
@@ -228,6 +260,7 @@ export class ConnectorRegistry {
 
   async register(input: ConnectorRegistrationInput): Promise<ConnectorRecord> {
     const value = validateConnectorInput(input);
+    this.#assertLocalConfiguration(value);
     const locationKey = connectorLocationKey(value.kind, value.config);
     return this.#store.transaction(async (transaction) => {
       const current = await transaction.getConnectorByLocationKey(locationKey);
@@ -276,6 +309,7 @@ export class ConnectorRegistry {
 
   async update(id: string, input: ConnectorRegistrationInput): Promise<ConnectorRecord> {
     const value = validateConnectorInput(input);
+    this.#assertLocalConfiguration(value);
     return this.#store.transaction(async (transaction) => {
       const resolvedId = this.#legacyAliases.get(id) ?? id;
       const current = await transaction.getConnector(resolvedId);
@@ -325,7 +359,7 @@ export class ConnectorRegistry {
 
   async check(id: string, credentials?: ConnectorCredentialsInput, requireCredentials = false): Promise<ConnectorRecord> {
     const current = await this.get(id);
-    const result = await checkConnector(current, validateResolvedCredentials(credentials), requireCredentials);
+    const result = await checkConnector(current, validateResolvedCredentials(credentials), requireCredentials, this.#localRoots);
     return this.#updateRecord(id, (latest) => ({ ...latest, lastCheck: result, updatedAt: new Date().toISOString() }));
   }
 
@@ -348,7 +382,17 @@ export class ConnectorRegistry {
       createdAt: now,
       updatedAt: now,
       origin: "user",
-    }, credentials, value.kind === "s3");
+    }, credentials, value.kind === "s3", this.#localRoots);
+  }
+
+  #assertLocalConfiguration(input: ConnectorRegistrationInput): void {
+    if (input.kind === "local") {
+      this.#localRoots.assertConfiguredPath(input.config.rootPath ?? "");
+      return;
+    }
+    if (input.kind === "jdbc" && input.config.url?.startsWith("jdbc:sqlite:")) {
+      this.#localRoots.assertConfiguredPath(sqliteContainerPath(input.config.url));
+    }
   }
 
   async #loadLegacyAliases(): Promise<void> {
@@ -393,8 +437,9 @@ export function normalizeConnectorRecords(entries: unknown[]): ConnectorRecord[]
     if (!candidate.kind || !CONNECTOR_KINDS.includes(candidate.kind) || !candidate.config || typeof candidate.config !== "object" || Array.isArray(candidate.config)) {
       throw new Error("connector state contains an invalid record");
     }
-    const config = Object.fromEntries(Object.entries(candidate.config as Record<string, unknown>).filter(([key, value]) => typeof value === "string" && !SECRET_CONFIG_KEY.test(key))) as Record<string, string>;
-    validateConnectorInput({ name: candidate.name || connectorLocationKey(candidate.kind, config), kind: candidate.kind, config, surveyId: candidate.surveyId, releaseId: candidate.releaseId, status: candidate.status });
+    const rawConfig = Object.fromEntries(Object.entries(candidate.config as Record<string, unknown>).filter(([key, value]) => typeof value === "string" && !SECRET_CONFIG_KEY.test(key))) as Record<string, string>;
+    const validated = validateConnectorInput({ name: candidate.name || connectorLocationKey(candidate.kind, rawConfig), kind: candidate.kind, config: rawConfig, surveyId: candidate.surveyId, releaseId: candidate.releaseId, status: candidate.status });
+    const config = validated.config;
     const locationKey = connectorLocationKey(candidate.kind, config);
     if (records.some((record) => record.locationKey === locationKey)) continue;
     records.push({
@@ -612,17 +657,19 @@ async function checkAlibabaOss(record: ConnectorRecord, credentials: ResolvedCon
   }
 }
 
-async function checkJdbc(record: ConnectorRecord): Promise<ConnectorCheck> {
+async function checkJdbc(record: ConnectorRecord, localRoots: LocalConnectorRootsPolicy): Promise<ConnectorCheck> {
   const rawUrl = record.config.url ?? "";
   const checkedAt = new Date().toISOString();
   if (rawUrl.startsWith("jdbc:sqlite:")) {
-    const filename = rawUrl.slice("jdbc:sqlite:".length);
+    let filename: string;
     try {
-      await stat(filename);
-      return { status: "ok", checkedAt, summary: "SQLite database file is readable" };
+      filename = sqliteContainerPath(rawUrl);
     } catch (error) {
-      return { status: "failed", checkedAt, summary: "SQLite database file is not readable", detail: error instanceof Error ? error.message : String(error) };
+      return { status: "failed", checkedAt, summary: error instanceof Error ? error.message : "SQLite database path is invalid" };
     }
+    const pathCheck = await localRoots.checkFile(filename);
+    if (pathCheck.ok) return { status: "ok", checkedAt, summary: "SQLite database file is readable" };
+    return { status: "failed", checkedAt, summary: localConnectorPolicyMessage(pathCheck.failure) };
   }
   let parsed: URL;
   try { parsed = new URL(rawUrl.replace(/^jdbc:/, "")); } catch { return { status: "failed", checkedAt, summary: "JDBC URL is invalid" }; }
@@ -638,25 +685,26 @@ async function checkJdbc(record: ConnectorRecord): Promise<ConnectorCheck> {
   });
 }
 
-export async function checkConnector(record: ConnectorRecord, credentials?: ConnectorCredentialsInput, requireCredentials = false): Promise<ConnectorCheck> {
+export async function checkConnector(
+  record: ConnectorRecord,
+  credentials?: ConnectorCredentialsInput,
+  requireCredentials = false,
+  localRoots = LocalConnectorRootsPolicy.fromEnvironment(),
+): Promise<ConnectorCheck> {
   let result: ConnectorCheck;
   if (record.kind === "local") {
     const checkedAt = new Date().toISOString();
-    try {
-      const rootPath = record.config.rootPath ?? "";
-      await stat(rootPath);
-      await access(rootPath, constants.R_OK);
-      result = { status: "ok", checkedAt, summary: "Local path exists and is readable" };
-    } catch (error) {
-      result = { status: "failed", checkedAt, summary: "Local path is not readable", detail: error instanceof Error ? error.message : String(error) };
-    }
+    const pathCheck = await localRoots.checkDirectory(record.config.rootPath ?? "");
+    result = pathCheck.ok
+      ? { status: "ok", checkedAt, summary: "Local path exists and is readable" }
+      : { status: "failed", checkedAt, summary: localConnectorPolicyMessage(pathCheck.failure) };
   } else if (record.kind === "s3") {
     const resolved = validateResolvedCredentials(credentials);
     result = isAlibabaOssEndpoint(cleanEndpoint(record.config.endpoint))
       ? await checkAlibabaOss(record, resolved, requireCredentials)
       : await checkS3(record, resolved, requireCredentials);
   } else {
-    result = await checkJdbc(record);
+    result = await checkJdbc(record, localRoots);
   }
   return { ...result, configHash: connectorConfigurationHash(record) };
 }

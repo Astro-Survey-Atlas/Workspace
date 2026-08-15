@@ -1,0 +1,54 @@
+services:
+  workspace:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: astro-data-workspace:local
+    user: "10001:10001"
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    environment:
+      HOST: 0.0.0.0
+      PORT: "3000"
+      ASTRO_DATA_WAREHOUSE_ENABLED: "false"
+      ASTRO_LOCAL_SCAN_ENABLED: "false"
+      ASTRO_METADATA_STORE: sqlite
+      ASTRO_SQLITE_PATH: /state/workspace.sqlite
+      ASTRO_WORKSPACE_STATE: /state/registry.json
+      ASTRO_DATA_CATALOG_STATE: /state/data-catalog.json
+      ASTRO_SURVEY_REGISTRY_STATE: /state/survey-registrations.json
+      ASTRO_MANUAL_FOOTPRINT_STATE: /state/manual-footprints.json
+      ASTRO_CONNECTOR_STATE: /state/connectors.json
+      ASTRO_CONNECTOR_RUN_STATE: /state/connector-ingest-runs.json
+      ASTRO_CONNECTOR_BOOTSTRAP: /app/bootstrap/connectors.json
+      ASTRO_ALLOWED_ROOTS: /state
+      ASTRO_WORKFLOW_ROOT: /state/workflow-runs
+      ASTRO_RESOURCE_PACKAGE_ROOT: /state/resource-packages
+      ASTRO_RESOURCE_PACKAGE_STATE: /state/resource-package-state.json
+    ports:
+      - "${ASTRO_PORT:-3000}:3000"
+    volumes:
+      - type: volume
+        source: state
+        target: /state
+    tmpfs:
+      - /tmp
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - >-
+          fetch("http://127.0.0.1:3000/healthz").then((response) =>
+          process.exit(response.ok ? 0 : 1)).catch(() => process.exit(1))
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+
+volumes:
+  state:
+    name: astro-data-workspace-state

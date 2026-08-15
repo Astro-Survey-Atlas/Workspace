@@ -5,7 +5,7 @@ import path from "node:path";
 import test from "node:test";
 
 import { ManualFootprintRegistry, ManualFootprintRevisionError } from "../src/manual-footprints.js";
-import { CURATED_SURVEYS } from "../src/survey-registry.js";
+import { CURATED_SURVEYS, SurveyRegistry } from "../src/survey-registry.js";
 
 const input = {
   surveyId: "euclid",
@@ -83,7 +83,7 @@ test("strict input, curated references, registered products, and publish conflic
   const { directory, registry } = await fixture();
   try {
     await assert.rejects(() => registry.create({ ...input, extra: true }), /unknown field/);
-    await assert.rejects(() => registry.create({ ...input, releaseId: "euclid-dr1" }), /available curated release/);
+    await assert.rejects(() => registry.create({ ...input, releaseId: "euclid-dr1" }), /non-planned registered release/);
     await assert.rejects(() => registry.create({ ...input, product: "unknown" }), /not registered/);
     await assert.rejects(() => registry.create({ ...input, sourceUrl: "http:\/\/example.test" }), /HTTPS/);
     const draft = await registry.create(input);
@@ -111,6 +111,45 @@ test("products listed only in release-products are valid references", async () =
     await registry.initialize();
     const record = await registry.create({ ...input, product: "Q1 deep fields" });
     assert.equal(record.product, "Q1 deep fields");
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("dynamic survey resolution accepts user releases added after construction", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "manual-footprints-user-release-"));
+  try {
+    const surveys = new SurveyRegistry(path.join(directory, "surveys.json"));
+    await surveys.initialize();
+    await surveys.register({
+      id: "user-survey",
+      name: "User Survey",
+      sourceUrl: "https://example.test/user-survey",
+      modalities: ["catalog"],
+    });
+    const registry = new ManualFootprintRegistry({
+      statePath: path.join(directory, "footprints.json"),
+      resolveSurvey: (surveyId) => {
+        try { return surveys.get(surveyId); } catch { return undefined; }
+      },
+    });
+    await registry.initialize();
+    await surveys.addRelease("user-survey", {
+      id: "user-survey-r1",
+      label: "R1",
+      kind: "public_release",
+      availability: "available",
+      modalities: ["catalog"],
+      products: [{ name: "User catalog", modality: "catalog", description: "User-provided source catalog." }],
+      coverage: { status: "pending", summary: "Pending manual footprint.", sourceUrl: "https://example.test/user-survey/r1" },
+    });
+    const created = await registry.create({
+      ...input,
+      surveyId: "user-survey",
+      releaseId: "user-survey-r1",
+      product: "User catalog",
+    });
+    assert.equal(created.surveyId, "user-survey");
   } finally {
     await rm(directory, { recursive: true, force: true });
   }

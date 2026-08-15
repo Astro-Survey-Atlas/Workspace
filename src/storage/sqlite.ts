@@ -57,6 +57,10 @@ const MIGRATIONS = [{
     ALTER TABLE connector_ingest_runs ADD COLUMN connector_kind TEXT
       CHECK (connector_kind IS NULL OR connector_kind IN ('s3', 'local', 'jdbc'));
     ALTER TABLE connector_ingest_runs ADD COLUMN idempotency_key_hash TEXT;
+    UPDATE connector_ingest_runs SET
+      connector_id = json_extract(record, '$.connectorId'),
+      connector_kind = json_extract(record, '$.connectorKind'),
+      idempotency_key_hash = json_extract(record, '$.idempotencyKeyHash');
     CREATE INDEX connector_ingest_runs_connector_created_idx
       ON connector_ingest_runs(connector_id, created_at DESC);
     CREATE INDEX connector_ingest_runs_kind_created_idx

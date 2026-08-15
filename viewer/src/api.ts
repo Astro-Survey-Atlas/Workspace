@@ -51,23 +51,106 @@ export interface SkyPoint {
 }
 
 import type { AgentSession, ToolDescriptor, WorkflowDefinition, WorkflowRun } from "../../src/workflow";
-import type { DataAssetRecord, DataAssetRegistrationInput } from "../../src/data-catalog";
+import type { DataAssetRecord as CoreDataAssetRecord, DataAssetRegistrationInput as CoreDataAssetRegistrationInput } from "../../src/data-catalog";
 import type { ConnectorCheck, ConnectorCheckInput, ConnectorPublicRecord, ConnectorRegistrationInput } from "../../src/connectors";
 import type { ConnectorIngestRun, ConnectorIngestRunInput } from "../../src/connector-history";
 import type { TagDefinition } from "../../src/tags";
-import type { SurveyCard, SurveyRecord, SurveyRegistrationInput } from "../../src/survey-registry";
+import type { ReleaseAvailability, ReleaseKind, SurveyCard, SurveyModality, SurveyRecord, SurveyRegistrationInput } from "../../src/survey-registry";
 import type { SurveyFootprintManifest } from "../../src/survey-footprints";
 import type { ManualFootprintInput, ManualFootprintRecord } from "../../src/manual-footprints";
 import type { PublicResourcePackage, ResourcePackageJob, ResourcePackageLoad } from "../../src/resource-packages";
 import type { PublicReleaseDetail } from "../../src/public-release-details";
-import type { AstroCoverageResponse, AstroOverviewResponse, AstroSkyQueryInput, AstroSpatialSummary } from "../../src/astro-index";
+import type { AstroOverviewResponse, AstroSkyQueryInput, AstroSpatialSummary } from "../../src/astro-index";
+import type {
+  AstroCellsQueryInput,
+  AstroCellsQueryResult,
+  ObjectRegionQueryInput,
+  AstroObjectQueryResult,
+} from "../../src/astro-object-index";
 
 export interface WorkspaceCapabilities {
   dataWarehouse: { enabled: boolean };
+  localScan?: { enabled: boolean; configured: boolean; executor: string; objectIndex: string; coverageIndex: string };
   metadataStore: { engine: string };
 }
 
 export type ConnectorScanRun = ConnectorIngestRun;
+
+export interface DataAssetRecord extends CoreDataAssetRecord {
+  sourceRelativePath?: string;
+}
+
+export interface DataAssetRegistrationInput extends CoreDataAssetRegistrationInput {
+  sourceRelativePath?: string;
+}
+
+export interface LocalConnectorFile {
+  relativePath: string;
+  name?: string;
+  byteSize?: number;
+  modifiedAt?: string;
+}
+
+export interface LocalCsvColumn {
+  name: string;
+  type?: string;
+  samples?: string[];
+}
+
+export interface LocalCsvInspection {
+  sourceRelativePath: string;
+  columns: LocalCsvColumn[];
+  inferred?: {
+    objectIdColumn?: string;
+    raColumn?: string;
+    decColumn?: string;
+    confidence?: number;
+    warnings?: string[];
+  };
+}
+
+export interface SurveyReleaseRegistrationInput {
+  label: string;
+  sourceUrl: string;
+  modalities: SurveyModality[];
+  kind?: ReleaseKind;
+  availability?: ReleaseAvailability;
+  description?: string;
+}
+
+export interface WorkspaceCoverageBreakdown {
+  key: string;
+  label: string;
+  files?: number;
+  bytes?: number;
+  objects?: number;
+  objectCount?: number;
+}
+
+export interface WorkspaceAssetCoverageLayer {
+  key: string;
+  assetId?: string;
+  assetIds: string[];
+  assetName?: string;
+  surveyId?: string;
+  releaseId?: string;
+  pixels: number[];
+  objectCount?: number;
+  byAsset: WorkspaceCoverageBreakdown[];
+  source?: "connector" | "asset" | "unassigned" | "conflict";
+  status?: "ready" | "unavailable" | "error";
+  message?: string;
+}
+
+export interface WorkspaceAssetCoverageResponse {
+  status: "ready" | "unavailable" | "error";
+  index: string;
+  nside: number;
+  pixels: number[];
+  byAsset: WorkspaceCoverageBreakdown[];
+  layers?: WorkspaceAssetCoverageLayer[];
+  message?: string;
+}
 
 async function getJson<T>(url: string): Promise<T> {
   const response = await fetch(url, { headers: { Accept: "application/json" } });
@@ -78,11 +161,12 @@ async function getJson<T>(url: string): Promise<T> {
   return response.json() as Promise<T>;
 }
 
-async function postJson<T>(url: string, body: unknown): Promise<T> {
+async function postJson<T>(url: string, body: unknown, signal?: AbortSignal): Promise<T> {
   const response = await fetch(url, {
     method: "POST",
     headers: { Accept: "application/json", "Content-Type": "application/json" },
     body: JSON.stringify(body),
+    signal,
   });
   if (!response.ok) {
     const payload = (await response.json().catch(() => ({}))) as { error?: string };
@@ -151,6 +235,14 @@ export const workspaceApi = {
   async deleteDataAsset(id: string): Promise<void> {
     await deleteRequest(`/api/data-assets/${encodeURIComponent(id)}`);
   },
+  async executeDataAssetLocalScan(id: string): Promise<ConnectorScanRun> {
+    return (await postJson<{ run: ConnectorScanRun }>(`/api/data-assets/${encodeURIComponent(id)}/local-scan`, {})).run;
+  },
+  async dataAssetScanRuns(id: string): Promise<ConnectorScanRun[]> {
+    const parameters = new URLSearchParams({ assetId: id });
+    const runs = (await getJson<{ runs: ConnectorScanRun[] }>(`/api/connector-ingest-runs?${parameters}`)).runs;
+    return runs.filter((run) => run.assetId === id || run.assetIds?.includes(id));
+  },
   async connectors(): Promise<ConnectorPublicRecord[]> {
     return (await getJson<{ connectors: ConnectorPublicRecord[] }>("/api/connectors")).connectors;
   },
@@ -165,6 +257,23 @@ export const workspaceApi = {
   },
   async deleteConnector(id: string): Promise<void> {
     await deleteRequest(`/api/connectors/${encodeURIComponent(id)}`);
+  },
+  async localConnectorFiles(id: string): Promise<LocalConnectorFile[]> {
+    const payload = await getJson<{ files: Array<LocalConnectorFile | string> }>(`/api/connectors/${encodeURIComponent(id)}/local-files`);
+    return payload.files.map((file) => typeof file === "string" ? { relativePath: file } : {
+      ...file,
+      byteSize: file.byteSize ?? (file as LocalConnectorFile & { sizeBytes?: number }).sizeBytes,
+    });
+  },
+  async inspectLocalConnectorFile(id: string, sourceRelativePath: string): Promise<LocalCsvInspection> {
+    const payload = await postJson<{ inspection: Omit<LocalCsvInspection, "columns"> & { columns: Array<LocalCsvColumn | string> } }>(
+      `/api/connectors/${encodeURIComponent(id)}/local-files/inspect`,
+      { sourceRelativePath },
+    );
+    return {
+      ...payload.inspection,
+      columns: payload.inspection.columns.map((column) => typeof column === "string" ? { name: column } : column),
+    };
   },
   async checkConnector(id: string): Promise<{ connector: ConnectorPublicRecord; check: ConnectorCheck }> {
     return postJson(`/api/connectors/${encodeURIComponent(id)}/check`, {});
@@ -254,15 +363,24 @@ export const workspaceApi = {
   async skyQuery(input: AstroSkyQueryInput): Promise<AstroSpatialSummary> {
     return postJson<AstroSpatialSummary>("/api/sky/query", input);
   },
-  async skyCoverage(input: { nside: number; assetIds?: string[]; survey?: string; release?: string }): Promise<AstroCoverageResponse> {
+  async skyCellsQuery(input: AstroCellsQueryInput, signal?: AbortSignal): Promise<AstroCellsQueryResult> {
+    return postJson<AstroCellsQueryResult>("/api/sky/cells/query", input, signal);
+  },
+  async skyObjectsQuery(input: ObjectRegionQueryInput, signal?: AbortSignal): Promise<AstroObjectQueryResult> {
+    return postJson<AstroObjectQueryResult>("/api/sky/objects/query", input, signal);
+  },
+  async skyCoverage(input: { nside: number; assetIds?: string[]; survey?: string; release?: string }): Promise<WorkspaceAssetCoverageResponse> {
     const parameters = new URLSearchParams({ nside: String(input.nside) });
     if (input.assetIds?.length) parameters.set("assetIds", input.assetIds.join(","));
     if (input.survey) parameters.set("survey", input.survey);
     if (input.release) parameters.set("release", input.release);
-    return getJson<AstroCoverageResponse>(`/api/sky/coverage?${parameters}`);
+    return getJson<WorkspaceAssetCoverageResponse>(`/api/sky/coverage?${parameters}`);
   },
   async registerSurvey(input: SurveyRegistrationInput): Promise<SurveyRecord> {
     return (await postJson<{ survey: SurveyRecord }>("/api/surveys/registrations", input)).survey;
+  },
+  async addSurveyRelease(surveyId: string, input: SurveyReleaseRegistrationInput): Promise<SurveyRecord> {
+    return (await postJson<{ survey: SurveyRecord }>(`/api/surveys/${encodeURIComponent(surveyId)}/releases`, input)).survey;
   },
   async skySummary(id: string): Promise<{ dataset: DatasetSummary; sky: SkySummary }> {
     return getJson(`/api/datasets/${encodeURIComponent(id)}/sky/summary`);
@@ -363,7 +481,6 @@ export type {
   AstroOverviewResponse,
   AstroSkyQueryInput,
   AstroSpatialSummary,
-  DataAssetRecord,
   ConnectorPublicRecord,
   ConnectorRegistrationInput,
 };

@@ -52,6 +52,22 @@ test("connector ownership overrides an asset's stale survey metadata", () => {
   assert.equal(result.releaseId, "euclid-q1");
 });
 
+test("ownership snapshots remain fixed when linked connector ownership changes", () => {
+  const result = resolveDataOwnership(
+    asset({
+      surveyId: "legacy-surveys",
+      releaseId: "legacy-dr10",
+      ownershipSnapshotVersion: 1,
+      connectorIds: ["c1"],
+    }),
+    [connector("c1", "s3://euclid/q1", "euclid", "euclid-q1")],
+  );
+  assert.equal(result.source, "asset");
+  assert.equal(result.surveyId, "legacy-surveys");
+  assert.equal(result.releaseId, "legacy-dr10");
+  assert.deepEqual(result.connectorIds, ["c1"]);
+});
+
 test("multiple connectors with the same ownership are accepted", () => {
   const result = resolveDataOwnership(
     asset({ connectorIds: ["c1", "c2"] }),

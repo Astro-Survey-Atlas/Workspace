@@ -99,34 +99,15 @@
               <button id="layer-select-all" class="command-button secondary" type="button">全部显示</button>
               <button id="layer-clear-all" class="command-button secondary" type="button">全部隐藏</button>
             </div>
-            <div class="representation-control" role="group" aria-label="Survey footprint layout">
-              <button type="button" class="representation-button active" data-layer-layout="layers">分层</button>
-              <button type="button" class="representation-button" data-layer-layout="overlap">重合</button>
+            <section class="layer-asset-section">
+              <div class="section-heading"><span>用户资产</span><output id="layer-asset-count">0</output></div>
+              <div id="workspace-asset-list" class="survey-list workspace-asset-list"></div>
+            </section>
+            <div class="representation-control" role="group" aria-label="图层显示深度模式">
+              <button type="button" class="representation-button active" data-layer-layout="overlap" aria-pressed="true" title="所有巡天共享同一 RA / Dec / HEALPix 位置">重合</button>
+              <button type="button" class="representation-button" data-layer-layout="layers" aria-pressed="false" title="仅沿球面法线分开数据来源，不代表物理距离">径向展开</button>
             </div>
             <div id="survey-list" class="survey-list"></div>
-          </section>
-        </div>
-
-        <div id="refinement-controls" hidden>
-          <section class="control-section refinement-mask-summary">
-            <div class="section-heading"><span>空间掩膜</span><output id="refinement-level-output">NSIDE --</output></div>
-            <dl>
-              <div><dt>候选块</dt><dd id="refinement-candidate-count">--</dd></div>
-              <div><dt>已保留</dt><dd id="refinement-selected-count">--</dd></div>
-              <div><dt>面积</dt><dd id="refinement-area">--</dd></div>
-            </dl>
-            <div class="refinement-step-actions">
-              <button id="refinement-back" class="command-button secondary" type="button">上一级</button>
-              <button id="refinement-next" class="command-button" type="button">细分为 4 子块</button>
-            </div>
-          </section>
-          <section class="control-section">
-            <div class="section-heading"><span>巡天筛选</span><output id="refinement-survey-count">--</output></div>
-            <div id="refinement-survey-list" class="refinement-filter-list"></div>
-          </section>
-          <section class="control-section">
-            <div class="section-heading"><span>数据模态</span><output id="refinement-modality-count">--</output></div>
-            <div id="refinement-modality-list" class="refinement-filter-list compact"></div>
           </section>
         </div>
 
@@ -324,10 +305,12 @@
             <div id="layer-tool-strip" class="layer-tool-strip" role="group" aria-label="天区工具">
               <button type="button" class="scene-tool active" data-layer-interaction="inspect" aria-pressed="true"><kbd>F</kbd><span>查看</span></button>
               <button type="button" class="scene-tool" data-layer-interaction="region" aria-pressed="false"><kbd>G</kbd><span>选区</span></button>
-              <button id="coverage-lock-button" type="button" class="scene-tool" aria-pressed="false" disabled><kbd>C</kbd><span>固定</span></button>
             </div>
             <button id="reset-button" class="icon-button scene-reset scene-action" type="button" aria-label="重置视图" title="重置视图">
               <i data-lucide="rotate-ccw"></i>
+            </button>
+            <button id="drill-back-button" class="icon-button scene-action" type="button" aria-label="返回上一级天区" title="返回上一级天区" disabled>
+              <i data-lucide="undo-2"></i>
             </button>
           </div>
         </div>
@@ -337,7 +320,6 @@
         <div class="cutaway-badge"><i data-lucide="layers-3"></i><span id="scene-badge">查看模式</span><output id="layer-selection-count">F</output></div>
         <aside id="coverage-hover" class="coverage-hover" aria-live="polite" hidden></aside>
         <aside id="region-scene-legend" class="region-scene-legend" aria-live="polite" hidden></aside>
-        <aside id="coverage-context-menu" class="coverage-context-menu" hidden></aside>
         <div id="loading-indicator" class="loading-indicator visible">载入多巡天索引</div>
       </section>
 
@@ -415,6 +397,13 @@
           <label class="field-label" for="catalog-name">名称</label><input id="catalog-name" class="field-input" maxlength="120" required />
           <div class="catalog-form-grid"><label><span class="field-label">巡天</span><select id="catalog-survey" class="field-input"></select></label><label><span class="field-label">数据发布</span><select id="catalog-release" class="field-input"></select></label><label><span class="field-label">数据类型</span><select id="catalog-kind" class="field-input"><option value="catalog">星表</option><option value="image">图像</option><option value="spectra">光谱</option><option value="cube">数据立方</option><option value="timeseries">时序</option><option value="other">其他</option></select></label></div>
            <fieldset class="catalog-connector-field"><legend class="field-label">Connector <span class="required-marker">必选</span></legend><div id="catalog-connector-list" class="connector-picker catalog-connector-list"></div><button id="catalog-new-connector" class="text-button" type="button">新建 Connector</button></fieldset>
+           <fieldset id="catalog-scan-fieldset" class="catalog-scan-fieldset" hidden>
+             <legend class="field-label">本地 CSV 文件与列</legend>
+             <label class="field-label" for="catalog-source-file">文件</label><select id="catalog-source-file" class="field-input"></select>
+             <button id="catalog-inspect-file" class="command-button secondary" type="button">读取表头</button>
+             <div class="catalog-scan-columns"><label><span>对象 ID</span><select id="catalog-object-id-column" class="field-input"></select></label><label><span>RA</span><select id="catalog-ra-column" class="field-input"></select></label><label><span>Dec</span><select id="catalog-dec-column" class="field-input"></select></label></div>
+             <output id="catalog-scan-feedback" class="catalog-scan-feedback" aria-live="polite">选择文件后读取表头</output>
+           </fieldset>
           <label class="field-label" for="catalog-description">说明（可选）</label><input id="catalog-description" class="field-input" maxlength="500" />
           <footer><button id="catalog-form-cancel" class="command-button secondary" type="button">取消</button><button id="catalog-form-submit" class="command-button" type="submit">登记数据</button></footer>
         </form>

@@ -10,6 +10,7 @@ import type { Request, Response } from "express";
 import { AgentService } from "./agent.js";
 import { AtlasCatalog, publicAtlasManifest } from "./atlas.js";
 import { AstroIndexService, ASTRO_OVERVIEW_NSIDE, type AstroCoverageLayer, type AstroSkyQueryInput } from "./astro-index.js";
+import { AstroObjectIndexService, type AstroCellsQueryInput, type ObjectRegionQueryInput } from "./astro-object-index.js";
 import { McpCatalogQueryClient } from "./catalog-mcp-client.js";
 import { createConnectorCredentialStore, type StoredConnectorCredentials } from "./connector-credentials.js";
 import { ConnectorRegistry, connectorLocationKey, validateConnectorInput, type ConnectorCheckInput, type ConnectorPublicRecord, type ConnectorRecord, type ConnectorRegistrationInput } from "./connectors.js";
@@ -24,7 +25,7 @@ import { JsonDatasetRegistry } from "./registry.js";
 import { ResourcePackageManager, type ResourcePackageLoad } from "./resource-packages.js";
 import { buildPublicReleaseDetails, type PublicReleaseProductStatus } from "./public-release-details.js";
 import { normalizeSurveyFootprintManifest, type SurveyFootprintManifest } from "./survey-footprints.js";
-import { CURATED_SURVEYS, SurveyRegistry, type SurveyRegistrationInput } from "./survey-registry.js";
+import { CURATED_SURVEYS, SurveyRegistry, type SurveyRegistrationInput, type SurveyReleaseRegistrationInput } from "./survey-registry.js";
 import { CatalogSkyIndexService } from "./sky-index.js";
 import type { DatasetRecord } from "./types.js";
 import { publicVolumeManifest, VolumeCatalog } from "./volume.js";
@@ -32,6 +33,9 @@ import { WorkflowEngine } from "./workflow-engine.js";
 import { WorkflowStore } from "./workflow-store.js";
 import { listTags } from "./tags.js";
 import { createMetadataStore, importJsonState } from "./storage/index.js";
+import { LocalConnectorRootsPolicy, LocalConnectorPolicyError, localConnectorRootsResponse } from "./local-connector-roots.js";
+import { inspectLocalCsv, listLocalCsvFiles, LocalSourceInspectionCapabilityError, LocalSourceInspectionError } from "./local-source-inspection.js";
+import { LocalCsvScanExecutor, LocalScanCapabilityError, LocalScanDisabledError, LocalScanPreconditionError, localScanEnabled, LOCAL_CSV_SCAN_EXECUTOR, type LocalCsvScanInput } from "./local-scan-executor.js";
 
 const projectRoot = fileURLToPath(new URL("../", import.meta.url));
 const port = Number(process.env.PORT ?? "3000");
@@ -58,6 +62,7 @@ const dataCatalogStatePath = process.env.ASTRO_DATA_CATALOG_STATE ?? path.join(p
 const connectorStatePath = process.env.ASTRO_CONNECTOR_STATE ?? path.join(path.dirname(statePath), "connectors.json");
 const connectorBootstrapPath = process.env.ASTRO_CONNECTOR_BOOTSTRAP ?? path.join(projectRoot, "bootstrap", "connectors.json");
 const connectorRunStatePath = process.env.ASTRO_CONNECTOR_RUN_STATE ?? path.join(path.dirname(statePath), "connector-ingest-runs.json");
+const localConnectorRoots = LocalConnectorRootsPolicy.fromEnvironment();
 const resourcePackageRoot = process.env.ASTRO_RESOURCE_PACKAGE_ROOT ?? path.join(projectRoot, "data", "resource-packages");
 const resourcePackageStatePath = process.env.ASTRO_RESOURCE_PACKAGE_STATE ?? path.join(path.dirname(statePath), "resource-package-state.json");
 const resourceCatalogUrl = process.env.ASTRO_RESOURCE_CATALOG_URL ?? pathToFileURL(path.join(projectRoot, "bootstrap", "resource-packages", "catalog.json")).href;
@@ -73,6 +78,7 @@ const flinkPollMs = Number(process.env.ASTRO_FLINK_POLL_MS ?? "5000");
 const astroEsUrl = process.env.ASTRO_ES_URL ?? "";
 const astroEsIndex = process.env.ASTRO_ES_ASTRO_INDEX ?? "astro_file_index_v1";
 const warehouseEnabled = dataWarehouseEnabled();
+const localCsvScanEnabled = localScanEnabled();
 const metadataStoreEngine = process.env.ASTRO_METADATA_STORE || "sqlite";
 
 const registry = new JsonDatasetRegistry({ statePath, allowedRoots });
@@ -84,9 +90,18 @@ const workflowStore = new WorkflowStore(workflowRoot);
 const surveys = new SurveyRegistry(surveyRegistryStatePath);
 const metadataStore = createMetadataStore();
 const dataCatalog = new DataCatalogRegistry(dataCatalogBootstrapPath, metadataStore);
-const connectors = new ConnectorRegistry(metadataStore, connectorBootstrapPath);
+const connectors = new ConnectorRegistry(metadataStore, connectorBootstrapPath, localConnectorRoots);
 const connectorCredentials = createConnectorCredentialStore();
 const connectorRuns = new ConnectorIngestRunCatalog(metadataStore);
+const astroObjectIndex = new AstroObjectIndexService({ baseUrl: astroEsUrl });
+const localCsvScans = new LocalCsvScanExecutor({
+  enabled: localCsvScanEnabled,
+  connectors,
+  dataCatalog,
+  runs: connectorRuns,
+  roots: localConnectorRoots,
+  indexService: astroObjectIndex,
+});
 const flinkScans = new FlinkScanService({
   enabled: warehouseEnabled,
   connectors,
@@ -103,7 +118,8 @@ const resourcePackages = new ResourcePackageManager({ catalogUrl: resourceCatalo
 let publicReleaseProductStatuses: PublicReleaseProductStatus[] = [];
 let bundledFootprintManifest: SurveyFootprintManifest;
 let manualFootprints: ManualFootprintRegistry;
-const astroIndex = new AstroIndexService({ baseUrl: warehouseEnabled ? astroEsUrl : "" });
+// Search indices are independent from the optional warehouse integration.
+const astroIndex = new AstroIndexService({ baseUrl: astroEsUrl });
 const workflowEngine = new WorkflowEngine(workflowStore, new McpCatalogQueryClient(catalogMcpUrl, catalogMcpTimeoutMs, 1));
 const agentService = new AgentService(workflowStore, workflowEngine);
 const app = createMcpExpressApp({ host, allowedHosts });
@@ -115,7 +131,17 @@ app.get("/healthz", (_request: Request, response: Response) => {
 });
 
 app.get("/api/capabilities", (_request: Request, response: Response) => {
-  response.json({ dataWarehouse: { enabled: warehouseEnabled }, metadataStore: { engine: metadataStoreEngine } });
+  response.json({
+    dataWarehouse: { enabled: warehouseEnabled },
+    localScan: {
+      enabled: localCsvScanEnabled,
+      configured: astroObjectIndex.configured,
+      executor: LOCAL_CSV_SCAN_EXECUTOR,
+      objectIndex: astroObjectIndex.objectIndex,
+      coverageIndex: astroObjectIndex.coverageIndex,
+    },
+    metadataStore: { engine: metadataStoreEngine },
+  });
 });
 
 function publicDataset(record: DatasetRecord) {
@@ -150,6 +176,7 @@ function connectorRunFilter(request: Request): ConnectorIngestRunFilter {
   if (connectorKind !== undefined && !["s3", "local", "jdbc"].includes(connectorKind)) throw new RangeError("connectorKind is not supported");
   if (status !== undefined && !["queued", "running", "succeeded", "failed"].includes(status)) throw new RangeError("status is not supported");
   return {
+    locationKey: value("locationKey"),
     connectorId: value("connectorId"),
     connectorKind: connectorKind as ConnectorIngestRunFilter["connectorKind"],
     status: status as ConnectorIngestRunStatus | undefined,
@@ -212,6 +239,56 @@ function validateConnectorSurveyBinding(input: ConnectorRegistrationInput): void
   }
 }
 
+function optionalOwnershipText(value: unknown, name: string): string | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== "string") throw new RangeError(`${name} must be a string`);
+  const result = value.trim();
+  if (result.length > 120) throw new RangeError(`${name} must contain at most 120 characters`);
+  return result || undefined;
+}
+
+function validateRegisteredAssetOwnership(surveyId?: string, releaseId?: string): void {
+  if (!surveyId) {
+    if (releaseId) throw new RangeError("releaseId requires surveyId");
+    return;
+  }
+  let survey;
+  try {
+    survey = surveys.get(surveyId);
+  } catch {
+    throw new RangeError(`surveyId is not registered: ${surveyId}`);
+  }
+  if (releaseId && !survey.releases.some((release) => release.id === releaseId)) {
+    throw new RangeError(`releaseId ${releaseId} does not belong to survey ${surveyId}`);
+  }
+}
+
+async function linkedAssetConnectors(input: DataAssetRegistrationInput): Promise<ConnectorRecord[]> {
+  const records = await connectors.list();
+  const ids = new Set([
+    ...(input.connectorIds ?? []),
+    ...(input.accesses ?? []).map((access) => access.connectorId).filter((value): value is string => Boolean(value)),
+  ]);
+  const locationKeys = new Set(input.connectorLocationKeys ?? []);
+  return records.filter((record) => ids.has(record.id) || locationKeys.has(record.locationKey));
+}
+
+async function withOwnershipSnapshot(input: DataAssetRegistrationInput): Promise<DataAssetRegistrationInput> {
+  if (input.ownershipSnapshotVersion !== undefined && input.ownershipSnapshotVersion !== 1) {
+    throw new RangeError("ownershipSnapshotVersion must be 1");
+  }
+  const explicitSurveyId = optionalOwnershipText(input.surveyId, "surveyId");
+  const explicitReleaseId = optionalOwnershipText(input.releaseId, "releaseId");
+  const linked = await linkedAssetConnectors(input);
+  const connector = linked.length === 1 ? linked[0] : undefined;
+  const surveyId = explicitSurveyId ?? connector?.surveyId;
+  const releaseId = explicitReleaseId ?? (explicitSurveyId === undefined || explicitSurveyId === connector?.surveyId
+    ? connector?.releaseId
+    : undefined);
+  validateRegisteredAssetOwnership(surveyId, releaseId);
+  return { ...input, surveyId, releaseId, ownershipSnapshotVersion: 1 };
+}
+
 async function validateAssetConnectorOwnership(input: DataAssetRegistrationInput): Promise<EffectiveDataOwnership> {
   const access = input.accesses?.[0] ?? {
     connector: input.connector ?? "metadata",
@@ -270,6 +347,9 @@ async function validateConnectorIds(input: DataAssetRegistrationInput): Promise<
   for (const key of input.connectorLocationKeys ?? []) {
     if (!records.some((record) => record.locationKey === key)) throw new RangeError(`connectorLocationKeys contains unknown path: ${key}`);
   }
+  for (const id of (input.accesses ?? []).map((access) => access.connectorId).filter((value): value is string => Boolean(value))) {
+    if (!records.some((record) => record.id === id)) throw new RangeError(`accesses contains unknown connectorId: ${id}`);
+  }
 }
 
 function sendApiError(response: Response, error: unknown): void {
@@ -277,7 +357,13 @@ function sendApiError(response: Response, error: unknown): void {
   const notFound = message.startsWith("Dataset not found:") || message.startsWith("Data asset not found:") || message.startsWith("Connector not found:") || message.startsWith("Connector ingest run not found:") || message.startsWith("Volume not found:") || message.startsWith("Atlas not found:") || message.startsWith("Survey not found:") || message.startsWith("Resource package not found:") || message.startsWith("Resource package is not installed:") || message.startsWith("Resource package job not found:")
     || message.startsWith("Scan run not found:") || message.startsWith("Lineage not found:") || message.startsWith("Workflow not found:")
     || message.startsWith("Workflow run not found:") || message.startsWith("Workflow artifact not found:") || message.startsWith("Agent session not found:");
-  const status = error instanceof DataWarehouseDisabledError ? 503
+  const status = error instanceof LocalConnectorPolicyError ? error.statusCode
+    : error instanceof LocalScanDisabledError ? error.statusCode
+    : error instanceof LocalScanCapabilityError ? error.statusCode
+    : error instanceof LocalScanPreconditionError ? error.statusCode
+    : error instanceof LocalSourceInspectionCapabilityError ? error.statusCode
+    : error instanceof LocalSourceInspectionError ? error.statusCode
+    : error instanceof DataWarehouseDisabledError ? 503
     : error instanceof ConnectorScanCapabilityError ? 422
     : error instanceof ConnectorScanPreconditionError ? 409
     : error instanceof ManualFootprintRevisionError ? 412
@@ -384,12 +470,21 @@ app.get("/api/data-assets/:id", async (request: Request, response: Response) => 
   }
 });
 
+app.post("/api/data-assets/:id/local-scan", async (request: Request, response: Response) => {
+  try {
+    const run = await localCsvScans.submitAsset(datasetIdFrom(request), request.body as LocalCsvScanInput, idempotencyKey(request));
+    response.status(202).json({ run: publicConnectorIngestRun(run) });
+  } catch (error) {
+    sendApiError(response, error);
+  }
+});
+
 app.post("/api/data-assets", async (request: Request, response: Response) => {
   try {
     const input = request.body as DataAssetRegistrationInput;
     await validateConnectorIds(input);
-    await validateAssetConnectorOwnership(input);
-    response.status(201).json({ asset: await publicDataAsset(await dataCatalog.register(input)) });
+    const prepared = await withOwnershipSnapshot(input);
+    response.status(201).json({ asset: await publicDataAsset(await dataCatalog.register(prepared)) });
   } catch (error) {
     sendApiError(response, error);
   }
@@ -400,6 +495,7 @@ app.put("/api/data-assets/:id", async (request: Request, response: Response) => 
     const id = datasetIdFrom(request);
     const input = request.body as DataAssetRegistrationInput;
     await validateConnectorIds(input);
+    validateRegisteredAssetOwnership(optionalOwnershipText(input.surveyId, "surveyId"), optionalOwnershipText(input.releaseId, "releaseId"));
     const current = await dataCatalog.get(id);
     await validateAssetConnectorOwnership({
       ...current,
@@ -425,6 +521,43 @@ app.delete("/api/data-assets/:id", async (request: Request, response: Response) 
 
 app.get("/api/connectors", async (_request: Request, response: Response) => {
   response.json({ connectors: await Promise.all((await connectors.list()).map(publicConnector)) });
+});
+
+app.get("/api/connectors/local-roots", async (_request: Request, response: Response) => {
+  try {
+    response.json(localConnectorRootsResponse(await connectors.listLocalRoots()));
+  } catch (error) {
+    sendApiError(response, error);
+  }
+});
+
+app.get("/api/connectors/:id/local-files", async (request: Request, response: Response) => {
+  try {
+    const connector = await connectors.get(datasetIdFrom(request));
+    response.json(await listLocalCsvFiles(connector, localConnectorRoots));
+  } catch (error) {
+    sendApiError(response, error);
+  }
+});
+
+app.post("/api/connectors/:id/local-files/inspect", async (request: Request, response: Response) => {
+  try {
+    const connector = await connectors.get(datasetIdFrom(request));
+    const body = request.body as Record<string, unknown>;
+    const inspection = await inspectLocalCsv(connector, localConnectorRoots, {
+      relativePath: body?.sourceRelativePath ?? body?.relativePath,
+    });
+    response.json({
+      inspection: {
+        sourceRelativePath: inspection.relativePath,
+        sizeBytes: inspection.sizeBytes,
+        columns: inspection.columns.map((name) => ({ name })),
+        inferred: inspection.suggestions,
+      },
+    });
+  } catch (error) {
+    sendApiError(response, error);
+  }
 });
 
 app.get("/api/connector-ingest-runs", async (request: Request, response: Response) => {
@@ -490,11 +623,26 @@ app.post("/api/connectors/check", async (request: Request, response: Response) =
 app.post("/api/connectors/:id/ingest-runs", async (request: Request, response: Response) => {
   try {
     const connector = await connectors.get(datasetIdFrom(request));
+    const input = request.body as ConnectorIngestRunInput;
     const run = await connectorRuns.add(connector.locationKey, {
-      ...(request.body as ConnectorIngestRunInput),
       connectorId: connector.id,
       connectorName: connector.name,
       connectorKind: connector.kind,
+      executor: input.executor,
+      target: input.target,
+      assetIds: input.assetIds,
+      jobId: input.jobId,
+      batchId: input.batchId,
+      assetId: input.assetId,
+      assetName: input.assetName,
+      status: input.status,
+      startedAt: input.startedAt,
+      completedAt: input.completedAt,
+      fileCount: input.fileCount,
+      documentCount: input.documentCount,
+      error: input.error,
+      sourcePath: input.sourcePath,
+      esIndex: input.esIndex,
     });
     response.status(201).json({ run: publicConnectorIngestRun(run) });
   } catch (error) {
@@ -506,6 +654,19 @@ app.post("/api/connectors/:id/scan-runs", async (request: Request, response: Res
   try {
     validateConnectorSelfScanBody(request.body);
     const run = await flinkScans.submitConnectorScan(datasetIdFrom(request), idempotencyKey(request));
+    response.status(202).json({ run: publicConnectorIngestRun(run) });
+  } catch (error) {
+    sendApiError(response, error);
+  }
+});
+
+app.post("/api/connectors/:id/local-scan", async (request: Request, response: Response) => {
+  try {
+    const run = await localCsvScans.submit(
+      datasetIdFrom(request),
+      request.body as LocalCsvScanInput,
+      idempotencyKey(request),
+    );
     response.status(202).json({ run: publicConnectorIngestRun(run) });
   } catch (error) {
     sendApiError(response, error);
@@ -531,7 +692,7 @@ app.delete("/api/connectors/:id/ingest-runs/:runId", async (request: Request, re
     const connector = await connectors.get(datasetIdFrom(request));
     const runId = Array.isArray(request.params.runId) ? request.params.runId[0] : request.params.runId;
     if (!runId) throw new RangeError("run id is required");
-    await connectorRuns.remove(connector.locationKey, runId);
+    await connectorRuns.remove(connector.locationKey, runId, connector.id);
     response.status(204).end();
   } catch (error) {
     sendApiError(response, error);
@@ -616,6 +777,14 @@ app.get("/api/surveys", (_request: Request, response: Response) => {
 app.get("/api/surveys/:id", (request: Request, response: Response) => {
   try {
     response.json({ survey: surveys.get(datasetIdFrom(request)) });
+  } catch (error) {
+    sendApiError(response, error);
+  }
+});
+
+app.post("/api/surveys/:id/releases", async (request: Request, response: Response) => {
+  try {
+    response.status(201).json({ release: await surveys.addRelease(datasetIdFrom(request), request.body as SurveyReleaseRegistrationInput) });
   } catch (error) {
     sendApiError(response, error);
   }
@@ -840,6 +1009,22 @@ app.post("/api/sky/query", async (request: Request, response: Response) => {
   }
 });
 
+app.post("/api/sky/cells/query", async (request: Request, response: Response) => {
+  try {
+    response.json(await astroObjectIndex.queryCells(request.body as AstroCellsQueryInput));
+  } catch (error) {
+    sendApiError(response, error);
+  }
+});
+
+app.post("/api/sky/objects/query", async (request: Request, response: Response) => {
+  try {
+    response.json(await astroObjectIndex.queryObjects(request.body as ObjectRegionQueryInput));
+  } catch (error) {
+    sendApiError(response, error);
+  }
+});
+
 app.get("/api/sky/coverage", async (request: Request, response: Response) => {
   try {
     const nside = Number(request.query.nside ?? ASTRO_OVERVIEW_NSIDE);
@@ -892,29 +1077,72 @@ app.get("/api/sky/coverage", async (request: Request, response: Response) => {
         const statuses: string[] = [];
         const messages: string[] = [];
         for (const group of groups.values()) {
-          // The catalog ownership filter above is authoritative. Do not add
-          // survey/release terms to the ES request: older scanner documents
-          // may have blank fields and must still be recovered by asset_id.
-          const coverage = await astroIndex.coverage({ nside, assetIds: group.assetIds });
-          coverage.pixels.forEach((pixel) => allPixels.add(pixel));
-          coverage.byAsset.forEach((entry) => allAssets.set(entry.key, entry));
-          statuses.push(coverage.status);
-          if (coverage.message) messages.push(coverage.message);
-          layers.push({
-            key: group.key,
-            surveyId: group.surveyId,
-            releaseId: group.releaseId,
-            source: group.source,
-            message: group.message,
-            assetIds: [...group.assetIds].sort(),
-            pixels: coverage.pixels,
-            byAsset: coverage.byAsset,
-          });
+          // Keep coverage ownership at asset granularity. A shared ownership
+          // group only describes the display metadata; querying the whole
+          // group would attribute every object's count to its first asset.
+          const assetLayers = await Promise.all(group.assetIds.map(async (assetId) => {
+            const asset = await dataCatalog.get(assetId);
+            // Query both indexes by one asset id. The legacy index may contain
+            // old file-level facts with blank ownership fields; the object
+            // coverage index is authoritative for local CSV scans.
+            const [legacy, local] = await Promise.all([
+              astroIndex.coverage({ nside, assetIds: [assetId] }),
+              astroObjectIndex.queryCoverageFacts({ nside, assetIds: [assetId] }),
+            ]);
+            const pixels = new Set<number>(legacy.pixels);
+            local.pixels.forEach((pixel) => pixels.add(pixel));
+            const objectCount = local.facts.reduce((sum, fact) => sum + fact.objectCount, 0);
+            const status = legacy.status === "error" || local.status === "error"
+              ? "error"
+              : legacy.status === "unavailable" && local.status === "unavailable"
+                ? "unavailable"
+                : "ready";
+            const message = [
+              group.message,
+              legacy.status === "error" ? legacy.message : undefined,
+              local.status !== "ready" ? local.message : undefined,
+            ].filter(Boolean).join("; ") || undefined;
+            const breakdown = {
+              key: asset.id,
+              label: asset.name,
+              files: legacy.byAsset.find((entry) => entry.key === asset.id)?.files ?? 0,
+              bytes: legacy.byAsset.find((entry) => entry.key === asset.id)?.bytes ?? 0,
+              objects: objectCount,
+              objectCount,
+            };
+            return {
+              layer: {
+                key: `asset:${asset.id}`,
+                assetId: asset.id,
+                assetName: asset.name,
+                surveyId: group.surveyId,
+                releaseId: group.releaseId,
+                source: group.source,
+                message,
+                status,
+                assetIds: [asset.id],
+                pixels: [...pixels].sort((left, right) => left - right),
+                objectCount,
+                byAsset: [breakdown],
+              } satisfies AstroCoverageLayer,
+              breakdown,
+              pixels,
+              status,
+              message,
+            };
+          }));
+          for (const entry of assetLayers) {
+            statuses.push(entry.status);
+            if (entry.message) messages.push(entry.message);
+            allAssets.set(entry.layer.assetId!, entry.breakdown);
+            entry.pixels.forEach((pixel) => allPixels.add(pixel));
+            layers.push(entry.layer);
+          }
         }
         const status = statuses.includes("error") ? "error" : statuses.includes("unavailable") ? "unavailable" : "ready";
         response.json({
           status,
-          index: astroEsIndex || "astro_file_index_v1",
+          index: astroObjectIndex.coverageIndex,
           nside,
           pixels: [...allPixels].sort((left, right) => left - right),
           byAsset: [...allAssets.values()],
@@ -1298,7 +1526,13 @@ async function start(): Promise<void> {
     releaseId: release.releaseId,
   })));
   bundledFootprintManifest = normalizeSurveyFootprintManifest(JSON.parse(await readFile(bundledFootprintPath, "utf8")) as SurveyFootprintManifest);
-  manualFootprints = new ManualFootprintRegistry({ statePath: manualFootprintStatePath, surveys: CURATED_SURVEYS, releaseProducts: publicReleaseProductStatuses });
+  manualFootprints = new ManualFootprintRegistry({
+    statePath: manualFootprintStatePath,
+    resolveSurvey: (surveyId) => {
+      try { return surveys.get(surveyId); } catch { return undefined; }
+    },
+    releaseProducts: publicReleaseProductStatuses,
+  });
   await manualFootprints.initialize();
   flinkScans.start();
   const bootstrapCatalog = process.env.ASTRO_BOOTSTRAP_CATALOG;

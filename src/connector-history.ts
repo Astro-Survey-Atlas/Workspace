@@ -65,6 +65,9 @@ export interface ConnectorIngestRunInput {
   error?: string;
   sourcePath?: string;
   esIndex?: string;
+}
+
+export interface ConnectorIngestRunInternalInput extends ConnectorIngestRunInput {
   secretName?: string;
 }
 
@@ -143,7 +146,7 @@ export class ConnectorIngestRunCatalog {
 
   async create(
     locationKey: string,
-    input: ConnectorIngestRunInput,
+    input: ConnectorIngestRunInternalInput,
     idempotencyKey?: string,
   ): Promise<{ run: ConnectorIngestRunRecord; created: boolean }> {
     if (!locationKey) throw new RangeError("locationKey is required");
@@ -185,11 +188,11 @@ export class ConnectorIngestRunCatalog {
     return { run: structuredClone(result.record), created: result.created };
   }
 
-  async add(locationKey: string, input: ConnectorIngestRunInput, idempotencyKey?: string): Promise<ConnectorIngestRunRecord> {
+  async add(locationKey: string, input: ConnectorIngestRunInternalInput, idempotencyKey?: string): Promise<ConnectorIngestRunRecord> {
     return (await this.create(locationKey, input, idempotencyKey)).run;
   }
 
-  async update(id: string, patch: Partial<ConnectorIngestRunInput>): Promise<ConnectorIngestRunRecord> {
+  async update(id: string, patch: Partial<ConnectorIngestRunInternalInput>): Promise<ConnectorIngestRunRecord> {
     const current = await this.#store.getConnectorIngestRun(id);
     if (!current) throw new Error(`Connector ingest run not found: ${id}`);
     if (patch.status !== undefined && !["queued", "running", "succeeded", "failed"].includes(patch.status)) {
@@ -222,9 +225,10 @@ export class ConnectorIngestRunCatalog {
     return structuredClone(next);
   }
 
-  async remove(locationKey: string, id: string): Promise<void> {
+  async remove(locationKey: string, id: string, connectorId?: string): Promise<void> {
     const record = await this.#store.getConnectorIngestRun(id);
-    if (!record || record.locationKey !== locationKey || !await this.#store.deleteConnectorIngestRun(id)) {
+    const belongsToConnector = record && (record.connectorId ? record.connectorId === connectorId : record.locationKey === locationKey);
+    if (!belongsToConnector || !await this.#store.deleteConnectorIngestRun(id)) {
       throw new Error(`Connector ingest run not found: ${id}`);
     }
   }

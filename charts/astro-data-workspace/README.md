@@ -34,6 +34,40 @@ The dependency archive and `Chart.lock` are vendored for reproducible source
 installs. Run `helm dependency build charts/astro-data-workspace` when updating
 or verifying the dependency.
 
+## Controlled local data mount
+
+`localData` is disabled by default. When enabled, exactly one read-only source
+is mounted at `/data/local` and the Deployment emits
+`ASTRO_LOCAL_CONNECTOR_ROOTS=/data/local`. The chart does not create a PV or
+PVC for local data; `existingClaim` must refer to a claim managed separately.
+
+Choose one source in a values file:
+
+```yaml
+localData:
+  enabled: true
+  existingClaim: local-data
+  nfs:
+    server: ""
+    path: ""
+  hostPath:
+    path: ""
+    type: Directory
+  nodeSelector: {}
+```
+
+For direct NFS use a non-empty `nfs.server` and absolute `nfs.path`, leaving the
+other source fields empty. For node-local storage use an absolute
+`hostPath.path` and `type: Directory`; `hostPath` cannot be `/`, contain dot
+segments, or be combined with another source. `nodeSelector` is copied to the
+Pod when supplied, which is required when a host path exists on only selected
+nodes. Unknown fields, partial NFS settings, non-string selectors, and source
+combinations are rejected by both the values schema and template guards.
+
+The persistent application state remains on `/state`. Workflow runs use
+`/state/workflow-runs`, and installed resource packages use
+`/state/resource-packages`.
+
 ## Warehouse integration
 
 Set `dataWarehouse.enabled=true` to emit Flink and Elasticsearch environment

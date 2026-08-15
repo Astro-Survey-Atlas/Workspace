@@ -1,0 +1,221 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "astro-data-workspace.fullname" . }}-search-init
+  labels:
+    {{- include "astro-data-workspace.labels" . | nindent 4 }}
+  annotations:
+    helm.sh/hook: post-install,post-upgrade
+    helm.sh/hook-weight: "10"
+    helm.sh/hook-delete-policy: before-hook-creation
+spec:
+  backoffLimit: 2
+  activeDeadlineSeconds: {{ add 60 (mul .Values.search.initJob.maxAttempts (add .Values.search.initJob.retryIntervalSeconds 4)) }}
+  ttlSecondsAfterFinished: 86400
+  template:
+    metadata:
+      labels:
+        {{- include "astro-data-workspace.labels" . | nindent 8 }}
+    spec:
+      automountServiceAccountToken: false
+      restartPolicy: Never
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets: {{ toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: initialize-search
+          image: "{{ .Values.search.initJob.image.repository }}:{{ .Values.search.initJob.image.tag }}"
+          imagePullPolicy: {{ .Values.search.initJob.image.pullPolicy }}
+          env:
+            - name: ASTRO_ES_URL
+              {{- if eq .Values.search.mode "bundled" }}
+              value: {{ include "astro-data-workspace.elasticsearchUrl" . | quote }}
+              {{- else }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.search.external.existingSecret | quote }}
+                  key: {{ .Values.search.external.existingSecretKey | quote }}
+              {{- end }}
+            - name: FILE_INDEX
+              value: {{ .Values.search.index.file | quote }}
+            - name: OBJECT_INDEX
+              value: {{ .Values.search.index.object | quote }}
+            - name: COVERAGE_INDEX
+              value: {{ .Values.search.index.coverage | quote }}
+            - name: MAX_ATTEMPTS
+              value: {{ .Values.search.initJob.maxAttempts | quote }}
+            - name: RETRY_INTERVAL_SECONDS
+              value: {{ .Values.search.initJob.retryIntervalSeconds | quote }}
+          command:
+            - /bin/sh
+            - -ec
+          args:
+            - |
+              base_url="${ASTRO_ES_URL%/}"
+              response_file=/tmp/elasticsearch-response
+
+              fail_response() {
+                message="$1"
+                echo "$message" >&2
+                if [ -s "$response_file" ]; then
+                  cat "$response_file" >&2
+                  echo >&2
+                fi
+                exit 1
+              }
+
+              request_status() {
+                method="$1"
+                path="$2"
+                payload="${3-}"
+                : > "$response_file"
+                if [ -n "$payload" ]; then
+                  curl --silent --show-error --output "$response_file" --write-out '%{http_code}' \
+                    --request "$method" --header 'Content-Type: application/json' \
+                    --data "$payload" "${base_url}${path}"
+                else
+                  curl --silent --show-error --output "$response_file" --write-out '%{http_code}' \
+                    --request "$method" "${base_url}${path}"
+                fi
+              }
+
+              require_success() {
+                method="$1"
+                path="$2"
+                payload="${3-}"
+                if ! status="$(request_status "$method" "$path" "$payload")"; then
+                  fail_response "Elasticsearch request failed: $method $path"
+                fi
+                case "$status" in
+                  2??) ;;
+                  *) fail_response "Elasticsearch returned HTTP $status: $method $path" ;;
+                esac
+              }
+
+              reconcile_index() {
+                index="$1"
+                mapping="$2"
+                # curl HEAD can wait indefinitely against the Elasticsearch index endpoint;
+                # GET is equally suitable for existence checks and returns a normal body.
+                if ! status="$(request_status GET "/$index")"; then
+                  fail_response "Unable to inspect Elasticsearch index: $index"
+                fi
+                case "$status" in
+                  200)
+                    require_success PUT "/$index/_mapping" "$mapping"
+                    ;;
+                  404)
+                    create_payload="{\"mappings\":$mapping}"
+                    if ! create_status="$(request_status PUT "/$index" "$create_payload")"; then
+                      fail_response "Unable to create Elasticsearch index: $index"
+                    fi
+                    case "$create_status" in
+                      2??) ;;
+                      400)
+                        response="$(tr -d '\n\r' < "$response_file")"
+                        case "$response" in
+                          *resource_already_exists_exception*) require_success PUT "/$index/_mapping" "$mapping" ;;
+                          *) fail_response "Elasticsearch returned HTTP 400 while creating index: $index" ;;
+                        esac
+                        ;;
+                      *) fail_response "Elasticsearch returned HTTP $create_status while creating index: $index" ;;
+                    esac
+                    ;;
+                  *) fail_response "Elasticsearch returned HTTP $status while inspecting index: $index" ;;
+                esac
+              }
+
+              verify_field() {
+                index="$1"
+                field="$2"
+                expected_type="$3"
+                require_success GET "/$index/_mapping/field/$field"
+                mapping="$(tr -d '[:space:]' < "$response_file")"
+                case "$mapping" in
+                  *\"type\":\"$expected_type\"*) ;;
+                  *) fail_response "Incompatible or missing mapping: $index.$field must be $expected_type" ;;
+                esac
+              }
+
+              verify_fields() {
+                index="$1"
+                shift
+                for specification in "$@"; do
+                  field="${specification%%:*}"
+                  expected_type="${specification#*:}"
+                  verify_field "$index" "$field" "$expected_type"
+                done
+              }
+
+              verify_strict_mapping() {
+                index="$1"
+                require_success GET "/$index/_mapping"
+                mapping="$(tr -d '[:space:]' < "$response_file")"
+                case "$mapping" in
+                  *\"dynamic\":\"strict\"*) ;;
+                  *) fail_response "Incompatible mapping: $index must use dynamic=strict" ;;
+                esac
+              }
+
+              attempt=1
+              while [ "$attempt" -le "$MAX_ATTEMPTS" ]; do
+                if status="$(request_status GET '/_cluster/health?wait_for_status=yellow&timeout=3s')"; then
+                  case "$status" in
+                    2??) break ;;
+                  esac
+                fi
+                if [ "$attempt" -eq "$MAX_ATTEMPTS" ]; then
+                  fail_response "Elasticsearch did not become ready after $MAX_ATTEMPTS attempts"
+                fi
+                echo "Waiting for Elasticsearch ($attempt/$MAX_ATTEMPTS)..."
+                attempt=$((attempt + 1))
+                sleep "$RETRY_INTERVAL_SECONDS"
+              done
+
+              file_mapping='{"dynamic":true,"properties":{"file_id":{"type":"keyword"},"source_document_id":{"type":"keyword"},"urn":{"type":"keyword"},"connector_location_key":{"type":"keyword"},"asset_id":{"type":"keyword"},"scan_run_id":{"type":"keyword"},"name":{"type":"keyword"},"parent_path":{"type":"keyword"},"file_type":{"type":"keyword"},"size_bytes":{"type":"long"},"last_modified":{"type":"date"},"survey":{"type":"keyword"},"release":{"type":"keyword"},"product":{"type":"keyword"},"modality":{"type":"keyword"},"band":{"type":"keyword"},"spatial_status":{"type":"keyword"},"spatial_error":{"type":"text"},"healpix_order":{"type":"byte"},"coverage_order":{"type":"byte"},"coverage_cells":{"type":"integer"},"coverage_method":{"type":"keyword"},"coverage_role":{"type":"keyword"},"coverage_quality":{"type":"keyword"},"coverage_frame":{"type":"keyword"},"coverage_moc_uri":{"type":"keyword"},"wcs_summary":{"type":"object","enabled":true},"parse_error":{"type":"text"}}}'
+              object_mapping='{"dynamic":"strict","properties":{"object_id":{"type":"keyword"},"ra_deg":{"type":"double"},"dec_deg":{"type":"double"},"sky_position":{"type":"geo_point"},"healpix_order":{"type":"byte"},"healpix_pixel":{"type":"integer"},"survey":{"type":"keyword"},"release":{"type":"keyword"},"product":{"type":"keyword"},"modality":{"type":"keyword"},"asset_id":{"type":"keyword"},"source_file_id":{"type":"keyword"},"scan_run_id":{"type":"keyword"},"attributes":{"type":"flattened"}}}'
+              coverage_mapping='{"dynamic":"strict","properties":{"healpix_order":{"type":"byte"},"healpix_pixel":{"type":"integer"},"objectCount":{"type":"long"},"survey":{"type":"keyword"},"release":{"type":"keyword"},"product":{"type":"keyword"},"modality":{"type":"keyword"},"asset_id":{"type":"keyword"},"source_file_id":{"type":"keyword"},"scan_run_id":{"type":"keyword"}}}'
+
+              reconcile_index "$FILE_INDEX" "$file_mapping"
+              reconcile_index "$OBJECT_INDEX" "$object_mapping"
+              reconcile_index "$COVERAGE_INDEX" "$coverage_mapping"
+
+              verify_fields "$FILE_INDEX" \
+                file_id:keyword source_document_id:keyword urn:keyword connector_location_key:keyword \
+                asset_id:keyword scan_run_id:keyword size_bytes:long last_modified:date \
+                survey:keyword release:keyword product:keyword modality:keyword spatial_status:keyword \
+                healpix_order:byte coverage_order:byte coverage_cells:integer coverage_method:keyword
+              verify_fields "$OBJECT_INDEX" \
+                object_id:keyword ra_deg:double dec_deg:double sky_position:geo_point \
+                healpix_order:byte healpix_pixel:integer survey:keyword release:keyword \
+                product:keyword modality:keyword asset_id:keyword source_file_id:keyword \
+                scan_run_id:keyword attributes:flattened
+              verify_fields "$COVERAGE_INDEX" \
+                healpix_order:byte healpix_pixel:integer objectCount:long survey:keyword \
+                release:keyword product:keyword modality:keyword asset_id:keyword \
+                source_file_id:keyword scan_run_id:keyword
+              verify_strict_mapping "$OBJECT_INDEX"
+              verify_strict_mapping "$COVERAGE_INDEX"
+              echo "Elasticsearch index mappings are compatible."
+          resources: {{ toYaml .Values.search.initJob.resources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 1000
+            seccompProfile:
+              type: RuntimeDefault
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}

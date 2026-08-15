@@ -212,6 +212,10 @@ export class PostgresMetadataStore implements MetadataStore {
           ALTER TABLE ${this.quotedSchema}.connector_ingest_runs ADD COLUMN connector_kind text
             CHECK (connector_kind IS NULL OR connector_kind IN ('s3', 'local', 'jdbc'));
           ALTER TABLE ${this.quotedSchema}.connector_ingest_runs ADD COLUMN idempotency_key_hash text;
+          UPDATE ${this.quotedSchema}.connector_ingest_runs SET
+            connector_id = NULLIF(record->>'connectorId', ''),
+            connector_kind = NULLIF(record->>'connectorKind', ''),
+            idempotency_key_hash = NULLIF(record->>'idempotencyKeyHash', '');
           CREATE INDEX connector_ingest_runs_connector_created_idx
             ON ${this.quotedSchema}.connector_ingest_runs(connector_id, created_at DESC);
           CREATE INDEX connector_ingest_runs_kind_created_idx

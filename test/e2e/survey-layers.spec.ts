@@ -75,6 +75,8 @@ test.afterAll(async () => {
   });
 });
 
+test.afterEach(async ({ page }) => page.unrouteAll({ behavior: "ignoreErrors" }));
+
 async function proxyApi(page: Page): Promise<void> {
   await page.route("**/api/**", async (route) => {
     const requestUrl = new URL(route.request().url());
@@ -97,18 +99,6 @@ function fragmentPixelCount(buffer: Buffer): number {
     const maximum = Math.max(red, green, blue);
     const minimum = Math.min(red, green, blue);
     if (maximum > 52 && maximum - minimum > 24) count += 1;
-  }
-  return count;
-}
-
-function brightScenePixelCount(buffer: Buffer): number {
-  const image = PNG.sync.read(buffer);
-  let count = 0;
-  for (let y = 50; y < image.height - 50; y += 1) {
-    for (let x = 50; x < image.width - 50; x += 1) {
-      const index = (y * image.width + x) * 4;
-      if (Math.max(image.data[index]!, image.data[index + 1]!, image.data[index + 2]!) > 170) count += 1;
-    }
   }
   return count;
 }
@@ -142,23 +132,68 @@ function fragmentPoint(buffer: Buffer): { x: number; y: number } {
   throw new Error("No solid footprint fragment found in Canvas screenshot");
 }
 
-async function openFresh(page: Page): Promise<void> {
+async function openFresh(page: Page, beforeGoto?: () => Promise<void>): Promise<void> {
   await page.addInitScript(() => {
     localStorage.clear();
     localStorage.setItem("astro-workspace:theme:v1", "dark");
   });
   await proxyApi(page);
+  await beforeGoto?.();
   await page.goto("/");
-  await expect(page.locator('[data-mode="catalog"]')).toHaveClass(/active/);
-  await expect(page.locator("#catalog-stage")).toBeVisible();
   await expect(page.locator("#service-status")).toHaveText("SERVICE ONLINE");
   await expect(page.locator("#loading-indicator")).not.toHaveClass(/visible/);
-  await page.locator('button[data-mode="layers"]').click();
+  const layersMode = page.locator('button[data-mode="layers"]');
+  if (!await layersMode.evaluate((button) => button.classList.contains("active"))) await layersMode.click();
   await expect(page.locator('button[data-mode="layers"]')).toHaveClass(/active/);
   await expect(page.locator("#loading-indicator")).not.toHaveClass(/visible/);
   await expect(page.locator("#volume-canvas")).toBeVisible();
   await page.waitForTimeout(900);
 }
+
+test("layers list each user asset independently with its own visibility control", async ({ page }) => {
+  const { assets } = await apiJson<{ assets: Array<{ id: string; name: string }> }>("/api/data-assets?origin=user");
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await openFresh(page);
+
+  const assetCards = page.locator("#workspace-asset-list .workspace-asset-card");
+  await expect(assetCards).toHaveCount(assets.length, { timeout: 15_000 });
+  await expect(page.locator("#layer-asset-count")).toHaveText(String(assets.length));
+  if (assets.length > 0) {
+    const first = assetCards.first();
+    const checkbox = first.locator('input[type="checkbox"]');
+    const initiallyChecked = await checkbox.isChecked();
+    if (initiallyChecked) {
+      await checkbox.uncheck();
+    } else {
+      await checkbox.check();
+    }
+    await expect(checkbox).toBeChecked({ checked: !initiallyChecked });
+    await first.locator(".survey-card-body").click();
+    await expect(page.locator("#inspector-content")).toContainText(assets[0]!.name);
+  }
+});
+
+test("sky layers default to semantic overlap and expose radial depth as display-only", async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await openFresh(page);
+
+  const overlap = page.locator('[data-layer-layout="overlap"]');
+  const radial = page.locator('[data-layer-layout="layers"]');
+  await expect(overlap).toHaveClass(/active/);
+  await expect(overlap).toHaveAttribute("aria-pressed", "true");
+  await expect(radial).toHaveText("径向展开");
+  await expect(radial).toHaveAttribute("title", /不代表物理距离/);
+
+  const assetLabels = await page.locator("#workspace-asset-list .survey-card-body").allTextContents();
+  expect(assetLabels.every((label) => !/user[-_][a-z0-9-]+/i.test(label))).toBe(true);
+
+  await radial.click();
+  await expect(radial).toHaveClass(/active/);
+  await expect(page.locator("#volume-canvas")).toHaveAttribute("data-layout-mode", "layers");
+  await overlap.click();
+  await expect(overlap).toHaveClass(/active/);
+  await expect(page.locator("#volume-canvas")).toHaveAttribute("data-layout-mode", "overlap");
+});
 
 test("public resource package installs and applies all releases atomically", async ({ page }) => {
   const { releases } = await apiJson<{ releases: Array<{ surveyId: string; releaseId: string; products: Array<{ coverageStatus: string }> }> }>("/api/public-release-details");
@@ -257,7 +292,7 @@ test("public resource package installs and applies all releases atomically", asy
   await apply.click();
   await expect(apply).toBeDisabled();
   await expect(loadableRow.locator(".resource-package-status")).toHaveText("已下载");
-  await page.locator('[data-mode="layers"]').click();
+  await page.locator('button[data-mode="layers"]').click();
   const canvas = page.locator("#volume-canvas");
   await expect(canvas).toBeVisible();
   const visibleSurveys = new Set((await canvas.getAttribute("data-visible-survey-ids"))?.split(",") ?? []);
@@ -318,7 +353,7 @@ test("light theme switches the 3D sky to a soft observation canvas", async ({ pa
   await proxyApi(page);
   await page.goto("/");
   await expect(page.locator("#service-status")).toHaveText("SERVICE ONLINE");
-  await page.locator('[data-mode="layers"]').click();
+  await page.locator('button[data-mode="layers"]').click();
   const canvas = page.locator("#volume-canvas");
   await expect(canvas).toBeVisible();
   await page.waitForTimeout(500);
@@ -353,20 +388,6 @@ async function findCanvasPoint(page: Page, predicate: (state: { pixel: number; c
   throw new Error("No matching HEALPix point found on the visible hemisphere");
 }
 
-async function findSelectedRefinementPoint(page: Page): Promise<{ x: number; y: number; pixel: number }> {
-  const canvas = page.locator("#volume-canvas");
-  const bounds = await canvas.boundingBox();
-  if (!bounds) throw new Error("Canvas has no layout bounds");
-  for (let y = 70; y < bounds.height - 70; y += 8) {
-    for (let x = 70; x < bounds.width - 70; x += 8) {
-      await page.mouse.move(bounds.x + x, bounds.y + y);
-      const rawPixel = await canvas.getAttribute("data-hovered-pixel");
-      if (rawPixel != null && await canvas.getAttribute("data-hovered-selected") === "true") return { x, y, pixel: Number(rawPixel) };
-    }
-  }
-  throw new Error("No selected refinement cell found on the visible region");
-}
-
 test("project status remains available when joint volume resources fail", async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
   await page.addInitScript(() => localStorage.clear());
@@ -390,7 +411,7 @@ test("project status remains available when joint volume resources fail", async 
   await expect(page.locator("#loading-indicator")).not.toHaveClass(/visible/);
 });
 
-test("desktop survey footprints are selectable fragments with layer and overlap layouts", async ({ page }, testInfo) => {
+test("desktop sky drills density cells without fixed-region controls", async ({ page }, testInfo) => {
   test.setTimeout(90_000);
   await page.setViewportSize({ width: 1440, height: 900 });
   await openFresh(page);
@@ -400,6 +421,10 @@ test("desktop survey footprints are selectable fragments with layer and overlap 
   await expect(page.locator("#survey-list")).not.toContainText("PENDING");
   await expect(page.locator("#focus-button")).toHaveCount(0);
   await expect(page.locator(".scene-hud-top #reset-button")).toBeVisible();
+  await expect(page.locator("#coverage-lock-button")).toHaveCount(0);
+  await expect(page.locator("#coverage-context-menu")).toHaveCount(0);
+  await expect(page.locator("#refinement-controls")).toHaveCount(0);
+  await expect(page.locator('[data-action="search-region"]')).toHaveCount(0);
 
   const legacyImage = await canvas.screenshot({ path: testInfo.outputPath("legacy-fragments.png") });
   const legacyLitPixels = fragmentPixelCount(legacyImage);
@@ -421,61 +446,23 @@ test("desktop survey footprints are selectable fragments with layer and overlap 
   expect(Math.abs(cameraDistanceAfter - cameraDistanceBefore)).toBeLessThan(0.01);
   await expect(canvas).toHaveAttribute("data-camera-position", cameraPositionBefore!);
   await canvas.screenshot({ path: testInfo.outputPath("selected-cell-explosion.png") });
-  await canvas.click({ position: legacyPoint, button: "right" });
-  await expect(page.locator("#coverage-context-menu")).toBeVisible();
-  await page.locator("#coverage-context-menu button").click();
-  await expect(page.locator("#layer-selection-count")).toContainText("LOCKED");
-  await expect(page.locator("#coverage-pin-status")).toHaveClass(/active/);
-  await expect(page.locator("#coverage-pin-status")).toHaveText("已固定");
-  await page.screenshot({ path: testInfo.outputPath("selected-cell-stack.png"), fullPage: true });
+  await expect(page.locator("#scene-mode-value")).toContainText("NESTED NSIDE 16");
+  await expect(page.locator("#layer-selection-count")).toHaveText("1 CELLS");
 
   await page.locator(".survey-card", { hasText: "SDSS" }).locator("input").check();
   await page.locator(".survey-card", { hasText: "HST" }).locator("input").check();
   const visibleIds = (await canvas.getAttribute("data-visible-survey-ids"))?.split(",") ?? [];
   expect(new Set(visibleIds)).toEqual(new Set(["legacy-surveys", "sdss", "hst"]));
-  await expect(page.locator("#layer-visible-output")).toHaveText("3 ACTIVE");
-  await expect(page.locator("#layer-selection-count")).toContainText("LOCKED");
-  await expect(page.locator("#coverage-pin-status")).toHaveClass(/active/);
+  await expect(page.locator("#layer-visible-output")).toHaveText("3 PUBLIC · 1 ASSET");
   await expect(canvas).toHaveAttribute("data-camera-position", cameraPositionBefore!);
   await page.waitForTimeout(500);
   const multiLayerImage = await canvas.screenshot({ path: testInfo.outputPath("multi-layer-fragments.png") });
 
-  await page.locator('[data-layer-interaction="region"]').click();
-  await expect(page.locator("#layer-selection-count")).toHaveText("G");
-  await canvas.click({ position: legacyPoint });
-  await expect(page.locator("#layer-selection-count")).toHaveText("1 CELLS");
-  await expect(page.locator("#inspector-kicker")).toHaveText("REGION SELECTION");
-  await expect(page.locator("#inspector-content")).toContainText("完整角向选区已高亮");
-  await expect(page.locator('[data-action="search-region"]')).toBeVisible();
-  await expect(page.locator('[data-action="download-region"]')).toBeVisible();
-  await expect(page.locator("#region-scene-legend")).toContainText("SELECTED SKY REGION");
-  await canvas.screenshot({ path: testInfo.outputPath("selected-region-overlay.png") });
-
-  await page.locator('[data-action="search-region"]').click();
-  await expect(canvas).toHaveAttribute("data-mode", "refine");
-  await expect(canvas).toHaveAttribute("data-refinement-nside", "32");
-  await expect(page.locator("#refinement-level-output")).toHaveText("NSIDE 32");
-  await expect(page.locator("#scene-legend")).toBeHidden();
-  await expect(page.locator("#agent-toggle")).toHaveCount(0);
-  await expect(page.locator("#inspector-content")).toContainText("Legacy Surveys DR10 Tractor catalog");
-  const candidateCount = Number(await page.locator("#refinement-candidate-count").textContent());
-  const selectedCount = Number(await page.locator("#refinement-selected-count").textContent());
-  expect(candidateCount).toBe(4);
-  expect(selectedCount).toBe(4);
-  const refinementPoint = await findSelectedRefinementPoint(page);
-  await canvas.click({ position: refinementPoint });
-  await expect(page.locator("#refinement-selected-count")).toHaveText("3");
-  await expect(canvas).not.toHaveAttribute("data-selected-pixels", new RegExp(`(^|,)${refinementPoint.pixel}(,|$)`));
-  await page.locator("#refinement-next").click();
-  await expect(canvas).toHaveAttribute("data-refinement-nside", "64");
-  await expect(page.locator("#refinement-candidate-count")).toHaveText("12");
-  await expect(page.locator('[data-action="export-refined-query"]')).toBeVisible();
-  const refinementImage = await canvas.screenshot({ path: testInfo.outputPath("region-refinement-canvas.png") });
-  expect(brightScenePixelCount(refinementImage)).toBeLessThan(50);
-  await page.screenshot({ path: testInfo.outputPath("region-refinement.png"), fullPage: true });
-  await page.locator('[data-mode="layers"]').click();
-  await expect(canvas).toHaveAttribute("data-selected-pixels", /\d+/);
-  await page.locator('[data-layer-interaction="inspect"]').click();
+  const drillPoint = await findCanvasPoint(page, (state) => state.covered && state.selectable);
+  await canvas.dblclick({ position: drillPoint });
+  await expect(page.locator("#scene-mode-value")).toContainText("NESTED NSIDE 32");
+  await expect(page.locator("#scene-badge")).toContainText("NSIDE 32");
+  await canvas.screenshot({ path: testInfo.outputPath("main-sky-drill-nside32.png") });
 
   await page.locator('[data-layer-layout="overlap"]').click();
   await expect(canvas).toHaveAttribute("data-layout-mode", "overlap");
@@ -489,26 +476,66 @@ test("desktop survey footprints are selectable fragments with layer and overlap 
   expect(fragmentPixelCount(emptyImage)).toBeLessThan(legacyLitPixels * 0.2);
 });
 
-test("region mode selects uncovered cells and every one of their eight neighbours", async ({ page }, testInfo) => {
+test("main sky supports Ctrl selection across density cells", async ({ page }, testInfo) => {
   await page.setViewportSize({ width: 1440, height: 900 });
   await openFresh(page);
   const canvas = page.locator("#volume-canvas");
-  await page.locator('[data-layer-interaction="region"]').click();
-
-  const empty = await findCanvasPoint(page, (state) => !state.covered && state.selectable);
-  await canvas.click({ position: empty });
-  await expect(canvas).toHaveAttribute("data-selected-pixels", String(empty.pixel));
+  const first = await findCanvasPoint(page, (state) => state.covered && state.selectable);
+  await canvas.click({ position: first });
   await expect(page.locator("#layer-selection-count")).toHaveText("1 CELLS");
-  await expect(page.locator("#inspector-content")).toContainText("当前可见巡天暂无覆盖");
-
-  const neighbours = new Set([...new Healpix(16).neighbours(empty.pixel)].filter((pixel) => pixel >= 0));
-  const adjacent = await findCanvasPoint(page, (state) => state.selectable && state.pixel !== empty.pixel && neighbours.has(state.pixel));
-  await canvas.click({ position: adjacent });
+  const second = await findCanvasPoint(page, (state) => state.covered && state.selectable && state.pixel !== first.pixel);
+  await canvas.click({ position: second, modifiers: ["Control"] });
   await expect(page.locator("#layer-selection-count")).toHaveText("2 CELLS");
-  await expect(page.locator("#region-scene-legend")).toContainText("2 CELLS");
-  const selected = (await canvas.getAttribute("data-selected-pixels"))?.split(",").map(Number) ?? [];
-  expect(new Set(selected)).toEqual(new Set([empty.pixel, adjacent.pixel]));
-  await page.screenshot({ path: testInfo.outputPath("uncovered-eight-neighbour-region.png"), fullPage: true });
+  await page.screenshot({ path: testInfo.outputPath("ctrl-density-selection.png"), fullPage: true });
+});
+
+test("wheel zoom refines selected cells and switches to object density", async ({ page }) => {
+  test.setTimeout(90_000);
+  await page.setViewportSize({ width: 1440, height: 900 });
+  let objectRequestSeen = false;
+  page.on("request", (request) => {
+    if (request.url().includes("/api/sky/objects/query")) objectRequestSeen = true;
+  });
+  await openFresh(page, async () => {
+    await page.route("**/api/sky/objects/query", async (route) => {
+      const request = route.request();
+      const body = request.postDataJSON() as { region?: { ordering?: string; coordinateFrame?: string } };
+      expect(body.region?.ordering).toBe("NESTED");
+      expect(body.region?.coordinateFrame).toBe("ICRS");
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          status: "ready",
+          index: "astro_object_index_v1",
+          objects: [{ object_id: "e2e-object", ra_deg: 150, dec_deg: 1.4, survey: "cosmos-custom", release: "cosmos-custom-v1", product: "COSMOS", modality: "catalog", asset_id: "user-12b69893-1a68-4b20-81dd-fb1ddca31953" }],
+          total: 1,
+          limit: 10000,
+        }),
+      });
+    });
+  });
+  const canvas = page.locator("#volume-canvas");
+  const point = await findCanvasPoint(page, (state) => state.covered && state.selectable);
+  const bounds = await canvas.boundingBox();
+  if (!bounds) throw new Error("Canvas has no layout bounds");
+  await canvas.dblclick({ position: point });
+  await expect(page.locator("#scene-mode-value")).toContainText("NESTED NSIDE 32");
+  await page.mouse.move(bounds.x + point.x, bounds.y + point.y);
+
+  for (let index = 0; index < 100; index += 1) {
+    await page.mouse.wheel(0, -480);
+    await page.waitForTimeout(60);
+    const status = await page.locator("#scene-mode-value").textContent();
+    if (status?.includes("NSIDE 256") && (await page.locator("#object-status").textContent())?.includes("OBJECTS")) break;
+  }
+
+  await expect.poll(() => objectRequestSeen, { timeout: 20_000 }).toBe(true);
+  await expect.poll(async () => page.locator("#scene-mode-value").textContent(), { timeout: 15_000 })
+    .toMatch(/NSIDE (64|128|256)/);
+  await expect.poll(async () => page.locator("#object-status").textContent(), { timeout: 20_000 })
+    .toMatch(/\d+ \/ \d+ OBJECTS/);
+  await expect(page.locator("#scene-mode-value")).toHaveText(/FOV 0\.(?:[0-4]\d|50)°/);
 });
 
 test("mobile controls expose survey filters and keyboard-addressable sky tools", async ({ page }, testInfo) => {
@@ -517,7 +544,7 @@ test("mobile controls expose survey filters and keyboard-addressable sky tools",
   await page.locator("#controls-toggle").click();
   await expect(page.locator("#controls-panel")).toHaveClass(/mobile-open/);
   await page.locator(".survey-card", { hasText: "SDSS" }).locator("input").check();
-  await expect(page.locator("#layer-visible-output")).toHaveText("2 ACTIVE");
+  await expect(page.locator("#layer-visible-output")).toHaveText("2 PUBLIC · 1 ASSET");
   await page.keyboard.press("g");
   await expect(page.locator(".region-multi-control")).toHaveCount(0);
   await expect(page.locator("#volume-canvas")).toHaveAttribute("data-interaction-mode", "region");

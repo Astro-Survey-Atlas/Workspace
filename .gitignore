@@ -14,3 +14,5 @@ scripts/__pycache__/
 *.pyc
 source-*.tgz
 .env
+compose.local.yaml
+compose.override.yaml

@@ -9,6 +9,8 @@ export interface AstroBreakdown {
   label: string;
   files: number;
   bytes: number;
+  objects?: number;
+  objectCount?: number;
 }
 
 export interface AstroSpatialSummary {
@@ -67,11 +69,15 @@ export interface AstroCoverageInput {
 /** Coverage returned for one effective survey ownership group. */
 export interface AstroCoverageLayer {
   key: string;
+  assetId?: string;
   surveyId?: string;
   releaseId?: string;
   assetIds: string[];
+  assetName?: string;
   pixels: number[];
   byAsset: AstroBreakdown[];
+  objectCount?: number;
+  status?: AstroIndexStatus;
   source?: "connector" | "asset" | "unassigned" | "conflict";
   message?: string;
 }

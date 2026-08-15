@@ -1,0 +1,14 @@
+# Copy this file to compose.local.yaml and set ASTRO_LOCAL_DATA_ROOT to an
+# existing parent directory before starting the service.
+services:
+  workspace:
+    environment:
+      ASTRO_LOCAL_CONNECTOR_ROOTS: /data/local
+      ASTRO_ALLOWED_ROOTS: /state:/data/local
+    volumes:
+      - type: bind
+        source: ${ASTRO_LOCAL_DATA_ROOT}
+        target: /data/local
+        read_only: true
+        bind:
+          create_host_path: false

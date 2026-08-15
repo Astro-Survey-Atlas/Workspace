@@ -53,6 +53,58 @@ npm run dev:viewer
 
 The Vite development server proxies `/api` to `http://127.0.0.1:3000`.
 
+## Local deployment
+
+The official Compose configuration runs SQLite with the warehouse disabled.
+Application state, workflow runs, and installed resource packages are kept in
+the named `state` volume. The container runs as UID/GID `10001`, has a read-only
+root filesystem, drops all capabilities, disallows privilege escalation, and
+uses a tmpfs for `/tmp`.
+
+The local data contract is one controlled parent directory mounted read-only at
+`/data/local`. To enable it, copy the example override and set the host
+directory before starting Compose:
+
+```bash
+cp compose.local.example.yaml compose.local.yaml
+ASTRO_LOCAL_DATA_ROOT=/srv/astro-data docker compose -f compose.yaml -f compose.local.yaml up -d
+```
+
+The parent directory must already exist. With Docker on Linux, UID/GID `10001`
+needs search (`x`) permission on every parent directory and read/search (`r-x`)
+permission on the mounted tree. The application does not write to this mount;
+state writes go to the named volume. `create_host_path: false` intentionally
+makes a missing host directory a configuration error.
+
+On SELinux-enabled Linux hosts, a bind mount can also require an SELinux label.
+Use the Compose `:z` option for a directory shared by containers, or `:Z` for a
+private directory, according to the host policy; do not disable SELinux to make
+the mount work. The host directory still needs normal Unix permissions.
+
+Docker Desktop on macOS and Windows runs Linux containers in a VM. The selected
+host directory must be allowed in Docker Desktop file sharing, and the path
+must use the syntax supported by the local Docker client (for example an
+absolute macOS path or `C:/data/astro` on Windows). Desktop-managed sharing and
+the VM's UID mapping can differ from native Linux, so verify the container's
+read-only access with the health and connector checks.
+
+When the Docker daemon is remote, bind sources are resolved on the daemon host,
+not on the machine running the Compose command. Set `ASTRO_LOCAL_DATA_ROOT` to
+a path on that host, or use a storage export mounted there. The directory must
+exist on the daemon host because automatic creation is disabled.
+
+Adding or removing a child directory below the mounted parent does not require
+an image rebuild or container recreation. Changing the parent directory does
+require recreating the service so the bind source is replaced, for example:
+
+```bash
+ASTRO_LOCAL_DATA_ROOT=/new/astro-data docker compose -f compose.yaml -f compose.local.yaml up -d --force-recreate
+```
+
+Local connectors currently support registration and non-enumerating existence/
+readability checks. They do not scan or enumerate the local parent directory;
+an explicit scan workflow is not implied by mounting it.
+
 ## Redshift volume
 
 The FITS preprocessing step runs offline. It filters high-quality galaxies,

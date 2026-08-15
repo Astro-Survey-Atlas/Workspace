@@ -22,3 +22,18 @@ helm.sh/chart: {{ .Chart.Name }}-{{ .Chart.Version | replace "+" "_" }}
 {{- printf "%s-postgresql" .Release.Name | trunc 63 | trimSuffix "-" -}}
 {{- end -}}
 {{- end }}
+{{- define "astro-data-workspace.elasticsearchName" -}}
+{{- default "elasticsearch" .Values.elasticsearch.nameOverride | trunc 63 | trimSuffix "-" -}}
+{{- end }}
+{{- define "astro-data-workspace.elasticsearchFullname" -}}
+{{- if .Values.elasticsearch.fullnameOverride -}}
+{{- .Values.elasticsearch.fullnameOverride | trunc 63 | trimSuffix "-" -}}
+{{- else if .Values.elasticsearch.nameOverride -}}
+{{- printf "%s-%s" .Release.Name .Values.elasticsearch.nameOverride | trunc 63 | trimSuffix "-" -}}
+{{- else -}}
+{{- printf "%s-elasticsearch" .Release.Name | trunc 63 | trimSuffix "-" -}}
+{{- end -}}
+{{- end }}
+{{- define "astro-data-workspace.elasticsearchUrl" -}}
+{{- printf "http://%s:9200" (include "astro-data-workspace.elasticsearchFullname" .) -}}
+{{- end }}

@@ -52,6 +52,8 @@ test("connector scan history snapshots identity and handles idempotent retries",
     assert.deepEqual((await catalog.list({ connectorId: "connector-one" })).map((run) => run.id), [first.run.id]);
     assert.equal(JSON.stringify(publicConnectorIngestRun(first.run)).includes("secretName"), false);
     assert.equal(JSON.stringify(publicConnectorIngestRun(first.run)).includes("idempotencyKeyHash"), false);
+    await catalog.remove("s3://survey/edited-release", first.run.id, "connector-one");
+    assert.deepEqual(await catalog.list({ connectorId: "connector-one" }), []);
   } finally {
     await store.close();
     await rm(directory, { recursive: true, force: true });

@@ -4,3 +4,9 @@ data
 .data
 .git
 *.log
+.env
+.env.*
+!.env.example
+compose.local.yaml
+compose.override.yaml
+!compose.local.example.yaml

@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { DataCatalogRegistry, type DataAssetRecord } from "../src/data-catalog.js";
+import { DataCatalogRegistry, normalizeDataAssetRecord, normalizePersistedDataAsset, type DataAssetRecord, type DataAssetRegistrationInput, type DataAssetScanSpec } from "../src/data-catalog.js";
 import { SqliteMetadataStore } from "../src/storage/index.js";
 
 async function fixture(): Promise<{ directory: string; bootstrapPath: string; statePath: string }> {
@@ -37,6 +37,21 @@ async function catalogRegistry(bootstrapPath: string, statePath: string): Promis
   const registry = new DataCatalogRegistry(bootstrapPath, store);
   await registry.initialize();
   return registry;
+}
+
+const normalizedScanSpec: DataAssetScanSpec = {
+  format: "csv",
+  objectIdColumn: "object_id",
+  raColumn: "ra_deg",
+  decColumn: "dec_deg",
+  coordinateFrame: "ICRS",
+  coordinateUnits: "deg",
+  modality: "photometry",
+  product: "source catalog",
+};
+
+function registrationWithScanSpec(scanSpec: unknown): DataAssetRegistrationInput {
+  return { name: "CSV catalog", kind: "catalog", scanSpec: scanSpec as DataAssetScanSpec };
 }
 
 test("data catalog merges read-only bootstrap records with persisted user records", async () => {
@@ -108,6 +123,56 @@ test("data catalog rejects incomplete connector metadata", async () => {
       sourceUri: "",
       format: "csv",
     }), /sourceUri is required/);
+  } finally {
+    await rm(paths.directory, { recursive: true, force: true });
+  }
+});
+
+test("CSV scan specs are normalized, retained by updates, and survive restart", async () => {
+  const paths = await fixture();
+  try {
+    const registry = await catalogRegistry(paths.bootstrapPath, paths.statePath);
+    const created = await registry.register({
+      ...registrationWithScanSpec({
+        format: " csv ",
+        objectIdColumn: " object_id ",
+        raColumn: " ra_deg ",
+        decColumn: " dec_deg ",
+        coordinateFrame: " ICRS ",
+        coordinateUnits: " deg ",
+        modality: " photometry ",
+        product: " source catalog ",
+      }),
+    });
+    assert.deepEqual(created.scanSpec, normalizedScanSpec);
+    assert.deepEqual(normalizeDataAssetRecord(created, "user").scanSpec, normalizedScanSpec);
+
+    const updated = await registry.update(created.id, { name: "Updated CSV catalog", kind: "catalog" });
+    assert.deepEqual(updated.scanSpec, normalizedScanSpec);
+
+    const restarted = await catalogRegistry(paths.bootstrapPath, paths.statePath);
+    assert.deepEqual((await restarted.get(created.id)).scanSpec, normalizedScanSpec);
+  } finally {
+    await rm(paths.directory, { recursive: true, force: true });
+  }
+});
+
+test("CSV scan specs reject unknown fields, invalid formats, columns, coordinates, and long text", async () => {
+  const paths = await fixture();
+  try {
+    const registry = await catalogRegistry(paths.bootstrapPath, paths.statePath);
+    const valid = { ...normalizedScanSpec };
+    await assert.rejects(() => registry.register(registrationWithScanSpec({ ...valid, extra: true })), /unknown field/);
+    await assert.rejects(() => registry.register(registrationWithScanSpec({ ...valid, format: "fits" })), /format must be csv/);
+    await assert.rejects(() => registry.register(registrationWithScanSpec({ ...valid, objectIdColumn: "" })), /objectIdColumn is required/);
+    await assert.rejects(() => registry.register(registrationWithScanSpec({ ...valid, decColumn: "ra_deg" })), /column names must be distinct/);
+    await assert.rejects(() => registry.register(registrationWithScanSpec({ ...valid, coordinateFrame: "FK5" })), /coordinateFrame must be ICRS/);
+    await assert.rejects(() => registry.register(registrationWithScanSpec({ ...valid, coordinateUnits: "rad" })), /coordinateUnits must be deg/);
+    await assert.rejects(() => registry.register(registrationWithScanSpec({ ...valid, raColumn: "r".repeat(513) })), /at most 512/);
+    await assert.rejects(() => registry.register(registrationWithScanSpec({ ...valid, product: "p".repeat(161) })), /at most 160/);
+
+    const created = await registry.register({ ...registrationWithScanSpec(valid) });
+    await assert.rejects(async () => normalizePersistedDataAsset({ ...created, scanSpec: { ...valid, modality: 42 } }), /modality must be a string/);
   } finally {
     await rm(paths.directory, { recursive: true, force: true });
   }

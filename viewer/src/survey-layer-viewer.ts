@@ -15,7 +15,7 @@ import {
 } from "../../src/survey-layer-model";
 import type { SurveyFootprint } from "../../src/survey-footprints";
 import type { SurveyCard, SurveyFootprintManifest } from "./api";
-import { cartesianToRaDec } from "./coordinates";
+import { cartesianToRaDec, raDecToCartesian } from "./coordinates";
 import {
   buildSphericalCellGeometry,
   buildSphericalCellEdges,
@@ -34,8 +34,11 @@ export interface SurveyLayerSelection {
   pixels: number[];
   surveyIds: string[];
   releaseIds: string[];
+  assetIds: string[];
   artifacts: SurveyFootprint[];
   coverageCounts: Array<{ surveyId: string; cellCount: number }>;
+  assetCoverageCounts: Array<{ assetId: string; cellCount: number }>;
+  workspaceLayers: WorkspaceCoverageMembership[];
   centerRaDeg: number;
   centerDecDeg: number;
   angularRadiusDeg: number;
@@ -49,6 +52,8 @@ export interface SurveyLayerInspection {
   pixel: number;
   surveyIds: string[];
   releaseIds: string[];
+  assetIds: string[];
+  workspaceLayers: WorkspaceCoverageMembership[];
   artifacts: SurveyFootprint[];
   pointerRaDeg: number;
   pointerDecDeg: number;
@@ -65,24 +70,74 @@ export interface SurveyLayerHover extends Omit<SurveyLayerInspection, "kind"> {
 
 export interface WorkspaceCoverageLayer {
   key?: string;
+  assetId?: string;
+  assetIds?: string[];
+  assetName?: string;
+  status?: string;
   surveyId?: string;
   releaseId?: string;
   source?: "connector" | "asset" | "unassigned" | "conflict";
   message?: string;
+  color?: string;
   nside: number;
   pixels: number[];
 }
 
-export interface SurveyLayerContextMenu {
-  clientX: number;
-  clientY: number;
+export interface WorkspaceCoverageMembership {
+  key: string;
+  assetId?: string;
+  assetIds: string[];
+  assetName?: string;
+  status?: string;
+  surveyId?: string;
+  releaseId?: string;
+  source?: WorkspaceCoverageLayer["source"];
+  message?: string;
+}
+
+export interface SurveyDrillCell {
+  nside: number;
   pixel: number;
-  locked: boolean;
+  count: number;
+  layers: Array<{
+    key: string;
+    assetId?: string;
+    surveyId?: string;
+    releaseId?: string;
+    product?: string;
+    modality?: string;
+    label?: string;
+    color?: string;
+    count: number;
+  }>;
+}
+
+export interface SurveyLayerDrillEvent {
+  nside: number;
+  pixel: number;
+  additive: boolean;
+  doubleClick: boolean;
+}
+
+export interface SurveyObjectPoint {
+  objectId?: string;
+  raDeg: number;
+  decDeg: number;
+  assetId?: string;
+  surveyId?: string;
+  releaseId?: string;
+  product?: string;
+  modality?: string;
+  attributes?: Record<string, unknown>;
+  label?: string;
+  color?: string;
+  count?: number;
 }
 
 export interface SurveyLayerState {
   nside: number;
   cameraDistance: number;
+  effectiveFovDeg: number;
   cameraPosition: [number, number, number];
   outerRadius: number;
   surveyCount: number;
@@ -93,11 +148,10 @@ export interface SurveyLayerState {
   selectedPixels: number[];
   selectionAnchor: { xRatio: number; yRatio: number; visible: boolean } | null;
   visibleSurveyIds: string[];
+  visibleAssetIds: string[];
   layoutMode: SurveyLayerLayoutMode;
   interactionMode: SurveyLayerInteractionMode;
   focusedSurveyId: string | null;
-  pinnedCoveragePixel: number | null;
-  lockedCoveragePixel: number | null;
 }
 
 interface CellRecord {
@@ -106,8 +160,11 @@ interface CellRecord {
 
 interface LayerMesh extends THREE.Mesh<THREE.BufferGeometry, THREE.MeshBasicMaterial> {
   userData: {
-    surveyId: string;
+    layerKey?: string;
+    assetId?: string;
+    surveyId?: string;
     records: CellRecord[];
+    drill?: boolean;
   };
 }
 
@@ -125,6 +182,14 @@ interface ExplodedFragment {
   material: THREE.MeshBasicMaterial;
   lineMaterial: THREE.LineBasicMaterial;
   fromScale: number;
+}
+
+interface ExplosionLayerEntry {
+  key: string;
+  nside: number;
+  pixel: number;
+  color: THREE.Color;
+  sourceRadius: number;
 }
 
 interface ExplosionTransition {
@@ -197,6 +262,20 @@ function displayColor(source: string): THREE.Color {
   return color;
 }
 
+export function workspaceAssetColor(key: string): string {
+  const palette = ["#f2cf62", "#45d7c6", "#ef8db2", "#9b8cff", "#5caeff", "#f29a62", "#72d88d", "#ed6d70"];
+  let hash = 2166136261;
+  for (let index = 0; index < key.length; index += 1) {
+    hash ^= key.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return palette[(hash >>> 0) % palette.length]!;
+}
+
+function deterministicWorkspaceColor(key: string): THREE.Color {
+  return new THREE.Color(workspaceAssetColor(key));
+}
+
 function fragmentMaterial(opacity = COVERAGE_OPACITY): THREE.MeshBasicMaterial {
   return new THREE.MeshBasicMaterial({
     vertexColors: true,
@@ -208,6 +287,45 @@ function fragmentMaterial(opacity = COVERAGE_OPACITY): THREE.MeshBasicMaterial {
     blending: THREE.NormalBlending,
     toneMapped: false,
   });
+}
+
+function compactCount(value: number): string {
+  if (!Number.isFinite(value) || value <= 0) return "0";
+  if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(value >= 10_000_000 ? 0 : 1)}M`;
+  if (value >= 1_000) return `${(value / 1_000).toFixed(value >= 10_000 ? 0 : 1)}K`;
+  return String(Math.round(value));
+}
+
+function shortLayerLabel(value: string): string {
+  const normalized = value.replace(/^asset:/, "");
+  return normalized.length > 12 ? `${normalized.slice(0, 10)}..` : normalized;
+}
+
+function countLabelSprite(text: string, position: THREE.Vector3): THREE.Sprite {
+  const canvas = document.createElement("canvas");
+  canvas.width = 192;
+  canvas.height = 64;
+  const context = canvas.getContext("2d")!;
+  context.clearRect(0, 0, canvas.width, canvas.height);
+  context.fillStyle = "rgba(4, 9, 12, 0.72)";
+  context.strokeStyle = "rgba(255, 255, 255, 0.45)";
+  context.lineWidth = 2;
+  context.beginPath();
+  context.roundRect(10, 10, 172, 44, 18);
+  context.fill();
+  context.stroke();
+  context.fillStyle = "#ffffff";
+  context.font = "700 24px Inter, Arial, sans-serif";
+  context.textAlign = "center";
+  context.textBaseline = "middle";
+  context.fillText(text, canvas.width / 2, canvas.height / 2 + 1);
+  const texture = new THREE.CanvasTexture(canvas);
+  texture.colorSpace = THREE.SRGBColorSpace;
+  const sprite = new THREE.Sprite(new THREE.SpriteMaterial({ map: texture, transparent: true, depthTest: true, depthWrite: false }));
+  sprite.position.copy(position);
+  sprite.scale.set(0.15, 0.05, 1);
+  sprite.renderOrder = 36;
+  return sprite;
 }
 
 export class SurveyLayerViewer {
@@ -225,16 +343,20 @@ export class SurveyLayerViewer {
   readonly #retiredGroup = new THREE.Group();
   readonly #selectionGroup = new THREE.Group();
   readonly #explosionGroup = new THREE.Group();
+  readonly #drillGroup = new THREE.Group();
+  readonly #objectPointGroup = new THREE.Group();
   readonly #resizeObserver: ResizeObserver;
   readonly #onSelection: (selection: SurveyLayerSelection | null) => void;
   readonly #onHover: (hover: SurveyLayerHover | null) => void;
   readonly #onInspection: (inspection: SurveyLayerInspection | null) => void;
-  readonly #onContextMenu: (menu: SurveyLayerContextMenu | null) => void;
   readonly #onStateChange: (state: SurveyLayerState) => void;
+  readonly #onDrill?: (event: SurveyLayerDrillEvent) => void;
+  readonly #onObjectPoint?: (point: SurveyObjectPoint) => void;
   readonly #model: SurveyLayerModel;
   readonly #colorBySurvey = new Map<string, THREE.Color>();
   readonly #selectedPixels = new Set<number>();
   readonly #visibleSurveyIds = new Set<string>();
+  readonly #visibleAssetIds = new Set<string>();
   readonly #layerMeshes: LayerMesh[] = [];
   readonly #coverageEdgeMaterials: THREE.LineBasicMaterial[] = [];
   readonly #meshBySurvey = new Map<string, LayerMesh>();
@@ -243,8 +365,6 @@ export class SurveyLayerViewer {
   #layoutMode: SurveyLayerLayoutMode = "layers";
   #interactionMode: SurveyLayerInteractionMode = "inspect";
   #focusedSurveyId: string | null = null;
-  #pinnedCoveragePixel: number | null = null;
-  #lockedCoveragePixel: number | null = null;
   #renderQueued = false;
   #pointerStart: { x: number; y: number } | null = null;
   #interactionMesh: LayerMesh | null = null;
@@ -252,6 +372,12 @@ export class SurveyLayerViewer {
   #explosionTransition: ExplosionTransition | null = null;
   #explodedFragments: ExplodedFragment[] = [];
   #explodedPixel: number | null = null;
+  #explodedNside: number | null = null;
+  #drillNside = 16;
+  #drillCells = new Map<number, SurveyDrillCell>();
+  #drillFocusActive = false;
+  #focusedAssetId: string | null = null;
+  #clickTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(
     canvas: HTMLCanvasElement,
@@ -260,16 +386,18 @@ export class SurveyLayerViewer {
     onSelection: (selection: SurveyLayerSelection | null) => void,
     onHover: (hover: SurveyLayerHover | null) => void,
     onInspection: (inspection: SurveyLayerInspection | null) => void,
-    onContextMenu: (menu: SurveyLayerContextMenu | null) => void,
     onStateChange: (state: SurveyLayerState) => void,
+    onDrill?: (event: SurveyLayerDrillEvent) => void,
+    onObjectPoint?: (point: SurveyObjectPoint) => void,
   ) {
     this.#canvas = canvas;
     this.#manifest = manifest;
     this.#onSelection = onSelection;
     this.#onHover = onHover;
     this.#onInspection = onInspection;
-    this.#onContextMenu = onContextMenu;
     this.#onStateChange = onStateChange;
+    this.#onDrill = onDrill;
+    this.#onObjectPoint = onObjectPoint;
     this.#model = buildSurveyLayerModel(surveys, manifest);
     surveys.forEach((survey) => this.#colorBySurvey.set(survey.id, displayColor(survey.color)));
 
@@ -281,18 +409,18 @@ export class SurveyLayerViewer {
     this.#controls.enablePan = false;
     this.#controls.enableDamping = true;
     this.#controls.dampingFactor = 0.07;
-    this.#controls.minDistance = this.#outerRadius + 0.18;
+    this.#controls.minDistance = 0.002;
     this.#controls.maxDistance = 7.5;
     this.#controls.addEventListener("change", this.#handleControlsChange);
     this.#starField = this.#backgroundStars();
-    this.#scene.add(this.#starField, this.#coverageGroup, this.#workspaceCoverageGroup, this.#retiredGroup, this.#selectionGroup, this.#explosionGroup);
+    this.#scene.add(this.#starField, this.#coverageGroup, this.#workspaceCoverageGroup, this.#drillGroup, this.#objectPointGroup, this.#retiredGroup, this.#selectionGroup, this.#explosionGroup);
     this.setTheme(document.documentElement.dataset.theme === "light" ? "light" : "dark");
     this.#canvas.addEventListener("pointerdown", this.#handlePointerDown);
     this.#canvas.addEventListener("pointerup", this.#handlePointerUp);
+    this.#canvas.addEventListener("dblclick", this.#handleDoubleClick);
     this.#canvas.addEventListener("pointermove", this.#handlePointerMove);
     this.#canvas.addEventListener("pointerleave", this.#handlePointerLeave);
     this.#canvas.addEventListener("pointercancel", this.#handlePointerCancel);
-    this.#canvas.addEventListener("contextmenu", this.#handleContextMenu);
     window.addEventListener("keydown", this.#handleKeyDown);
     this.#resizeObserver = new ResizeObserver(() => this.#resize());
     this.#resizeObserver.observe(canvas.parentElement ?? canvas);
@@ -323,42 +451,193 @@ export class SurveyLayerViewer {
     return {
       nside: this.#manifest.nside,
       cameraDistance: this.#camera.position.length(),
+      effectiveFovDeg: this.#effectiveSkyFovDeg(),
       cameraPosition: [this.#camera.position.x, this.#camera.position.y, this.#camera.position.z],
       outerRadius: this.#outerRadius,
       surveyCount: this.#model.slots.length,
       releaseCount: new Set(this.#manifest.footprints.map((footprint) => footprint.releaseId)).size,
-      occupiedCellCount: new Set([...this.#model.coverageByPixel.keys(), ...Array.from(this.#workspaceLayers.values()).flatMap((layer) => layer.pixels)]).size,
+      occupiedCellCount: new Set([
+        ...this.#model.coverageByPixel.keys(),
+        ...Array.from(this.#workspaceLayers.values()).filter((layer) => this.#workspaceLayerVisible(layer)).flatMap((layer) => layer.pixels),
+      ]).size,
       visibleCellCount: visibleCells.size,
       selectedCellCount: this.#selectedPixels.size,
       selectedPixels: [...this.#selectedPixels].sort((left, right) => left - right),
       selectionAnchor: this.#selectionAnchor(),
       visibleSurveyIds: [...this.#visibleSurveyIds],
+      visibleAssetIds: [...this.#visibleAssetIds],
       layoutMode: this.#layoutMode,
       interactionMode: this.#interactionMode,
       focusedSurveyId: this.#focusedSurveyId,
-      pinnedCoveragePixel: this.#pinnedCoveragePixel,
-      lockedCoveragePixel: this.#lockedCoveragePixel,
     };
+  }
+
+  setDrillCells(cells: readonly SurveyDrillCell[], nside: number): void {
+    if (!Number.isInteger(nside) || nside < this.#manifest.nside) return;
+    this.#drillNside = nside;
+    // Keep zero-count children as wireframe cells. They are part of the
+    // selected HEALPix subdivision and must remain pickable for the next
+    // double-click, even though they do not get a numeric label.
+    const visible = cells.filter((cell) => Number.isInteger(cell.pixel) && cell.pixel >= 0 && cell.pixel < 12 * nside ** 2);
+    this.#drillCells = new Map(visible.map((cell) => [cell.pixel, cell]));
+    clearGroup(this.#drillGroup);
+    if (!visible.length) {
+      this.#requestRender();
+      return;
+    }
+    const cellsInput = visible.map((cell) => ({
+      nside,
+      pixel: cell.pixel,
+      radius: Math.max(1.006, this.#outerRadius + 0.006),
+      color: this.#drillCellColor(cell),
+      inset: nside === this.#manifest.nside ? 0.018 : 0.006,
+    }));
+    const mesh = new THREE.Mesh(buildSphericalCellSheetGeometry(cellsInput), new THREE.MeshBasicMaterial({
+      vertexColors: true,
+      transparent: true,
+      opacity: nside === this.#manifest.nside ? 0.2 : 0.3,
+      side: THREE.DoubleSide,
+      depthTest: true,
+      depthWrite: false,
+      toneMapped: false,
+    })) as LayerMesh;
+    mesh.userData = { layerKey: "__drill__", records: visible.map((cell) => ({ pixel: cell.pixel })), drill: true };
+    mesh.renderOrder = 15;
+    const edges = new THREE.LineSegments(buildSphericalCellEdges(cellsInput), new THREE.LineBasicMaterial({
+      vertexColors: true,
+      transparent: true,
+      opacity: 0.8,
+      depthTest: true,
+      depthWrite: false,
+      toneMapped: false,
+    }));
+    edges.renderOrder = 16;
+    this.#drillGroup.add(mesh, edges);
+    // Labels are deliberately sparse. Counts remain available in the inspector;
+    // the canvas only annotates a few high-resolution, high-count cells.
+    const labelRadius = Math.max(1.012, this.#outerRadius + 0.012);
+    const labels = nside >= 64
+      ? visible.filter((cell) => cell.count > 0).sort((left, right) => right.count - left.count).slice(0, 8)
+      : [];
+    labels.forEach((cell) => {
+      const layerText = cell.layers
+        .filter((layer) => layer.count > 0)
+        .map((layer) => `${shortLayerLabel(layer.label ?? (layer.assetId ? "用户资产" : layer.surveyId ? "巡天" : "图层"))}:${compactCount(layer.count)}`)
+        .join("  ");
+      const label = countLabelSprite(`${compactCount(cell.count)}${layerText ? `  ${layerText}` : ""}`, this.#pixelDirectionAt(nside, [cell.pixel]).multiplyScalar(labelRadius));
+      this.#drillGroup.add(label);
+    });
+    this.#requestRender();
+  }
+
+  clearDrillCells(): void {
+    this.#drillCells.clear();
+    clearGroup(this.#drillGroup);
+    this.#requestRender();
+  }
+
+  setDrillFocus(active: boolean): void {
+    if (this.#drillFocusActive === active) return;
+    this.#drillFocusActive = active;
+    this.#applyFocus();
+  }
+
+  setObjectPoints(points: readonly SurveyObjectPoint[]): void {
+    clearGroup(this.#objectPointGroup);
+    const valid = points.filter((point) => Number.isFinite(point.raDeg) && Number.isFinite(point.decDeg));
+    if (!valid.length) {
+      this.#requestRender();
+      return;
+    }
+    const radius = Math.max(1.018, this.#outerRadius + 0.018);
+    const positions = new Float32Array(valid.length * 3);
+    const colors = new Float32Array(valid.length * 3);
+    valid.forEach((point, index) => {
+      const position = raDecToCartesian(point.raDeg, point.decDeg, radius);
+      positions.set([position.x, position.y, position.z], index * 3);
+      const color = point.color
+        ? new THREE.Color(point.color)
+        : point.assetId
+        ? new THREE.Color(workspaceAssetColor(point.assetId))
+        : point.surveyId ? this.#colorBySurvey.get(point.surveyId) ?? BASE_COLOR : SELECTION_COLOR;
+      colors.set([color.r, color.g, color.b], index * 3);
+    });
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute("position", new THREE.BufferAttribute(positions, 3));
+    geometry.setAttribute("color", new THREE.BufferAttribute(colors, 3));
+    const material = new THREE.PointsMaterial({ size: 0.014, sizeAttenuation: true, vertexColors: true, transparent: true, opacity: 0.95, depthTest: true, depthWrite: false, blending: THREE.AdditiveBlending, toneMapped: false });
+    const objectCloud = new THREE.Points(geometry, material);
+    objectCloud.renderOrder = 40;
+    objectCloud.userData = { objectCount: valid.length, points: valid };
+    this.#objectPointGroup.add(objectCloud);
+    this.#requestRender();
+  }
+
+  clearObjectPoints(): void {
+    clearGroup(this.#objectPointGroup);
+    this.#requestRender();
+  }
+
+  focusDrillCell(nside: number, pixel: number): void {
+    const direction = this.#pixelDirectionAt(nside, [pixel]);
+    const distance = this.#outerRadius + 0.36;
+    const targetRadius = Math.max(0.001, this.#outerRadius - 0.004);
+    this.#startCameraTransition(
+      direction.clone().multiplyScalar(distance),
+      direction.clone().multiplyScalar(targetRadius),
+      620,
+    );
+  }
+
+  focusAsset(assetId: string): void {
+    const layer = [...this.#workspaceLayers.values()].find((candidate) => this.#workspaceLayerAssetIds(candidate).includes(assetId));
+    if (!layer || !this.#visibleAssetIds.has(assetId) || !layer.pixels.length) return;
+    this.#focusedAssetId = assetId;
+    this.#applyFocus();
+    const direction = this.#pixelDirectionAt(layer.nside, layer.pixels);
+    this.#startCameraTransition(
+      direction.clone().multiplyScalar(this.#outerRadius + 0.36),
+      direction.clone().multiplyScalar(Math.max(0.001, this.#outerRadius - 0.004)),
+      680,
+    );
   }
 
   get #outerRadius(): number {
     const slots = visibleSurveySlots(this.#model, this.#visibleSurveyIds, this.#layoutMode);
+    const workspaceRadii = this.#workspaceDisplayLayers().map((entry) => entry.radius);
     const explodedOuter = this.#explodedPixel == null
       ? 1
-      : 1 + Math.max(0, this.#visibleSurveyIds.size - 1) * EXPLODED_LAYER_STEP / 2;
-    return Math.max(1, explodedOuter, ...slots.map((slot) => slot.displayRadius));
+      : 1 + Math.max(0, this.#explodedFragments.length - 1) * EXPLODED_LAYER_STEP / 2;
+    return Math.max(1, explodedOuter, ...slots.map((slot) => slot.displayRadius), ...workspaceRadii);
+  }
+
+  #effectiveSkyFovDeg(): number {
+    const distance = this.#camera.position.distanceTo(this.#controls.target);
+    const halfSpan = Math.atan((distance * Math.tan(THREE.MathUtils.degToRad(this.#camera.fov) / 2)) / Math.max(0.001, this.#outerRadius));
+    return Math.max(0.01, Math.min(180, THREE.MathUtils.radToDeg(halfSpan * 2)));
   }
 
   setVisibleSurveys(surveyIds: Iterable<string>): void {
     const available = new Set(this.#model.slots.filter((slot) => slot.hasFootprint).map((slot) => slot.surveyId));
-    this.#workspaceLayers.forEach((layer) => { if (layer.pixels.length) available.add(layer.surveyId ?? "__unassigned__"); });
+    this.#workspaceLayers.forEach((layer) => {
+      if (!this.#workspaceLayerAssetIds(layer).length && layer.pixels.length) available.add(layer.surveyId ?? "__unassigned__");
+    });
     const next = new Set([...surveyIds].filter((surveyId) => available.has(surveyId)));
     if (next.size === this.#visibleSurveyIds.size && [...next].every((surveyId) => this.#visibleSurveyIds.has(surveyId))) return;
     this.#visibleSurveyIds.clear();
     next.forEach((surveyId) => this.#visibleSurveyIds.add(surveyId));
     if (this.#focusedSurveyId && !this.#visibleSurveyIds.has(this.#focusedSurveyId)) this.#focusedSurveyId = null;
     this.#pruneSelection();
-    this.#rebuildVisible(this.#lockedCoveragePixel == null);
+    this.#rebuildVisible(true);
+  }
+
+  setVisibleAssets(assetIds: Iterable<string>): void {
+    const next = new Set([...assetIds].filter((assetId) => typeof assetId === "string" && assetId.length > 0));
+    if (next.size === this.#visibleAssetIds.size && [...next].every((assetId) => this.#visibleAssetIds.has(assetId))) return;
+    this.#visibleAssetIds.clear();
+    next.forEach((assetId) => this.#visibleAssetIds.add(assetId));
+    this.#pruneSelection();
+    this.#rebuildVisible(true);
   }
 
   setWorkspaceCoverage(layer: WorkspaceCoverageLayer | null): void {
@@ -386,26 +665,6 @@ export class SurveyLayerViewer {
     this.#emitState();
   }
 
-  setInspectionLocked(pixel: number, locked: boolean): void {
-    if (!locked) {
-      if (this.#lockedCoveragePixel === pixel) this.#lockedCoveragePixel = null;
-      this.#emitState();
-      return;
-    }
-    const membership = visibleCoverageAtPixel(this.#model, pixel, this.#visibleSurveyIds);
-    const workspaceAvailable = this.#workspaceAvailableAt(pixel);
-    if (!membership && !workspaceAvailable) return;
-    this.#lockedCoveragePixel = pixel;
-    this.#pinnedCoveragePixel = pixel;
-    this.#presentInspection(pixel, membership ?? { surveyIds: [], releaseIds: [], artifacts: [] }, workspaceAvailable, this.#pixelDirection([pixel]), false);
-    this.#emitState();
-  }
-
-  togglePinnedInspectionLock(): void {
-    if (this.#interactionMode !== "inspect" || this.#pinnedCoveragePixel == null) return;
-    this.setInspectionLocked(this.#pinnedCoveragePixel, this.#lockedCoveragePixel !== this.#pinnedCoveragePixel);
-  }
-
   clearRegionSelection(): void {
     this.#clearSelection();
   }
@@ -428,14 +687,12 @@ export class SurveyLayerViewer {
   setLayoutMode(mode: SurveyLayerLayoutMode): void {
     if (this.#layoutMode === mode) return;
     this.#layoutMode = mode;
-    this.#rebuildVisible(this.#lockedCoveragePixel == null);
+    this.#rebuildVisible(true);
   }
 
   setInteractionMode(mode: SurveyLayerInteractionMode): void {
     if (this.#interactionMode === mode) return;
     this.#interactionMode = mode;
-    this.#pinnedCoveragePixel = null;
-    this.#lockedCoveragePixel = null;
     this.#clearExplosion(false);
     this.#onInspection(null);
     if (mode === "inspect") this.#clearSelection();
@@ -462,7 +719,6 @@ export class SurveyLayerViewer {
   reset(): void {
     this.#cameraTransition = null;
     this.#focusedSurveyId = null;
-    this.#pinnedCoveragePixel = null;
     this.#selectedPixels.clear();
     this.#clearExplosion(false);
     clearGroup(this.#selectionGroup);
@@ -479,7 +735,7 @@ export class SurveyLayerViewer {
     this.#camera.position.set(radius * 1.72, radius * 1.48, radius * 1.56);
     this.#controls.target.set(0, 0, 0);
     this.#controls.enabled = true;
-    this.#controls.minDistance = radius + 0.18;
+    this.#controls.minDistance = 0.002;
     this.#controls.update();
     this.#emitState();
     this.#requestRender();
@@ -492,17 +748,19 @@ export class SurveyLayerViewer {
     this.#controls.dispose();
     this.#canvas.removeEventListener("pointerdown", this.#handlePointerDown);
     this.#canvas.removeEventListener("pointerup", this.#handlePointerUp);
+    this.#canvas.removeEventListener("dblclick", this.#handleDoubleClick);
     this.#canvas.removeEventListener("pointermove", this.#handlePointerMove);
     this.#canvas.removeEventListener("pointerleave", this.#handlePointerLeave);
     this.#canvas.removeEventListener("pointercancel", this.#handlePointerCancel);
-    this.#canvas.removeEventListener("contextmenu", this.#handleContextMenu);
     window.removeEventListener("keydown", this.#handleKeyDown);
+    if (this.#clickTimer) clearTimeout(this.#clickTimer);
     disposeObject(this.#scene);
     this.#renderer.dispose();
     releaseWebglContext(this.#renderer);
   }
 
   #rebuildVisible(animated: boolean): void {
+    this.#onHover(null);
     this.#clearExplosion(false);
     if (!animated) {
       this.#fragmentTransitions.length = 0;
@@ -510,29 +768,24 @@ export class SurveyLayerViewer {
     }
     this.#retireCoverage(animated);
     const slots = visibleSurveySlots(this.#model, this.#visibleSurveyIds, this.#layoutMode);
-    if (this.#layoutMode === "overlap") this.#buildOverlapLayer(animated);
-    else slots.forEach((slot) => this.#buildSurveyLayer(slot.surveyId, slot.displayRadius, animated));
+    if (this.#layoutMode === "overlap") slots.forEach((slot, index) => this.#buildSurveyLayer(slot.surveyId, slot.displayRadius, animated, 4 + index * 2));
+    else slots.forEach((slot, index) => this.#buildSurveyLayer(slot.surveyId, slot.displayRadius, animated, 4 + index * 2));
     this.#rebuildWorkspaceCoverage();
     this.#buildInteractionLayer();
-    this.#controls.minDistance = this.#outerRadius + 0.18;
+    this.#controls.minDistance = 0.002;
     this.#keepCameraOutside();
     this.#renderSelectionRegion();
     this.#applyFocus();
-    if (this.#lockedCoveragePixel != null) {
-      const membership = visibleCoverageAtPixel(this.#model, this.#lockedCoveragePixel, this.#visibleSurveyIds);
-      const workspaceAvailable = this.#workspaceAvailableAt(this.#lockedCoveragePixel);
-      if (membership || workspaceAvailable) this.#presentInspection(this.#lockedCoveragePixel, membership ?? { surveyIds: [], releaseIds: [], artifacts: [] }, workspaceAvailable, this.#pixelDirection([this.#lockedCoveragePixel]), false);
-    }
     this.#emitState();
     this.#requestRender();
   }
 
-  #buildSurveyLayer(surveyId: string, radius: number, animated: boolean): void {
+  #buildSurveyLayer(surveyId: string, radius: number, animated: boolean, renderOrder = 4): void {
     const pixels = this.#model.pixelsBySurvey.get(surveyId) ?? [];
     if (!pixels.length) return;
     const color = this.#colorBySurvey.get(surveyId) ?? BASE_COLOR;
     const cells = pixels.map((pixel) => this.#cellInput(pixel, radius, color));
-    this.#addFragmentLayer(surveyId, pixels, cells, animated);
+    this.#addFragmentLayer(surveyId, pixels, cells, animated, renderOrder);
   }
 
   #buildOverlapLayer(animated: boolean): void {
@@ -575,35 +828,99 @@ export class SurveyLayerViewer {
 
   #rebuildWorkspaceCoverage(): void {
     clearGroup(this.#workspaceCoverageGroup);
-    this.#workspaceLayers.forEach((layer) => {
-      if (!this.#workspaceLayerVisible(layer) || !layer.pixels.length) return;
-      const surveyId = layer.surveyId;
-      const slot = surveyId ? visibleSurveySlots(this.#model, this.#visibleSurveyIds, this.#layoutMode).find((candidate) => candidate.surveyId === surveyId) : undefined;
-      const radius = (slot?.displayRadius ?? 1) + 0.014;
-      const color = surveyId ? this.#colorBySurvey.get(surveyId) ?? WORKSPACE_COLOR : WORKSPACE_COLOR;
+    this.#workspaceDisplayLayers().forEach(({ layer, radius, color }, index) => {
+      if (!layer.pixels.length) return;
       const cells = layer.pixels.map((pixel) => ({ nside: this.#manifest.nside, pixel, radius, color, inset: 0.018 }));
-      const mesh = new THREE.Mesh(buildSphericalCellSheetGeometry(cells), new THREE.MeshBasicMaterial({ vertexColors: true, transparent: true, opacity: 0.14, side: THREE.DoubleSide, depthTest: true, depthWrite: false, toneMapped: false }));
-      mesh.renderOrder = 9;
+      const mesh = new THREE.Mesh(buildSphericalCellSheetGeometry(cells), new THREE.MeshBasicMaterial({ vertexColors: true, transparent: true, opacity: 0.14, side: THREE.DoubleSide, depthTest: true, depthWrite: false, toneMapped: false })) as LayerMesh;
+      mesh.userData = {
+        layerKey: layer.key,
+        assetId: this.#workspaceLayerAssetIds(layer)[0],
+        records: layer.pixels.map((pixel) => ({ pixel })),
+      };
+      mesh.renderOrder = 9 + index * 2;
       const edges = new THREE.LineSegments(buildSphericalCellEdges(cells), new THREE.LineBasicMaterial({ vertexColors: true, transparent: true, opacity: 0.68, depthTest: true, depthWrite: false, toneMapped: false }));
-      edges.renderOrder = 10;
+      edges.renderOrder = 10 + index * 2;
       this.#workspaceCoverageGroup.add(mesh, edges);
     });
     this.#requestRender();
   }
 
   #workspaceLayerVisible(layer: WorkspaceCoverageLayer): boolean {
+    const assetIds = this.#workspaceLayerAssetIds(layer);
+    if (assetIds.length) return assetIds.some((assetId) => this.#visibleAssetIds.has(assetId));
     return this.#visibleSurveyIds.has(layer.surveyId ?? "__unassigned__");
+  }
+
+  #workspaceLayerAssetIds(layer: WorkspaceCoverageLayer): string[] {
+    return [...new Set([...(layer.assetIds ?? []), ...(layer.assetId ? [layer.assetId] : [])])].sort();
+  }
+
+  #visibleWorkspaceLayerAssetIds(layer: WorkspaceCoverageLayer): string[] {
+    return this.#workspaceLayerAssetIds(layer).filter((assetId) => this.#visibleAssetIds.has(assetId));
+  }
+
+  #workspaceDisplayLayers(): Array<{ layer: WorkspaceCoverageLayer; radius: number; color: THREE.Color }> {
+    const layers = [...this.#workspaceLayers.values()]
+      .filter((layer) => this.#workspaceLayerVisible(layer) && layer.pixels.length)
+      .sort((left, right) => (left.key ?? "").localeCompare(right.key ?? ""));
+    const slots = visibleSurveySlots(this.#model, this.#visibleSurveyIds, this.#layoutMode);
+    let assetOffset = 0;
+    return layers.map((layer) => {
+      const assetIds = this.#workspaceLayerAssetIds(layer);
+      const slot = layer.surveyId ? slots.find((candidate) => candidate.surveyId === layer.surveyId) : undefined;
+      const radius = this.#layoutMode === "overlap"
+        ? (slot?.displayRadius ?? 1)
+        : (slot?.displayRadius ?? 1) + (assetIds.length ? 0.018 + assetOffset++ * 0.016 : 0.014);
+      const color = layer.color
+        ? new THREE.Color(layer.color)
+        : assetIds.length
+          ? deterministicWorkspaceColor(assetIds[0]!)
+          : layer.surveyId ? this.#colorBySurvey.get(layer.surveyId) ?? WORKSPACE_COLOR : WORKSPACE_COLOR;
+      return { layer, radius, color };
+    });
+  }
+
+  #drillCellColor(cell: SurveyDrillCell): THREE.Color {
+    const dominant = [...cell.layers].sort((left, right) => right.count - left.count)[0];
+    if (dominant?.color) return new THREE.Color(dominant.color);
+    if (dominant?.assetId) return deterministicWorkspaceColor(dominant.assetId);
+    if (dominant?.surveyId) return this.#colorBySurvey.get(dominant.surveyId) ?? BASE_COLOR;
+    const ratio = Math.min(1, cell.count / Math.max(1, ...[...this.#drillCells.values()].map((candidate) => candidate.count)));
+    return BASE_COLOR.clone().lerp(OVERLAP_COLOR, ratio);
+  }
+
+  #objectPointAt(event: PointerEvent): SurveyObjectPoint | null {
+    const intersections = this.#raycaster.intersectObjects([this.#objectPointGroup], true);
+    const hit = intersections.find((candidate) => candidate.object instanceof THREE.Points);
+    if (!hit || hit.index == null) return null;
+    const points = hit.object.userData.points as SurveyObjectPoint[] | undefined;
+    return points?.[hit.index] ?? null;
   }
 
   #workspaceAvailableAt(pixel: number): boolean {
     return [...this.#workspaceLayers.values()].some((layer) => this.#workspaceLayerVisible(layer) && layer.pixels.includes(pixel));
   }
 
-  #workspaceMembershipAt(pixel: number): { surveyIds: string[]; releaseIds: string[] } {
+  #workspaceMembershipAt(pixel: number): { surveyIds: string[]; releaseIds: string[]; assetIds: string[]; layers: WorkspaceCoverageMembership[] } {
     const layers = [...this.#workspaceLayers.values()].filter((layer) => this.#workspaceLayerVisible(layer) && layer.pixels.includes(pixel));
     return {
       surveyIds: [...new Set(layers.map((layer) => layer.surveyId).filter((value): value is string => Boolean(value)))].sort(),
       releaseIds: [...new Set(layers.map((layer) => layer.releaseId).filter((value): value is string => Boolean(value)))].sort(),
+      assetIds: [...new Set(layers.flatMap((layer) => this.#visibleWorkspaceLayerAssetIds(layer)))].sort(),
+      layers: layers.map((layer) => {
+        const assetIds = this.#visibleWorkspaceLayerAssetIds(layer);
+        return {
+          key: layer.key ?? layer.surveyId ?? "__unassigned__",
+          assetId: layer.assetId && assetIds.includes(layer.assetId) ? layer.assetId : assetIds.length === 1 ? assetIds[0] : undefined,
+          assetIds,
+          assetName: layer.assetName,
+          status: layer.status,
+          surveyId: layer.surveyId,
+          releaseId: layer.releaseId,
+          source: layer.source,
+          message: layer.message,
+        };
+      }).sort((left, right) => left.key.localeCompare(right.key)),
     };
   }
 
@@ -617,18 +934,18 @@ export class SurveyLayerViewer {
     };
   }
 
-  #addFragmentLayer(surveyId: string, pixels: number[], cells: SphericalCellSheetGeometryInput[], animated: boolean): void {
+  #addFragmentLayer(surveyId: string, pixels: number[], cells: SphericalCellSheetGeometryInput[], animated: boolean, renderOrder = 4): void {
     const root = new THREE.Group();
     root.scale.setScalar(animated ? 0.94 : 1);
     const material = fragmentMaterial();
     material.opacity = animated ? 0 : COVERAGE_OPACITY;
     const mesh = new THREE.Mesh(buildSphericalCellSheetGeometry(cells), material) as LayerMesh;
     mesh.userData = { surveyId, records: pixels.map((pixel) => ({ pixel })) };
-    mesh.renderOrder = 4;
+    mesh.renderOrder = renderOrder;
     const lineMaterial = new THREE.LineBasicMaterial({ vertexColors: true, transparent: true, opacity: animated ? 0 : COVERAGE_EDGE_OPACITY, depthTest: true, depthWrite: false });
     this.#coverageEdgeMaterials.push(lineMaterial);
     const edges = new THREE.LineSegments(buildSphericalCellEdges(cells), lineMaterial);
-    edges.renderOrder = 6;
+    edges.renderOrder = renderOrder + 2;
     root.add(mesh, edges);
     this.#coverageGroup.add(root);
     this.#layerMeshes.push(mesh);
@@ -675,29 +992,61 @@ export class SurveyLayerViewer {
 
   #applyFocus(): void {
     for (const [surveyId, mesh] of this.#meshBySurvey) {
-      mesh.material.opacity = this.#selectedPixels.size > 0 || this.#explodedPixel != null
+      mesh.material.opacity = this.#drillFocusActive || this.#selectedPixels.size > 0 || this.#explodedPixel != null
         ? DIMMED_OPACITY
         : this.#focusedSurveyId === surveyId ? 0.24 : COVERAGE_OPACITY;
     }
-    const edgeOpacity = this.#selectedPixels.size > 0 || this.#explodedPixel != null ? DIMMED_EDGE_OPACITY : COVERAGE_EDGE_OPACITY;
+    this.#workspaceCoverageGroup.traverse((child) => {
+      if (!(child instanceof THREE.Mesh) || !(child.material instanceof THREE.MeshBasicMaterial)) return;
+      const assetId = child.userData.assetId;
+      child.material.opacity = this.#drillFocusActive || this.#selectedPixels.size > 0 || this.#explodedPixel != null
+        ? DIMMED_OPACITY
+        : this.#focusedAssetId && assetId === this.#focusedAssetId ? 0.28 : 0.14;
+    });
+    const edgeOpacity = this.#drillFocusActive || this.#selectedPixels.size > 0 || this.#explodedPixel != null ? DIMMED_EDGE_OPACITY : COVERAGE_EDGE_OPACITY;
     this.#coverageEdgeMaterials.forEach((material) => { material.opacity = edgeOpacity; });
     this.#requestRender();
   }
 
-  #pickCell(event: PointerEvent): { pixel: number; membership: CoverageCellMembership | null; workspaceAvailable: boolean; point: THREE.Vector3 } | null {
+  #pickCell(event: PointerEvent): { pixel: number; nside: number; membership: CoverageCellMembership | null; workspaceAvailable: boolean; point: THREE.Vector3 } | null {
     const bounds = this.#canvas.getBoundingClientRect();
     if (bounds.width <= 0 || bounds.height <= 0) return null;
     this.#pointer.set(((event.clientX - bounds.left) / bounds.width) * 2 - 1, -((event.clientY - bounds.top) / bounds.height) * 2 + 1);
     this.#raycaster.setFromCamera(this.#pointer, this.#camera);
-    // Angular pick on the unit sphere: independent of display-layer insets/radii, so visually covered
-    // gaps between inset cells remain selectable and multi-layer shells share one sky grid.
-    const point = this.#intersectUnitSphere(this.#raycaster.ray);
-    if (!point) return null;
-    const pixel = healpixPixelFromSceneDirection(this.#manifest.nside, point);
-    const membership = visibleCoverageAtPixel(this.#model, pixel, this.#visibleSurveyIds);
-    const workspaceAvailable = this.#workspaceAvailableAt(pixel);
-    if (!membership && !workspaceAvailable && this.#interactionMode !== "region") return null;
-    return { pixel, membership, workspaceAvailable, point };
+    const renderedHit = this.#raycaster.intersectObjects([this.#drillGroup, this.#workspaceCoverageGroup], true).find((hit) => {
+      const object = hit.object as Partial<LayerMesh>;
+      return Boolean(object.userData?.records?.length);
+    });
+    let renderedPixel: number | undefined;
+    let renderedNside = this.#drillNside;
+    if (renderedHit) {
+      const object = renderedHit.object as LayerMesh;
+      const records = object.userData.records;
+      const record = records[Math.max(0, Math.floor((renderedHit.faceIndex ?? 0) / 2))] ?? records[0];
+      renderedPixel = record?.pixel;
+      if (object.userData.drill) renderedNside = this.#drillNside;
+      else renderedNside = [...this.#workspaceLayers.values()].find((layer) => layer.key === object.userData.layerKey)?.nside ?? this.#manifest.nside;
+    }
+    // Angular picking keeps inset gaps selectable, while a rendered shell hit preserves
+    // the actual asset or drill cell beneath the pointer.
+    const unitPoint = this.#intersectUnitSphere(this.#raycaster.ray);
+    if (!unitPoint && !renderedHit) return null;
+    const point = unitPoint ?? renderedHit!.point.clone().normalize();
+    const nside = renderedPixel == null ? this.#manifest.nside : renderedNside;
+    const pixel = renderedPixel ?? healpixPixelFromSceneDirection(nside, point);
+    const membership = nside === this.#manifest.nside ? visibleCoverageAtPixel(this.#model, pixel, this.#visibleSurveyIds) : null;
+    const workspaceAvailable = nside === this.#manifest.nside && this.#workspaceAvailableAt(pixel);
+    const drillAvailable = nside === this.#drillNside && this.#drillCells.has(pixel);
+    if (!membership && !workspaceAvailable && !drillAvailable && this.#interactionMode !== "region") return null;
+    return { pixel, nside, membership, workspaceAvailable: workspaceAvailable || drillAvailable, point };
+  }
+
+  #pickObject(event: PointerEvent): SurveyObjectPoint | null {
+    const bounds = this.#canvas.getBoundingClientRect();
+    if (bounds.width <= 0 || bounds.height <= 0) return null;
+    this.#pointer.set(((event.clientX - bounds.left) / bounds.width) * 2 - 1, -((event.clientY - bounds.top) / bounds.height) * 2 + 1);
+    this.#raycaster.setFromCamera(this.#pointer, this.#camera);
+    return this.#objectPointAt(event);
   }
 
   #intersectUnitSphere(ray: THREE.Ray): THREE.Vector3 | null {
@@ -720,36 +1069,33 @@ export class SurveyLayerViewer {
   #inspect(event: PointerEvent): void {
     const hit = this.#pickCell(event);
     if (!hit?.membership && !hit?.workspaceAvailable) {
-      if (this.#lockedCoveragePixel != null) return;
-      this.#pinnedCoveragePixel = null;
       this.#clearExplosion(true);
       this.#onInspection(null);
       this.#emitState();
       return;
     }
-    if (this.#explodedPixel === hit.pixel) {
-      if (this.#lockedCoveragePixel === hit.pixel) return;
-      this.#pinnedCoveragePixel = null;
+    if (this.#explodedPixel === hit.pixel && this.#explodedNside === hit.nside) {
       this.#clearExplosion(true);
       this.#onInspection(null);
       this.#emitState();
       return;
     }
-    this.#pinnedCoveragePixel = hit.pixel;
-    this.#presentInspection(hit.pixel, hit.membership ?? { surveyIds: [], releaseIds: [], artifacts: [] }, hit.workspaceAvailable, hit.point, false);
+    this.#presentInspection(hit.nside, hit.pixel, hit.membership ?? { surveyIds: [], releaseIds: [], artifacts: [] }, hit.workspaceAvailable, hit.point, false);
     this.#emitState();
   }
 
-  #presentInspection(pixel: number, membership: CoverageCellMembership, workspaceAvailable: boolean, point: THREE.Vector3, rotateCamera: boolean): void {
+  #presentInspection(nside: number, pixel: number, membership: CoverageCellMembership, workspaceAvailable: boolean, point: THREE.Vector3, rotateCamera: boolean): void {
     const pointer = cartesianToRaDec(point);
-    const center = cartesianToRaDec(this.#pixelDirection([pixel]));
-    const workspace = this.#workspaceMembershipAt(pixel);
+    const center = cartesianToRaDec(this.#pixelDirectionAt(nside, [pixel]));
+    const workspace = nside === this.#manifest.nside ? this.#workspaceMembershipAt(pixel) : { surveyIds: [], releaseIds: [], assetIds: [], layers: [] };
     this.#onInspection({
       kind: "coverage-cell",
-      nside: this.#manifest.nside,
+      nside,
       pixel,
       surveyIds: [...new Set([...membership.surveyIds, ...workspace.surveyIds])].sort(),
       releaseIds: [...new Set([...membership.releaseIds, ...workspace.releaseIds])].sort(),
+      assetIds: workspace.assetIds,
+      workspaceLayers: workspace.layers,
       artifacts: membership.artifacts,
       pointerRaDeg: pointer.raDeg,
       pointerDecDeg: pointer.decDeg,
@@ -757,7 +1103,7 @@ export class SurveyLayerViewer {
       centerDecDeg: center.decDeg,
       workspaceAvailable,
     });
-    this.#explodeInspection(pixel, membership, rotateCamera);
+    this.#explodeInspection(nside, pixel, membership, rotateCamera);
   }
 
   #select(event: PointerEvent): void {
@@ -783,8 +1129,9 @@ export class SurveyLayerViewer {
     if (!this.#selectedPixels.size) return;
     const selected = this.#selectedPixels;
     const allSlots = visibleSurveySlots(this.#model, this.#visibleSurveyIds, this.#layoutMode);
-    const minimumRadius = Math.min(1, ...allSlots.map((slot) => slot.displayRadius)) - REGION_INNER_PADDING;
-    const maximumRadius = Math.max(1, ...allSlots.map((slot) => slot.displayRadius)) + REGION_OUTER_PADDING;
+    const workspaceRadii = this.#workspaceDisplayLayers().map((entry) => entry.radius);
+    const minimumRadius = Math.min(1, ...allSlots.map((slot) => slot.displayRadius), ...workspaceRadii) - REGION_INNER_PADDING;
+    const maximumRadius = Math.max(1, ...allSlots.map((slot) => slot.displayRadius), ...workspaceRadii) + REGION_OUTER_PADDING;
     const regionCells = [...selected].map((pixel) => ({
       nside: this.#manifest.nside,
       pixel,
@@ -848,19 +1195,16 @@ export class SurveyLayerViewer {
       this.#selectionGroup.add(mesh, edges);
     });
 
-    this.#workspaceLayers.forEach((layer) => {
-      if (!this.#workspaceLayerVisible(layer)) return;
+    this.#workspaceDisplayLayers().forEach(({ layer, radius, color }, index) => {
       const pixels = [...selected].filter((pixel) => layer.pixels.includes(pixel));
       if (!pixels.length) return;
-      const surveyColor = layer.surveyId ? this.#colorBySurvey.get(layer.surveyId) : undefined;
-      const radius = (allSlots.find((slot) => slot.surveyId === layer.surveyId)?.displayRadius ?? 1) + 0.02;
-      const cells = pixels.map((pixel) => ({ nside: this.#manifest.nside, pixel, radius, color: surveyColor ?? WORKSPACE_COLOR, inset: 0.01 }));
+      const cells = pixels.map((pixel) => ({ nside: this.#manifest.nside, pixel, radius: radius + 0.006, color, inset: 0.01 }));
       const material = new THREE.MeshBasicMaterial({ vertexColors: true, transparent: true, opacity: 0.42, side: THREE.DoubleSide, depthTest: true, depthWrite: false, toneMapped: false });
       const mesh = new THREE.Mesh(buildSphericalCellSheetGeometry(cells), material);
-      mesh.renderOrder = 34;
+      mesh.renderOrder = 34 + index * 2;
       const edgeMaterial = new THREE.LineBasicMaterial({ vertexColors: true, transparent: true, opacity: 0.72, depthTest: true, depthWrite: false, toneMapped: false });
       const edges = new THREE.LineSegments(buildSphericalCellEdges(cells), edgeMaterial);
-      edges.renderOrder = 35;
+      edges.renderOrder = 35 + index * 2;
       this.#selectionGroup.add(mesh, edges);
     });
 
@@ -887,16 +1231,24 @@ export class SurveyLayerViewer {
     }
     const surveyIds = new Set<string>();
     const releaseIds = new Set<string>();
+    const assetIds = new Set<string>();
     const artifacts = new Map<string, SurveyFootprint>();
+    const workspaceLayers = new Map<string, WorkspaceCoverageMembership>();
     const coverageCounts = new Map<string, number>();
+    const assetCoverageCounts = new Map<string, number>();
     let emptyCellCount = 0;
     for (const pixel of this.#selectedPixels) {
       const membership = visibleCoverageAtPixel(this.#model, pixel, this.#visibleSurveyIds);
       const workspace = this.#workspaceMembershipAt(pixel);
       workspace.surveyIds.forEach((surveyId) => surveyIds.add(surveyId));
       workspace.releaseIds.forEach((releaseId) => releaseIds.add(releaseId));
+      workspace.assetIds.forEach((assetId) => {
+        assetIds.add(assetId);
+        assetCoverageCounts.set(assetId, (assetCoverageCounts.get(assetId) ?? 0) + 1);
+      });
+      workspace.layers.forEach((layer) => workspaceLayers.set(layer.key, layer));
       workspace.surveyIds.forEach((surveyId) => coverageCounts.set(surveyId, (coverageCounts.get(surveyId) ?? 0) + 1));
-      if (!membership && !workspace.surveyIds.length && !this.#workspaceAvailableAt(pixel)) {
+      if (!membership && !workspace.layers.length) {
         emptyCellCount += 1;
         continue;
       }
@@ -919,8 +1271,11 @@ export class SurveyLayerViewer {
       pixels: [...this.#selectedPixels].sort((left, right) => left - right),
       surveyIds: [...surveyIds].sort(),
       releaseIds: [...releaseIds].sort(),
+      assetIds: [...assetIds].sort(),
       artifacts: [...artifacts.values()].sort((left, right) => artifactKey(left).localeCompare(artifactKey(right))),
       coverageCounts: [...coverageCounts].map(([surveyId, cellCount]) => ({ surveyId, cellCount })).sort((left, right) => left.surveyId.localeCompare(right.surveyId)),
+      assetCoverageCounts: [...assetCoverageCounts].map(([assetId, cellCount]) => ({ assetId, cellCount })).sort((left, right) => left.assetId.localeCompare(right.assetId)),
+      workspaceLayers: [...workspaceLayers.values()].sort((left, right) => left.key.localeCompare(right.key)),
       centerRaDeg: center.raDeg,
       centerDecDeg: center.decDeg,
       angularRadiusDeg,
@@ -931,11 +1286,6 @@ export class SurveyLayerViewer {
   }
 
   #pruneSelection(): void {
-    if (this.#pinnedCoveragePixel != null && this.#lockedCoveragePixel !== this.#pinnedCoveragePixel && !visibleCoverageAtPixel(this.#model, this.#pinnedCoveragePixel, this.#visibleSurveyIds) && !this.#workspaceAvailableAt(this.#pinnedCoveragePixel)) {
-      this.#pinnedCoveragePixel = null;
-      this.#clearExplosion(false);
-      this.#onInspection(null);
-    }
     if (this.#selectedPixels.size) {
       if (this.#selectedPixels.size > 1 && !isAdjacentConnected(this.#manifest.nside, this.#selectedPixels)) {
         // Preserve the largest contiguous eight-neighbour component if imported state is invalid.
@@ -975,21 +1325,58 @@ export class SurveyLayerViewer {
     this.#requestRender();
   }
 
-  #explodeInspection(pixel: number, membership: CoverageCellMembership, rotateCamera: boolean): void {
+  #explodeInspection(nside: number, pixel: number, membership: CoverageCellMembership, rotateCamera: boolean): void {
     this.#clearExplosion(false);
     this.#explodedPixel = pixel;
+    this.#explodedNside = nside;
     const slots = visibleSurveySlots(this.#model, this.#visibleSurveyIds, this.#layoutMode);
-    const surveyIds = this.#model.slots
-      .map((slot) => slot.surveyId)
-      .filter((surveyId) => membership.surveyIds.includes(surveyId));
-    const midpoint = (surveyIds.length - 1) / 2;
-    this.#explodedFragments = surveyIds.map((surveyId, index) => {
-      const color = this.#colorBySurvey.get(surveyId) ?? BASE_COLOR;
+    const entries: ExplosionLayerEntry[] = [];
+    for (const surveyId of membership.surveyIds) {
+      if (!this.#visibleSurveyIds.has(surveyId)) continue;
+      entries.push({
+        key: `survey:${surveyId}`,
+        nside,
+        pixel,
+        color: this.#colorBySurvey.get(surveyId) ?? BASE_COLOR,
+        sourceRadius: slots.find((slot) => slot.surveyId === surveyId)?.displayRadius ?? 1,
+      });
+    }
+    if (nside === this.#manifest.nside) {
+      this.#workspaceDisplayLayers()
+        .filter(({ layer }) => layer.pixels.includes(pixel))
+        .forEach(({ layer, radius, color }) => entries.push({
+          key: layer.key ?? layer.assetId ?? layer.surveyId ?? "workspace",
+          nside,
+          pixel,
+          color,
+          sourceRadius: radius,
+        }));
+    }
+    const drillCell = this.#drillCells.get(pixel);
+    if (drillCell && drillCell.nside === nside) {
+      const existingKeys = new Set(entries.map((entry) => entry.key));
+      for (const layer of drillCell.layers.filter((candidate) => candidate.count > 0)) {
+        const key = layer.key || layer.assetId || layer.surveyId || `cell:${pixel}`;
+        if (existingKeys.has(key)) continue;
+        const color = layer.assetId
+          ? deterministicWorkspaceColor(layer.assetId)
+          : layer.surveyId ? this.#colorBySurvey.get(layer.surveyId) ?? BASE_COLOR : BASE_COLOR;
+        entries.push({ key, nside, pixel, color, sourceRadius: Math.max(1.006, this.#outerRadius + 0.006) });
+        existingKeys.add(key);
+      }
+    }
+    const midpoint = (entries.length - 1) / 2;
+    this.#explodedFragments = entries.map((entry, index) => {
       const targetRadius = 1 + (index - midpoint) * EXPLODED_LAYER_STEP;
-      const sourceRadius = slots.find((slot) => slot.surveyId === surveyId)?.displayRadius ?? 1;
       const root = new THREE.Group();
-      root.scale.setScalar(sourceRadius / targetRadius);
-      const cell = this.#cellInput(pixel, targetRadius, color);
+      root.scale.setScalar(entry.sourceRadius / targetRadius);
+      const cell: SphericalCellSheetGeometryInput = {
+        nside: entry.nside,
+        pixel: entry.pixel,
+        radius: targetRadius,
+        color: entry.color,
+        inset: entry.nside === this.#manifest.nside ? 0.018 : 0.006,
+      };
       const material = fragmentMaterial(0);
       const mesh = new THREE.Mesh(buildSphericalCellSheetGeometry([cell]), material);
       mesh.renderOrder = 20 + index * 2;
@@ -1005,23 +1392,20 @@ export class SurveyLayerViewer {
       edges.renderOrder = 21 + index * 2;
       root.add(mesh, edges);
       this.#explosionGroup.add(root);
-      return { root, material, lineMaterial, fromScale: sourceRadius / targetRadius };
+      return { root, material, lineMaterial, fromScale: entry.sourceRadius / targetRadius };
     });
-    this.#coverageGroup.traverse((child) => {
-      if (child instanceof THREE.Mesh && child.material instanceof THREE.MeshBasicMaterial) child.material.opacity = DIMMED_OPACITY;
-      if (child instanceof THREE.LineSegments && child.material instanceof THREE.LineBasicMaterial) child.material.opacity = DIMMED_EDGE_OPACITY;
-    });
+    this.#setCoverageOpacity(true);
     this.#explosionTransition = {
       startedAt: performance.now(),
       durationMs: 620,
       direction: "in",
       fragments: this.#explodedFragments,
     };
-    const direction = this.#pixelDirection([pixel]);
+    const direction = this.#pixelDirectionAt(nside, [pixel]);
     const outer = this.#outerRadius;
     const distance = Math.max(this.#camera.position.length(), outer + 0.18);
     const destination = direction.clone().multiplyScalar(distance);
-    this.#controls.minDistance = outer + 0.18;
+    this.#controls.minDistance = 0.002;
     if (rotateCamera) this.#startCameraTransition(destination, new THREE.Vector3(0, 0, 0), 620);
     this.#requestRender();
   }
@@ -1031,10 +1415,8 @@ export class SurveyLayerViewer {
       return;
     }
     this.#explodedPixel = null;
-    this.#coverageGroup.traverse((child) => {
-      if (child instanceof THREE.Mesh && child.material instanceof THREE.MeshBasicMaterial) child.material.opacity = COVERAGE_OPACITY;
-      if (child instanceof THREE.LineSegments && child.material instanceof THREE.LineBasicMaterial) child.material.opacity = COVERAGE_EDGE_OPACITY;
-    });
+    this.#explodedNside = null;
+    this.#setCoverageOpacity(false);
     if (animated && this.#explodedFragments.length) {
       this.#explosionTransition = {
         startedAt: performance.now(),
@@ -1051,10 +1433,26 @@ export class SurveyLayerViewer {
     this.#requestRender();
   }
 
+  #setCoverageOpacity(dimmed: boolean): void {
+    const restore = (group: THREE.Group, meshOpacity: number, edgeOpacity: number): void => {
+      group.traverse((child) => {
+        if (child instanceof THREE.Mesh && child.material instanceof THREE.MeshBasicMaterial) child.material.opacity = dimmed ? DIMMED_OPACITY : meshOpacity;
+        if (child instanceof THREE.LineSegments && child.material instanceof THREE.LineBasicMaterial) child.material.opacity = dimmed ? DIMMED_EDGE_OPACITY : edgeOpacity;
+      });
+    };
+    restore(this.#coverageGroup, COVERAGE_OPACITY, COVERAGE_EDGE_OPACITY);
+    restore(this.#workspaceCoverageGroup, 0.14, 0.68);
+    restore(this.#drillGroup, 0.3, 0.8);
+  }
+
   #pixelDirection(pixels: Iterable<number>): THREE.Vector3 {
+    return this.#pixelDirectionAt(this.#manifest.nside, pixels);
+  }
+
+  #pixelDirectionAt(nside: number, pixels: Iterable<number>): THREE.Vector3 {
     const direction = new THREE.Vector3();
     for (const pixel of pixels) {
-      const boundary = sphericalCellBoundary(this.#manifest.nside, pixel, 1);
+      const boundary = sphericalCellBoundary(nside, pixel, 1);
       const center = boundary.reduce((sum, point) => sum.add(point), new THREE.Vector3()).normalize();
       direction.add(center);
     }
@@ -1150,7 +1548,7 @@ export class SurveyLayerViewer {
   };
 
   #keepCameraOutside(): void {
-    const minimumRadius = this.#outerRadius + 0.18;
+    const minimumRadius = this.#outerRadius + 0.002;
     if (this.#camera.position.length() >= minimumRadius) return;
     if (this.#camera.position.lengthSq() === 0) this.#camera.position.set(minimumRadius, 0, 0);
     else this.#camera.position.setLength(minimumRadius);
@@ -1167,8 +1565,31 @@ export class SurveyLayerViewer {
     const distance = Math.hypot(event.clientX - this.#pointerStart.x, event.clientY - this.#pointerStart.y);
     this.#pointerStart = null;
     if (distance >= 5) return;
-    if (this.#interactionMode === "region") this.#select(event);
-    else this.#inspect(event);
+    if (this.#clickTimer) clearTimeout(this.#clickTimer);
+    this.#clickTimer = setTimeout(() => {
+      this.#clickTimer = null;
+      const object = this.#pickObject(event);
+      if (object) {
+        this.#onObjectPoint?.(object);
+        return;
+      }
+      const hit = this.#pickCell(event);
+      if (hit) this.#onDrill?.({ nside: hit.nside, pixel: hit.pixel, additive: event.ctrlKey || event.metaKey, doubleClick: false });
+      if (this.#interactionMode === "region") this.#select(event);
+      else this.#inspect(event);
+    }, 220);
+  };
+
+  readonly #handleDoubleClick = (event: MouseEvent): void => {
+    if (event.button !== 0) return;
+    if (this.#clickTimer) {
+      clearTimeout(this.#clickTimer);
+      this.#clickTimer = null;
+    }
+    const hit = this.#pickCell(event as PointerEvent);
+    if (!hit) return;
+    this.#onDrill?.({ nside: hit.nside, pixel: hit.pixel, additive: event.ctrlKey || event.metaKey, doubleClick: true });
+    this.focusDrillCell(hit.nside, hit.pixel);
   };
 
   readonly #handlePointerMove = (event: PointerEvent): void => {
@@ -1179,12 +1600,15 @@ export class SurveyLayerViewer {
       return;
     }
     const pointer = cartesianToRaDec(hit.point);
-    const center = cartesianToRaDec(this.#pixelDirection([hit.pixel]));
+    const center = cartesianToRaDec(this.#pixelDirectionAt(hit.nside, [hit.pixel]));
+    const workspace = hit.nside === this.#manifest.nside ? this.#workspaceMembershipAt(hit.pixel) : { surveyIds: [], releaseIds: [], assetIds: [], layers: [] };
     this.#onHover({
-      nside: this.#manifest.nside,
+      nside: hit.nside,
       pixel: hit.pixel,
-      surveyIds: hit.membership?.surveyIds ?? [],
-      releaseIds: hit.membership?.releaseIds ?? [],
+      surveyIds: [...new Set([...(hit.membership?.surveyIds ?? []), ...workspace.surveyIds])].sort(),
+      releaseIds: [...new Set([...(hit.membership?.releaseIds ?? []), ...workspace.releaseIds])].sort(),
+      assetIds: workspace.assetIds,
+      workspaceLayers: workspace.layers,
       artifacts: hit.membership?.artifacts ?? [],
       pointerRaDeg: pointer.raDeg,
       pointerDecDeg: pointer.decDeg,
@@ -1201,20 +1625,8 @@ export class SurveyLayerViewer {
 
   readonly #handlePointerLeave = (): void => this.#onHover(null);
   readonly #handlePointerCancel = (): void => { this.#pointerStart = null; };
-  readonly #handleContextMenu = (event: MouseEvent): void => {
-    event.preventDefault();
-    const hit = this.#pickCell(event as PointerEvent);
-    this.#onContextMenu(hit?.membership || hit?.workspaceAvailable ? {
-      clientX: event.clientX,
-      clientY: event.clientY,
-      pixel: hit.pixel,
-      locked: this.#lockedCoveragePixel === hit.pixel,
-    } : null);
-  };
   readonly #handleKeyDown = (event: KeyboardEvent): void => {
     if (event.key !== "Escape" || this.#explodedPixel == null) return;
-    this.#pinnedCoveragePixel = null;
-    this.#lockedCoveragePixel = null;
     this.#clearExplosion(true);
     this.#onInspection(null);
     this.#emitState();

@@ -185,10 +185,11 @@ test("connector self-scan accepts no business body", () => {
   assert.throws(() => validateConnectorSelfScanBody([]), /do not accept a request body/);
 });
 
-test("connector self-scan derives its target and snapshots zero or multiple linked assets", async () => {
-  for (const assetIds of [[], ["asset-two", "asset-one"]]) {
+test("connector self-scan derives its target and snapshots zero, one, or multiple linked user assets", async () => {
+  for (const assetIds of [[], ["asset-one"], ["asset-two", "asset-one"]]) {
     const record = connector();
-    const fixture = await scanFixture(record, assetIds.map((id) => asset(id, record)));
+    const builtin = { ...asset("builtin-linked", record), origin: "builtin" as const };
+    const fixture = await scanFixture(record, [...assetIds.map((id) => asset(id, record)), builtin]);
     try {
       const run = await fixture.service.submitConnectorScan(record.id, `key-${assetIds.length}`);
       assert.equal(run.connectorId, record.id);

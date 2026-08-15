@@ -24,6 +24,9 @@ spec:
       {{- if .Values.dataWarehouse.enabled }}
       serviceAccountName: {{ include "astro-data-workspace.serviceAccountName" . }}
       {{- end }}
+      {{- if gt (len .Values.localData.nodeSelector) 0 }}
+      nodeSelector: {{ toYaml .Values.localData.nodeSelector | nindent 8 }}
+      {{- end }}
       securityContext: {{ toYaml .Values.podSecurityContext | nindent 8 }}
       containers:
         - name: workspace
@@ -52,11 +55,17 @@ spec:
             - name: ASTRO_CONNECTOR_BOOTSTRAP
               value: /app/bootstrap/connectors.json
             - name: ASTRO_ALLOWED_ROOTS
-              value: /state
+              value: {{ ternary "/state:/data/local" "/state" .Values.localData.enabled | quote }}
+            - name: ASTRO_WORKFLOW_ROOT
+              value: /state/workflow-runs
             - name: ASTRO_RESOURCE_PACKAGE_ROOT
               value: /state/resource-packages
             - name: ASTRO_RESOURCE_PACKAGE_STATE
               value: /state/resource-package-state.json
+            {{- if .Values.localData.enabled }}
+            - name: ASTRO_LOCAL_CONNECTOR_ROOTS
+              value: /data/local
+            {{- end }}
             - name: ASTRO_METADATA_STORE
               value: {{ ternary "sqlite" "postgres" (eq .Values.metadataStore.mode "sqlite") | quote }}
             {{- if eq .Values.metadataStore.mode "sqlite" }}
@@ -77,6 +86,23 @@ spec:
                   name: {{ .Values.metadataStore.external.existingSecret | quote }}
                   key: {{ .Values.metadataStore.external.existingSecretKey | quote }}
             {{- end }}
+            - name: ASTRO_ES_URL
+              {{- if eq .Values.search.mode "bundled" }}
+              value: {{ include "astro-data-workspace.elasticsearchUrl" . | quote }}
+              {{- else }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.search.external.existingSecret | quote }}
+                  key: {{ .Values.search.external.existingSecretKey | quote }}
+              {{- end }}
+            - name: ASTRO_ES_ASTRO_INDEX
+              value: {{ .Values.search.index.file | quote }}
+            - name: ASTRO_ES_OBJECT_INDEX
+              value: {{ .Values.search.index.object | quote }}
+            - name: ASTRO_ES_COVERAGE_INDEX
+              value: {{ .Values.search.index.coverage | quote }}
+            - name: ASTRO_LOCAL_SCAN_ENABLED
+              value: {{ .Values.search.localScanEnabled | quote }}
             {{- if .Values.dataWarehouse.enabled }}
             - name: ASTRO_FLINK_NAMESPACE
               value: {{ .Values.dataWarehouse.namespace | quote }}
@@ -84,24 +110,40 @@ spec:
               value: {{ .Values.dataWarehouse.namespace | quote }}
             - name: ASTRO_FLINK_POLL_MS
               value: {{ .Values.dataWarehouse.pollIntervalMs | quote }}
-            {{- with .Values.dataWarehouse.elasticsearch.url }}
-            - name: ASTRO_ES_URL
-              value: {{ . | quote }}
-            {{- end }}
-            - name: ASTRO_ES_ASTRO_INDEX
-              value: {{ .Values.dataWarehouse.elasticsearch.index | quote }}
             {{- end }}
             {{- with .Values.env }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
-          readinessProbe:
+          startupProbe:
             httpGet:
               path: /healthz
               port: http
-            initialDelaySeconds: 2
             periodSeconds: 5
             timeoutSeconds: 2
-            failureThreshold: 6
+            failureThreshold: 30
+          readinessProbe:
+            exec:
+              command:
+                - node
+                - -e
+                - |
+                  const decode = (value) => { try { return decodeURIComponent(value); } catch { return value; } };
+                  const endpoint = new URL(process.env.ASTRO_ES_URL);
+                  const headers = {};
+                  if (endpoint.username || endpoint.password) {
+                    headers.Authorization = `Basic ${Buffer.from(`${decode(endpoint.username)}:${decode(endpoint.password)}`).toString("base64")}`;
+                    endpoint.username = "";
+                    endpoint.password = "";
+                  }
+                  endpoint.pathname = `${endpoint.pathname.replace(/\/+$/, "")}/_cluster/health`;
+                  endpoint.search = "wait_for_status=yellow&timeout=1s";
+                  Promise.all([
+                    fetch("http://127.0.0.1:3000/healthz", { signal: AbortSignal.timeout(1500) }),
+                    fetch(endpoint, { headers, signal: AbortSignal.timeout(1500) }),
+                  ]).then(([app, search]) => process.exit(app.ok && search.ok ? 0 : 1)).catch(() => process.exit(1));
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 3
           livenessProbe:
             httpGet:
               path: /healthz
@@ -117,6 +159,11 @@ spec:
               mountPath: /state
             - name: tmp
               mountPath: /tmp
+            {{- if .Values.localData.enabled }}
+            - name: local-data
+              mountPath: /data/local
+              readOnly: true
+            {{- end }}
       volumes:
         - name: state
           {{- if .Values.persistence.existingClaim }}
@@ -130,3 +177,20 @@ spec:
           {{- end }}
         - name: tmp
           emptyDir: {}
+        {{- if .Values.localData.enabled }}
+        - name: local-data
+          {{- if .Values.localData.existingClaim }}
+          persistentVolumeClaim:
+            claimName: {{ .Values.localData.existingClaim | quote }}
+            readOnly: true
+          {{- else if .Values.localData.nfs.server }}
+          nfs:
+            server: {{ .Values.localData.nfs.server | quote }}
+            path: {{ .Values.localData.nfs.path | quote }}
+            readOnly: true
+          {{- else }}
+          hostPath:
+            path: {{ .Values.localData.hostPath.path | quote }}
+            type: Directory
+          {{- end }}
+        {{- end }}

@@ -41,7 +41,8 @@ interface ManualFootprintState {
 
 export interface ManualFootprintRegistryOptions {
   statePath: string;
-  surveys: readonly SurveyRecord[];
+  surveys?: readonly SurveyRecord[];
+  resolveSurvey?: (surveyId: string) => SurveyRecord | undefined;
   releaseProducts?: readonly PublicReleaseProductStatus[];
   now?: () => Date;
 }
@@ -122,7 +123,7 @@ function parseRecord(value: unknown): ManualFootprintRecord {
 
 export class ManualFootprintRegistry {
   readonly #statePath: string;
-  readonly #surveys: readonly SurveyRecord[];
+  readonly #resolveSurvey: (surveyId: string) => SurveyRecord | undefined;
   readonly #releaseProducts: ReadonlySet<string>;
   readonly #now: () => Date;
   #state: ManualFootprintState = { schemaVersion: MANUAL_FOOTPRINT_SCHEMA_VERSION, records: [] };
@@ -130,7 +131,8 @@ export class ManualFootprintRegistry {
 
   constructor(options: ManualFootprintRegistryOptions) {
     this.#statePath = path.resolve(options.statePath);
-    this.#surveys = options.surveys;
+    if (!options.resolveSurvey && !options.surveys) throw new TypeError("surveys or resolveSurvey is required");
+    this.#resolveSurvey = options.resolveSurvey ?? ((surveyId) => options.surveys!.find((candidate) => candidate.id === surveyId));
     this.#releaseProducts = new Set((options.releaseProducts ?? []).map(identity));
     this.#now = options.now ?? (() => new Date());
   }
@@ -268,9 +270,9 @@ export class ManualFootprintRegistry {
   }
 
   #validateReference(input: Pick<ManualFootprintInput, "surveyId" | "releaseId" | "product">): void {
-    const survey = this.#surveys.find((candidate) => candidate.id === input.surveyId);
-    const release = survey?.releases.find((candidate) => candidate.id === input.releaseId && candidate.availability === "available");
-    if (!survey || !release) throw new RangeError(`Survey release is not an available curated release: ${input.surveyId}:${input.releaseId}`);
+    const survey = this.#resolveSurvey(input.surveyId);
+    const release = survey?.releases.find((candidate) => candidate.id === input.releaseId && candidate.availability !== "planned");
+    if (!survey || !release) throw new RangeError(`Survey release is not a non-planned registered release: ${input.surveyId}:${input.releaseId}`);
     if (!release.products.some((candidate) => candidate.name === input.product) && !this.#releaseProducts.has(identity(input))) {
       throw new RangeError(`Product is not registered for release: ${identity(input)}`);
     }

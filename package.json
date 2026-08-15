@@ -20,6 +20,7 @@
     "artifacts:footprints": "tsx scripts/public_footprint_artifacts.ts sync",
     "benchmark:atlas": "tsx scripts/benchmark_joint_index.ts",
     "smoke:http": "tsx scripts/mcp-http-smoke.ts",
+    "smoke:local-scan": "tsx scripts/smoke_local_csv_scan.ts",
     "smoke:workflow-real": "tsx scripts/smoke_real_workflow.ts",
     "validate": "npm run build && npm test && npm run test:volume"
   },

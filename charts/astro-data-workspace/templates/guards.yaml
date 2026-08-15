@@ -8,3 +8,75 @@
 {{- if and (eq .Values.metadataStore.mode "bundled-postgresql") (empty .Values.postgresql.auth.username) }}{{ fail "postgresql.auth.username is required for bundled-postgresql" }}{{- end }}
 {{- if and (eq .Values.metadataStore.mode "bundled-postgresql") (empty .Values.postgresql.auth.database) }}{{ fail "postgresql.auth.database is required for bundled-postgresql" }}{{- end }}
 {{- if and (eq .Values.metadataStore.mode "sqlite") (not (hasPrefix "/state/" .Values.metadataStore.sqlite.path)) }}{{ fail "metadataStore.sqlite.path must be on the /state persistence mount" }}{{- end }}
+{{- if not (has .Values.search.mode (list "bundled" "external")) }}{{ fail "search.mode must be bundled or external" }}{{- end }}
+{{- if and (eq .Values.search.mode "bundled") (not .Values.elasticsearch.enabled) }}{{ fail "search.mode=bundled requires elasticsearch.enabled=true" }}{{- end }}
+{{- if and (eq .Values.search.mode "external") .Values.elasticsearch.enabled }}{{ fail "search.mode=external requires elasticsearch.enabled=false" }}{{- end }}
+{{- if and (eq .Values.search.mode "bundled") .Values.search.external.existingSecret }}{{ fail "search.external.existingSecret is only valid with search.mode=external" }}{{- end }}
+{{- if and (eq .Values.search.mode "external") (empty .Values.search.external.existingSecret) }}{{ fail "search.external.existingSecret is required for search.mode=external" }}{{- end }}
+{{- if and (eq .Values.search.mode "external") (empty .Values.search.external.existingSecretKey) }}{{ fail "search.external.existingSecretKey is required for search.mode=external" }}{{- end }}
+{{- range $name, $index := .Values.search.index }}
+{{- if not (kindIs "string" $index) }}{{ fail (printf "search.index.%s must be a string" $name) }}{{- end }}
+{{- if or (empty $index) (gt (len $index) 255) (not (regexMatch "^[a-z0-9][a-z0-9._-]*$" $index)) }}{{ fail (printf "search.index.%s must be a valid lowercase Elasticsearch index name" $name) }}{{- end }}
+{{- end }}
+{{- if or (eq .Values.search.index.file .Values.search.index.object) (eq .Values.search.index.file .Values.search.index.coverage) (eq .Values.search.index.object .Values.search.index.coverage) }}{{ fail "search.index.file, search.index.object, and search.index.coverage must be distinct" }}{{- end }}
+{{- if eq .Values.search.mode "bundled" }}
+{{- if .Values.elasticsearch.security.enabled }}{{ fail "bundled search currently requires elasticsearch.security.enabled=false; access is restricted by NetworkPolicy" }}{{- end }}
+{{- if or .Values.elasticsearch.master.masterOnly (ne (int .Values.elasticsearch.master.replicaCount) 1) (ne (int .Values.elasticsearch.data.replicaCount) 0) (ne (int .Values.elasticsearch.coordinating.replicaCount) 0) .Values.elasticsearch.ingest.enabled (ne (int .Values.elasticsearch.ingest.replicaCount) 0) }}{{ fail "bundled search must remain a single multi-role Elasticsearch node" }}{{- end }}
+{{- if not .Values.elasticsearch.master.persistence.enabled }}{{ fail "bundled search requires elasticsearch.master.persistence.enabled=true" }}{{- end }}
+{{- $searchSize := .Values.elasticsearch.master.persistence.size -}}
+{{- if not (kindIs "string" $searchSize) }}{{ fail "elasticsearch.master.persistence.size must be a string" }}{{- end }}
+{{- if not (regexMatch `^([1-9][0-9]*)Gi$|^([1-9][0-9]*)Ti$` $searchSize) }}{{ fail "elasticsearch.master.persistence.size must use Gi or Ti units" }}{{- end }}
+{{- if and (hasSuffix "Gi" $searchSize) (lt (atoi (trimSuffix "Gi" $searchSize)) 20) }}{{ fail "bundled search requires at least 20Gi of persistent storage" }}{{- end }}
+{{- end }}
+{{- if not (kindIs "map" .Values.localData) }}{{ fail "localData must be an object" }}{{- end }}
+{{- if not (kindIs "bool" .Values.localData.enabled) }}{{ fail "localData.enabled must be a boolean" }}{{- end }}
+{{- if not (kindIs "map" .Values.localData.nfs) }}{{ fail "localData.nfs must be an object" }}{{- end }}
+{{- if not (kindIs "map" .Values.localData.hostPath) }}{{ fail "localData.hostPath must be an object" }}{{- end }}
+{{- if not (kindIs "map" .Values.localData.nodeSelector) }}{{ fail "localData.nodeSelector must be an object" }}{{- end }}
+{{- range $key, $_ := .Values.localData }}
+{{- if not (has $key (list "enabled" "existingClaim" "nfs" "hostPath" "nodeSelector")) }}{{ fail (printf "localData.%s is not a supported field" $key) }}{{- end }}
+{{- end }}
+{{- range $key, $_ := .Values.localData.nfs }}
+{{- if not (has $key (list "server" "path")) }}{{ fail (printf "localData.nfs.%s is not a supported field" $key) }}{{- end }}
+{{- end }}
+{{- range $key, $_ := .Values.localData.hostPath }}
+{{- if not (has $key (list "path" "type")) }}{{ fail (printf "localData.hostPath.%s is not a supported field" $key) }}{{- end }}
+{{- end }}
+{{- if not (kindIs "string" .Values.localData.existingClaim) }}{{ fail "localData.existingClaim must be a string" }}{{- end }}
+{{- if not (kindIs "string" .Values.localData.nfs.server) }}{{ fail "localData.nfs.server must be a string" }}{{- end }}
+{{- if not (kindIs "string" .Values.localData.nfs.path) }}{{ fail "localData.nfs.path must be a string" }}{{- end }}
+{{- if not (kindIs "string" .Values.localData.hostPath.path) }}{{ fail "localData.hostPath.path must be a string" }}{{- end }}
+{{- if not (kindIs "string" .Values.localData.hostPath.type) }}{{ fail "localData.hostPath.type must be a string" }}{{- end }}
+{{- $existingClaim := default "" .Values.localData.existingClaim -}}
+{{- $nfsServer := default "" .Values.localData.nfs.server -}}
+{{- $nfsPath := default "" .Values.localData.nfs.path -}}
+{{- $hostPath := default "" .Values.localData.hostPath.path -}}
+{{- $hostPathType := default "" .Values.localData.hostPath.type -}}
+{{- if ne $hostPathType "Directory" }}{{ fail "localData.hostPath.type must be Directory" }}{{- end }}
+{{- if not .Values.localData.enabled }}
+{{- if or $existingClaim $nfsServer $nfsPath $hostPath (gt (len .Values.localData.nodeSelector) 0) }}{{ fail "localData source fields and nodeSelector require localData.enabled=true" }}{{- end }}
+{{- else }}
+{{- if and $existingClaim (or $nfsServer $nfsPath $hostPath) }}{{ fail "localData.existingClaim cannot be combined with nfs or hostPath" }}{{- end }}
+{{- if and (or $nfsServer $nfsPath) (or $existingClaim $hostPath) }}{{ fail "localData.nfs cannot be combined with existingClaim or hostPath" }}{{- end }}
+{{- if and $hostPath (or $existingClaim $nfsServer $nfsPath) }}{{ fail "localData.hostPath cannot be combined with existingClaim or nfs" }}{{- end }}
+{{- if and (not $existingClaim) (not (or $nfsServer $nfsPath)) (not $hostPath) }}{{ fail "one localData source is required when localData.enabled=true" }}{{- end }}
+{{- if $existingClaim }}
+{{- if or (gt (len $existingClaim) 253) (not (regexMatch "^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$" $existingClaim)) }}{{ fail "localData.existingClaim must be a DNS-1123 subdomain name" }}{{- end }}
+{{- end }}
+{{- if or $nfsServer $nfsPath }}
+{{- if or (not $nfsServer) (not $nfsPath) }}{{ fail "localData.nfs.server and localData.nfs.path are both required" }}{{- end }}
+{{- if not (hasPrefix "/" $nfsPath) }}{{ fail "localData.nfs.path must be an absolute path" }}{{- end }}
+{{- if regexMatch `(^|/)\.\.?(/|$)` $nfsPath }}{{ fail "localData.nfs.path must not contain dot segments" }}{{- end }}
+{{- if regexMatch `^/+$` $nfsPath }}{{ fail "localData.nfs.path must not be the NFS root" }}{{- end }}
+{{- if regexMatch `\s` $nfsServer }}{{ fail "localData.nfs.server must not contain whitespace" }}{{- end }}
+{{- if regexMatch `/` $nfsServer }}{{ fail "localData.nfs.server must not contain a slash" }}{{- end }}
+{{- end }}
+{{- if $hostPath }}
+{{- if not (hasPrefix "/" $hostPath) }}{{ fail "localData.hostPath.path must be an absolute path" }}{{- end }}
+{{- if regexMatch `(^|/)\.\.?(/|$)` $hostPath }}{{ fail "localData.hostPath.path must not contain dot segments" }}{{- end }}
+{{- if regexMatch `^/+$` $hostPath }}{{ fail "localData.hostPath.path must not be the host root" }}{{- end }}
+{{- end }}
+{{- range $key, $value := .Values.localData.nodeSelector }}
+{{- if or (not (kindIs "string" $key)) (not (kindIs "string" $value)) (empty $key) (empty $value) }}{{ fail "localData.nodeSelector keys and values must be non-empty strings" }}{{- end }}
+{{- end }}
+{{- end }}

@@ -151,7 +151,7 @@ spec:
         fsGroupChangePolicy: OnRootMismatch
       containers:
         - name: mcp
-          image: crpi-wixjy6gci86ms14e.cn-hongkong.personal.cr.aliyuncs.com/ay-dev/astro-data-workspace-mcp:0.10.38-20260813111706
+          image: crpi-wixjy6gci86ms14e.cn-hongkong.personal.cr.aliyuncs.com/ay-dev/astro-data-workspace-mcp:20260815024750
           imagePullPolicy: Always
           ports:
             - name: http
@@ -166,6 +166,8 @@ spec:
             - name: ASTRO_WORKSPACE_STATE
               value: /state/registry.json
             - name: ASTRO_DATA_WAREHOUSE_ENABLED
+              value: "false"
+            - name: ASTRO_LOCAL_SCAN_ENABLED
               value: "true"
             - name: ASTRO_METADATA_STORE
               value: sqlite
@@ -186,7 +188,9 @@ spec:
                   key: admin-token
                   optional: true
             - name: ASTRO_ALLOWED_ROOTS
-              value: /catalogs
+              value: /catalogs:/data/local
+            - name: ASTRO_LOCAL_CONNECTOR_ROOTS
+              value: /data/local:/catalogs
             - name: ASTRO_BOOTSTRAP_CATALOG
               value: /catalogs/cosmos-clean-v2/processing_summary.csv
             - name: ASTRO_BOOTSTRAP_NAME
@@ -209,12 +213,16 @@ spec:
               value: http://eva24002-entrance.lab.zverse.space:30082/mcp
             - name: ASTRO_CATALOG_MCP_TIMEOUT_MS
               value: "15000"
-            # The warehouse-local Elasticsearch contains connector scan results.
+            # Independent search service for local object and coverage indices.
             # Keep this inside the cluster; the public NodePort is for the workspace API only.
             - name: ASTRO_ES_URL
-              value: http://warehouse-elasticsearch.warehouse.svc.cluster.local:9200
+              value: http://astro-search-elasticsearch:9200
             - name: ASTRO_ES_ASTRO_INDEX
               value: astro_file_index_v1
+            - name: ASTRO_ES_OBJECT_INDEX
+              value: astro_object_index_v1
+            - name: ASTRO_ES_COVERAGE_INDEX
+              value: astro_coverage_index_v1
             - name: ASTRO_ES_OVERVIEW_CACHE_MS
               value: "60000"
             - name: ASTRO_FLINK_NAMESPACE
@@ -273,6 +281,9 @@ spec:
               mountPath: /volumes
               subPath: volumes
               readOnly: true
+            - name: local-data
+              mountPath: /data/local
+              readOnly: true
       volumes:
         - name: registry-state
           persistentVolumeClaim:
@@ -288,6 +299,11 @@ spec:
         - name: redshift-volumes
           persistentVolumeClaim:
             claimName: workspace-metadata
+        - name: local-data
+          nfs:
+            server: 10.15.49.212
+            path: /mnt/data/catalogs
+            readOnly: true
 ---
 apiVersion: v1
 kind: Service

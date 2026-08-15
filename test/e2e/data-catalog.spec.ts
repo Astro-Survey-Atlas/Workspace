@@ -1,4 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
+import type { ConnectorIngestRun } from "../../src/connector-history.js";
 
 const apiRoot = process.env.ASTRO_E2E_API ?? "http://astro.workspace.dev.72602.space:32080";
 
@@ -29,7 +30,15 @@ async function waitForWorkspace(page: Page): Promise<void> {
   await expect(page.locator("#loading-indicator")).not.toHaveClass(/visible/);
 }
 
+async function openCatalog(page: Page): Promise<void> {
+  const catalog = page.locator('[data-mode="catalog"]');
+  if (!await catalog.evaluate((button) => button.classList.contains("active"))) await catalog.click();
+  await expect(catalog).toHaveClass(/active/);
+  await expect(page.locator("#catalog-stage")).toBeVisible();
+}
+
 test.beforeEach(async ({ page }) => proxyApi(page));
+test.afterEach(async ({ page }) => page.unrouteAll({ behavior: "ignoreErrors" }));
 
 test("theme follows the system until a choice is persisted", async ({ page }) => {
   await page.emulateMedia({ colorScheme: "light" });
@@ -54,6 +63,7 @@ test("light theme keeps metrics, actions, overlays, and scroll regions legible",
   await page.setViewportSize({ width: 1440, height: 760 });
   await page.goto("/");
   await waitForWorkspace(page);
+  await openCatalog(page);
 
   const lightStyles = await page.evaluate(() => {
     const css = (selector: string) => getComputedStyle(document.querySelector<HTMLElement>(selector)!);
@@ -91,6 +101,7 @@ test("status explanations are available where records are evaluated", async ({ p
   await page.setViewportSize({ width: 1440, height: 900 });
   await page.goto("/");
   await waitForWorkspace(page);
+  await openCatalog(page);
 
   const assetHelp = page.locator(".catalog-columns .status-help");
   await expect(assetHelp.locator("svg")).toBeVisible();
@@ -115,7 +126,7 @@ test("status explanations are available where records are evaluated", async ({ p
   await expect(page.locator(`#${await workflowHelp.getAttribute("aria-describedby")}`)).toContainText("等待输入");
 });
 
-test("user assets are the default workspace view", async ({ page }) => {
+test("user assets remain reachable from the workspace navigation", async ({ page }) => {
   const { assets } = await apiJson<{ assets: Array<{ name: string; origin: string; status: string }> }>("/api/data-assets?origin=user");
   const catalogRequests: string[] = [];
   page.on("request", (request) => {
@@ -125,6 +136,7 @@ test("user assets are the default workspace view", async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
   await page.goto("/");
   await waitForWorkspace(page);
+  await openCatalog(page);
 
   await expect(page.locator('[data-mode="catalog"]')).toHaveClass(/active/);
   await expect(page.locator('[data-mode="catalog"]')).toHaveText("用户资产");
@@ -168,6 +180,7 @@ test("mobile catalog keeps creation modal and details reachable", async ({ page 
   await page.setViewportSize({ width: 390, height: 844 });
   await page.goto("/");
   await waitForWorkspace(page);
+  await openCatalog(page);
 
   await expect(page.locator("#catalog-stage")).toBeVisible();
   await expect(page.locator("#theme-toggle")).toBeVisible();
@@ -208,6 +221,64 @@ test("mobile catalog keeps creation modal and details reachable", async ({ page 
     await expect(page.locator("#inspector-panel")).toHaveClass(/mobile-open/);
     await expect(page.locator("#inspector-content h2")).toBeVisible();
   }
+});
+
+test("local asset registration inspects CSV columns before creating a scan spec", async ({ page }) => {
+  const localConnector = {
+    id: "e2e-local-csv",
+    locationKey: "local:///data/e2e-csv",
+    displayPath: "/data/e2e-csv",
+    name: "E2E local CSV",
+    description: "Local CSV fixture",
+    kind: "local",
+    config: { rootPath: "/data/e2e-csv" },
+    status: "ready",
+    createdAt: "2026-08-14T00:00:00.000Z",
+    updatedAt: "2026-08-14T00:00:00.000Z",
+    origin: "user",
+    credentials: { accessKeyId: "", secretConfigured: false },
+  };
+  const existing = await apiJson<{ connectors: unknown[] }>("/api/connectors");
+  let inspectBody: unknown;
+  await page.route("**/api/connectors", async (route) => {
+    await route.fulfill({ json: { connectors: [...existing.connectors, localConnector] } });
+  });
+  await page.route("**/api/connectors/e2e-local-csv/local-files", async (route) => {
+    await route.fulfill({ json: { files: [{ relativePath: "catalog.csv", byteSize: 2048, modifiedAt: "2026-08-14T00:00:00.000Z" }] } });
+  });
+  await page.route("**/api/connectors/e2e-local-csv/local-files/inspect", async (route) => {
+    inspectBody = route.request().postDataJSON();
+    await route.fulfill({ json: {
+      inspection: {
+        sourceRelativePath: "catalog.csv",
+        columns: [{ name: "object_id", type: "string" }, { name: "ra_deg", type: "number" }, { name: "dec_deg", type: "number" }, { name: "flux", type: "number" }],
+        inferred: { objectIdColumn: "object_id", raColumn: "ra_deg", decColumn: "dec_deg", confidence: 0.96 },
+      },
+    } });
+  });
+
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto("/");
+  await waitForWorkspace(page);
+  await openCatalog(page);
+  await page.locator("#catalog-new").click();
+  const localRadio = page.locator('#catalog-connector-list input[type="radio"][value="local:///data/e2e-csv"]');
+  await expect(localRadio).toBeVisible();
+  await localRadio.check();
+
+  const scanFieldset = page.locator("#catalog-scan-fieldset");
+  await expect(scanFieldset).toBeVisible();
+  await expect(page.locator("#catalog-source-file")).toHaveValue("catalog.csv");
+  await expect(page.locator("#catalog-scan-feedback")).toHaveText("选择文件后读取表头");
+
+  await page.locator("#catalog-inspect-file").click();
+  await expect.poll(() => inspectBody).toEqual({ sourceRelativePath: "catalog.csv" });
+  await expect(page.locator("#catalog-object-id-column")).toHaveValue("object_id");
+  await expect(page.locator("#catalog-ra-column")).toHaveValue("ra_deg");
+  await expect(page.locator("#catalog-dec-column")).toHaveValue("dec_deg");
+  await expect(page.locator("#catalog-scan-feedback")).toContainText("已读取 4 个字段");
+  await expect(page.locator("#catalog-scan-feedback")).toContainText("96%");
+  await page.locator("#catalog-dialog-close").click();
 });
 
 test("data production keeps cross-match runnable and exposes cutout/package contracts", async ({ page }) => {
@@ -309,7 +380,7 @@ test("connector actions and unified scan history expose only supported execution
       status: "ready", createdAt: now, updatedAt: now, origin: "user", credentials: { accessKeyId: "", secretConfigured: false },
     },
   ];
-  const runs = [
+  const runs: ConnectorIngestRun[] = [
     {
       id: "run-flink", locationKey: "s3://fixture/catalog", connectorId: "connector-s3-fixture", connectorName: "S3 science archive", connectorKind: "s3", executor: "flink-ingest",
       target: { uri: "s3://fixture/catalog" }, assetIds: ["asset-s3"], status: "running", startedAt: now, createdAt: now, jobId: "flink-scan-01", fileCount: 12,
@@ -329,7 +400,7 @@ test("connector actions and unified scan history expose only supported execution
   await page.route("**/api/connector-ingest-runs", (route) => route.fulfill({ json: { runs } }));
   await page.route("**/api/connectors/connector-s3-fixture/scan-runs", async (route) => {
     submittedBody = route.request().postDataJSON();
-    const run = { ...runs[0]!, id: "run-submitted", jobId: "flink-scan-02", status: "queued" };
+    const run: ConnectorIngestRun = { ...runs[0]!, id: "run-submitted", jobId: "flink-scan-02", status: "queued" };
     runs.unshift(run);
     await route.fulfill({ status: 202, json: { run } });
   });

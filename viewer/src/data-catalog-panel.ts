@@ -2,7 +2,7 @@ import type { ConnectorPublicRecord } from "../../src/connectors";
 import type { DataAssetAccess, DataAssetKind, DataAssetLineage, DataAssetProjectState, DataAssetRecord, DataAssetRegistrationInput, DataAssetSource } from "../../src/data-catalog";
 import type { TagDefinition } from "../../src/tags";
 import type { SurveyCard, SurveyRecord } from "../../src/survey-registry";
-import { workspaceApi } from "./api";
+import { workspaceApi, type LocalCsvInspection } from "./api";
 
 function byId<T extends HTMLElement>(id: string): T {
   const element = document.getElementById(id);
@@ -40,6 +40,7 @@ export class DataCatalogPanel {
   readonly #onError: (error: unknown) => void;
   readonly #onConnectorSelected?: (connectorId: string) => void;
   readonly #onNewConnector?: () => void;
+  readonly #onAssetChanged?: (assetId: string) => void | Promise<void>;
   #assets: DataAssetRecord[] = [];
   #connectors: ConnectorPublicRecord[] = [];
   #tags: TagDefinition[] = [];
@@ -48,11 +49,14 @@ export class DataCatalogPanel {
   #selectedId: string | null = null;
   #detailEditing: DetailSection = null;
   #active = false;
+  #scanInspection: LocalCsvInspection | null = null;
+  #scanConnectorId: string | null = null;
 
-  constructor(onError: (error: unknown) => void, onConnectorSelected?: (connectorId: string) => void, onNewConnector?: () => void) {
+  constructor(onError: (error: unknown) => void, onConnectorSelected?: (connectorId: string) => void, onNewConnector?: () => void, onAssetChanged?: (assetId: string) => void | Promise<void>) {
     this.#onError = onError;
     this.#onConnectorSelected = onConnectorSelected;
     this.#onNewConnector = onNewConnector;
+    this.#onAssetChanged = onAssetChanged;
     byId<HTMLInputElement>("catalog-search").addEventListener("input", () => this.#render());
     byId<HTMLSelectElement>("catalog-kind-filter").addEventListener("change", () => this.#render());
     byId<HTMLSelectElement>("catalog-project-filter").addEventListener("change", () => this.#render());
@@ -68,6 +72,7 @@ export class DataCatalogPanel {
       this.#closeCreateDialog();
       this.#onNewConnector?.();
     });
+    byId<HTMLButtonElement>("catalog-inspect-file").addEventListener("click", () => void this.#inspectSelectedFile().catch(this.#onError));
   }
 
   async activate(surveys: SurveyCard[], records: Map<string, SurveyRecord>): Promise<void> {
@@ -238,6 +243,7 @@ export class DataCatalogPanel {
       radio.name = "catalog-connector";
       radio.value = connector.locationKey;
       radio.required = index === 0;
+      radio.addEventListener("change", () => void this.#selectCreateConnector(connector));
       const copy = document.createElement("span");
       const name = document.createElement("strong");
       name.textContent = connector.name;
@@ -247,6 +253,59 @@ export class DataCatalogPanel {
       label.append(radio, copy);
       return label;
     }));
+  }
+
+  async #selectCreateConnector(connector: ConnectorPublicRecord): Promise<void> {
+    this.#scanInspection = null;
+    this.#scanConnectorId = connector.id;
+    const fieldset = byId("catalog-scan-fieldset");
+    fieldset.hidden = connector.kind !== "local";
+    if (connector.kind !== "local") return;
+    const files = await workspaceApi.localConnectorFiles(connector.id);
+    const select = byId<HTMLSelectElement>("catalog-source-file");
+    select.replaceChildren(...files.map((file) => {
+      const option = document.createElement("option");
+      option.value = file.relativePath;
+      option.textContent = `${file.relativePath}${file.byteSize ? ` · ${file.byteSize} B` : ""}`;
+      return option;
+    }));
+    byId("catalog-scan-feedback").textContent = files.length ? "选择文件后读取表头" : "该 Connector 下没有 CSV 文件";
+  }
+
+  async #inspectSelectedFile(): Promise<void> {
+    if (!this.#scanConnectorId) throw new RangeError("请选择本地 Connector");
+    const relativePath = byId<HTMLSelectElement>("catalog-source-file").value;
+    if (!relativePath) throw new RangeError("请选择 CSV 文件");
+    const inspection = await workspaceApi.inspectLocalConnectorFile(this.#scanConnectorId, relativePath);
+    this.#scanInspection = inspection;
+    const fill = (id: string, value?: string): void => {
+      const select = byId<HTMLSelectElement>(id);
+      select.replaceChildren(...inspection.columns.map((column) => {
+        const option = document.createElement("option"); option.value = column.name; option.textContent = column.name; return option;
+      }));
+      if (value && inspection.columns.some((column) => column.name === value)) select.value = value;
+    };
+    fill("catalog-object-id-column", inspection.inferred?.objectIdColumn);
+    fill("catalog-ra-column", inspection.inferred?.raColumn);
+    fill("catalog-dec-column", inspection.inferred?.decColumn);
+    byId("catalog-scan-feedback").textContent = `已读取 ${inspection.columns.length} 个字段${inspection.inferred ? ` · 识别置信度 ${Math.round((inspection.inferred.confidence ?? 0) * 100)}%` : ""}`;
+  }
+
+  #createScanFields(): Pick<DataAssetRegistrationInput, "sourceRelativePath" | "scanSpec"> {
+    if (!this.#scanInspection || !this.#scanConnectorId) return {};
+    const connector = this.#connectors.find((candidate) => candidate.id === this.#scanConnectorId);
+    if (connector?.kind !== "local") return {};
+    return {
+      sourceRelativePath: this.#scanInspection.sourceRelativePath,
+      scanSpec: {
+        format: "csv",
+        objectIdColumn: byId<HTMLSelectElement>("catalog-object-id-column").value,
+        raColumn: byId<HTMLSelectElement>("catalog-ra-column").value,
+        decColumn: byId<HTMLSelectElement>("catalog-dec-column").value,
+        coordinateFrame: "ICRS",
+        coordinateUnits: "deg",
+      },
+    };
   }
 
   #selectedCreateConnectors(): ConnectorPublicRecord[] {
@@ -269,6 +328,7 @@ export class DataCatalogPanel {
       connectorLocationKeys: [connector.locationKey],
       status: "ready",
       projectStates: ["deliverable"],
+      ...this.#createScanFields(),
     };
   }
 
@@ -279,12 +339,16 @@ export class DataCatalogPanel {
     this.#selectedId = asset.id;
     this.#closeCreateDialog();
     this.#render();
+    await this.#onAssetChanged?.(asset.id);
   }
 
   #startNew(): void {
+    this.#scanInspection = null;
+    this.#scanConnectorId = null;
     byId<HTMLFormElement>("catalog-registration-form").reset();
     this.#renderSurveyOptions();
     byId<HTMLSelectElement>("catalog-kind").value = "catalog";
+    byId("catalog-scan-fieldset").hidden = true;
     this.#renderCreateConnectors();
     byId("catalog-form-title").textContent = "登记用户数据";
     byId("catalog-form-submit").textContent = "登记数据";
@@ -292,9 +356,12 @@ export class DataCatalogPanel {
   }
 
   #closeCreateDialog(): void {
+    this.#scanInspection = null;
+    this.#scanConnectorId = null;
     byId<HTMLFormElement>("catalog-registration-form").reset();
     this.#renderSurveyOptions();
     byId<HTMLSelectElement>("catalog-kind").value = "catalog";
+    byId("catalog-scan-fieldset").hidden = true;
     this.#renderCreateConnectors();
     byId("catalog-form-title").textContent = "登记用户数据";
     byId("catalog-form-submit").textContent = "登记数据";

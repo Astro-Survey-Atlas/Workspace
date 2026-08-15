@@ -1,17 +1,18 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
 import { ConnectorRegistry, connectorLocationKey, hasCurrentSuccessfulConnectorCheck } from "../src/connectors.js";
+import { LocalConnectorRootsPolicy } from "../src/local-connector-roots.js";
 import { SqliteMetadataStore } from "../src/storage/index.js";
 
-async function connectorRegistry(statePath: string, bootstrapPath?: string): Promise<ConnectorRegistry> {
+async function connectorRegistry(statePath: string, bootstrapPath?: string, localRoots = new LocalConnectorRootsPolicy([{ containerPath: "/", hostPath: "/" }])): Promise<ConnectorRegistry> {
   const store = new SqliteMetadataStore(`${statePath}.sqlite`);
   await store.initialize();
-  const registry = new ConnectorRegistry(store, bootstrapPath);
+  const registry = new ConnectorRegistry(store, bootstrapPath, localRoots);
   await registry.initialize();
   return registry;
 }
@@ -30,6 +31,32 @@ test("connector registry persists S3, local, and JDBC configuration without test
     assert.equal((await reloaded.get(s3.id)).config.bucket, "euclid");
     await assert.rejects(() => reloaded.register({ name: "Broken", kind: "local", config: {} }), /config.rootPath is required/);
   } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("local connector registration and checking are explicitly unavailable without configured roots", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "astro-connectors-"));
+  const store = new SqliteMetadataStore(path.join(directory, "workspace.sqlite"));
+  try {
+    await store.initialize();
+    const registry = new ConnectorRegistry(store, undefined, new LocalConnectorRootsPolicy());
+    await registry.initialize();
+    await assert.rejects(
+      () => registry.register({ name: "Unconfigured local", kind: "local", config: { rootPath: "/data/local/catalogs" } }),
+      /Local connectors are unavailable/,
+    );
+    const remote = await registry.register({ name: "Remote", kind: "s3", config: { bucket: "remote" } });
+    await assert.rejects(
+      () => registry.update(remote.id, { name: "Now local", kind: "local", config: { rootPath: "/data/local/catalogs" } }),
+      /ASTRO_LOCAL_CONNECTOR_ROOTS is not configured/,
+    );
+    assert.equal((await registry.get(remote.id)).kind, "s3");
+    const check = await registry.checkInput({ name: "Preview", kind: "local", config: { rootPath: "/data/local/catalogs" } });
+    assert.equal(check.status, "failed");
+    assert.match(check.summary, /Local connectors are unavailable/);
+  } finally {
+    await store.close();
     await rm(directory, { recursive: true, force: true });
   }
 });
@@ -121,7 +148,29 @@ test("local connector check does not enumerate the directory", async () => {
   }
 });
 
-test("scan-relevant connector edits invalidate a successful check", async () => {
+test("JDBC SQLite paths use the same authorized local roots policy", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "astro-connectors-"));
+  try {
+    const databasePath = path.join(directory, "catalog.sqlite");
+    await writeFile(databasePath, "SQLite fixture", "utf8");
+    const policy = new LocalConnectorRootsPolicy([{ containerPath: "/data/local", hostPath: directory }]);
+    const registry = await connectorRegistry(path.join(directory, "connectors.json"), undefined, policy);
+    const record = await registry.register({ name: "SQLite", kind: "jdbc", config: { url: "jdbc:sqlite:/data/local/catalog.sqlite" } });
+    assert.equal((await registry.check(record.id)).lastCheck?.status, "ok");
+    await assert.rejects(
+      () => registry.register({ name: "Outside SQLite", kind: "jdbc", config: { url: "jdbc:sqlite:/tmp/catalog.sqlite" } }),
+      /outside the configured local roots/,
+    );
+    await assert.rejects(
+      () => registry.register({ name: "Relative SQLite", kind: "jdbc", config: { url: "jdbc:sqlite:catalog.sqlite" } }),
+      /absolute container path/,
+    );
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("path, type, and credential edits invalidate a successful connector check", async () => {
   const directory = await mkdtemp(path.join(os.tmpdir(), "astro-connectors-"));
   try {
     const registry = await connectorRegistry(path.join(directory, "connectors.json"));
@@ -132,9 +181,19 @@ test("scan-relevant connector edits invalidate a successful check", async () => 
     const renamed = await registry.update(record.id, { name: "Renamed", kind: "local", config: { rootPath: directory } });
     assert.equal(hasCurrentSuccessfulConnectorCheck(renamed), true);
 
-    const edited = await registry.update(record.id, { name: "Renamed", kind: "local", config: { rootPath: path.join(directory, "other") } });
-    assert.equal(edited.lastCheck, undefined);
-    assert.equal(hasCurrentSuccessfulConnectorCheck(edited), false);
+    const credentialEdited = await registry.setCredentialReference(record.id, "namespace/updated-credential");
+    assert.equal(credentialEdited.lastCheck, undefined);
+    assert.equal(hasCurrentSuccessfulConnectorCheck(credentialEdited), false);
+
+    await registry.check(record.id);
+    const otherPath = path.join(directory, "other");
+    await mkdir(otherPath);
+    const pathEdited = await registry.update(record.id, { name: "Renamed", kind: "local", config: { rootPath: otherPath }, credentialRef: "namespace/updated-credential" });
+    assert.equal(pathEdited.lastCheck, undefined);
+
+    await registry.check(record.id);
+    const typeEdited = await registry.update(record.id, { name: "Renamed", kind: "jdbc", config: { url: "jdbc:postgresql://db/catalog" } });
+    assert.equal(typeEdited.lastCheck, undefined);
   } finally {
     await rm(directory, { recursive: true, force: true });
   }

@@ -39,6 +39,15 @@ export function resolveDataOwnership(asset: DataAssetRecord, connectors: readonl
   }
 
   const linkedRecords = [...linked.values()].sort((left, right) => left.locationKey.localeCompare(right.locationKey));
+  if (asset.ownershipSnapshotVersion === 1) {
+    return {
+      surveyId: asset.surveyId,
+      releaseId: asset.releaseId,
+      source: "asset",
+      connectorIds: linkedRecords.map((connector) => connector.id),
+      connectorLocationKeys: linkedRecords.map((connector) => connector.locationKey),
+    };
+  }
   if (!linkedRecords.length) {
     if (asset.surveyId) {
       return {
