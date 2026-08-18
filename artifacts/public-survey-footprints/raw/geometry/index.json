@@ -1,0 +1,22 @@
+{
+  "schemaVersion": 1,
+  "generatedAt": "2026-08-18T08:58:49.557Z",
+  "coordinateFrame": "ICRS",
+  "artifacts": [
+    {
+      "surveyId": "euclid",
+      "releaseId": "euclid-q1",
+      "product": "Euclid Q1 deep fields",
+      "sourceUrl": "https://www.euclid-ec.org/wp-content/uploads/q1_region_files.zip",
+      "filePath": "euclid-q1-region-files.zip",
+      "retrievedAt": "2026-08-18T08:58:49.557Z",
+      "mediaType": "application/zip",
+      "etag": "\"1498-649eb8e1d464e\"",
+      "lastModified": "Tue, 03 Feb 2026 13:38:30 GMT",
+      "byteLength": 5272,
+      "sha256": "1cf306fab4995179219fbefd32b9648ce0455b65c48cab9246138cc72eff20ef",
+      "polygonCount": 118,
+      "parser": "DS9 ICRS polygon; Healpix.queryPolygonInclusive at NSIDE 16 with fact 8"
+    }
+  ]
+}

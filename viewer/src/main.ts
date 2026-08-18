@@ -300,6 +300,7 @@ let aladinFullscreen = false;
 let aladinAssetDrawerOpen = false;
 let aladinAssetDrawerPinned = false;
 let aladinAssetDrawerTimer: ReturnType<typeof setTimeout> | null = null;
+let aladinStatusFadeTimer: ReturnType<typeof setTimeout> | null = null;
 let aladinToastSequence = 0;
 let aladinLastToastKey = "";
 let aladinLastToastAt = 0;
@@ -432,6 +433,23 @@ function clearAladinAssetDrawerTimer(): void {
   aladinAssetDrawerTimer = null;
 }
 
+function clearAladinStatusFadeTimer(): void {
+  if (aladinStatusFadeTimer === null) return;
+  clearTimeout(aladinStatusFadeTimer);
+  aladinStatusFadeTimer = null;
+}
+
+function scheduleAladinStatusFade(status: AladinExplorerStatus): void {
+  const output = byId<HTMLOutputElement>("aladin-status");
+  clearAladinStatusFadeTimer();
+  output.classList.remove("is-faded");
+  if (status.phase === "initializing" || status.phase === "loading") return;
+  aladinStatusFadeTimer = setTimeout(() => {
+    aladinStatusFadeTimer = null;
+    output.classList.add("is-faded");
+  }, 3_800);
+}
+
 function renderAladinAssetDrawerState(): void {
   const controls = byId("aladin-controls");
   const rail = byId("aladin-cockpit-rail");
@@ -513,12 +531,14 @@ function destroyViewer(): void {
   aladinSnapshot = null;
   latestAladinStatus = null;
   clearAladinAssetDrawerTimer();
+  clearAladinStatusFadeTimer();
   aladinAssetDrawerOpen = false;
   aladinAssetDrawerPinned = false;
   byId("aladin-explorer").hidden = true;
   byId("aladin-controls").hidden = true;
   byId("aladin-asset-nav").replaceChildren();
   byId("aladin-status-deck").replaceChildren();
+  byId("aladin-status").classList.remove("is-faded");
   byId("scene-stage").classList.remove("aladin-active");
   byId("scene-coordinate-readout").hidden = true;
   byId("scene-camera-readout").hidden = false;
@@ -775,6 +795,7 @@ function renderAladinStatus(status: AladinExplorerStatus): void {
     error: `对象查询失败：${status.message ?? "未知错误"}`,
   };
   output.textContent = phaseLabel[status.phase];
+  scheduleAladinStatusFade(status);
   host.dataset.queryPhase = status.phase;
   host.dataset.objectReturned = String(status.returned);
   host.dataset.objectTotal = String(status.total);
@@ -816,6 +837,7 @@ async function enterAladinExplorer(menu: SkyRegionMenu): Promise<void> {
   aladinSnapshot = null;
   latestAladinStatus = null;
   clearAladinAssetDrawerTimer();
+  clearAladinStatusFadeTimer();
   aladinAssetDrawerOpen = aladinAssetDrawerPinned;
   layerViewer?.dispose();
   layerViewer = null;
@@ -955,6 +977,7 @@ async function leaveAladinExplorer(): Promise<void> {
   aladinSnapshot = null;
   latestAladinStatus = null;
   clearAladinAssetDrawerTimer();
+  clearAladinStatusFadeTimer();
   aladinAssetDrawerOpen = false;
   aladinAssetDrawerPinned = false;
   byId("aladin-explorer").hidden = true;
@@ -963,6 +986,7 @@ async function leaveAladinExplorer(): Promise<void> {
   renderAladinAssetDrawerState();
   byId("aladin-asset-nav").replaceChildren();
   byId("aladin-status-deck").replaceChildren();
+  byId("aladin-status").classList.remove("is-faded");
   byId("aladin-loaded-summary").textContent = "--";
   byId("aladin-cache-state").textContent = "CACHE IDLE";
   byId("aladin-object-telemetry").textContent = "--";

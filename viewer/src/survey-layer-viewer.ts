@@ -234,8 +234,10 @@ const SELECTION_EDGE_COLOR = new THREE.Color("#e7fffb");
 const WORKSPACE_COLOR = new THREE.Color("#d69b4e");
 const COVERAGE_OPACITY = 0.17;
 const COVERAGE_EDGE_OPACITY = 0.22;
-const DIMMED_OPACITY = 0.035;
-const DIMMED_EDGE_OPACITY = 0.07;
+// Keep the surrounding layers subdued without making the selected region read as
+// a hole in the sphere. The selection outline still carries the emphasis.
+const DIMMED_OPACITY = 0.075;
+const DIMMED_EDGE_OPACITY = 0.12;
 const EXPLODED_OPACITY = 0.58;
 const EXPLODED_LAYER_STEP = 0.18;
 const REGION_INNER_PADDING = 0.045;
@@ -282,7 +284,9 @@ function narrativeCameraPose(direction: THREE.Vector3, distance: number, outerRa
   const tangent = new THREE.Vector3().crossVectors(reference, direction).normalize();
   const camera = direction.clone().multiplyScalar(distance).addScaledVector(tangent, outerRadius * tangentRatio);
   camera.setLength(distance);
-  const target = direction.clone().multiplyScalar(outerRadius * 0.11).addScaledVector(tangent, outerRadius * tangentRatio * 0.22);
+  // Aim close to the selected surface so the cell stays centered while the
+  // camera's tangential offset supplies the oblique, narrative perspective.
+  const target = direction.clone().multiplyScalar(outerRadius * 0.98);
   return { camera, target };
 }
 
@@ -635,7 +639,7 @@ export class SurveyLayerViewer {
     const direction = this.#pixelDirectionAt(nside, [pixel]);
     const outer = this.#outerRadius;
     const distance = Math.max(outer * 1.55, outer + 0.08);
-    const pose = narrativeCameraPose(direction, distance, outer, 0.22);
+    const pose = narrativeCameraPose(direction, distance, outer, 0.32);
     this.#startCameraTransition(
       pose.camera,
       pose.target,
@@ -661,7 +665,7 @@ export class SurveyLayerViewer {
     const halfFov = Math.max(THREE.MathUtils.degToRad(4), angularRadius * 1.35);
     const fitDistance = outer / Math.tan(Math.min(Math.PI / 3, halfFov * 1.25));
     const distance = THREE.MathUtils.clamp(Math.max(outer * 1.55, fitDistance), outer * 1.55, outer * 2.8);
-    const pose = narrativeCameraPose(direction, distance, outer, 0.16);
+    const pose = narrativeCameraPose(direction, distance, outer, 0.24);
     this.#startCameraTransition(
       pose.camera,
       pose.target,

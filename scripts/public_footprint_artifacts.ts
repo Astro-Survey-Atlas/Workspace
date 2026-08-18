@@ -13,6 +13,7 @@ const catalogPath = path.join(root, "bootstrap", "resource-packages", "catalog.j
 const packageRoot = path.join(root, "bootstrap", "resource-packages");
 const manualFootprintsPath = path.join(artifactRoot, "manual", "footprints.json");
 const rawMocIndexPath = path.join(artifactRoot, "raw", "moc", "index.json");
+const rawGeometryIndexPath = path.join(artifactRoot, "raw", "geometry", "index.json");
 
 const SOURCE_STATUSES = ["acquired", "overview_only", "awaiting_geometry", "not_applicable"] as const;
 type SourceStatus = typeof SOURCE_STATUSES[number];
@@ -104,6 +105,20 @@ export async function validate(): Promise<PublicFootprintStatistics> {
     if (fits.byteLength !== artifact.byteLength || createHash("sha256").update(fits).digest("hex") !== artifact.sha256) errors.push(`raw MOC checksum mismatch ${artifact.sourceId}`);
     try { await readJson(path.join(path.dirname(rawMocIndexPath), artifact.metadataPath)); } catch { errors.push(`invalid raw MOC metadata ${artifact.sourceId}`); }
   }
+  const rawGeometry = await readJson<{ schemaVersion: number; coordinateFrame: string; artifacts: Array<{ surveyId: string; releaseId: string; product: string; sourceUrl: string; filePath: string; byteLength: number; sha256: string; polygonCount: number; parser: string }> }>(rawGeometryIndexPath);
+  if (rawGeometry.schemaVersion !== 1 || rawGeometry.coordinateFrame !== "ICRS" || !Array.isArray(rawGeometry.artifacts)) errors.push("raw geometry index has an unsupported schema");
+  const euclidQ1Geometry = rawGeometry.artifacts?.find((artifact) => artifact.surveyId === "euclid" && artifact.releaseId === "euclid-q1" && artifact.product === "Euclid Q1 deep fields");
+  if (!euclidQ1Geometry) errors.push("missing Euclid Q1 raw geometry record");
+  else {
+    if (!validUrl(euclidQ1Geometry.sourceUrl) || euclidQ1Geometry.filePath !== "euclid-q1-region-files.zip" || !Number.isSafeInteger(euclidQ1Geometry.byteLength) || euclidQ1Geometry.byteLength <= 0 || !/^[a-f0-9]{64}$/.test(euclidQ1Geometry.sha256) || !Number.isSafeInteger(euclidQ1Geometry.polygonCount) || euclidQ1Geometry.polygonCount <= 0 || !euclidQ1Geometry.parser.includes("DS9 ICRS polygon")) {
+      errors.push("invalid Euclid Q1 raw geometry record");
+    } else {
+      try {
+        const archive = await readFile(path.join(path.dirname(rawGeometryIndexPath), euclidQ1Geometry.filePath));
+        if (archive.byteLength !== euclidQ1Geometry.byteLength || createHash("sha256").update(archive).digest("hex") !== euclidQ1Geometry.sha256) errors.push("Euclid Q1 raw geometry checksum mismatch");
+      } catch { errors.push("missing Euclid Q1 raw geometry archive"); }
+    }
+  }
   if (errors.length) throw new Error(`public footprint validation failed:\n${errors.join("\n")}`);
   const counts = sources.releases.flatMap((entry) => entry.products);
   return {
@@ -142,6 +157,7 @@ export async function sync(): Promise<void> {
     sources: { path: path.relative(artifactRoot, sourcesPath), sha256: await sha256(sourcesPath) },
     manual: { path: path.relative(artifactRoot, manualFootprintsPath), sha256: await sha256(manualFootprintsPath) },
     rawMocIndex: { path: path.relative(artifactRoot, rawMocIndexPath), sha256: await sha256(rawMocIndexPath) },
+    rawGeometryIndex: { path: path.relative(artifactRoot, rawGeometryIndexPath), sha256: await sha256(rawGeometryIndexPath) },
   };
   const files = { manifest: { path: path.relative(artifactRoot, normalizedPath), sha256: await sha256(normalizedPath) }, catalog: { path: path.relative(artifactRoot, catalogOut), sha256: await sha256(catalogOut) }, packages };
   await writeFile(path.join(artifactRoot, "provenance.json"), `${JSON.stringify({ schemaVersion: 2, generatedAt: new Date().toISOString(), generator: { name: "scripts/public_footprint_artifacts.ts" }, statistics: { ...statistics, manifestFootprints: manifest.footprints.length, packages: packages.length }, inputs, files }, null, 2)}\n`, "utf8");

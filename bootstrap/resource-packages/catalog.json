@@ -1,11 +1,11 @@
 {
   "schemaVersion": 2,
-  "generatedAt": "2026-08-12T08:47:34.577Z",
+  "generatedAt": "2026-08-18T08:58:51.095Z",
   "packages": [
     {
       "surveyId": "euclid",
       "name": "Euclid",
-      "description": "Euclid Q1 深场官方中心与面积生成的概览覆盖。",
+      "description": "Euclid Q1 三个深场的官方 DS9 ICRS 边界导出 MOC。",
       "modalities": [
         "imaging",
         "photometry"
@@ -15,13 +15,13 @@
         "near-infrared"
       ],
       "productTypes": [
-        "field-overview"
+        "field-polygon-MOC"
       ],
       "facilities": [
         "ESA Euclid"
       ],
       "coverageAuthorities": [
-        "overview"
+        "official-boundary"
       ],
       "accessModes": [
         "ESA Science Archive"
@@ -29,9 +29,9 @@
       "sources": [
         {
           "releaseId": "euclid-q1",
-          "label": "Euclid Q1",
-          "url": "https://www.euclid-ec.org/science/q1/",
-          "authority": "official-overview"
+          "label": "Euclid Q1 DS9 field boundaries",
+          "url": "https://www.euclid-ec.org/wp-content/uploads/q1_region_files.zip",
+          "authority": "Euclid Consortium"
         }
       ],
       "id": "public-euclid-footprints",
@@ -41,16 +41,16 @@
       "releaseLabels": {
         "euclid-q1": "Q1"
       },
-      "version": "2.0.1",
-      "archiveUrl": "public-euclid-footprints-2.0.1.zip",
-      "sizeBytes": 1124,
-      "sha256": "a35c86f89a2898dd2ddd1d0d6e8198865b8e14e5ac994929774bbc6580a8f759",
-      "updatedAt": "2026-08-12T08:47:34.577Z"
+      "version": "2.0.2",
+      "archiveUrl": "public-euclid-footprints-2.0.2.zip",
+      "sizeBytes": 1120,
+      "sha256": "460a8a0e4326f2dec4add2fcf114aa9218ed494123db3fb99687bd638b90c52c",
+      "updatedAt": "2026-08-18T08:58:51.095Z"
     },
     {
       "surveyId": "galex",
       "name": "GALEX",
-      "description": "GALEX GR6/GR7 紫外彩色 HiPS 的公开覆盖。",
+      "description": "GALEX GR6/GR7 FUV、NUV 与彩色 HiPS 图像的公开覆盖。",
       "modalities": [
         "imaging",
         "ultraviolet"
@@ -89,11 +89,11 @@
       "releaseLabels": {
         "galex-gr6-gr7": "GR6/GR7"
       },
-      "version": "2.0.1",
-      "archiveUrl": "public-galex-footprints-2.0.1.zip",
-      "sizeBytes": 8603,
-      "sha256": "e6c5b59e5b952126e47bc9ec89936f8cc1f9c351ccd83fa98a584e2b5e67b458",
-      "updatedAt": "2026-08-12T08:47:34.577Z"
+      "version": "2.0.2",
+      "archiveUrl": "public-galex-footprints-2.0.2.zip",
+      "sizeBytes": 22582,
+      "sha256": "80c74433058d69571a93b3cec905cbae76d3ccc5904f6ab1248261b32c826eef",
+      "updatedAt": "2026-08-18T08:58:51.095Z"
     },
     {
       "surveyId": "legacy-surveys",
@@ -138,11 +138,11 @@
       "releaseLabels": {
         "legacy-dr10": "DR10"
       },
-      "version": "2.0.1",
-      "archiveUrl": "public-legacy-surveys-footprints-2.0.1.zip",
-      "sizeBytes": 6823,
-      "sha256": "6a33355ad145fc9208ab674a1f94123e66b07a997063b0c06d7f8583e9867311",
-      "updatedAt": "2026-08-12T08:47:34.577Z"
+      "version": "2.0.2",
+      "archiveUrl": "public-legacy-surveys-footprints-2.0.2.zip",
+      "sizeBytes": 6826,
+      "sha256": "c7c9a889479241720a2e729e7da482a792a5895f74605dfbc54c2d01d3a41a53",
+      "updatedAt": "2026-08-18T08:58:51.095Z"
     },
     {
       "surveyId": "sdss",
@@ -184,16 +184,16 @@
       "releaseLabels": {
         "sdss-dr09": "DR9"
       },
-      "version": "2.0.1",
-      "archiveUrl": "public-sdss-footprints-2.0.1.zip",
-      "sizeBytes": 5298,
-      "sha256": "bde41b3df45c09d3f17962c76d174d7828c724475357aa358a58fd827b8cc1cf",
-      "updatedAt": "2026-08-12T08:47:34.577Z"
+      "version": "2.0.2",
+      "archiveUrl": "public-sdss-footprints-2.0.2.zip",
+      "sizeBytes": 5296,
+      "sha256": "55ba1d346cb92de51205692bc4a28fe780fcbe82ca5b943ecd65940d8418118f",
+      "updatedAt": "2026-08-18T08:58:51.095Z"
     },
     {
       "surveyId": "hsc-ssp",
       "name": "HSC-SSP",
-      "description": "HSC-SSP PDR2 Wide 与 Deep 彩色成像覆盖并集。",
+      "description": "HSC-SSP PDR2 Wide 与 Deep 的彩色及 grizy 图像 MOC 并集。",
       "modalities": [
         "imaging",
         "photometry"
@@ -230,11 +230,11 @@
       "releaseLabels": {
         "hsc-pdr2": "PDR2"
       },
-      "version": "2.0.1",
-      "archiveUrl": "public-hsc-ssp-footprints-2.0.1.zip",
-      "sizeBytes": 1483,
-      "sha256": "de514e6b8f18ae70ac864731dc07e1815d0bfe37f1c99dd7864f6fcadab38613",
-      "updatedAt": "2026-08-12T08:47:34.577Z"
+      "version": "2.0.2",
+      "archiveUrl": "public-hsc-ssp-footprints-2.0.2.zip",
+      "sizeBytes": 2108,
+      "sha256": "93397ad8b1dea1ee66f4f252bea5178af66cc6e54dc66f7d41d58ea7f2299b80",
+      "updatedAt": "2026-08-18T08:58:51.095Z"
     },
     {
       "surveyId": "hst",
@@ -278,16 +278,16 @@
       "releaseLabels": {
         "hst-mast-snapshot-2026": "MAST archive snapshot 2026"
       },
-      "version": "2.0.1",
-      "archiveUrl": "public-hst-footprints-2.0.1.zip",
-      "sizeBytes": 8546,
-      "sha256": "f48f332dbc0fe6bc5addd7e608ad2f7a78bfa3785a9b6b06b95b4c529e2956c2",
-      "updatedAt": "2026-08-12T08:47:34.577Z"
+      "version": "2.0.2",
+      "archiveUrl": "public-hst-footprints-2.0.2.zip",
+      "sizeBytes": 8544,
+      "sha256": "292a400e940a17852b11b4dc636024b7ab83fd4a6b7ab7f316e03757e589f44d",
+      "updatedAt": "2026-08-18T08:58:51.095Z"
     },
     {
       "surveyId": "panstarrs",
       "name": "Pan-STARRS1",
-      "description": "Pan-STARRS1 DR1 i/r/g 叠加彩色成像覆盖。",
+      "description": "Pan-STARRS1 DR1 彩色及 grizy HiPS 图像覆盖。",
       "modalities": [
         "imaging",
         "photometry"
@@ -324,11 +324,11 @@
       "releaseLabels": {
         "panstarrs-dr1": "DR1"
       },
-      "version": "2.0.1",
-      "archiveUrl": "public-panstarrs-footprints-2.0.1.zip",
-      "sizeBytes": 7276,
-      "sha256": "b109d0f0f6d86a24ea70c5cbdc8508f217a5cc96e32f2781b977aa5f27291dc1",
-      "updatedAt": "2026-08-12T08:47:34.577Z"
+      "version": "2.0.2",
+      "archiveUrl": "public-panstarrs-footprints-2.0.2.zip",
+      "sizeBytes": 36962,
+      "sha256": "a4b2b37e6a2bd9d5fa4b5e3fe472934975823229f47f2eddbbbd6f204d38a188",
+      "updatedAt": "2026-08-18T08:58:51.095Z"
     },
     {
       "surveyId": "des",
@@ -370,16 +370,16 @@
       "releaseLabels": {
         "des-dr2": "DR2"
       },
-      "version": "2.0.1",
-      "archiveUrl": "public-des-footprints-2.0.1.zip",
-      "sizeBytes": 2265,
-      "sha256": "f930b3e1d8bcecea10abff22556856df9186a192ae8a8a70afff482d2b3dd07e",
-      "updatedAt": "2026-08-12T08:47:34.577Z"
+      "version": "2.0.2",
+      "archiveUrl": "public-des-footprints-2.0.2.zip",
+      "sizeBytes": 2263,
+      "sha256": "d42dc551fff6a9e8443225a8c51ec4e632453abeb2317fa7e1169af294e4775f",
+      "updatedAt": "2026-08-18T08:58:51.095Z"
     },
     {
       "surveyId": "2mass",
       "name": "2MASS",
-      "description": "2MASS All-Sky J 波段图像覆盖。",
+      "description": "2MASS All-Sky J、H、K 波段图像覆盖。",
       "modalities": [
         "imaging",
         "photometry",
@@ -417,16 +417,16 @@
       "releaseLabels": {
         "2mass-all-sky": "All-Sky Release"
       },
-      "version": "2.0.1",
-      "archiveUrl": "public-2mass-footprints-2.0.1.zip",
-      "sizeBytes": 8710,
-      "sha256": "15a187487a3ab59af95afb0fd5f8ef504f54c062322e88ad53a3631f2b999db8",
-      "updatedAt": "2026-08-12T08:47:34.577Z"
+      "version": "2.0.2",
+      "archiveUrl": "public-2mass-footprints-2.0.2.zip",
+      "sizeBytes": 23076,
+      "sha256": "0e76b875ed7bdf15d004ca3b2a9d912909b197d94d064ac7876e508025079724",
+      "updatedAt": "2026-08-18T08:58:51.095Z"
     },
     {
       "surveyId": "allwise",
       "name": "AllWISE",
-      "description": "AllWISE W1 静态图像覆盖，不表达 NEOWISE 时间完整性。",
+      "description": "AllWISE W1-W4 静态图像覆盖，不表达 NEOWISE 时间完整性。",
       "modalities": [
         "imaging",
         "photometry",
@@ -465,11 +465,11 @@
       "releaseLabels": {
         "allwise": "AllWISE"
       },
-      "version": "2.0.1",
-      "archiveUrl": "public-allwise-footprints-2.0.1.zip",
-      "sizeBytes": 8777,
-      "sha256": "cbba57e7ed3f19d147adf53dc46cbf658187ac0a7d47cb44306af8a8ec5d6a09",
-      "updatedAt": "2026-08-12T08:47:34.577Z"
+      "version": "2.0.2",
+      "archiveUrl": "public-allwise-footprints-2.0.2.zip",
+      "sizeBytes": 30300,
+      "sha256": "086d90534a910ddc36eaee87ce64eb57691e1cf353c95c4b54d5dcda774cf094",
+      "updatedAt": "2026-08-18T08:58:51.095Z"
     },
     {
       "surveyId": "kids",
@@ -511,11 +511,11 @@
       "releaseLabels": {
         "kids-dr5": "DR5"
       },
-      "version": "2.0.1",
-      "archiveUrl": "public-kids-footprints-2.0.1.zip",
-      "sizeBytes": 1506,
-      "sha256": "5e24e9cf363185e0187ab80f8410ce2f032be6bbe2720a551ce2b5762e86a4e5",
-      "updatedAt": "2026-08-12T08:47:34.577Z"
+      "version": "2.0.2",
+      "archiveUrl": "public-kids-footprints-2.0.2.zip",
+      "sizeBytes": 1505,
+      "sha256": "8eb3b6944bd350db9cca24aa57ec6f1d7d21fded0dee6d52437416d6e4b1d3c2",
+      "updatedAt": "2026-08-18T08:58:51.095Z"
     },
     {
       "surveyId": "nvss",
@@ -556,11 +556,11 @@
       "releaseLabels": {
         "nvss-final": "Final survey"
       },
-      "version": "2.0.1",
-      "archiveUrl": "public-nvss-footprints-2.0.1.zip",
-      "sizeBytes": 7714,
-      "sha256": "b990a1f04742d9ade77b52c48f35e4747f9d18135057cfbb3309aeff9bac5d17",
-      "updatedAt": "2026-08-12T08:47:34.577Z"
+      "version": "2.0.2",
+      "archiveUrl": "public-nvss-footprints-2.0.2.zip",
+      "sizeBytes": 7712,
+      "sha256": "4161b5c439e78442469f5558e0c23f80faef86bd2fb8eb789757c44058537e41",
+      "updatedAt": "2026-08-18T08:58:51.095Z"
     },
     {
       "id": "public-imaging-footprints",

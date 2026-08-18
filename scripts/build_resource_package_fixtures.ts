@@ -14,7 +14,7 @@ const outputRoot = path.join(root, "bootstrap", "resource-packages");
 const source = JSON.parse(await readFile(path.join(root, "src", "footprints", "survey-footprints.json"), "utf8")) as SurveyFootprintManifest;
 const generatedAt = source.generatedAt;
 const catalogOnly = process.argv.includes("--catalog-only");
-const packageVersion = "2.0.1";
+const packageVersion = "2.0.2";
 
 interface PackageDefinition {
   surveyId: string;
@@ -31,12 +31,12 @@ interface PackageDefinition {
 
 const definitions: readonly PackageDefinition[] = [
   {
-    surveyId: "euclid", name: "Euclid", description: "Euclid Q1 深场官方中心与面积生成的概览覆盖。",
-    modalities: ["imaging", "photometry"], wavelengths: ["optical", "near-infrared"], productTypes: ["field-overview"], facilities: ["ESA Euclid"], coverageAuthorities: ["overview"], accessModes: ["ESA Science Archive"],
-    sources: [{ releaseId: "euclid-q1", label: "Euclid Q1", url: "https://www.euclid-ec.org/science/q1/", authority: "official-overview" }],
+    surveyId: "euclid", name: "Euclid", description: "Euclid Q1 三个深场的官方 DS9 ICRS 边界导出 MOC。",
+    modalities: ["imaging", "photometry"], wavelengths: ["optical", "near-infrared"], productTypes: ["field-polygon-MOC"], facilities: ["ESA Euclid"], coverageAuthorities: ["official-boundary"], accessModes: ["ESA Science Archive"],
+    sources: [{ releaseId: "euclid-q1", label: "Euclid Q1 DS9 field boundaries", url: "https://www.euclid-ec.org/wp-content/uploads/q1_region_files.zip", authority: "Euclid Consortium" }],
   },
   {
-    surveyId: "galex", name: "GALEX", description: "GALEX GR6/GR7 紫外彩色 HiPS 的公开覆盖。",
+    surveyId: "galex", name: "GALEX", description: "GALEX GR6/GR7 FUV、NUV 与彩色 HiPS 图像的公开覆盖。",
     modalities: ["imaging", "ultraviolet"], wavelengths: ["far-ultraviolet", "near-ultraviolet"], productTypes: ["HiPS-image"], facilities: ["NASA GALEX", "MAST"], coverageAuthorities: ["third-party-moc"], accessModes: ["MAST", "CDS HiPS"],
     sources: [{ releaseId: "galex-gr6-gr7", label: "GALEX GR6/GR7 HiPS MOC", url: "https://alasky.cds.unistra.fr/MocServer/query?ID=CDS%2FP%2FGALEXGR6_7%2Fcolor&get=record&fmt=json", authority: "CDS", license: "ODbL-1.0 derivative" }],
   },
@@ -51,7 +51,7 @@ const definitions: readonly PackageDefinition[] = [
     sources: [{ releaseId: "sdss-dr09", label: "SDSS DR9 HiPS MOC", url: "https://alasky.cds.unistra.fr/MocServer/query?ID=CDS%2FP%2FSDSS9%2Fcolor&get=record&fmt=json", authority: "CDS", license: "ODbL-1.0 derivative" }],
   },
   {
-    surveyId: "hsc-ssp", name: "HSC-SSP", description: "HSC-SSP PDR2 Wide 与 Deep 彩色成像覆盖并集。",
+    surveyId: "hsc-ssp", name: "HSC-SSP", description: "HSC-SSP PDR2 Wide 与 Deep 的彩色及 grizy 图像 MOC 并集。",
     modalities: ["imaging", "photometry"], wavelengths: ["optical"], productTypes: ["HiPS-image"], facilities: ["Subaru Hyper Suprime-Cam"], coverageAuthorities: ["third-party-moc"], accessModes: ["HSC archive", "CDS HiPS"],
     sources: [{ releaseId: "hsc-pdr2", label: "HSC-SSP PDR2 HiPS MOCs", url: "https://alasky.cds.unistra.fr/MocServer/query?ID=CDS%2FP%2FHSC%2FDR2%2Fwide%2Fcolor-i-r-g%2CCDS%2FP%2FHSC%2FDR2%2Fdeep%2Fcolor-i-r-g&get=record&fmt=json", authority: "CDS", license: "ODbL-1.0 derivative" }],
   },
@@ -61,7 +61,7 @@ const definitions: readonly PackageDefinition[] = [
     sources: [{ releaseId: "hst-mast-snapshot-2026", label: "Published HST HiPS MOC union", url: "https://alasky.cds.unistra.fr/MocServer/query?ID=*P%2FHST%2F*&get=record&fmt=json", authority: "CDS", license: "ODbL-1.0 derivative" }],
   },
   {
-    surveyId: "panstarrs", name: "Pan-STARRS1", description: "Pan-STARRS1 DR1 i/r/g 叠加彩色成像覆盖。",
+    surveyId: "panstarrs", name: "Pan-STARRS1", description: "Pan-STARRS1 DR1 彩色及 grizy HiPS 图像覆盖。",
     modalities: ["imaging", "photometry"], wavelengths: ["optical"], productTypes: ["HiPS-image"], facilities: ["Pan-STARRS1"], coverageAuthorities: ["third-party-moc"], accessModes: ["MAST", "CDS HiPS"],
     sources: [{ releaseId: "panstarrs-dr1", label: "Pan-STARRS1 DR1 HiPS MOC", url: "https://alasky.cds.unistra.fr/MocServer/query?ID=CDS%2FP%2FPanSTARRS%2FDR1%2Fcolor-i-r-g&get=record&fmt=json", authority: "CDS", license: "ODbL-1.0 derivative" }],
   },
@@ -71,12 +71,12 @@ const definitions: readonly PackageDefinition[] = [
     sources: [{ releaseId: "des-dr2", label: "DES DR2 HiPS MOC", url: "https://alasky.cds.unistra.fr/MocServer/query?ID=CDS%2FP%2FDES-DR2%2FColorIRG&get=record&fmt=json", authority: "CDS", license: "ODbL-1.0 derivative" }],
   },
   {
-    surveyId: "2mass", name: "2MASS", description: "2MASS All-Sky J 波段图像覆盖。",
+    surveyId: "2mass", name: "2MASS", description: "2MASS All-Sky J、H、K 波段图像覆盖。",
     modalities: ["imaging", "photometry", "infrared"], wavelengths: ["near-infrared"], productTypes: ["HiPS-image"], facilities: ["2MASS"], coverageAuthorities: ["third-party-moc"], accessModes: ["IRSA", "CDS HiPS"],
     sources: [{ releaseId: "2mass-all-sky", label: "2MASS J-band HiPS MOC", url: "https://alasky.cds.unistra.fr/MocServer/query?ID=CDS%2FP%2F2MASS%2FJ&get=record&fmt=json", authority: "CDS/IRSA", license: "ODbL-1.0 derivative" }],
   },
   {
-    surveyId: "allwise", name: "AllWISE", description: "AllWISE W1 静态图像覆盖，不表达 NEOWISE 时间完整性。",
+    surveyId: "allwise", name: "AllWISE", description: "AllWISE W1-W4 静态图像覆盖，不表达 NEOWISE 时间完整性。",
     modalities: ["imaging", "photometry", "infrared"], wavelengths: ["mid-infrared"], productTypes: ["HiPS-image"], facilities: ["WISE", "IRSA"], coverageAuthorities: ["third-party-moc"], accessModes: ["IRSA", "CDS HiPS"],
     sources: [{ releaseId: "allwise", label: "AllWISE W1 HiPS MOC", url: "https://alasky.cds.unistra.fr/MocServer/query?ID=CDS%2FP%2FallWISE%2FW1&get=record&fmt=json", authority: "CDS/IRSA", license: "ODbL-1.0 derivative" }],
   },

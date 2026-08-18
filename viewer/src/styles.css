@@ -2827,7 +2827,7 @@ input {
   pointer-events: none;
 }
 
-.aladin-telemetry output:last-child {
+.aladin-telemetry #aladin-status {
   color: #d9efed;
   font: 9px "SFMono-Regular", Consolas, monospace;
 }
@@ -5484,9 +5484,21 @@ html[data-theme="light"] .scene-tool:disabled kbd { border-color: var(--border);
   letter-spacing: 0.16em;
 }
 
-.aladin-telemetry output:last-child {
+.aladin-telemetry #aladin-status {
   color: #d9fffb;
   font-size: 10px;
+  max-height: 40px;
+  overflow: hidden;
+  opacity: 1;
+  transform: translateY(0);
+  transition: max-height 220ms ease, opacity 220ms ease, transform 220ms ease, margin 220ms ease;
+}
+
+.aladin-telemetry #aladin-status.is-faded {
+  max-height: 0;
+  margin-top: -3px;
+  opacity: 0;
+  transform: translateY(-4px);
 }
 
 .aladin-telemetry small {
@@ -5532,16 +5544,6 @@ html[data-theme="light"] .scene-tool:disabled kbd { border-color: var(--border);
   color: #a3e8df;
   font-size: 8px;
   letter-spacing: 0.12em;
-}
-
-.aladin-status-pulse {
-  width: 6px;
-  height: 6px;
-  flex: 0 0 6px;
-  border-radius: 50%;
-  background: #6fd69b;
-  box-shadow: 0 0 12px #6fd69b;
-  animation: aladin-lock 1.5s ease-in-out infinite;
 }
 
 .region-scene-legend {
@@ -5803,6 +5805,10 @@ html[data-theme="light"] .scene-tool:disabled kbd { border-color: var(--border);
 
 .volume-stage.aladin-active .scene-readout b {
   color: #f2cf62;
+}
+
+.volume-stage.aladin-active .cutaway-badge {
+  display: none;
 }
 
 @media (max-width: 720px) {

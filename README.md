@@ -154,9 +154,11 @@ local, per-survey stack for visual comparison. The stack preserves coverage
 membership and provenance only; it is not a radial data cube. Hovering a cell
 shows its survey, release, product, modalities, geometry quality, and source.
 The bundled compact catalog includes available MOC artifacts for GALEX GR6/GR7,
-Legacy Surveys DR10, SDSS DR9 imaging, HSC-SSP PDR2, HST archive discovery, and
-an explicitly labelled official Euclid Q1 field overview. It contains no
-catalog rows or image pixels.
+Legacy Surveys DR10, SDSS DR9 imaging, HSC-SSP PDR2, HST archive discovery,
+Pan-STARRS1 DR1, DES DR2, 2MASS J/H/K, AllWISE W1-W4, KiDS DR5, NVSS, and an
+official-boundary Euclid Q1 field MOC. It contains no catalog rows or image
+pixels. The exact sources and the Euclid polygon rasterization are documented
+in [`docs/public-footprint-moc-method.md`](docs/public-footprint-moc-method.md).
 
 Only a MOC/HEALPix footprint may drive regional release discovery. Entries
 marked `summary_only` retain an official area or field summary, while `pending`
@@ -170,10 +172,11 @@ imaging or local COSMOS data for it.
 The fixed public-footprint directory is `artifacts/public-survey-footprints/`.
 `sources.json` is the product-level acquisition ledger for every available
 release in `src/survey-registry.ts`: `acquired` identifies an existing manifest
-identity, while `unavailable` records only a valid source URL and a reason. An
-unavailable product never receives fabricated pixels. These are release and
-product coverage artifacts, not catalog rows, image pixels, or a claim that
-every product in a release shares one footprint.
+identity, `overview_only` identifies a bounded but non-product-exact overview,
+and `awaiting_geometry` identifies a product for which no exact geometry has
+been ingested. An incomplete product never receives fabricated pixels. These
+are release and product coverage artifacts, not catalog rows, image pixels, or
+a claim that every product in a release shares one footprint.
 
 The checked-in bootstrap resources are copied once into this directory by:
 
