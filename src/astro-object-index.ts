@@ -46,6 +46,8 @@ export interface ObjectRegionQueryInput {
   modalities?: string[];
   assetIds?: string[];
   limit?: number;
+  /** Skip the potentially large flattened attributes map for point-only views. */
+  includeAttributes?: boolean;
   searchAfter?: unknown[];
   cursor?: unknown[];
 }
@@ -203,6 +205,8 @@ const OBJECT_SOURCE_FIELDS = [
   "scan_run_id",
   "attributes",
 ] as const;
+
+const OBJECT_POINT_SOURCE_FIELDS = OBJECT_SOURCE_FIELDS.filter((field) => field !== "attributes");
 
 const COVERAGE_SOURCE_FIELDS = [
   "healpix_order",
@@ -486,6 +490,7 @@ interface NormalizedObjectRegionQuery {
   modalities?: string[];
   assetIds?: string[];
   limit: number;
+  includeAttributes: boolean;
   searchAfter?: unknown[];
 }
 
@@ -559,6 +564,7 @@ function validateQueryInput(input: ObjectRegionQueryInput): NormalizedObjectRegi
     modalities: validateFilterValues(input.modalities, "modalities"),
     assetIds: validateFilterValues(input.assetIds, "assetIds"),
     limit: rawLimit,
+    includeAttributes: input.includeAttributes !== false,
     ...(searchAfter === undefined ? {} : { searchAfter }),
   };
 }
@@ -694,7 +700,7 @@ function queryBody(input: NormalizedObjectRegionQuery): Record<string, unknown> 
   return {
     track_total_hits: true,
     size: input.limit,
-    _source: [...OBJECT_SOURCE_FIELDS],
+    _source: [...(input.includeAttributes ? OBJECT_SOURCE_FIELDS : OBJECT_POINT_SOURCE_FIELDS)],
     query: { bool: { filter: filters } },
     sort: [...objectSort(input)],
     ...(input.searchAfter === undefined ? {} : { search_after: input.searchAfter }),

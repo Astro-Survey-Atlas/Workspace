@@ -4,10 +4,13 @@ import test from "node:test";
 import * as THREE from "three";
 
 import {
+  buildSphericalCellGeometry,
   buildSphericalCellEdges,
   buildSphericalCellSheetGeometry,
   healpixPixelFromSceneDirection,
   sphericalCellBoundary,
+  sphericalCellCenter,
+  TRIANGLES_PER_SPHERICAL_CELL,
   TRIANGLES_PER_SPHERICAL_CELL_SHEET,
 } from "../viewer/src/spherical-cell-geometry.js";
 
@@ -31,6 +34,27 @@ test("fragment edge geometry traces four outer HEALPix boundaries without a sphe
   assert.equal(geometry.getAttribute("position").count, 8);
   assert.equal(geometry.getAttribute("color").count, 8);
   geometry.dispose();
+});
+
+test("selection volume geometry contains a closed HEALPix solid", () => {
+  const geometry = buildSphericalCellGeometry([{
+    nside: cell.nside,
+    pixel: cell.pixel,
+    innerRadius: 0.95,
+    outerRadius: 1.05,
+    color: cell.color,
+  }]);
+  assert.equal(geometry.getAttribute("position").count, TRIANGLES_PER_SPHERICAL_CELL * 3);
+  assert.equal(geometry.getAttribute("normal").count, TRIANGLES_PER_SPHERICAL_CELL * 3);
+  assert.equal(geometry.getAttribute("color").count, TRIANGLES_PER_SPHERICAL_CELL * 3);
+  geometry.dispose();
+});
+
+test("HEALPix center maps back to its nested pixel", () => {
+  const nside = 16;
+  for (const pixel of [0, 17, 1702, 1703, 1709]) {
+    assert.equal(healpixPixelFromSceneDirection(nside, sphericalCellCenter(nside, pixel, 1)), pixel);
+  }
 });
 
 

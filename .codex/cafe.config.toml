@@ -6,7 +6,7 @@ plan_mode_reasoning_effort = "high"
 [model_providers.hansyai]
 name = "Hansyai OpenAI-compatible API"
 base_url = "https://token.72602.space/v1"
-env_key = "CAFE_API_KEY"
+env_key = "OPENAI_API_KEY"
 wire_api = "responses"
 requires_openai_auth = false
 

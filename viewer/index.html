@@ -94,20 +94,16 @@
 
         <div id="layer-controls" hidden>
           <section class="control-section layer-survey-section">
-            <div class="section-heading"><span>巡天图层</span><output id="layer-visible-output">1 ACTIVE</output></div>
+            <div class="section-heading"><span>数据图层</span><output id="layer-visible-output">1 ACTIVE</output></div>
             <div class="layer-bulk-actions">
               <button id="layer-select-all" class="command-button secondary" type="button">全部显示</button>
               <button id="layer-clear-all" class="command-button secondary" type="button">全部隐藏</button>
             </div>
-            <section class="layer-asset-section">
-              <div class="section-heading"><span>用户资产</span><output id="layer-asset-count">0</output></div>
-              <div id="workspace-asset-list" class="survey-list workspace-asset-list"></div>
-            </section>
             <div class="representation-control" role="group" aria-label="图层显示深度模式">
               <button type="button" class="representation-button active" data-layer-layout="overlap" aria-pressed="true" title="所有巡天共享同一 RA / Dec / HEALPix 位置">重合</button>
               <button type="button" class="representation-button" data-layer-layout="layers" aria-pressed="false" title="仅沿球面法线分开数据来源，不代表物理距离">径向展开</button>
             </div>
-            <div id="survey-list" class="survey-list"></div>
+            <div id="sky-layer-list" class="survey-list sky-layer-list" aria-label="可排序数据图层"></div>
           </section>
         </div>
 
@@ -240,8 +236,8 @@
 
       <section id="public-survey-overview-stage" class="catalog-stage public-survey-overview-stage" aria-label="巡天公开版本列表" hidden>
         <header class="catalog-stage-header public-survey-overview-header">
-          <div><span class="panel-kicker">PUBLIC SURVEY</span><h2 id="public-survey-overview-title">巡天</h2><p id="public-survey-overview-summary"></p></div>
           <button id="public-survey-overview-back" class="command-button secondary" type="button">返回公开资源集</button>
+          <div><span class="panel-kicker">PUBLIC SURVEY</span><h2 id="public-survey-overview-title">巡天</h2><p id="public-survey-overview-summary"></p></div>
         </header>
         <section class="public-survey-overview-releases-section">
           <div class="public-survey-overview-columns"><span>公开版本</span><span>覆盖状态</span></div>
@@ -295,31 +291,47 @@
 
       <section id="scene-stage" class="volume-stage" aria-label="数据覆盖天球与数据空间" hidden>
         <canvas id="volume-canvas"></canvas>
+        <div id="aladin-explorer" class="aladin-explorer-host" hidden aria-label="Aladin 天区对象探索"></div>
+        <div id="aladin-controls" class="aladin-controls" hidden>
+          <aside id="aladin-cockpit-rail" class="aladin-cockpit-rail" aria-label="对象资产探索舱">
+            <header class="aladin-cockpit-heading"><span class="panel-kicker">EXPLORATION DECK</span><strong>用户资产</strong><output id="aladin-cache-state">CACHE IDLE</output></header>
+            <div id="aladin-asset-nav" class="aladin-asset-nav" role="group" aria-label="对象资产导航"></div>
+            <div class="aladin-rail-summary"><span>VIEWPORT LOAD</span><output id="aladin-loaded-summary">--</output></div>
+          </aside>
+          <div class="aladin-telemetry" aria-live="polite"><span>ICRS · OBJECTS</span><output id="aladin-object-telemetry">--</output><output id="aladin-status">等待 Aladin</output></div>
+          <div class="aladin-action-rail" aria-label="Aladin 应用操作">
+            <button id="aladin-inspector-toggle" class="aladin-action-button" type="button" aria-label="显示对象详情" title="显示对象详情"><i data-lucide="info"></i></button>
+          </div>
+          <div id="aladin-status-deck" class="aladin-status-deck" aria-live="polite">VIEWPORT CACHE IDLE</div>
+        </div>
         <div class="scene-hud-top">
           <div class="scene-readout">
             <span><b>FRAME</b> ICRS</span>
             <span title="球面颜色表达公开覆盖和用户资产状态；层间偏移只用于显示，不代表物理距离。"><b id="scene-mode-label">DATA COVERAGE</b> <span id="scene-mode-value">PUBLIC + OWNED</span></span>
-            <span><b>CAMERA</b> <output id="camera-distance">--</output></span>
+            <span id="scene-coordinate-readout" class="scene-coordinate-readout" hidden>RA -- · DEC -- · FOV --</span>
+            <span id="scene-camera-readout"><b>CAMERA</b> <output id="camera-distance">--</output></span>
           </div>
           <div class="scene-tools">
-            <div id="layer-tool-strip" class="layer-tool-strip" role="group" aria-label="天区工具">
-              <button type="button" class="scene-tool active" data-layer-interaction="inspect" aria-pressed="true"><kbd>F</kbd><span>查看</span></button>
-              <button type="button" class="scene-tool" data-layer-interaction="region" aria-pressed="false"><kbd>G</kbd><span>选区</span></button>
-            </div>
             <button id="reset-button" class="icon-button scene-reset scene-action" type="button" aria-label="重置视图" title="重置视图">
               <i data-lucide="rotate-ccw"></i>
             </button>
             <button id="drill-back-button" class="icon-button scene-action" type="button" aria-label="返回上一级天区" title="返回上一级天区" disabled>
               <i data-lucide="undo-2"></i>
             </button>
+            <button id="aladin-fullscreen" class="icon-button scene-action" type="button" aria-label="进入全屏" title="进入全屏" hidden>
+              <i data-lucide="maximize-2"></i>
+            </button>
           </div>
         </div>
         <div id="scene-legend" class="distance-legend" aria-label="场景颜色图例">
           <span id="legend-min">INNER</span><i></i><span id="legend-max">OUTER</span>
         </div>
-        <div class="cutaway-badge"><i data-lucide="layers-3"></i><span id="scene-badge">查看模式</span><output id="layer-selection-count">F</output></div>
+        <div class="cutaway-badge"><i data-lucide="layers-3"></i><span id="scene-badge">查看模式</span><output id="layer-selection-count">NO CELL</output></div>
         <aside id="coverage-hover" class="coverage-hover" aria-live="polite" hidden></aside>
         <aside id="region-scene-legend" class="region-scene-legend" aria-live="polite" hidden></aside>
+        <div id="coverage-context-menu" class="coverage-context-menu" role="menu" hidden>
+          <button id="coverage-enter-flat" type="button" role="menuitem">在 Aladin 中探索</button>
+        </div>
         <div id="loading-indicator" class="loading-indicator visible">载入多巡天索引</div>
       </section>
 

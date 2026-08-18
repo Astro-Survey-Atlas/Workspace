@@ -182,8 +182,9 @@ export class DataCatalogPanel {
     const content = byId("inspector-content");
     byId("inspector-kicker").textContent = "DATA ASSET DETAIL";
     if (!asset) { empty.hidden = false; content.hidden = true; content.replaceChildren(); return; }
-    empty.hidden = true;
-    content.hidden = false;
+     empty.hidden = true;
+     content.hidden = false;
+     content.classList.add("catalog-inspector-content");
     const heading = document.createElement("h2");
     heading.textContent = asset.name;
     const note = document.createElement("p");
@@ -197,7 +198,17 @@ export class DataCatalogPanel {
     const lineage = this.#detailEditing === "lineage" ? this.#lineageEditor(asset) : document.createElement("div"); lineage.classList.add("lineage-detail-tree");
     if (this.#detailEditing !== "lineage") { (asset.lineage ?? []).forEach((entry) => { const item = document.createElement("div"); item.textContent = `${entry.relation} · ${entry.label}`; lineage.append(item); }); if (!lineage.childElementCount) lineage.textContent = "暂无血缘关系。"; }
     const sections = [this.#detailSection("基本信息", basic, "编辑基本信息", () => { this.#detailEditing = "basic"; this.#renderInspector(); }), this.#detailSection("公开来源", sourceList, "编辑公开来源", () => { this.#detailEditing = "sources"; this.#renderInspector(); }), this.#detailSection("访问位置与 Connector", accessList, "编辑 Connector 关联", () => { this.#detailEditing = "access"; this.#renderInspector(); }), this.#detailSection("数据血缘", lineage, "编辑血缘关系", () => { this.#detailEditing = "lineage"; this.#renderInspector(); })];
-    if (asset.origin !== "builtin") { const remove = document.createElement("button"); remove.type = "button"; remove.className = "command-button danger"; remove.textContent = "删除数据资产"; remove.addEventListener("click", () => void this.#remove(asset).catch(this.#onError)); sections.push(remove); }
+     if (asset.origin !== "builtin") {
+       const actions = document.createElement("div");
+       actions.className = "catalog-inspector-actions";
+       const remove = document.createElement("button");
+       remove.type = "button";
+       remove.className = "command-button danger";
+       remove.textContent = "删除数据资产";
+       remove.addEventListener("click", () => void this.#remove(asset).catch(this.#onError));
+       actions.append(remove);
+       sections.push(actions);
+     }
     content.replaceChildren(heading, note, ...sections);
   }
 
@@ -380,7 +391,7 @@ export class DataCatalogPanel {
 
   #detailSection(title: string, content: HTMLElement, action: string, callback: () => void): HTMLElement {
     const wrapper = document.createElement("section"); wrapper.className = "asset-detail-section";
-    const header = document.createElement("div"); header.className = "asset-detail-section-heading";
+     const header = document.createElement("div"); header.className = "asset-detail-section-heading catalog-inspector-section-heading";
     const heading = document.createElement("h3"); heading.textContent = title;
     const button = document.createElement("button"); button.type = "button"; button.className = "text-button"; button.textContent = action; button.addEventListener("click", callback);
     header.append(heading, button); wrapper.append(header, content); return wrapper;

@@ -152,9 +152,25 @@ test("user assets remain reachable from the workspace navigation", async ({ page
     const first = page.locator("#catalog-asset-list .catalog-row").first();
     await first.click();
     await expect(page.locator("#inspector-kicker")).toHaveText("DATA ASSET DETAIL");
-    await expect(page.locator("#inspector-content h2")).toHaveText(assets[0]!.name);
-    await expect(page.locator("#catalog-stage")).toBeVisible();
-    await expect(page.locator("#inspector-content")).toContainText("公开来源");
+     await expect(page.locator("#inspector-content h2")).toHaveText(assets[0]!.name);
+     await expect(page.locator("#catalog-stage")).toBeVisible();
+     await expect(page.locator("#inspector-content")).toContainText("公开来源");
+     await expect(page.locator("#inspector-content.catalog-inspector-content")).toBeVisible();
+     await expect(page.locator(".catalog-inspector-section-heading .text-button")).toHaveCount(4);
+     await expect(page.locator(".catalog-inspector-actions")).toHaveCount(1);
+     const inspectorLayout = await page.locator("#inspector-content").evaluate((content) => {
+       const headings = [...content.querySelectorAll<HTMLElement>(".catalog-inspector-section-heading")];
+       const buttons = headings.map((heading) => heading.querySelector<HTMLElement>(".text-button")!.getBoundingClientRect());
+       const actions = content.querySelector<HTMLElement>(".catalog-inspector-actions")!.getBoundingClientRect();
+       return {
+         headingCount: headings.length,
+         buttonsInside: buttons.every((button, index) => button.right <= content.getBoundingClientRect().right && button.left >= headings[index]!.getBoundingClientRect().left),
+         actionWidth: actions.width,
+       };
+     });
+     expect(inspectorLayout.headingCount).toBe(4);
+     expect(inspectorLayout.buttonsInside).toBe(true);
+     expect(inspectorLayout.actionWidth).toBeGreaterThan(0);
   } else {
     await expect(page.locator("#catalog-empty")).toBeVisible();
   }
@@ -218,9 +234,11 @@ test("mobile catalog keeps creation modal and details reachable", async ({ page 
   const first = page.locator("#catalog-asset-list .catalog-row").first();
   if (await first.count()) {
     await first.click();
-    await expect(page.locator("#inspector-panel")).toHaveClass(/mobile-open/);
-    await expect(page.locator("#inspector-content h2")).toBeVisible();
-  }
+     await expect(page.locator("#inspector-panel")).toHaveClass(/mobile-open/);
+     await expect(page.locator("#inspector-content h2")).toBeVisible();
+     await expect(page.locator(".catalog-inspector-section-heading .text-button")).toHaveCount(4);
+     await expect(page.locator(".catalog-inspector-actions .command-button")).toBeVisible();
+   }
 });
 
 test("local asset registration inspects CSV columns before creating a scan spec", async ({ page }) => {

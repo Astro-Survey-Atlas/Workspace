@@ -117,6 +117,23 @@ function averagePixelBrightness(buffer: Buffer): number {
   return count ? total / count : 0;
 }
 
+async function catalogMarkerPixelCount(page: Page): Promise<number> {
+  return page.locator(".aladin-catalogCanvas").evaluate((element) => {
+    const canvas = element as HTMLCanvasElement;
+    const context = canvas.getContext("2d");
+    if (!context || !canvas.width || !canvas.height) return 0;
+    const pixels = context.getImageData(0, 0, canvas.width, canvas.height).data;
+    let count = 0;
+    for (let index = 0; index < pixels.length; index += 4) {
+      const red = pixels[index]!;
+      const green = pixels[index + 1]!;
+      const blue = pixels[index + 2]!;
+      if (red >= 180 && green >= 145 && blue <= 145 && red - blue >= 70) count += 1;
+    }
+    return count;
+  });
+}
+
 function fragmentPoint(buffer: Buffer): { x: number; y: number } {
   const image = PNG.sync.read(buffer);
   const saturated = (x: number, y: number): boolean => {
@@ -133,13 +150,14 @@ function fragmentPoint(buffer: Buffer): { x: number; y: number } {
 }
 
 async function openFresh(page: Page, beforeGoto?: () => Promise<void>): Promise<void> {
-  await page.addInitScript(() => {
-    localStorage.clear();
-    localStorage.setItem("astro-workspace:theme:v1", "dark");
-  });
   await proxyApi(page);
   await beforeGoto?.();
   await page.goto("/");
+  await page.evaluate(() => {
+    localStorage.clear();
+    localStorage.setItem("astro-workspace:theme:v1", "dark");
+  });
+  await page.reload();
   await expect(page.locator("#service-status")).toHaveText("SERVICE ONLINE");
   await expect(page.locator("#loading-indicator")).not.toHaveClass(/visible/);
   const layersMode = page.locator('button[data-mode="layers"]');
@@ -150,14 +168,24 @@ async function openFresh(page: Page, beforeGoto?: () => Promise<void>): Promise<
   await page.waitForTimeout(900);
 }
 
-test("layers list each user asset independently with its own visibility control", async ({ page }) => {
+async function waitForVisibleAssetCoverage(page: Page): Promise<void> {
+  const assetToggle = page.locator("#sky-layer-list .workspace-asset-card input[type='checkbox']").first();
+  await expect(assetToggle).toBeVisible({ timeout: 15_000 });
+  if (!await assetToggle.isChecked()) await assetToggle.check();
+  await expect.poll(async () => page.locator("#volume-canvas").getAttribute("data-visible-asset-ids"), {
+    timeout: 15_000,
+  }).toMatch(/.+/);
+}
+
+test("unified sky layer stack lists each user asset with its own visibility control", async ({ page }) => {
   const { assets } = await apiJson<{ assets: Array<{ id: string; name: string }> }>("/api/data-assets?origin=user");
   await page.setViewportSize({ width: 1440, height: 900 });
   await openFresh(page);
 
-  const assetCards = page.locator("#workspace-asset-list .workspace-asset-card");
+  const assetCards = page.locator("#sky-layer-list .workspace-asset-card");
   await expect(assetCards).toHaveCount(assets.length, { timeout: 15_000 });
-  await expect(page.locator("#layer-asset-count")).toHaveText(String(assets.length));
+  await expect(page.locator("#workspace-asset-list")).toHaveCount(0);
+  await expect(page.locator("#survey-list")).toHaveCount(0);
   if (assets.length > 0) {
     const first = assetCards.first();
     const checkbox = first.locator('input[type="checkbox"]');
@@ -184,8 +212,10 @@ test("sky layers default to semantic overlap and expose radial depth as display-
   await expect(radial).toHaveText("径向展开");
   await expect(radial).toHaveAttribute("title", /不代表物理距离/);
 
-  const assetLabels = await page.locator("#workspace-asset-list .survey-card-body").allTextContents();
+  const assetLabels = await page.locator("#sky-layer-list .workspace-asset-card .survey-card-body").allTextContents();
   expect(assetLabels.every((label) => !/user[-_][a-z0-9-]+/i.test(label))).toBe(true);
+  await expect(page.locator("#sky-layer-list")).not.toContainText("COSMOS Custom Catalog");
+  await expect(page.locator("#sky-layer-list")).toContainText("COSMOS");
 
   await radial.click();
   await expect(radial).toHaveClass(/active/);
@@ -193,6 +223,30 @@ test("sky layers default to semantic overlap and expose radial depth as display-
   await overlap.click();
   await expect(overlap).toHaveClass(/active/);
   await expect(page.locator("#volume-canvas")).toHaveAttribute("data-layout-mode", "overlap");
+});
+
+test("sky layer order persists and drives the Three display depth", async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await openFresh(page);
+
+  const cards = page.locator("#sky-layer-list .survey-card");
+  await expect.poll(() => cards.count()).toBeGreaterThan(0);
+  if (await cards.count() < 2) return;
+
+  const firstKey = await cards.nth(0).getAttribute("data-layer-key");
+  const secondKey = await cards.nth(1).getAttribute("data-layer-key");
+  await expect(cards.nth(0).locator(".layer-reorder-actions")).toHaveCount(0);
+  const handle = cards.nth(0).locator(".layer-drag-handle");
+  await expect(handle).toHaveCount(1);
+  await handle.focus();
+  await page.keyboard.press("Alt+ArrowDown");
+  await expect(cards.nth(0)).toHaveAttribute("data-layer-key", secondKey!);
+  await expect(cards.nth(1)).toHaveAttribute("data-layer-key", firstKey!);
+  await expect(page.locator("#volume-canvas")).toHaveAttribute("data-layer-order", new RegExp(`^${secondKey},${firstKey}`));
+
+  await page.reload();
+  await expect(page.locator("#service-status")).toHaveText("SERVICE ONLINE");
+  await expect(page.locator("#sky-layer-list .survey-card").nth(0)).toHaveAttribute("data-layer-key", secondKey!);
 });
 
 test("public resource package installs and applies all releases atomically", async ({ page }) => {
@@ -222,23 +276,28 @@ test("public resource package installs and applies all releases atomically", asy
   await expect(row.locator(".resource-package-version")).toHaveText("0 / 4 产品有真实覆盖");
   await expect(row.locator(".resource-package-version")).not.toHaveAttribute("role", "button");
   await expect(row).not.toContainText("2.0.0");
-  const resourceTitleStyle = await page.locator("#resource-package-stage .catalog-stage-header h2").evaluate((element) => {
-    const style = getComputedStyle(element);
-    const rect = element.getBoundingClientRect();
-    return { fontSize: style.fontSize, fontWeight: style.fontWeight, marginTop: style.marginTop, marginBottom: style.marginBottom, color: style.color, left: rect.left };
-  });
+   const resourceTitleStyle = await page.locator("#resource-package-stage .catalog-stage-header h2").evaluate((element) => {
+     const style = getComputedStyle(element);
+     return { fontSize: style.fontSize, fontWeight: style.fontWeight, marginTop: style.marginTop, marginBottom: style.marginBottom, color: style.color };
+   });
   await row.click();
   await expect(page.locator("#public-survey-overview-stage")).toBeVisible();
   await expect(page.locator("#public-survey-overview-title")).toHaveText("Euclid");
-  const overviewTitleStyle = await page.locator("#public-survey-overview-title").evaluate((element) => {
-    const style = getComputedStyle(element);
-    const rect = element.getBoundingClientRect();
-    return { fontSize: style.fontSize, fontWeight: style.fontWeight, marginTop: style.marginTop, marginBottom: style.marginBottom, color: style.color, left: rect.left };
-  });
+   const overviewTitleStyle = await page.locator("#public-survey-overview-title").evaluate((element) => {
+     const style = getComputedStyle(element);
+     return { fontSize: style.fontSize, fontWeight: style.fontWeight, marginTop: style.marginTop, marginBottom: style.marginBottom, color: style.color };
+   });
   expect(overviewTitleStyle).toEqual(resourceTitleStyle);
-  await expect(page.locator("#public-survey-overview-stage > .public-survey-overview-header")).toBeVisible();
-  await expect(page.locator("#public-survey-overview-stage > .public-release-detail-header")).toHaveCount(0);
-  await expect(page.locator(".public-survey-overview-releases-section > .section-heading")).toHaveCount(0);
+   await expect(page.locator("#public-survey-overview-stage > .public-survey-overview-header")).toBeVisible();
+   await expect(page.locator("#public-survey-overview-stage > .public-release-detail-header")).toHaveCount(0);
+   const overviewHeaderLayout = await page.locator("#public-survey-overview-stage > .public-survey-overview-header").evaluate((header) => {
+     const back = header.querySelector<HTMLElement>("#public-survey-overview-back")!.getBoundingClientRect();
+     const title = header.querySelector<HTMLElement>("#public-survey-overview-title")!.getBoundingClientRect();
+      return { backRight: back.right, titleLeft: title.left, backTop: back.top, titleTop: title.top };
+    });
+    expect(overviewHeaderLayout.backRight).toBeLessThanOrEqual(overviewHeaderLayout.titleLeft);
+    expect(overviewHeaderLayout.backTop).toBeLessThanOrEqual(overviewHeaderLayout.titleTop + 4);
+   await expect(page.locator(".public-survey-overview-releases-section > .section-heading")).toHaveCount(0);
   await expect(page.locator(".public-survey-overview-columns > span")).toHaveCount(2);
   await expect(page.locator(".public-survey-overview-columns")).toContainText("公开版本");
   await expect(page.locator(".public-survey-overview-columns")).toContainText("覆盖状态");
@@ -321,25 +380,29 @@ test("public survey overview header remains aligned in light mobile layout", asy
   await expect(page.locator("#public-survey-overview-title")).toBeVisible();
   await expect(page.locator(".public-survey-overview-columns > span")).toHaveCount(2);
   await expect(page.locator("#public-survey-overview-back")).toBeVisible();
-  const layout = await page.locator("#public-survey-overview-stage").evaluate((stage) => {
+   const layout = await page.locator("#public-survey-overview-stage").evaluate((stage) => {
     const title = stage.querySelector<HTMLElement>("#public-survey-overview-title")!;
     const back = stage.querySelector<HTMLElement>("#public-survey-overview-back")!;
     const columns = stage.querySelector<HTMLElement>(".public-survey-overview-columns")!;
     const stageRect = stage.getBoundingClientRect();
     const titleRect = title.getBoundingClientRect();
     const backRect = back.getBoundingClientRect();
-    const columnsRect = columns.getBoundingClientRect();
+     const columnsRect = columns.getBoundingClientRect();
     return {
       titleInside: titleRect.left >= stageRect.left && titleRect.right <= stageRect.right,
       backInside: backRect.left >= stageRect.left && backRect.right <= stageRect.right,
-      columnsInside: columnsRect.left >= stageRect.left && columnsRect.right <= stageRect.right,
+       columnsInside: columnsRect.left >= stageRect.left && columnsRect.right <= stageRect.right,
+       backBeforeTitle: backRect.right <= titleRect.left,
+       backAtTop: backRect.top <= titleRect.top + 4,
       titleColor: getComputedStyle(title).color,
-      stageBackground: getComputedStyle(stage).backgroundColor,
-    };
-  });
+       stageBackground: getComputedStyle(stage).backgroundColor,
+     };
+   });
   expect(layout.titleInside).toBe(true);
   expect(layout.backInside).toBe(true);
-  expect(layout.columnsInside).toBe(true);
+    expect(layout.columnsInside).toBe(true);
+    expect(layout.backBeforeTitle).toBe(true);
+    expect(layout.backAtTop).toBe(true);
   expect(layout.titleColor).not.toBe("rgb(255, 255, 255)");
   expect(layout.stageBackground).not.toBe("rgb(7, 11, 15)");
 });
@@ -366,25 +429,41 @@ test("light theme switches the 3D sky to a soft observation canvas", async ({ pa
   await expect(canvas).toHaveAttribute("data-theme", "light");
 });
 
-async function findCanvasPoint(page: Page, predicate: (state: { pixel: number; covered: boolean; selectable: boolean }) => boolean): Promise<{ x: number; y: number; pixel: number }> {
-  const canvas = page.locator("#volume-canvas");
-  const bounds = await canvas.boundingBox();
-  if (!bounds) throw new Error("Canvas has no layout bounds");
-  for (let y = 70; y < bounds.height - 70; y += 10) {
-    for (let x = 70; x < bounds.width - 70; x += 10) {
-      await page.mouse.move(bounds.x + x, bounds.y + y);
-      const rawPixel = await canvas.getAttribute("data-hovered-pixel");
-      if (rawPixel === null) continue;
-      const pixel = Number(rawPixel);
-      if (!Number.isInteger(pixel)) continue;
-      const state = {
-        pixel,
-        covered: (await canvas.getAttribute("data-hovered-covered")) === "true",
-        selectable: (await canvas.getAttribute("data-hovered-selectable")) === "true",
-      };
-      if (predicate(state)) return { x, y, pixel };
+async function findCanvasPoint(page: Page, predicate: (state: { pixel: number; covered: boolean; selectable: boolean; assetIds: string[] }) => boolean): Promise<{ x: number; y: number; pixel: number }> {
+  const hits = await page.evaluate(() => {
+    const canvas = document.querySelector<HTMLCanvasElement>("#volume-canvas");
+    if (!canvas) return [];
+    const rect = canvas.getBoundingClientRect();
+    const results: Array<{ x: number; y: number; pixel: number; covered: boolean; selectable: boolean; assetIds: string[] }> = [];
+    for (let y = 8; y < rect.height - 8; y += 8) {
+      for (let x = 8; x < rect.width - 8; x += 8) {
+        const clientX = rect.left + x;
+        const clientY = rect.top + y;
+        canvas.dispatchEvent(new PointerEvent("pointermove", {
+          bubbles: true,
+          clientX,
+          clientY,
+          pointerId: 1,
+          pointerType: "mouse",
+          buttons: 0,
+        }));
+        const rawPixel = canvas.dataset.hoveredPixel;
+        const pixel = Number(rawPixel);
+        if (!rawPixel || !Number.isInteger(pixel)) continue;
+        results.push({
+          x,
+          y,
+          pixel,
+          covered: canvas.dataset.hoveredCovered === "true",
+          selectable: canvas.dataset.hoveredSelectable === "true",
+          assetIds: (canvas.dataset.hoveredAssetIds ?? "").split(",").filter(Boolean),
+        });
+      }
     }
-  }
+    return results;
+  });
+  const match = hits.find(predicate);
+  if (match) return { x: match.x, y: match.y, pixel: match.pixel };
   throw new Error("No matching HEALPix point found on the visible hemisphere");
 }
 
@@ -411,69 +490,152 @@ test("project status remains available when joint volume resources fail", async 
   await expect(page.locator("#loading-indicator")).not.toHaveClass(/visible/);
 });
 
-test("desktop sky drills density cells without fixed-region controls", async ({ page }, testInfo) => {
-  test.setTimeout(90_000);
+test("sphere selection enters Aladin with an exact region snapshot", async ({ page }, testInfo) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  const objectRequests: Array<{ assetIds?: string[]; surveyIds?: string[]; releaseIds?: string[]; region?: { nside?: number; pixels?: number[]; ordering?: string; coordinateFrame?: string }; bbox?: { raMin?: number; raMax?: number; decMin?: number; decMax?: number }; includeAttributes?: boolean }> = [];
+  await openFresh(page, async () => {
+    await page.route("**/api/sky/objects/query", async (route) => {
+      const body = route.request().postDataJSON() as typeof objectRequests[number];
+      objectRequests.push(body);
+      const bbox = body.bbox ?? { raMin: 0, raMax: 1, decMin: 0, decMax: 1 };
+      const ra = ((Number(bbox.raMin ?? 0) + Number(bbox.raMax ?? 0)) / 2) % 360;
+      const dec = (Number(bbox.decMin ?? 0) + Number(bbox.decMax ?? 0)) / 2;
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          status: "ready",
+          index: "astro_object_index_v1",
+          objects: [{
+            object_id: "e2e-aladin-object",
+            ra_deg: ra,
+            dec_deg: dec,
+            survey: "cosmos-custom",
+            release: "cosmos-custom-v1",
+            product: "COSMOS",
+            modality: "catalog",
+            asset_id: "user-12b69893-1a68-4b20-81dd-fb1ddca31953",
+          }],
+          total: 1,
+          limit: 1000,
+        }),
+      });
+    });
+  });
+  const canvas = page.locator("#volume-canvas");
+  await expect(page.locator("#coverage-context-menu")).toHaveCount(1);
+  await expect(page.locator("#coverage-lock-button")).toHaveCount(0);
+  await expect(page.locator("#refinement-controls")).toHaveCount(0);
+  await expect(page.locator('[data-action="search-region"]')).toHaveCount(0);
+  await waitForVisibleAssetCoverage(page);
+
+  const before = await canvas.screenshot({ path: testInfo.outputPath("sphere-overview.png") });
+  expect(fragmentPixelCount(before)).toBeGreaterThan(1_000);
+  const point = await findCanvasPoint(page, (state) => state.covered && state.selectable && state.assetIds.length > 0);
+  await canvas.click({ position: point });
+  await expect(page.locator("#layer-selection-count")).toHaveText("1 CELLS");
+  await expect(canvas).toHaveAttribute("data-selection-volume", "solid");
+  await expect(canvas).toHaveAttribute("data-selection-depth-radii", /.+/);
+  await expect(canvas).toHaveAttribute("data-selection-edge-layers", /[1-9]/);
+  const selectedPixels = await canvas.getAttribute("data-selected-pixels");
+  expect(selectedPixels).toBeTruthy();
+  const cameraBeforeFocus = await canvas.getAttribute("data-camera-position");
+  await page.keyboard.press("f");
+  await expect.poll(async () => canvas.getAttribute("data-camera-position"), { timeout: 3_000 })
+    .not.toBe(cameraBeforeFocus);
+  await expect(canvas).toHaveAttribute("data-selected-pixels", selectedPixels!);
+  await page.locator("#reset-button").click();
+  await expect(canvas).toHaveAttribute("data-selected-pixels", selectedPixels!);
+  await expect(canvas).toHaveAttribute("data-selection-volume", "solid");
+
+  await canvas.click({ button: "right", position: point });
+  await expect(page.locator("#coverage-context-menu")).toBeVisible();
+  await expect(page.locator("#coverage-enter-flat")).toHaveText("在 Aladin 中探索");
+  await page.locator("#coverage-enter-flat").click();
+  const aladin = page.locator("#aladin-explorer");
+  await expect(aladin).toBeVisible();
+  await expect(page.locator("#aladin-controls")).toBeVisible();
+  await expect(page.locator("#aladin-cockpit-rail")).toBeVisible();
+  await expect(page.locator("#aladin-loaded-summary")).toBeVisible();
+  await expect(page.locator("#aladin-cache-state")).toContainText(/CACHE|FETCH/);
+  await expect(page.locator("#aladin-fullscreen")).toBeVisible();
+  await expect(page.locator("#scene-camera-readout")).toBeHidden();
+  await expect(page.locator("#scene-mode-label")).toHaveText("OBJECT EXPLORE");
+  await expect(page.locator("#scene-mode-value")).toHaveText("ICRS");
+  await expect(page.locator("#scene-coordinate-readout")).toBeVisible();
+  await expect(page.locator("#aladin-coordinate-form, #aladin-ra, #aladin-dec, #aladin-fov, #aladin-go")).toHaveCount(0);
+  await expect(page.locator("#aladin-asset-nav .aladin-asset-button")).toHaveCount(1);
+  await expect(page.locator(".aladin-location")).toBeHidden();
+  await expect(page.locator(".aladin-fov")).toBeHidden();
+  await expect(page.locator(".aladin-status-bar")).toBeHidden();
+  await expect(canvas).toBeHidden();
+  await expect(aladin).toHaveAttribute("data-scene-kind", "aladin");
+  await expect(aladin).toHaveAttribute("data-nside", "16");
+  await expect(aladin).toHaveAttribute("data-pixels", selectedPixels!);
+  await expect(aladin).toHaveAttribute("data-initial-fov-deg");
+  await expect.poll(() => objectRequests.length, { timeout: 15_000 }).toBeGreaterThan(0);
+  expect(objectRequests[0]!.region?.nside).toBe(16);
+  expect(objectRequests[0]!.region?.pixels).toEqual(selectedPixels!.split(",").map(Number));
+  expect(objectRequests[0]!.region?.ordering).toBe("NESTED");
+  expect(objectRequests[0]!.region?.coordinateFrame).toBe("ICRS");
+  expect(objectRequests[0]!.includeAttributes).toBe(false);
+  expect(objectRequests.every((request) => request.assetIds?.length === 1)).toBe(true);
+  expect(objectRequests.every((request) => request.surveyIds === undefined && request.releaseIds === undefined)).toBe(true);
+  await expect(page.locator("#object-status")).toContainText("OBJECTS");
+  await expect.poll(() => catalogMarkerPixelCount(page), { timeout: 10_000 }).toBeGreaterThan(0);
+  const catalogCanvas = page.locator(".aladin-catalogCanvas").last();
+  const marker = await catalogCanvas.evaluate((element) => {
+    const canvas = element as HTMLCanvasElement;
+    const context = canvas.getContext("2d");
+    if (!context) return null;
+    const pixels = context.getImageData(0, 0, canvas.width, canvas.height).data;
+    for (let index = 0; index < pixels.length; index += 4) {
+      const alpha = pixels[index + 3]!;
+      const red = pixels[index]!;
+      const green = pixels[index + 1]!;
+      const blue = pixels[index + 2]!;
+      if (alpha > 150 && Math.max(red, green, blue) - Math.min(red, green, blue) > 35) {
+        return { x: (index / 4) % canvas.width, y: Math.floor(index / 4 / canvas.width) };
+      }
+    }
+    return null;
+  });
+  expect(marker).not.toBeNull();
+  const box = await catalogCanvas.boundingBox();
+  expect(box).not.toBeNull();
+  await page.mouse.click(box!.x + marker!.x, box!.y + marker!.y);
+  await expect(page.locator("#inspector-panel")).toHaveClass(/aladin-object-selected/);
+  await expect(page.locator("#inspector-content")).toContainText("e2e-aladin-object");
+  await page.locator("#aladin-fullscreen").click();
+  await expect(page.locator("#scene-stage")).toHaveAttribute("data-fullscreen", "true");
+  await page.locator("#aladin-fullscreen").click();
+  await expect(page.locator("#scene-stage")).toHaveAttribute("data-fullscreen", "false");
+  await expect(page.locator("#coverage-context-menu")).toBeHidden();
+
+  await page.locator("#drill-back-button").click();
+  await expect(aladin).toBeHidden();
+  await expect(canvas).toBeVisible();
+  await expect(page.locator("#layer-selection-count")).toHaveText("NO CELL");
+  await page.screenshot({ path: testInfo.outputPath("aladin-explorer.png"), fullPage: true });
+});
+
+test("Escape exits Aladin even when a layer control has focus", async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
   await openFresh(page);
   const canvas = page.locator("#volume-canvas");
-  await expect(canvas).toHaveAttribute("data-visible-survey-ids", "legacy-surveys");
-  await expect(page.locator(".survey-card", { hasText: "DESI" })).toHaveCount(0);
-  await expect(page.locator("#survey-list")).not.toContainText("PENDING");
-  await expect(page.locator("#focus-button")).toHaveCount(0);
-  await expect(page.locator(".scene-hud-top #reset-button")).toBeVisible();
-  await expect(page.locator("#coverage-lock-button")).toHaveCount(0);
-  await expect(page.locator("#coverage-context-menu")).toHaveCount(0);
-  await expect(page.locator("#refinement-controls")).toHaveCount(0);
-  await expect(page.locator('[data-action="search-region"]')).toHaveCount(0);
+  const point = await findCanvasPoint(page, (state) => state.covered && state.selectable);
+  await canvas.click({ position: point });
+  await canvas.click({ button: "right", position: point });
+  await page.locator("#coverage-enter-flat").click();
+  await expect(page.locator("#aladin-explorer")).toBeVisible();
 
-  const legacyImage = await canvas.screenshot({ path: testInfo.outputPath("legacy-fragments.png") });
-  const legacyLitPixels = fragmentPixelCount(legacyImage);
-  expect(legacyLitPixels).toBeGreaterThan(1_000);
-  const cameraDistanceBefore = Number(await canvas.getAttribute("data-camera-distance"));
-  const cameraPositionBefore = await canvas.getAttribute("data-camera-position");
-  const legacyPoint = fragmentPoint(legacyImage);
-  await canvas.click({ position: legacyPoint });
-  await expect(page.locator("#inspector-kicker")).toHaveText("AVAILABLE DATA IN THIS SKY CELL");
-  await expect(page.locator("#inspector-content")).toContainText("Legacy Surveys");
-  await expect(page.locator(".coverage-location")).toContainText("RA");
-  await expect(page.locator(".coverage-location")).toContainText("Dec");
-  await expect(page.locator(".coverage-stack")).toContainText("DR10");
-  await expect(page.locator(".coverage-stack")).toContainText("MOC GEOMETRY");
-  await expect(page.locator(".coverage-next-step button")).toBeDisabled();
-  await expect(page.locator(".survey-solo")).toHaveCount(0);
-  await page.waitForTimeout(750);
-  const cameraDistanceAfter = Number(await canvas.getAttribute("data-camera-distance"));
-  expect(Math.abs(cameraDistanceAfter - cameraDistanceBefore)).toBeLessThan(0.01);
-  await expect(canvas).toHaveAttribute("data-camera-position", cameraPositionBefore!);
-  await canvas.screenshot({ path: testInfo.outputPath("selected-cell-explosion.png") });
-  await expect(page.locator("#scene-mode-value")).toContainText("NESTED NSIDE 16");
-  await expect(page.locator("#layer-selection-count")).toHaveText("1 CELLS");
+  const layerControl = page.locator("#sky-layer-list input[type='checkbox']").first();
+  await layerControl.focus();
+  await page.keyboard.press("Escape");
 
-  await page.locator(".survey-card", { hasText: "SDSS" }).locator("input").check();
-  await page.locator(".survey-card", { hasText: "HST" }).locator("input").check();
-  const visibleIds = (await canvas.getAttribute("data-visible-survey-ids"))?.split(",") ?? [];
-  expect(new Set(visibleIds)).toEqual(new Set(["legacy-surveys", "sdss", "hst"]));
-  await expect(page.locator("#layer-visible-output")).toHaveText("3 PUBLIC · 1 ASSET");
-  await expect(canvas).toHaveAttribute("data-camera-position", cameraPositionBefore!);
-  await page.waitForTimeout(500);
-  const multiLayerImage = await canvas.screenshot({ path: testInfo.outputPath("multi-layer-fragments.png") });
-
-  const drillPoint = await findCanvasPoint(page, (state) => state.covered && state.selectable);
-  await canvas.dblclick({ position: drillPoint });
-  await expect(page.locator("#scene-mode-value")).toContainText("NESTED NSIDE 32");
-  await expect(page.locator("#scene-badge")).toContainText("NSIDE 32");
-  await canvas.screenshot({ path: testInfo.outputPath("main-sky-drill-nside32.png") });
-
-  await page.locator('[data-layer-layout="overlap"]').click();
-  await expect(canvas).toHaveAttribute("data-layout-mode", "overlap");
-  await page.waitForTimeout(500);
-  await canvas.screenshot({ path: testInfo.outputPath("overlap-fragments.png") });
-
-  await page.locator("#layer-clear-all").click();
-  await expect(canvas).toHaveAttribute("data-visible-survey-ids", "");
-  await page.waitForTimeout(350);
-  const emptyImage = await canvas.screenshot({ path: testInfo.outputPath("empty-fragment-scene.png") });
-  expect(fragmentPixelCount(emptyImage)).toBeLessThan(legacyLitPixels * 0.2);
+  await expect(page.locator("#aladin-explorer")).toBeHidden();
+  await expect(canvas).toBeVisible();
+  await expect(page.locator("#layer-selection-count")).toHaveText("NO CELL");
 });
 
 test("main sky supports Ctrl selection across density cells", async ({ page }, testInfo) => {
@@ -486,71 +648,103 @@ test("main sky supports Ctrl selection across density cells", async ({ page }, t
   const second = await findCanvasPoint(page, (state) => state.covered && state.selectable && state.pixel !== first.pixel);
   await canvas.click({ position: second, modifiers: ["Control"] });
   await expect(page.locator("#layer-selection-count")).toHaveText("2 CELLS");
+  await canvas.click({ position: first, modifiers: ["Control"] });
+  await expect(page.locator("#layer-selection-count")).toHaveText("1 CELLS");
   await page.screenshot({ path: testInfo.outputPath("ctrl-density-selection.png"), fullPage: true });
 });
 
-test("wheel zoom refines selected cells and switches to object density", async ({ page }) => {
-  test.setTimeout(90_000);
+test("Aladin queries the current RA/Dec viewport for lightweight objects", async ({ page }) => {
+  test.setTimeout(60_000);
   await page.setViewportSize({ width: 1440, height: 900 });
-  let objectRequestSeen = false;
-  page.on("request", (request) => {
-    if (request.url().includes("/api/sky/objects/query")) objectRequestSeen = true;
-  });
+  const requests: Array<{
+    assetIds?: string[];
+    surveyIds?: string[];
+    releaseIds?: string[];
+    cursor?: unknown[];
+    region?: { ordering?: string; coordinateFrame?: string };
+    bbox?: { raMin?: number; raMax?: number; decMin?: number; decMax?: number };
+    includeAttributes?: boolean;
+    limit?: number;
+  }> = [];
   await openFresh(page, async () => {
     await page.route("**/api/sky/objects/query", async (route) => {
-      const request = route.request();
-      const body = request.postDataJSON() as { region?: { ordering?: string; coordinateFrame?: string } };
-      expect(body.region?.ordering).toBe("NESTED");
-      expect(body.region?.coordinateFrame).toBe("ICRS");
-      await route.fulfill({
-        status: 200,
-        contentType: "application/json",
-        body: JSON.stringify({
-          status: "ready",
-          index: "astro_object_index_v1",
-          objects: [{ object_id: "e2e-object", ra_deg: 150, dec_deg: 1.4, survey: "cosmos-custom", release: "cosmos-custom-v1", product: "COSMOS", modality: "catalog", asset_id: "user-12b69893-1a68-4b20-81dd-fb1ddca31953" }],
-          total: 1,
-          limit: 10000,
-        }),
+      const body = route.request().postDataJSON() as typeof requests[number];
+      requests.push(body);
+       const pageNumber = body.bbox ? (body.cursor ? 2 : 1) : 0;
+       const objects = body.bbox
+         ? Array.from({ length: 1000 }, (_, index) => ({
+           object_id: `viewport-object-${(pageNumber - 1) * 1000 + index}`,
+           ra_deg: 150.1 + (index % 20) / 1000,
+           dec_deg: 2.2 + (index % 20) / 1000,
+           survey: "cosmos-custom",
+           release: "cosmos-custom-v1",
+           product: "COSMOS",
+           modality: "catalog",
+           asset_id: "user-12b69893-1a68-4b20-81dd-fb1ddca31953",
+         }))
+          : [{ object_id: "viewport-object-0", ra_deg: 150.1, dec_deg: 2.2, survey: "cosmos-custom", release: "cosmos-custom-v1", product: "COSMOS", modality: "catalog", asset_id: "user-12b69893-1a68-4b20-81dd-fb1ddca31953" }];
+       await route.fulfill({
+         status: 200,
+         contentType: "application/json",
+         body: JSON.stringify({
+           status: "ready",
+           index: "astro_object_index_v1",
+            objects,
+            total: body.bbox ? 2000 : 1,
+            limit: 1000,
+            ...(body.bbox && !body.cursor ? { nextCursor: ["viewport-page-2"] } : {}),
+         }),
       });
     });
   });
   const canvas = page.locator("#volume-canvas");
-  const point = await findCanvasPoint(page, (state) => state.covered && state.selectable);
-  const bounds = await canvas.boundingBox();
-  if (!bounds) throw new Error("Canvas has no layout bounds");
-  await canvas.dblclick({ position: point });
-  await expect(page.locator("#scene-mode-value")).toContainText("NESTED NSIDE 32");
-  await page.mouse.move(bounds.x + point.x, bounds.y + point.y);
-
-  for (let index = 0; index < 100; index += 1) {
-    await page.mouse.wheel(0, -480);
-    await page.waitForTimeout(60);
-    const status = await page.locator("#scene-mode-value").textContent();
-    if (status?.includes("NSIDE 256") && (await page.locator("#object-status").textContent())?.includes("OBJECTS")) break;
-  }
-
-  await expect.poll(() => objectRequestSeen, { timeout: 20_000 }).toBe(true);
-  await expect.poll(async () => page.locator("#scene-mode-value").textContent(), { timeout: 15_000 })
-    .toMatch(/NSIDE (64|128|256)/);
-  await expect.poll(async () => page.locator("#object-status").textContent(), { timeout: 20_000 })
-    .toMatch(/\d+ \/ \d+ OBJECTS/);
-  await expect(page.locator("#scene-mode-value")).toHaveText(/FOV 0\.(?:[0-4]\d|50)°/);
+  await waitForVisibleAssetCoverage(page);
+  const point = await findCanvasPoint(page, (state) => state.covered && state.selectable && state.assetIds.length > 0);
+  await canvas.click({ position: point, modifiers: ["Control"] });
+  await canvas.click({ button: "right", position: point });
+  await page.locator("#coverage-enter-flat").click();
+  await expect(page.locator("#aladin-explorer")).toBeVisible();
+  await expect.poll(() => requests.length, { timeout: 15_000 }).toBeGreaterThan(0);
+  await expect(page.locator("#aladin-asset-nav .aladin-asset-button")).toHaveCount(1);
+  await expect(page.locator("#aladin-explorer")).toHaveAttribute("data-object-returned", "2000", { timeout: 15_000 });
+  await expect(page.locator("#aladin-status")).toContainText("2,000 个对象");
+  expect(requests[0]!.region?.ordering).toBe("NESTED");
+  expect(requests[0]!.region?.coordinateFrame).toBe("ICRS");
+  expect(requests[0]!.includeAttributes).toBe(false);
+   expect(requests.some((request) => request.limit === 1000)).toBe(true);
+   expect(requests.some((request) => JSON.stringify(request.cursor) === JSON.stringify(["viewport-page-2"]))).toBe(true);
+  await expect(page.locator("#aladin-explorer")).toHaveAttribute("data-object-complete", "true");
+   await expect(page.locator("#aladin-explorer")).toHaveAttribute("data-catalog-colors", /.+/);
+  expect(requests.every((request) => request.assetIds?.length === 1)).toBe(true);
+  expect(requests.every((request) => request.surveyIds === undefined && request.releaseIds === undefined)).toBe(true);
+   await expect(page.locator("#object-status")).toContainText("2,000 / 2,000 OBJECTS");
+  await expect(page.locator("#aladin-asset-nav .aladin-asset-button").first()).toBeVisible();
 });
 
-test("mobile controls expose survey filters and keyboard-addressable sky tools", async ({ page }, testInfo) => {
+test("Aladin entry returns to the sphere with Escape", async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await openFresh(page);
+  const canvas = page.locator("#volume-canvas");
+  await waitForVisibleAssetCoverage(page);
+  const point = await findCanvasPoint(page, (state) => state.covered && state.selectable && state.assetIds.length > 0);
+  await canvas.click({ position: point });
+  await canvas.click({ button: "right", position: point });
+  await page.locator("#coverage-enter-flat").click();
+  await expect(page.locator("#aladin-explorer")).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(page.locator("#aladin-explorer")).toBeHidden();
+  await expect(canvas).toBeVisible();
+});
+
+test("mobile controls keep the sphere free of legacy tool controls", async ({ page }, testInfo) => {
   await page.setViewportSize({ width: 390, height: 844 });
   await openFresh(page);
   await page.locator("#controls-toggle").click();
   await expect(page.locator("#controls-panel")).toHaveClass(/mobile-open/);
   await page.locator(".survey-card", { hasText: "SDSS" }).locator("input").check();
-  await expect(page.locator("#layer-visible-output")).toHaveText("2 PUBLIC · 1 ASSET");
-  await page.keyboard.press("g");
-  await expect(page.locator(".region-multi-control")).toHaveCount(0);
-  await expect(page.locator("#volume-canvas")).toHaveAttribute("data-interaction-mode", "region");
-  await expect(page.locator('[data-layer-interaction="region"]')).toHaveClass(/active/);
-  await expect(page.locator('[data-layer-interaction="region"]')).toHaveAttribute("aria-pressed", "true");
-  await page.keyboard.press("f");
-  await expect(page.locator("#volume-canvas")).toHaveAttribute("data-interaction-mode", "inspect");
+  await expect(page.locator("#layer-visible-output")).toHaveText(/^\d+ ACTIVE · 2 PUBLIC · \d+ OWNED$/);
+  await expect(page.locator("[data-layer-interaction]")).toHaveCount(0);
+  await expect(page.locator("#layer-tool-strip")).toHaveCount(0);
+  await expect(page.locator("#coverage-context-menu")).toHaveCount(1);
   await page.screenshot({ path: testInfo.outputPath("mobile-survey-controls.png"), fullPage: true });
 });

@@ -6,7 +6,7 @@
     "openai": {
       "options": {
         "baseURL": "https://token.72602.space/v1",
-        "apiKey": "{env:CAFE_API_KEY}",
+        "apiKey": "{env:OPENAI_API_KEY}",
         "headerTimeout": 60000,
         "timeout": 600000,
         "chunkTimeout": 120000

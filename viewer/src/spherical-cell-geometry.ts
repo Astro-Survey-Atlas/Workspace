@@ -52,6 +52,10 @@ export function sphericalCellBoundary(nside: number, pixel: number, radius: numb
   return healpix(nside).getBoundaries(pixel).map((vector) => sceneVector(vector, radius));
 }
 
+export function sphericalCellCenter(nside: number, pixel: number, radius: number): THREE.Vector3 {
+  return sceneVector(healpix(nside).pix2vec(pixel), radius);
+}
+
 function insetBoundary(boundary: THREE.Vector3[], radius: number, inset: number): THREE.Vector3[] {
   if (inset <= 0) return boundary;
   const center = boundary.reduce((sum, point) => sum.add(point), new THREE.Vector3()).normalize();
