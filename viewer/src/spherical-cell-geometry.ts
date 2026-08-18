@@ -135,3 +135,29 @@ export function buildSphericalCellEdges(cells: readonly (SphericalCellGeometryIn
   geometry.computeBoundingSphere();
   return geometry;
 }
+
+/** Build the visible outer boundary of a spherical HEALPix cell volume. */
+export function buildSphericalCellVolumeEdges(cells: readonly SphericalCellGeometryInput[]): THREE.BufferGeometry {
+  const positions: number[] = [];
+  const colors: number[] = [];
+  cells.forEach((cell) => {
+    const innerRadius = Math.max(0.001, cell.innerRadius) + 0.0015;
+    const outerRadius = cell.outerRadius + 0.0015;
+    const inner = insetBoundary(sphericalCellBoundary(cell.nside, cell.pixel, innerRadius), innerRadius, cell.inset ?? 0);
+    const outer = insetBoundary(sphericalCellBoundary(cell.nside, cell.pixel, outerRadius), outerRadius, cell.inset ?? 0);
+    if (inner.length !== 4 || outer.length !== 4) throw new Error("HEALPix cell boundary is not quadrilateral");
+    const addSegment = (start: THREE.Vector3, end: THREE.Vector3): void => {
+      positions.push(start.x, start.y, start.z, end.x, end.y, end.z);
+      colors.push(cell.color.r, cell.color.g, cell.color.b, cell.color.r, cell.color.g, cell.color.b);
+    };
+    for (let index = 0; index < 4; index += 1) {
+      addSegment(outer[index]!, outer[(index + 1) % 4]!);
+      addSegment(inner[index]!, outer[index]!);
+    }
+  });
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
+  geometry.setAttribute("color", new THREE.Float32BufferAttribute(colors, 3));
+  geometry.computeBoundingSphere();
+  return geometry;
+}

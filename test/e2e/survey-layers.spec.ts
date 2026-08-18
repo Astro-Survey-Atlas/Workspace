@@ -534,7 +534,7 @@ test("sphere selection enters Aladin with an exact region snapshot", async ({ pa
   const point = await findCanvasPoint(page, (state) => state.covered && state.selectable && state.assetIds.length > 0);
   await canvas.click({ position: point });
   await expect(page.locator("#layer-selection-count")).toHaveText("1 CELLS");
-  await expect(canvas).toHaveAttribute("data-selection-volume", "solid");
+  await expect(canvas).toHaveAttribute("data-selection-volume", "outline");
   await expect(canvas).toHaveAttribute("data-selection-depth-radii", /.+/);
   await expect(canvas).toHaveAttribute("data-selection-edge-layers", /[1-9]/);
   const selectedPixels = await canvas.getAttribute("data-selected-pixels");
@@ -543,10 +543,17 @@ test("sphere selection enters Aladin with an exact region snapshot", async ({ pa
   await page.keyboard.press("f");
   await expect.poll(async () => canvas.getAttribute("data-camera-position"), { timeout: 3_000 })
     .not.toBe(cameraBeforeFocus);
+  const focusedDistance = Number(await canvas.getAttribute("data-camera-distance"));
+  const outerRadius = Number(await canvas.getAttribute("data-outer-radius"));
+  expect(focusedDistance / outerRadius).toBeLessThan(2.05);
   await expect(canvas).toHaveAttribute("data-selected-pixels", selectedPixels!);
+  const selectionTooltip = page.locator("#region-scene-legend");
+  await expect(selectionTooltip).toBeVisible();
+  await expect.poll(async () => selectionTooltip.getAttribute("data-placement"), { timeout: 3_000 }).toMatch(/right|left|above|below/);
+  expect(await selectionTooltip.evaluate((element) => element.getBoundingClientRect().width)).toBeLessThanOrEqual(220);
   await page.locator("#reset-button").click();
   await expect(canvas).toHaveAttribute("data-selected-pixels", selectedPixels!);
-  await expect(canvas).toHaveAttribute("data-selection-volume", "solid");
+  await expect(canvas).toHaveAttribute("data-selection-volume", "outline");
 
   await canvas.click({ button: "right", position: point });
   await expect(page.locator("#coverage-context-menu")).toBeVisible();
@@ -555,13 +562,18 @@ test("sphere selection enters Aladin with an exact region snapshot", async ({ pa
   const aladin = page.locator("#aladin-explorer");
   await expect(aladin).toBeVisible();
   await expect(page.locator("#aladin-controls")).toBeVisible();
+  await expect(page.locator("#aladin-cockpit-rail")).toBeHidden();
+  await expect(page.locator(".aladin-sector-banner")).toHaveCount(0);
+  await expect(page.locator("#aladin-asset-drawer-toggle")).toBeVisible();
+  await page.locator("#aladin-asset-drawer-toggle").click();
   await expect(page.locator("#aladin-cockpit-rail")).toBeVisible();
+  await expect(page.locator(".aladin-hud-reticle")).toBeVisible();
   await expect(page.locator("#aladin-loaded-summary")).toBeVisible();
   await expect(page.locator("#aladin-cache-state")).toContainText(/CACHE|FETCH/);
   await expect(page.locator("#aladin-fullscreen")).toBeVisible();
   await expect(page.locator("#scene-camera-readout")).toBeHidden();
   await expect(page.locator("#scene-mode-label")).toHaveText("OBJECT EXPLORE");
-  await expect(page.locator("#scene-mode-value")).toHaveText("ICRS");
+  await expect(page.locator("#scene-mode-value")).toHaveText("ALT/AZ");
   await expect(page.locator("#scene-coordinate-readout")).toBeVisible();
   await expect(page.locator("#aladin-coordinate-form, #aladin-ra, #aladin-dec, #aladin-fov, #aladin-go")).toHaveCount(0);
   await expect(page.locator("#aladin-asset-nav .aladin-asset-button")).toHaveCount(1);
@@ -706,6 +718,7 @@ test("Aladin queries the current RA/Dec viewport for lightweight objects", async
   await expect(page.locator("#aladin-explorer")).toBeVisible();
   await expect.poll(() => requests.length, { timeout: 15_000 }).toBeGreaterThan(0);
   await expect(page.locator("#aladin-asset-nav .aladin-asset-button")).toHaveCount(1);
+  await page.locator("#aladin-asset-drawer-toggle").click();
   await expect(page.locator("#aladin-explorer")).toHaveAttribute("data-object-returned", "2000", { timeout: 15_000 });
   await expect(page.locator("#aladin-status")).toContainText("2,000 个对象");
   expect(requests[0]!.region?.ordering).toBe("NESTED");

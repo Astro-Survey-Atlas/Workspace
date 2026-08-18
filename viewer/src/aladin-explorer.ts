@@ -323,8 +323,6 @@ export class AladinExplorer {
         labelSize: 10,
       },
       inertia: false,
-      reticleColor: "rgb(159, 231, 224)",
-      reticleSize: 24,
       showFullscreenControl: false,
       showLayersControl: false,
       showGotoControl: false,
@@ -342,7 +340,7 @@ export class AladinExplorer {
        showSelectionModeControl: false,
        showSettingsControl: false,
        showSimbadPointerControl: false,
-       showReticle: true,
+       showReticle: false,
     });
      if (this.disposed) {
        this.disposeAladin();

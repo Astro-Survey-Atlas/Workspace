@@ -6,6 +6,7 @@ import * as THREE from "three";
 import {
   buildSphericalCellGeometry,
   buildSphericalCellEdges,
+  buildSphericalCellVolumeEdges,
   buildSphericalCellSheetGeometry,
   healpixPixelFromSceneDirection,
   sphericalCellBoundary,
@@ -47,6 +48,19 @@ test("selection volume geometry contains a closed HEALPix solid", () => {
   assert.equal(geometry.getAttribute("position").count, TRIANGLES_PER_SPHERICAL_CELL * 3);
   assert.equal(geometry.getAttribute("normal").count, TRIANGLES_PER_SPHERICAL_CELL * 3);
   assert.equal(geometry.getAttribute("color").count, TRIANGLES_PER_SPHERICAL_CELL * 3);
+  geometry.dispose();
+});
+
+test("selection outline geometry omits the inner square", () => {
+  const geometry = buildSphericalCellVolumeEdges([{
+    nside: cell.nside,
+    pixel: cell.pixel,
+    innerRadius: 0.95,
+    outerRadius: 1.05,
+    color: cell.color,
+  }]);
+  assert.equal(geometry.getAttribute("position").count, 16);
+  assert.equal(geometry.getAttribute("color").count, 16);
   geometry.dispose();
 });
 

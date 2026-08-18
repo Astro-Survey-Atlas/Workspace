@@ -15,8 +15,8 @@ import type { SurveyCard, SurveyFootprintManifest } from "./api";
 import { cartesianToRaDec, raDecToCartesian } from "./coordinates";
 import { normalizeLayerOrder, visibleLayerDepths, type LayerDepth } from "./layer-order";
 import {
-  buildSphericalCellGeometry,
   buildSphericalCellEdges,
+  buildSphericalCellVolumeEdges,
   buildSphericalCellSheetGeometry,
   healpixPixelFromSceneDirection,
   sphericalCellBoundary,
@@ -156,7 +156,12 @@ export interface SurveyLayerState {
   visibleCellCount: number;
   selectedCellCount: number;
   selectedPixels: number[];
-  selectionAnchor: { xRatio: number; yRatio: number; visible: boolean } | null;
+  selectionAnchor: {
+    xRatio: number;
+    yRatio: number;
+    visible: boolean;
+    bounds: { leftRatio: number; rightRatio: number; topRatio: number; bottomRatio: number };
+  } | null;
   visibleSurveyIds: string[];
   visibleAssetIds: string[];
   layerOrder: string[];
@@ -268,6 +273,17 @@ function easeInOut(progress: number): number {
   return progress < 0.5
     ? 4 * progress * progress * progress
     : 1 - ((-2 * progress + 2) ** 3) / 2;
+}
+
+function narrativeCameraPose(direction: THREE.Vector3, distance: number, outerRadius: number, tangentRatio: number): { camera: THREE.Vector3; target: THREE.Vector3 } {
+  const reference = Math.abs(direction.y) < 0.82
+    ? new THREE.Vector3(0, 1, 0)
+    : new THREE.Vector3(1, 0, 0);
+  const tangent = new THREE.Vector3().crossVectors(reference, direction).normalize();
+  const camera = direction.clone().multiplyScalar(distance).addScaledVector(tangent, outerRadius * tangentRatio);
+  camera.setLength(distance);
+  const target = direction.clone().multiplyScalar(outerRadius * 0.11).addScaledVector(tangent, outerRadius * tangentRatio * 0.22);
+  return { camera, target };
 }
 
 function artifactKey(artifact: SurveyFootprint): string {
@@ -391,6 +407,9 @@ export class SurveyLayerViewer {
   #clickTimer: ReturnType<typeof setTimeout> | null = null;
   #interactionMesh: LayerMesh | null = null;
   #cameraTransition: CameraTransition | null = null;
+  #selectionCoreMaterial: THREE.LineBasicMaterial | null = null;
+  #selectionEdgeMaterial: THREE.LineDashedMaterial | null = null;
+  #selectionGlowMaterial: THREE.LineBasicMaterial | null = null;
   #explosionTransition: ExplosionTransition | null = null;
   #explodedFragments: ExplodedFragment[] = [];
   #explodedPixel: number | null = null;
@@ -615,13 +634,12 @@ export class SurveyLayerViewer {
   focusCell(nside: number, pixel: number): void {
     const direction = this.#pixelDirectionAt(nside, [pixel]);
     const outer = this.#outerRadius;
-    const tangent = Math.abs(direction.y) > 0.9
-      ? new THREE.Vector3(1, 0, 0)
-      : new THREE.Vector3(0, 1, 0).cross(direction).normalize();
+    const distance = Math.max(outer * 1.55, outer + 0.08);
+    const pose = narrativeCameraPose(direction, distance, outer, 0.22);
     this.#startCameraTransition(
-      direction.clone().multiplyScalar(outer * 2.75).addScaledVector(tangent, outer * 0.32),
-      direction.clone().multiplyScalar(outer * 0.16),
-      620,
+      pose.camera,
+      pose.target,
+      720,
     );
   }
 
@@ -641,11 +659,13 @@ export class SurveyLayerViewer {
     }
     const outer = this.#outerRadius;
     const halfFov = Math.max(THREE.MathUtils.degToRad(4), angularRadius * 1.35);
-    const distance = THREE.MathUtils.clamp(outer / Math.tan(Math.min(Math.PI / 2.2, halfFov)), outer * 1.8, outer * 8);
+    const fitDistance = outer / Math.tan(Math.min(Math.PI / 3, halfFov * 1.25));
+    const distance = THREE.MathUtils.clamp(Math.max(outer * 1.55, fitDistance), outer * 1.55, outer * 2.8);
+    const pose = narrativeCameraPose(direction, distance, outer, 0.16);
     this.#startCameraTransition(
-      direction.clone().multiplyScalar(distance),
-      direction.clone().multiplyScalar(outer * 0.16),
-      680,
+      pose.camera,
+      pose.target,
+      720,
     );
   }
 
@@ -797,6 +817,9 @@ export class SurveyLayerViewer {
     this.#drillCells.clear();
     this.#clearExplosion(false);
     clearGroup(this.#selectionGroup);
+    this.#selectionCoreMaterial = null;
+    this.#selectionEdgeMaterial = null;
+    this.#selectionGlowMaterial = null;
     clearGroup(this.#drillGroup);
     clearGroup(this.#objectPointGroup);
     this.#onHover(null);
@@ -1238,6 +1261,9 @@ export class SurveyLayerViewer {
 
   #renderSelectionRegion(): void {
     clearGroup(this.#selectionGroup);
+    this.#selectionCoreMaterial = null;
+    this.#selectionEdgeMaterial = null;
+    this.#selectionGlowMaterial = null;
     delete this.#canvas.dataset.selectionVolume;
     delete this.#canvas.dataset.selectionDepthKeys;
     delete this.#canvas.dataset.selectionDepthRadii;
@@ -1260,54 +1286,81 @@ export class SurveyLayerViewer {
     const radii = depths.map((depth) => depth.radius);
     const minimumRadius = Math.max(0.05, Math.min(...radii) - REGION_INNER_PADDING);
     const maximumRadius = Math.max(...radii) + REGION_OUTER_PADDING;
-    const regionCells = selected.map((pixel) => ({
+    const edgeCells = selected.map((pixel) => ({
       nside: this.#manifest.nside,
       pixel,
       innerRadius: minimumRadius,
       outerRadius: maximumRadius,
-      color: SELECTION_COLOR,
-      inset: 0.018,
+      color: SELECTION_EDGE_COLOR,
+      inset: 0.012,
     }));
-    const volumeMaterial = new THREE.MeshBasicMaterial({
-      vertexColors: true,
+    const edgeGeometry = buildSphericalCellVolumeEdges(edgeCells);
+    const volumeEdgeMaterial = new THREE.LineDashedMaterial({
+      color: SELECTION_EDGE_COLOR,
       transparent: true,
-      opacity: 0.14,
-      side: THREE.DoubleSide,
-      depthTest: true,
+      opacity: 0.98,
+      depthTest: false,
+      depthWrite: false,
+      dashSize: 0.07,
+      gapSize: 0.035,
+      toneMapped: false,
+    });
+    const volumeEdges = new THREE.LineSegments(edgeGeometry, volumeEdgeMaterial);
+    volumeEdges.computeLineDistances();
+    volumeEdges.renderOrder = SELECTION_RENDER_ORDER + 1;
+    const coreMaterial = new THREE.LineBasicMaterial({
+      color: 0xf7fffd,
+      transparent: true,
+      opacity: 0.96,
+      depthTest: false,
       depthWrite: false,
       toneMapped: false,
     });
-    const volume = new THREE.Mesh(buildSphericalCellGeometry(regionCells), volumeMaterial);
-    volume.renderOrder = SELECTION_RENDER_ORDER;
-    const edgeCells = depths.flatMap((depth) => selected.map((pixel) => ({
-      nside: this.#manifest.nside,
-      pixel,
-      radius: depth.radius,
-      color: SELECTION_EDGE_COLOR,
-      inset: 0.012,
-    })));
-    const volumeEdgeMaterial = new THREE.LineBasicMaterial({ color: SELECTION_EDGE_COLOR, transparent: true, opacity: 0.98, depthTest: false, depthWrite: false, toneMapped: false });
-    const volumeEdges = new THREE.LineSegments(buildSphericalCellEdges(edgeCells), volumeEdgeMaterial);
-    volumeEdges.renderOrder = SELECTION_RENDER_ORDER + 1;
-    this.#selectionGroup.add(volume, volumeEdges);
-    this.#canvas.dataset.selectionVolume = "solid";
+    const coreEdges = new THREE.LineSegments(edgeGeometry.clone(), coreMaterial);
+    coreEdges.renderOrder = SELECTION_RENDER_ORDER + 2;
+    const glowMaterial = new THREE.LineBasicMaterial({
+      color: SELECTION_COLOR,
+      transparent: true,
+      opacity: 0.42,
+      depthTest: false,
+      depthWrite: false,
+      blending: THREE.AdditiveBlending,
+      toneMapped: false,
+    });
+    const glowEdges = new THREE.LineSegments(edgeGeometry.clone(), glowMaterial);
+    glowEdges.renderOrder = SELECTION_RENDER_ORDER;
+    this.#selectionCoreMaterial = coreMaterial;
+    this.#selectionEdgeMaterial = volumeEdgeMaterial;
+    this.#selectionGlowMaterial = glowMaterial;
+    this.#selectionGroup.add(glowEdges, volumeEdges, coreEdges);
+    this.#canvas.dataset.selectionVolume = "outline";
     this.#canvas.dataset.selectionDepthKeys = depths.map((depth) => depth.key).join(",");
     this.#canvas.dataset.selectionDepthRadii = depths.map((depth) => depth.radius.toFixed(4)).join(",");
-    this.#canvas.dataset.selectionEdgeLayers = String(depths.length);
+    this.#canvas.dataset.selectionEdgeLayers = "1";
 
     this.#requestRender();
   }
 
   #selectionAnchor(): SurveyLayerState["selectionAnchor"] {
     if (!this.#selectedPixels.size) return null;
-    const world = this.#pixelDirection(this.#selectedPixels).multiplyScalar(this.#outerRadius + 0.045);
+    const radius = this.#outerRadius + 0.045;
+    const world = this.#pixelDirection(this.#selectedPixels).multiplyScalar(radius);
     const projected = world.clone().project(this.#camera);
     const forward = new THREE.Vector3();
     this.#camera.getWorldDirection(forward);
+    const boundaryDirections = [...this.#selectedPixels]
+      .flatMap((pixel) => sphericalCellBoundary(this.#manifest.nside, pixel, 1));
+    const projectedBounds = [Math.max(0.05, this.#outerRadius - 0.18), radius]
+      .flatMap((sampleRadius) => boundaryDirections.map((point) => point.clone().multiplyScalar(sampleRadius).project(this.#camera)));
+    const leftRatio = projectedBounds.length ? Math.min(...projectedBounds.map((point) => (point.x + 1) / 2)) : (projected.x + 1) / 2;
+    const rightRatio = projectedBounds.length ? Math.max(...projectedBounds.map((point) => (point.x + 1) / 2)) : (projected.x + 1) / 2;
+    const topRatio = projectedBounds.length ? Math.min(...projectedBounds.map((point) => (1 - point.y) / 2)) : (1 - projected.y) / 2;
+    const bottomRatio = projectedBounds.length ? Math.max(...projectedBounds.map((point) => (1 - point.y) / 2)) : (1 - projected.y) / 2;
     return {
       xRatio: (projected.x + 1) / 2,
       yRatio: (1 - projected.y) / 2,
       visible: world.clone().sub(this.#camera.position).dot(forward) > 0 && projected.z >= -1 && projected.z <= 1,
+      bounds: { leftRatio, rightRatio, topRatio, bottomRatio },
     };
   }
 
@@ -1380,6 +1433,9 @@ export class SurveyLayerViewer {
   #clearSelection(): void {
     this.#selectedPixels.clear();
     clearGroup(this.#selectionGroup);
+    this.#selectionCoreMaterial = null;
+    this.#selectionEdgeMaterial = null;
+    this.#selectionGlowMaterial = null;
     this.#applyFocus();
     this.#onSelection(null);
     this.#emitState();
@@ -1590,6 +1646,16 @@ export class SurveyLayerViewer {
     }
   }
 
+  #advanceSelectionAnimation(now: number): void {
+    if (!this.#selectionCoreMaterial || !this.#selectionEdgeMaterial || !this.#selectionGlowMaterial) return;
+    const pulse = 0.5 + 0.5 * Math.sin(now * 0.004);
+    this.#selectionEdgeMaterial.dashSize = 0.052 + pulse * 0.034;
+    this.#selectionEdgeMaterial.gapSize = 0.028 + (1 - pulse) * 0.018;
+    this.#selectionEdgeMaterial.opacity = 0.86 + pulse * 0.14;
+    this.#selectionCoreMaterial.opacity = 0.88 + pulse * 0.12;
+    this.#selectionGlowMaterial.opacity = 0.28 + pulse * 0.38;
+  }
+
   #backgroundStars(): THREE.Points {
     const positions = new Float32Array(750 * 3);
     for (let index = 0; index < 750; index += 1) {
@@ -1745,10 +1811,11 @@ export class SurveyLayerViewer {
       this.#advanceCameraTransition(now);
       this.#advanceFragmentTransitions(now);
       this.#advanceExplosionTransition(now);
+      this.#advanceSelectionAnimation(now);
       const moving = this.#controls.enabled && this.#controls.update();
       this.#keepCameraOutside();
       this.#renderer.render(this.#scene, this.#camera);
-      if (moving || this.#cameraTransition || this.#fragmentTransitions.length || this.#explosionTransition) this.#requestRender();
+      if (moving || this.#cameraTransition || this.#fragmentTransitions.length || this.#explosionTransition || this.#selectionEdgeMaterial) this.#requestRender();
     });
   }
 }

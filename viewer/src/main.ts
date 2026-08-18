@@ -1,4 +1,4 @@
-import { createIcons, Download, Globe2, GripVertical, Info, Layers3, Maximize2, Minimize2, Moon, Play, Plus, RefreshCw, RotateCcw, SlidersHorizontal, Sun, Undo2 } from "lucide";
+import { ChevronLeft, ChevronRight, createIcons, Download, Globe2, GripVertical, Info, Layers3, Maximize2, Minimize2, Moon, Pin, PinOff, Play, Plus, RefreshCw, RotateCcw, SlidersHorizontal, Sun, Undo2 } from "lucide";
 
 import "./styles.css";
 import {
@@ -297,6 +297,12 @@ let aladinExplorer: AladinExplorer | null = null;
 let aladinSnapshot: AladinExplorerSnapshot | null = null;
 let latestAladinStatus: AladinExplorerStatus | null = null;
 let aladinFullscreen = false;
+let aladinAssetDrawerOpen = false;
+let aladinAssetDrawerPinned = false;
+let aladinAssetDrawerTimer: ReturnType<typeof setTimeout> | null = null;
+let aladinToastSequence = 0;
+let aladinLastToastKey = "";
+let aladinLastToastAt = 0;
 let aladinEntryGeneration = 0;
 let aladinEntryAbort: AbortController | null = null;
 let mode: ViewMode = "layers";
@@ -352,7 +358,7 @@ const LEGACY_LAYER_PREFERENCES_KEY = "astro-workspace:survey-layer-preferences:v
 const THEME_PREFERENCE_KEY = "astro-workspace:theme:v1";
 type WorkspaceTheme = "light" | "dark";
 
-createIcons({ icons: { Download, Globe2, GripVertical, Info, Layers3, Maximize2, Minimize2, Moon, Play, Plus, RefreshCw, RotateCcw, SlidersHorizontal, Sun, Undo2 } });
+createIcons({ icons: { ChevronLeft, ChevronRight, Download, Globe2, GripVertical, Info, Layers3, Maximize2, Minimize2, Moon, Pin, PinOff, Play, Plus, RefreshCw, RotateCcw, SlidersHorizontal, Sun, Undo2 } });
 
 const themeQuery = window.matchMedia("(prefers-color-scheme: dark)");
 const themeToggle = byId<HTMLButtonElement>("theme-toggle");
@@ -418,6 +424,84 @@ function cancelAladinEntry(): void {
   aladinEntryAbort = null;
 }
 
+const ALADIN_ASSET_DRAWER_TIMEOUT_MS = 30_000;
+
+function clearAladinAssetDrawerTimer(): void {
+  if (aladinAssetDrawerTimer === null) return;
+  clearTimeout(aladinAssetDrawerTimer);
+  aladinAssetDrawerTimer = null;
+}
+
+function renderAladinAssetDrawerState(): void {
+  const controls = byId("aladin-controls");
+  const rail = byId("aladin-cockpit-rail");
+  const toggle = byId<HTMLButtonElement>("aladin-asset-drawer-toggle");
+  const pin = byId<HTMLButtonElement>("aladin-asset-drawer-pin");
+  controls.dataset.assetDrawer = aladinAssetDrawerOpen ? "open" : "closed";
+  rail.classList.toggle("is-open", aladinAssetDrawerOpen);
+  rail.classList.toggle("is-pinned", aladinAssetDrawerPinned);
+  toggle.setAttribute("aria-expanded", String(aladinAssetDrawerOpen));
+  toggle.setAttribute("aria-label", aladinAssetDrawerOpen ? "收起用户资产抽屉" : "展开用户资产抽屉");
+  toggle.title = aladinAssetDrawerOpen ? "收起用户资产抽屉" : "展开用户资产抽屉";
+  toggle.replaceChildren();
+  const toggleIcon = document.createElement("i");
+  toggleIcon.dataset.lucide = aladinAssetDrawerOpen ? "chevron-left" : "chevron-right";
+  const toggleLabel = document.createElement("span");
+  toggleLabel.textContent = "资产";
+  toggle.append(toggleIcon, toggleLabel);
+  pin.setAttribute("aria-pressed", String(aladinAssetDrawerPinned));
+  pin.setAttribute("aria-label", aladinAssetDrawerPinned ? "取消固定用户资产抽屉" : "固定用户资产抽屉");
+  pin.title = aladinAssetDrawerPinned ? "取消固定" : "固定抽屉";
+  pin.replaceChildren();
+  const pinIcon = document.createElement("i");
+  pinIcon.dataset.lucide = aladinAssetDrawerPinned ? "pin-off" : "pin";
+  pin.append(pinIcon);
+  createIcons({ icons: { ChevronLeft, ChevronRight, Pin, PinOff }, attrs: { "aria-hidden": "true" } });
+}
+
+function scheduleAladinAssetDrawerCollapse(): void {
+  clearAladinAssetDrawerTimer();
+  if (!aladinAssetDrawerOpen || aladinAssetDrawerPinned || !aladinExplorer) return;
+  aladinAssetDrawerTimer = setTimeout(() => {
+    aladinAssetDrawerTimer = null;
+    aladinAssetDrawerOpen = false;
+    renderAladinAssetDrawerState();
+  }, ALADIN_ASSET_DRAWER_TIMEOUT_MS);
+}
+
+function setAladinAssetDrawer(open: boolean, touch = true): void {
+  aladinAssetDrawerOpen = open;
+  if (!open) clearAladinAssetDrawerTimer();
+  renderAladinAssetDrawerState();
+  if (touch) scheduleAladinAssetDrawerCollapse();
+}
+
+function pushAladinToast(message: string, tone: "info" | "success" | "error" = "info"): void {
+  const normalized = message.trim();
+  if (!normalized) return;
+  const now = Date.now();
+  const key = `${tone}:${normalized}`;
+  if (key === aladinLastToastKey && now - aladinLastToastAt < 900) return;
+  aladinLastToastKey = key;
+  aladinLastToastAt = now;
+  const stack = byId("aladin-status-deck");
+  const toast = document.createElement("div");
+  toast.className = `aladin-toast aladin-toast-${tone}`;
+  toast.dataset.toastId = String(++aladinToastSequence);
+  const pulse = document.createElement("i");
+  pulse.className = "aladin-toast-pulse";
+  const text = document.createElement("span");
+  text.textContent = normalized;
+  toast.append(pulse, text);
+  stack.append(toast);
+  while (stack.children.length > 4) stack.firstElementChild?.remove();
+  requestAnimationFrame(() => toast.classList.add("is-visible"));
+  window.setTimeout(() => {
+    toast.classList.add("is-leaving");
+    window.setTimeout(() => toast.remove(), 420);
+  }, 3_800);
+}
+
 function destroyViewer(): void {
   layerViewer?.dispose();
   volumeViewer?.dispose();
@@ -428,15 +512,20 @@ function destroyViewer(): void {
   aladinExplorer = null;
   aladinSnapshot = null;
   latestAladinStatus = null;
+  clearAladinAssetDrawerTimer();
+  aladinAssetDrawerOpen = false;
+  aladinAssetDrawerPinned = false;
   byId("aladin-explorer").hidden = true;
   byId("aladin-controls").hidden = true;
   byId("aladin-asset-nav").replaceChildren();
+  byId("aladin-status-deck").replaceChildren();
   byId("scene-stage").classList.remove("aladin-active");
   byId("scene-coordinate-readout").hidden = true;
   byId("scene-camera-readout").hidden = false;
   byId("inspector-panel").classList.remove("aladin-object-selected");
   delete byId("inspector-panel").dataset.objectId;
   renderAladinFullscreenState();
+  renderAladinAssetDrawerState();
   renderSurveyHover(null);
 }
 
@@ -527,9 +616,31 @@ async function queryAladinAssetProfile(asset: DataAssetRecord, menu: SkyRegionMe
     limit: ALADIN_PROFILE_LIMIT,
     includeAttributes: false,
   }, signal);
-  if (result.status !== "ready" || !result.objects.length) return null;
-  const records = result.objects.filter((record) => Number.isFinite(record.ra_deg) && Number.isFinite(record.dec_deg));
-  if (!records.length) return null;
+  const records = result.status === "ready"
+    ? result.objects.filter((record) => Number.isFinite(record.ra_deg) && Number.isFinite(record.dec_deg))
+    : [];
+  const fallbackCenter = aladinCenterForRegion(menu.nside, menu.pixels);
+  const fallbackRadius = sameSkyPixels(menu.nside, menu.pixels, selectedLayerRegion)
+    ? selectedLayerRegion!.angularRadiusDeg
+    : 1.5;
+  const layer = displayLayerFor({ assetId: asset.id, key: asset.id });
+  if (!records.length) {
+    return {
+      target: {
+        assetId: asset.id,
+        label: layer.label,
+        color: layer.color,
+        centerRaDeg: fallbackCenter.raDeg,
+        centerDecDeg: fallbackCenter.decDeg,
+        defaultFovDeg: Math.max(2, Math.min(16, fallbackRadius * 2.6)),
+        objectCount: result.status === "ready" ? result.total : 0,
+        returned: 0,
+      },
+      records: [],
+      total: result.status === "ready" ? result.total : 0,
+      truncated: false,
+    };
+  }
   const sum = records.reduce((point, record) => {
     const vector = raDecToCartesian(record.ra_deg, record.dec_deg);
     point.x += vector.x;
@@ -540,7 +651,6 @@ async function queryAladinAssetProfile(asset: DataAssetRecord, menu: SkyRegionMe
   const center = cartesianToRaDec(sum);
   const centerVector = raDecToCartesian(center.raDeg, center.decDeg);
   const radiusDeg = Math.max(...records.map((record) => angularDistanceDeg(centerVector, raDecToCartesian(record.ra_deg, record.dec_deg))));
-  const layer = displayLayerFor({ assetId: asset.id, key: asset.id });
   return {
     target: {
       assetId: asset.id,
@@ -564,8 +674,9 @@ function renderAladinAssetNavigation(targets: readonly AladinAssetTarget[], acti
   if (!targets.length) {
     const empty = document.createElement("span");
     empty.className = "aladin-asset-nav-empty";
-    empty.textContent = "当前选区没有可探索的用户资产对象";
+    empty.textContent = "当前视野暂无对象资产";
     nav.append(empty);
+    scheduleAladinAssetDrawerCollapse();
     return;
   }
   const addButton = (assetId: string | null, label: string, detail?: string): void => {
@@ -574,6 +685,8 @@ function renderAladinAssetNavigation(targets: readonly AladinAssetTarget[], acti
     button.className = "aladin-asset-button";
     button.classList.toggle("active", activeAssetId === assetId);
     button.dataset.assetId = assetId ?? "all";
+    const target = assetId ? targets.find((candidate) => candidate.assetId === assetId) : undefined;
+    if (target) button.style.setProperty("--asset-color", target.color);
     const title = document.createElement("strong");
     title.textContent = label;
     button.append(title);
@@ -594,7 +707,10 @@ function renderAladinAssetNavigation(targets: readonly AladinAssetTarget[], acti
       track.append(bar);
       button.append(track);
     }
-    button.addEventListener("click", () => aladinExplorer?.focusAsset(assetId));
+    button.addEventListener("click", () => {
+      setAladinAssetDrawer(true);
+      aladinExplorer?.focusAsset(assetId);
+    });
     nav.append(button);
   };
   if (targets.length > 1) {
@@ -603,6 +719,7 @@ function renderAladinAssetNavigation(targets: readonly AladinAssetTarget[], acti
     addButton(null, "全部用户资产", `${formatInteger(returned)} / ${formatInteger(total)} OBJECTS`);
   }
   targets.forEach((target) => addButton(target.assetId, target.label, `${formatInteger(target.objectCount ?? target.returned ?? 0)} OBJECTS · FOV ${target.defaultFovDeg.toFixed(1)}°`));
+  scheduleAladinAssetDrawerCollapse();
 }
 
 function syncAladinView(): void {
@@ -654,7 +771,7 @@ function renderAladinStatus(status: AladinExplorerStatus): void {
       ? `已加载 ${formatInteger(status.returned)} / ${formatInteger(status.total)} 个对象`
       : `已加载 ${formatInteger(status.returned)} 个对象`,
     ready: `${formatInteger(status.returned)} 个对象`,
-    empty: "当前视野没有对象 · 覆盖范围不等于对象目录",
+    empty: "当前视野没有对象",
     error: `对象查询失败：${status.message ?? "未知错误"}`,
   };
   output.textContent = phaseLabel[status.phase];
@@ -664,12 +781,12 @@ function renderAladinStatus(status: AladinExplorerStatus): void {
   host.dataset.objectTruncated = String(status.truncated);
   host.dataset.objectComplete = String(status.complete ?? (status.phase === "ready" || status.phase === "empty" || status.phase === "error"));
   byId("render-status").textContent = "ALADIN LITE";
-  const emptyMessage = status.message ?? "当前视野没有对象 · 覆盖范围不等于对象目录";
-  if (status.phase === "empty") output.textContent = emptyMessage;
+  const selectionEmpty = status.phase === "empty" && status.message?.includes("当前选区没有可探索的用户资产");
+  if (status.phase === "empty" && !selectionEmpty) output.textContent = status.message ?? "当前视野没有对象";
   byId("object-status").textContent = status.phase === "loading"
     ? `${formatInteger(status.returned)} / ${formatInteger(status.total)} OBJECTS · LOADING`
     : status.phase === "empty"
-      ? status.message?.includes("用户资产") ? "NO OBJECT CATALOG · COVERAGE ONLY" : "NO OBJECTS · FOCUS AN ASSET"
+      ? selectionEmpty ? "NO OBJECT CATALOG" : "NO OBJECTS IN VIEW"
       : `${formatInteger(status.returned)} / ${formatInteger(status.total)} OBJECTS`;
   byId("layer-selection-count").textContent = `${formatInteger(status.returned)} OBJECTS`;
   const loadedSummary = byId<HTMLOutputElement>("aladin-loaded-summary");
@@ -678,7 +795,10 @@ function renderAladinStatus(status: AladinExplorerStatus): void {
   byId("aladin-object-telemetry").textContent = status.overlapCount
     ? `${formatInteger(status.overlapCount)} OVERLAP MARKERS`
     : `${formatInteger(status.returned)} POINTS IN VIEW`;
-  byId("aladin-status-deck").textContent = status.message ?? (status.phase === "loading" ? "VIEWPORT QUERY IN PROGRESS" : "VIEWPORT CACHE ACTIVE");
+  if (status.phase === "error") pushAladinToast(status.message ?? "对象查询失败", "error");
+  else if (status.phase === "ready" && status.complete) pushAladinToast(`${formatInteger(status.returned)} 个对象已载入`, "success");
+  else if (status.phase === "empty" && !selectionEmpty) pushAladinToast(status.message ?? "当前视野暂无对象", "info");
+  else if (status.message && !selectionEmpty) pushAladinToast(status.message, "info");
   if (aladinSnapshot) renderAladinAssetNavigation(aladinSnapshot.assetTargets, aladinExplorer?.getActiveAssetId() ?? null);
   syncAladinView();
 }
@@ -695,14 +815,38 @@ async function enterAladinExplorer(menu: SkyRegionMenu): Promise<void> {
   aladinExplorer = null;
   aladinSnapshot = null;
   latestAladinStatus = null;
+  clearAladinAssetDrawerTimer();
+  aladinAssetDrawerOpen = aladinAssetDrawerPinned;
   layerViewer?.dispose();
   layerViewer = null;
 
-  const candidates = userDataAssets().filter((asset) => menu.assetIds.includes(asset.id));
-  byId<HTMLOutputElement>("aladin-status").textContent = candidates.length ? "读取用户资产对象范围" : "当前选区没有可探索的用户资产对象";
+  const selectedCandidates = userDataAssets().filter((asset) => menu.assetIds.includes(asset.id));
+  const candidates = selectedCandidates.length ? selectedCandidates : userDataAssets();
+  byId<HTMLOutputElement>("aladin-status").textContent = candidates.length ? "读取视野对象" : "暂无用户资产";
   const settled = await Promise.allSettled(candidates.map((asset) => queryAladinAssetProfile(asset, { ...menu, pixels }, profileAbort.signal)));
   if (generation !== aladinEntryGeneration || profileAbort.signal.aborted) return;
-  const profiles = settled.flatMap((result) => result.status === "fulfilled" && result.value ? [result.value] : []);
+  const fallbackProfile = (asset: DataAssetRecord): AladinAssetProfile => {
+    const center = aladinCenterForRegion(menu.nside, pixels);
+    const layer = displayLayerFor({ assetId: asset.id, key: asset.id });
+    return {
+      target: {
+        assetId: asset.id,
+        label: layer.label,
+        color: layer.color,
+        centerRaDeg: center.raDeg,
+        centerDecDeg: center.decDeg,
+        defaultFovDeg: 4,
+        objectCount: 0,
+        returned: 0,
+      },
+      records: [],
+      total: 0,
+      truncated: false,
+    };
+  };
+  const profiles = settled.flatMap((result, index) => result.status === "fulfilled" && result.value
+    ? [result.value]
+    : candidates[index] ? [fallbackProfile(candidates[index]!)] : []);
   const targets = profiles.map((profile) => profile.target);
   const initialTarget = targets[0];
   const fallbackCenter = aladinCenterForRegion(menu.nside, pixels);
@@ -748,7 +892,8 @@ async function enterAladinExplorer(menu: SkyRegionMenu): Promise<void> {
   byId("coverage-hover").hidden = true;
   byId("scene-badge").textContent = "ALADIN LITE";
   byId("scene-mode-label").textContent = "OBJECT EXPLORE";
-  byId("scene-mode-value").textContent = "ICRS";
+  byId("scene-mode-value").textContent = "ALT/AZ";
+  byId("scene-frame-label").textContent = "ALT/AZ";
   byId("scene-coordinate-readout").hidden = false;
   byId("scene-camera-readout").hidden = true;
   byId("object-status").textContent = "INITIALIZING ALADIN";
@@ -756,6 +901,7 @@ async function enterAladinExplorer(menu: SkyRegionMenu): Promise<void> {
   byId<HTMLButtonElement>("drill-back-button").setAttribute("aria-label", "返回天球范围探查");
   byId<HTMLButtonElement>("drill-back-button").title = "返回天球范围探查";
   byId<HTMLOutputElement>("aladin-status").textContent = "初始化 Aladin";
+  renderAladinAssetDrawerState();
   closeSkyContextMenu();
   renderSurveyHover(null);
 
@@ -808,11 +954,15 @@ async function leaveAladinExplorer(): Promise<void> {
   aladinExplorer = null;
   aladinSnapshot = null;
   latestAladinStatus = null;
+  clearAladinAssetDrawerTimer();
+  aladinAssetDrawerOpen = false;
+  aladinAssetDrawerPinned = false;
   byId("aladin-explorer").hidden = true;
   byId("aladin-controls").hidden = true;
   renderAladinFullscreenState();
+  renderAladinAssetDrawerState();
   byId("aladin-asset-nav").replaceChildren();
-  byId("aladin-status-deck").textContent = "VIEWPORT CACHE IDLE";
+  byId("aladin-status-deck").replaceChildren();
   byId("aladin-loaded-summary").textContent = "--";
   byId("aladin-cache-state").textContent = "CACHE IDLE";
   byId("aladin-object-telemetry").textContent = "--";
@@ -864,12 +1014,21 @@ function renderLayerState(state: SurveyLayerState): void {
   canvas.dataset.layerOrder = state.layerOrder.join(",");
   canvas.dataset.layerDepths = JSON.stringify(state.layerDepths);
   canvas.dataset.selectedPixels = state.selectedPixels.join(",");
+  if (state.selectionAnchor) {
+    canvas.dataset.selectionBounds = [
+      state.selectionAnchor.bounds.leftRatio,
+      state.selectionAnchor.bounds.rightRatio,
+      state.selectionAnchor.bounds.topRatio,
+      state.selectionAnchor.bounds.bottomRatio,
+    ].map((value) => value.toFixed(4)).join(",");
+  } else delete canvas.dataset.selectionBounds;
   byId("camera-distance").textContent = `${state.cameraDistance.toFixed(2)} R`;
   byId("layer-visible-output").textContent = `${state.layerDepths.length} ACTIVE · ${state.visibleSurveyIds.length} PUBLIC · ${state.visibleAssetIds.length} OWNED`;
   renderRegionSceneLegend(state);
   setActiveButtons("[data-layer-layout]", (button) => button.dataset.layerLayout === state.layoutMode);
   byId("legend-min").textContent = state.layoutMode === "layers" ? "图层内侧" : "1 SURVEY";
   byId("legend-max").textContent = state.layoutMode === "layers" ? "图层外侧" : "MOST OVERLAP";
+  byId("scene-frame-label").textContent = "ICRS";
   byId("scene-mode-value").textContent = "PUBLIC + OWNED";
   byId("scene-badge").textContent = state.selectedCellCount ? `${state.selectedCellCount} 个已选区块` : "天球概览";
   byId("layer-selection-count").textContent = state.selectedCellCount ? `${state.selectedCellCount} CELLS` : "NO CELL";
@@ -888,9 +1047,9 @@ function renderRegionSceneLegend(state: SurveyLayerState): void {
     return;
   }
   const title = document.createElement("strong");
-  title.textContent = `SELECTED SKY REGION · ${state.selectedCellCount} CELLS`;
+  title.textContent = `SELECTED · ${state.selectedCellCount} CELLS`;
   const subtitle = document.createElement("span");
-  subtitle.textContent = "其余天区已弱化";
+  subtitle.textContent = "其余天区弱化";
   const surveys = document.createElement("div");
   surveys.className = "region-scene-surveys";
   const surveyIds = selectionSurveyIds(selectedLayerRegion);
@@ -918,12 +1077,40 @@ function renderRegionSceneLegend(state: SurveyLayerState): void {
   legend.replaceChildren(title, subtitle, surveys);
   legend.hidden = false;
   const stage = byId("scene-stage").getBoundingClientRect();
-  const width = Math.min(270, Math.max(200, stage.width - 24));
-  const left = Math.max(12, Math.min(state.selectionAnchor.xRatio * stage.width + 18, stage.width - width - 12));
-  const top = Math.max(52, Math.min(state.selectionAnchor.yRatio * stage.height - 42, stage.height - 110));
+  const width = Math.min(220, Math.max(180, stage.width - 28));
   legend.style.width = `${width}px`;
-  legend.style.left = `${left}px`;
-  legend.style.top = `${top}px`;
+  const height = Math.max(58, legend.getBoundingClientRect().height);
+  const anchorX = state.selectionAnchor.xRatio * stage.width;
+  const anchorY = state.selectionAnchor.yRatio * stage.height;
+  const margin = 14;
+  const anchorBox = {
+    left: Math.max(0, state.selectionAnchor.bounds.leftRatio * stage.width - 8),
+    right: Math.min(stage.width, state.selectionAnchor.bounds.rightRatio * stage.width + 8),
+    top: Math.max(0, state.selectionAnchor.bounds.topRatio * stage.height - 8),
+    bottom: Math.min(stage.height, state.selectionAnchor.bounds.bottomRatio * stage.height + 8),
+  };
+  const candidates = [
+    { placement: "right", left: anchorBox.right + 18, top: anchorY - height / 2 },
+    { placement: "left", left: anchorBox.left - width - 18, top: anchorY - height / 2 },
+    { placement: "below", left: anchorBox.right - width, top: anchorBox.bottom + 18 },
+    { placement: "above", left: anchorBox.right - width, top: anchorBox.top - height - 18 },
+  ] as const;
+  const bounded = candidates.map((candidate) => ({
+    ...candidate,
+    left: Math.max(margin, Math.min(candidate.left, stage.width - width - margin)),
+    top: Math.max(48, Math.min(candidate.top, stage.height - height - margin)),
+  }));
+  const score = (candidate: typeof bounded[number]): number => {
+    const overlapWidth = Math.max(0, Math.min(candidate.left + width, anchorBox.right) - Math.max(candidate.left, anchorBox.left));
+    const overlapHeight = Math.max(0, Math.min(candidate.top + height, anchorBox.bottom) - Math.max(candidate.top, anchorBox.top));
+    const overlap = overlapWidth * overlapHeight;
+    const distance = Math.hypot(candidate.left + width / 2 - anchorX, candidate.top + height / 2 - anchorY);
+    return overlap * 100_000 - distance;
+  };
+  const best = bounded.reduce((current, candidate) => score(candidate) < score(current) ? candidate : current);
+  legend.dataset.placement = best.placement;
+  legend.style.left = `${best.left}px`;
+  legend.style.top = `${best.top}px`;
 }
 
 function renderVolumeState(state: VolumeViewState): void {
@@ -2602,17 +2789,6 @@ document.querySelectorAll<HTMLButtonElement>("[data-layer-layout]").forEach((but
     applyLayerPreferences();
   });
 });
-byId<HTMLButtonElement>("layer-select-all").addEventListener("click", () => {
-  visibleSurveyIds = new Set(footprintSurveyIds());
-  visibleAssetIds = new Set(userDataAssets().map((asset) => asset.id));
-  applyLayerPreferences();
-});
-byId<HTMLButtonElement>("layer-clear-all").addEventListener("click", () => {
-  visibleSurveyIds.clear();
-  visibleAssetIds.clear();
-  unassignedWorkspaceVisible = false;
-  applyLayerPreferences();
-});
 document.querySelectorAll<HTMLButtonElement>("[data-joint-nside]").forEach((button) => {
   button.addEventListener("click", () => {
     jointNside = Number(button.dataset.jointNside);
@@ -2676,11 +2852,23 @@ byId<HTMLButtonElement>("reset-button").addEventListener("click", () => {
   }
 });
 byId<HTMLButtonElement>("aladin-fullscreen").addEventListener("click", () => void toggleAladinFullscreen());
+byId<HTMLButtonElement>("aladin-asset-drawer-toggle").addEventListener("click", () => {
+  setAladinAssetDrawer(!aladinAssetDrawerOpen);
+});
+byId<HTMLButtonElement>("aladin-asset-drawer-pin").addEventListener("click", () => {
+  aladinAssetDrawerPinned = !aladinAssetDrawerPinned;
+  aladinAssetDrawerOpen = true;
+  renderAladinAssetDrawerState();
+  scheduleAladinAssetDrawerCollapse();
+});
+byId("aladin-cockpit-rail").addEventListener("pointerenter", () => scheduleAladinAssetDrawerCollapse());
+byId("aladin-cockpit-rail").addEventListener("focusin", () => scheduleAladinAssetDrawerCollapse());
 byId<HTMLButtonElement>("aladin-inspector-toggle").addEventListener("click", () => {
   const panel = byId("inspector-panel");
   panel.classList.add("mobile-open");
   panel.scrollIntoView({ block: "nearest", inline: "nearest" });
 });
+renderAladinAssetDrawerState();
 document.addEventListener("fullscreenchange", () => {
   renderAladinFullscreenState();
   window.setTimeout(() => {

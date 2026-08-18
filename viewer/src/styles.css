@@ -478,17 +478,16 @@ input {
   accent-color: var(--cyan);
 }
 
-.layer-bulk-actions {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 5px;
-  margin-bottom: 7px;
+.layer-survey-section {
+  margin-top: 18px;
+  padding-top: 13px;
+  border-top: 1px solid var(--border);
 }
 
-.layer-survey-section {
-  margin-top: 0;
-  padding-top: 0;
-  border-top: 0;
+.layer-survey-section .section-heading {
+  margin-bottom: 11px;
+  padding-bottom: 9px;
+  border-bottom: 1px solid var(--border);
 }
 
 .layer-survey-section .survey-list {
@@ -555,13 +554,6 @@ input {
   min-height: 14px;
   color: var(--quiet);
   font: 9px/1.4 "SFMono-Regular", Consolas, monospace;
-}
-
-.layer-bulk-actions .command-button:first-child {
-  color: #c7d0d7;
-  border-color: #3d4a55;
-  background: #0c1116;
-  font-weight: 500;
 }
 
 .command-button:disabled {
@@ -4691,7 +4683,6 @@ html[data-theme="light"] .result-table-wrap {
 
 html[data-theme="light"] .command-button,
 html[data-theme="light"] .command-button.secondary,
-html[data-theme="light"] .layer-bulk-actions .command-button:first-child,
 html[data-theme="light"] .coverage-next-step .command-button:disabled {
   border-color: #aebdc4;
   color: #26373f;
@@ -5303,5 +5294,526 @@ html[data-theme="light"] .scene-tool:disabled kbd { border-color: var(--border);
 
   .statusbar > span:nth-child(2) {
     display: none;
+  }
+}
+
+.aladin-controls {
+  isolation: isolate;
+}
+
+.aladin-vignette,
+.aladin-scanlines,
+.aladin-hud-reticle {
+  position: absolute;
+  pointer-events: none;
+}
+
+.aladin-vignette {
+  z-index: 1;
+  inset: 0;
+  background: radial-gradient(circle at 52% 48%, transparent 34%, rgba(1, 5, 9, 0.16) 68%, rgba(1, 4, 8, 0.82) 100%);
+}
+
+.aladin-scanlines {
+  z-index: 2;
+  inset: 0;
+  opacity: 0.09;
+  background: repeating-linear-gradient(0deg, transparent 0, transparent 3px, rgba(131, 237, 225, 0.18) 4px, transparent 5px);
+  mix-blend-mode: screen;
+  animation: aladin-scan 9s linear infinite;
+}
+
+.aladin-hud-reticle {
+  z-index: 2;
+  top: 50%;
+  left: 52%;
+  width: 132px;
+  height: 132px;
+  transform: translate(-50%, -50%);
+  border: 1px solid rgba(114, 239, 222, 0.2);
+  border-radius: 50%;
+  box-shadow: 0 0 0 1px rgba(114, 239, 222, 0.05), inset 0 0 26px rgba(54, 222, 204, 0.08), 0 0 32px rgba(54, 222, 204, 0.1);
+  opacity: 0.8;
+}
+
+.aladin-hud-reticle::before,
+.aladin-hud-reticle::after,
+.aladin-hud-reticle i,
+.aladin-hud-reticle b,
+.aladin-hud-reticle span {
+  position: absolute;
+  display: block;
+  content: "";
+}
+
+.aladin-hud-reticle::before,
+.aladin-hud-reticle::after {
+  top: 50%;
+  width: 22px;
+  height: 1px;
+  background: rgba(114, 239, 222, 0.55);
+}
+
+.aladin-hud-reticle::before { left: -28px; }
+.aladin-hud-reticle::after { right: -28px; }
+
+.aladin-hud-reticle i,
+.aladin-hud-reticle b {
+  left: 50%;
+  width: 1px;
+  height: 22px;
+  background: rgba(114, 239, 222, 0.55);
+}
+
+.aladin-hud-reticle i { top: -28px; }
+.aladin-hud-reticle b { bottom: -28px; }
+
+.aladin-hud-reticle span {
+  top: 50%;
+  left: 50%;
+  width: 4px;
+  height: 4px;
+  transform: translate(-50%, -50%);
+  border: 1px solid #f2cf62;
+  border-radius: 50%;
+  box-shadow: 0 0 12px #f2cf62;
+  animation: aladin-lock 1.8s ease-in-out infinite;
+}
+
+.aladin-cockpit-rail,
+.aladin-telemetry,
+.aladin-action-rail,
+.aladin-status-deck {
+  z-index: 4;
+  border-color: rgba(91, 215, 203, 0.46);
+  border-radius: 2px;
+  background: linear-gradient(145deg, rgba(5, 17, 22, 0.94), rgba(5, 9, 14, 0.84));
+  box-shadow: 0 16px 38px rgba(0, 0, 0, 0.38), inset 0 0 18px rgba(50, 196, 185, 0.04), 0 0 18px rgba(45, 211, 196, 0.06);
+}
+
+.aladin-cockpit-rail {
+  top: 66px;
+  bottom: 58px;
+  left: 14px;
+  width: min(252px, 24vw);
+  overflow: hidden;
+  clip-path: polygon(0 0, calc(100% - 12px) 0, 100% 12px, 100% 100%, 0 100%);
+}
+
+.aladin-cockpit-rail::before,
+.aladin-telemetry::before,
+.aladin-status-deck::before {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 38px;
+  height: 2px;
+  background: #f2cf62;
+  box-shadow: 0 0 12px rgba(242, 207, 98, 0.6);
+  content: "";
+}
+
+.aladin-cockpit-heading {
+  padding: 12px 12px 10px;
+  border-bottom-color: rgba(91, 215, 203, 0.28);
+}
+
+.aladin-cockpit-heading strong {
+  color: #effffc;
+  font-size: 14px;
+  letter-spacing: 0.04em;
+}
+
+.aladin-cockpit-heading small {
+  color: #607f85;
+  font: 7px "SFMono-Regular", Consolas, monospace;
+  letter-spacing: 0.14em;
+}
+
+.aladin-asset-nav {
+  gap: 7px;
+  padding: 10px;
+}
+
+.aladin-asset-button {
+  display: grid;
+  gap: 4px;
+  position: relative;
+  min-height: 50px;
+  padding: 8px 9px;
+  border-color: rgba(94, 127, 133, 0.5);
+  border-radius: 2px;
+  background: rgba(10, 28, 33, 0.72);
+  box-shadow: inset 3px 0 0 var(--asset-color, #42d4c6);
+}
+
+.aladin-asset-button:hover,
+.aladin-asset-button.active {
+  border-color: #f2cf62;
+  color: #f5f8f2;
+  background: linear-gradient(90deg, rgba(242, 207, 98, 0.2), rgba(8, 30, 31, 0.86));
+  box-shadow: inset 3px 0 0 #f2cf62, 0 0 16px rgba(242, 207, 98, 0.1);
+}
+
+.aladin-asset-button strong {
+  font-size: 10px;
+  letter-spacing: 0.03em;
+}
+
+.aladin-asset-button strong,
+.aladin-asset-button small {
+  display: block;
+}
+
+.aladin-rail-summary {
+  position: relative;
+  padding: 9px 11px;
+  border-top-color: rgba(91, 215, 203, 0.28);
+}
+
+.aladin-telemetry {
+  top: 66px;
+  right: 58px;
+  min-width: 196px;
+  padding: 9px 12px 10px;
+}
+
+.aladin-telemetry span {
+  color: #f2cf62;
+  font: 8px "SFMono-Regular", Consolas, monospace;
+  letter-spacing: 0.16em;
+}
+
+.aladin-telemetry output:last-child {
+  color: #d9fffb;
+  font-size: 10px;
+}
+
+.aladin-telemetry small {
+  color: #5d858a;
+  font: 7px "SFMono-Regular", Consolas, monospace;
+  letter-spacing: 0.1em;
+}
+
+.aladin-action-rail {
+  top: 66px;
+  right: 14px;
+  padding: 5px;
+  border-color: rgba(242, 207, 98, 0.5);
+}
+
+.aladin-action-button {
+  width: 34px;
+  height: 34px;
+  border-radius: 2px;
+  border-color: rgba(242, 207, 98, 0.6);
+  color: #f2cf62;
+  background: rgba(8, 20, 25, 0.92);
+}
+
+.aladin-action-button:hover,
+.aladin-action-button:focus-visible {
+  color: #07110f;
+  border-color: #f2cf62;
+  background: #f2cf62;
+  box-shadow: 0 0 18px rgba(242, 207, 98, 0.35);
+}
+
+.aladin-status-deck {
+  right: 58px;
+  bottom: 16px;
+  left: 286px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 28px;
+  padding: 7px 12px;
+  border-color: rgba(91, 215, 203, 0.42);
+  color: #a3e8df;
+  font-size: 8px;
+  letter-spacing: 0.12em;
+}
+
+.aladin-status-pulse {
+  width: 6px;
+  height: 6px;
+  flex: 0 0 6px;
+  border-radius: 50%;
+  background: #6fd69b;
+  box-shadow: 0 0 12px #6fd69b;
+  animation: aladin-lock 1.5s ease-in-out infinite;
+}
+
+.region-scene-legend {
+  max-width: 220px;
+  max-height: min(150px, calc(100% - 106px));
+  overflow: auto;
+  padding: 7px 8px;
+  gap: 3px;
+  border-radius: 2px;
+  background: rgba(5, 13, 17, 0.94);
+  box-shadow: 0 12px 28px rgba(0, 0, 0, 0.42), 0 0 18px rgba(242, 207, 98, 0.12);
+}
+
+.region-scene-legend strong {
+  font-size: 8px;
+  letter-spacing: 0.08em;
+}
+
+.region-scene-legend > span {
+  font-size: 7px;
+}
+
+.region-scene-surveys {
+  max-height: 44px;
+  overflow: auto;
+  gap: 3px 7px;
+  margin-top: 2px;
+  font-size: 7px;
+}
+
+.coverage-hover {
+  max-width: 240px;
+  max-height: min(280px, calc(100% - 88px));
+  padding: 7px 8px;
+  border-radius: 2px;
+  font-size: 8px;
+}
+
+@keyframes aladin-scan {
+  from { transform: translateY(-10px); }
+  to { transform: translateY(10px); }
+}
+
+@keyframes aladin-lock {
+  0%, 100% { opacity: 0.5; transform: scale(0.82); }
+  50% { opacity: 1; transform: scale(1.16); }
+}
+
+@media (max-width: 720px) {
+  .aladin-cockpit-rail {
+    top: 52px;
+    right: 52px;
+    bottom: 48px;
+    left: 10px;
+    width: auto;
+  }
+
+  .aladin-telemetry {
+    top: 10px;
+    right: 50px;
+    min-width: 0;
+    max-width: calc(100% - 180px);
+  }
+
+  .aladin-action-rail {
+    top: 52px;
+    right: 10px;
+  }
+
+  .aladin-status-deck {
+    right: 10px;
+    bottom: 10px;
+    left: 10px;
+  }
+
+  .aladin-hud-reticle {
+    width: 94px;
+    height: 94px;
+  }
+}
+
+/* Aladin HUD: the asset rail is a temporary drawer, while query feedback is toast-only. */
+.aladin-drawer-tab {
+  position: absolute;
+  z-index: 7;
+  top: 70px;
+  left: 14px;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-height: 31px;
+  padding: 0 8px 0 6px;
+  border: 1px solid rgba(91, 215, 203, 0.56);
+  border-radius: 2px;
+  color: #b5f0e8;
+  background: rgba(5, 17, 22, 0.92);
+  box-shadow: 0 8px 20px rgba(0, 0, 0, 0.32), 0 0 14px rgba(45, 211, 196, 0.12);
+  font: 8px "SFMono-Regular", Consolas, monospace;
+  letter-spacing: 0.1em;
+  pointer-events: auto;
+  cursor: pointer;
+  transition: left 180ms ease, color 160ms ease, border-color 160ms ease, background 160ms ease;
+}
+
+.aladin-drawer-tab svg {
+  width: 13px;
+  height: 13px;
+}
+
+.aladin-drawer-tab:hover,
+.aladin-drawer-tab:focus-visible {
+  border-color: #f2cf62;
+  color: #07110f;
+  background: #f2cf62;
+  outline: none;
+}
+
+.aladin-controls[data-asset-drawer="open"] .aladin-drawer-tab {
+  left: calc(14px + min(252px, 24vw));
+}
+
+.aladin-cockpit-rail {
+  transition: transform 220ms cubic-bezier(0.22, 0.8, 0.25, 1), opacity 180ms ease;
+}
+
+.aladin-cockpit-rail:not(.is-open) {
+  opacity: 0;
+  pointer-events: none;
+  visibility: hidden;
+  transform: translateX(calc(-100% - 24px));
+}
+
+.aladin-cockpit-rail.is-open {
+  opacity: 1;
+  pointer-events: auto;
+  visibility: visible;
+  transform: translateX(0);
+}
+
+.aladin-cockpit-heading {
+  position: relative;
+  padding-right: 42px;
+}
+
+.aladin-rail-pin {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  display: grid;
+  width: 24px;
+  height: 24px;
+  place-items: center;
+  padding: 0;
+  border: 1px solid rgba(91, 215, 203, 0.35);
+  border-radius: 2px;
+  color: #7ba7a6;
+  background: rgba(4, 13, 17, 0.72);
+  cursor: pointer;
+}
+
+.aladin-rail-pin svg {
+  width: 12px;
+  height: 12px;
+}
+
+.aladin-rail-pin:hover,
+.aladin-rail-pin:focus-visible,
+.aladin-cockpit-rail.is-pinned .aladin-rail-pin {
+  border-color: #f2cf62;
+  color: #f2cf62;
+  outline: none;
+}
+
+.aladin-status-deck {
+  position: absolute;
+  z-index: 8;
+  top: 112px;
+  right: 58px;
+  bottom: auto;
+  left: auto;
+  display: flex;
+  width: min(280px, 34vw);
+  max-height: min(42%, 260px);
+  flex-direction: column-reverse;
+  align-items: stretch;
+  gap: 6px;
+  min-height: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+  pointer-events: none;
+}
+
+.aladin-status-deck:empty {
+  display: none;
+}
+
+.aladin-status-deck::before {
+  display: none;
+}
+
+.aladin-toast {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  min-width: 0;
+  padding: 8px 10px;
+  border: 1px solid rgba(91, 215, 203, 0.42);
+  border-left: 2px solid #67d7c9;
+  border-radius: 2px;
+  color: #c9f4ee;
+  background: rgba(5, 17, 22, 0.9);
+  box-shadow: 0 10px 24px rgba(0, 0, 0, 0.32), inset 0 0 16px rgba(50, 196, 185, 0.04);
+  font: 8px/1.4 "SFMono-Regular", Consolas, monospace;
+  letter-spacing: 0.05em;
+  opacity: 0;
+  transform: translateY(8px);
+  transition: opacity 220ms ease, transform 220ms ease;
+}
+
+.aladin-toast.is-visible {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+.aladin-toast.is-leaving {
+  opacity: 0;
+  transform: translateY(-5px) scale(0.98);
+}
+
+.aladin-toast-error {
+  border-left-color: #ef8d7f;
+  color: #ffd7cf;
+}
+
+.aladin-toast-success {
+  border-left-color: #f2cf62;
+  color: #f5e6a6;
+}
+
+.aladin-toast-pulse {
+  width: 5px;
+  height: 5px;
+  flex: 0 0 5px;
+  margin-top: 3px;
+  border-radius: 50%;
+  background: currentColor;
+  box-shadow: 0 0 10px currentColor;
+}
+
+.volume-stage.aladin-active .scene-readout {
+  border-color: rgba(91, 215, 203, 0.46);
+  border-radius: 2px;
+  color: #bcefe8;
+  background: rgba(5, 17, 22, 0.9);
+  box-shadow: 0 10px 24px rgba(0, 0, 0, 0.32), inset 0 0 16px rgba(50, 196, 185, 0.04);
+}
+
+.volume-stage.aladin-active .scene-readout b {
+  color: #f2cf62;
+}
+
+@media (max-width: 720px) {
+  .aladin-controls[data-asset-drawer="open"] .aladin-drawer-tab {
+    left: auto;
+    right: 48px;
+  }
+
+  .aladin-status-deck {
+    top: 108px;
+    right: 10px;
+    width: min(280px, calc(100% - 20px));
   }
 }
