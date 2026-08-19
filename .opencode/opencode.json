@@ -106,7 +106,7 @@
     "wzzzz": {
       "options": {
         "baseURL": "https://sub2api.home.geekcity.tech:32443/v1",
-        "apiKey": "sk-762fdc21284c286c2e6cf9cfd42d469cf3604210274396ed954e79d085ac5ea6",
+        "apiKey": "s",
         "headerTimeout": 60000,
         "timeout": 600000,
         "chunkTimeout": 120000
