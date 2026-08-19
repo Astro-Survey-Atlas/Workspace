@@ -54,6 +54,7 @@ import type { AgentSession, ToolDescriptor, WorkflowDefinition, WorkflowRun } fr
 import type { DataAssetRecord as CoreDataAssetRecord, DataAssetRegistrationInput as CoreDataAssetRegistrationInput } from "../../src/data-catalog";
 import type { ConnectorCheck, ConnectorCheckInput, ConnectorPublicRecord, ConnectorRegistrationInput } from "../../src/connectors";
 import type { ConnectorIngestRun, ConnectorIngestRunInput } from "../../src/connector-history";
+import type { CoverageJobCapability, CoverageJobSubmission } from "../../src/coverage-jobs";
 import type { TagDefinition } from "../../src/tags";
 import type { ReleaseAvailability, ReleaseKind, SurveyCard, SurveyModality, SurveyRecord, SurveyRegistrationInput } from "../../src/survey-registry";
 import type { SurveyFootprintManifest } from "../../src/survey-footprints";
@@ -75,6 +76,12 @@ export interface WorkspaceCapabilities {
 }
 
 export type ConnectorScanRun = ConnectorIngestRun;
+export type CoverageJob = ConnectorIngestRun;
+
+export interface CoverageJobCapabilities {
+  output: { coordinateFrame: "ICRS"; ordering: "NESTED"; nside: number; healpixOrder: number };
+  modes: readonly CoverageJobCapability[];
+}
 
 export interface DataAssetRecord extends CoreDataAssetRecord {
   sourceRelativePath?: string;
@@ -381,6 +388,19 @@ export const workspaceApi = {
   },
   async addSurveyRelease(surveyId: string, input: SurveyReleaseRegistrationInput): Promise<SurveyRecord> {
     return (await postJson<{ survey: SurveyRecord }>(`/api/surveys/${encodeURIComponent(surveyId)}/releases`, input)).survey;
+  },
+  async coverageJobCapabilities(): Promise<CoverageJobCapabilities> {
+    return getJson<CoverageJobCapabilities>("/api/coverage-jobs/capabilities");
+  },
+  async surveyCoverageJobs(surveyId: string, filters: { releaseId?: string; status?: CoverageJob["status"] } = {}): Promise<CoverageJob[]> {
+    const parameters = new URLSearchParams();
+    if (filters.releaseId) parameters.set("releaseId", filters.releaseId);
+    if (filters.status) parameters.set("status", filters.status);
+    const query = parameters.size ? `?${parameters}` : "";
+    return (await getJson<{ jobs: CoverageJob[] }>(`/api/surveys/${encodeURIComponent(surveyId)}/coverage-jobs${query}`)).jobs;
+  },
+  async submitSurveyCoverageJob(surveyId: string, input: CoverageJobSubmission): Promise<CoverageJob> {
+    return (await postJson<{ job: CoverageJob }>(`/api/surveys/${encodeURIComponent(surveyId)}/coverage-jobs`, input)).job;
   },
   async skySummary(id: string): Promise<{ dataset: DatasetSummary; sky: SkySummary }> {
     return getJson(`/api/datasets/${encodeURIComponent(id)}/sky/summary`);

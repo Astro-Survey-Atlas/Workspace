@@ -38,6 +38,7 @@ import {
 import type { PublicResourcePackage } from "../../src/resource-packages";
 import type { PublicCoverageStatus, PublicReleaseDetail } from "../../src/public-release-details";
 import type { ManualFootprintInput, ManualFootprintRecord } from "../../src/manual-footprints";
+import type { SurveyModality, SurveyRegistrationInput } from "../../src/survey-registry";
 import {
   VolumeViewer,
   type JointCellSelection,
@@ -347,6 +348,66 @@ function renderConnectorMetrics(metrics: ConnectorMetrics): void {
   });
 }
 const connectorPanel = new ConnectorPanel((error) => showFatal(error), renderConnectorMetrics);
+
+function surveyRegistrationFeedback(summary: string, detail = ""): void {
+  const output = byId("survey-registration-feedback");
+  const title = document.createElement("strong");
+  title.textContent = summary;
+  const note = document.createElement("small");
+  note.textContent = detail;
+  output.replaceChildren(title, ...(detail ? [note] : []));
+}
+
+function selectedModalities(form: HTMLFormElement): SurveyModality[] {
+  return [...(form.elements.namedItem("modalities") as HTMLSelectElement).selectedOptions]
+    .map((option) => option.value as SurveyModality);
+}
+
+function surveyRegistrationInput(form: HTMLFormElement): SurveyRegistrationInput {
+  const value = (name: string): string => String(new FormData(form).get(name) ?? "").trim();
+  const modalities = selectedModalities(form);
+  const productModality = value("productModality") as SurveyModality;
+  const releaseModalities = [...new Set([...modalities, productModality])];
+  return {
+    id: value("id"),
+    name: value("name"),
+    mission: value("mission") || undefined,
+    sourceUrl: value("sourceUrl"),
+    description: value("description") || undefined,
+    modalities: releaseModalities,
+    releases: [{
+      id: value("releaseId"),
+      label: value("releaseLabel"),
+      kind: "archive_snapshot",
+      availability: "metadata_only",
+      modalities: releaseModalities,
+      products: [{ name: value("product"), modality: productModality, description: value("productDescription") }],
+      coverage: { status: "pending", summary: "等待从已绑定的数据源计算覆盖范围。", sourceUrl: value("sourceUrl") },
+    }],
+  };
+}
+
+function setupSurveyRegistration(): void {
+  const dialog = byId<HTMLDialogElement>("survey-registration-dialog");
+  const form = byId<HTMLFormElement>("survey-registration-form");
+  const reset = () => { form.reset(); surveyRegistrationFeedback("尚未保存"); };
+  const close = () => { reset(); if (dialog.open) dialog.close(); };
+  byId<HTMLButtonElement>("survey-new").addEventListener("click", () => { reset(); if (!dialog.open) dialog.showModal(); });
+  byId<HTMLButtonElement>("survey-registration-close").addEventListener("click", close);
+  byId<HTMLButtonElement>("survey-registration-cancel").addEventListener("click", close);
+  dialog.addEventListener("cancel", reset);
+  form.addEventListener("submit", (event) => {
+    event.preventDefault();
+    if (!form.reportValidity()) return;
+    if (!selectedModalities(form).length) { surveyRegistrationFeedback("请选择至少一种模态"); return; }
+    surveyRegistrationFeedback("正在登记巡天…");
+    void workspaceApi.registerSurvey(surveyRegistrationInput(form)).then(() => {
+      close();
+      return activateMode("connectors");
+    }).catch((error) => surveyRegistrationFeedback("登记失败", error instanceof Error ? error.message : String(error)));
+  });
+}
+setupSurveyRegistration();
 const resourcePackagePanel = new ResourcePackagePanel(
   (before, after) => refreshActiveFootprints(before, after),
   (record, draftReleaseIds, callbacks) => renderResourcePackageDetails(record, draftReleaseIds, callbacks),

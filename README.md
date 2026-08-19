@@ -36,6 +36,10 @@ is `astro-file-scanner-0.1.0-SNAPSHOT-all.jar`; the default Job backend uses the
 standalone `AstroMetadataScanJobMain` entry point, while `backend: flink` uses
 the existing `MetadataExtractorJob` adapter.
 
+The shared operator/workspace invocation and troubleshooting runbook is in the
+sibling checkout at
+`/home/aaron/Repo/data-warehouse/docs/astro-metadata-scan-runbook.md`.
+
 ## Development
 
 The authoritative checkout is:

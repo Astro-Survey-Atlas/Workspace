@@ -141,6 +141,31 @@ scan backend identity, and status, but never stores raw keys. A task explicitly
 using `backend: flink` is compiled by the operator's adapter and is not a
 legacy `FlinkIngestTask` submission.
 
+### Survey coverage jobs
+
+A registered survey can submit an explicit private coverage job through
+`POST /api/surveys/:surveyId/coverage-jobs`. It is a management workflow,
+not a public-site API: the browser names an already registered Connector,
+asset, release and product, while the Workspace obtains credentials from its
+secret store and the metadata operator reads OSS/S3.
+
+The request must choose one evidence mode rather than implying that all data
+products have the same kind of footprint:
+
+- `catalog-radec` requires ICRS RA/Dec columns and produces
+  `object_presence` occupancy;
+- `nested-healpix` requires a declared NESTED pixel column and order, and also
+  produces `object_presence` occupancy;
+- `fits-wcs` reads image headers and produces an `image_extent` candidate.
+
+Current workspace coverage output is NESTED order 8 (NSIDE 256). Before a task
+is created, the API verifies that the selected connector is bound to the named
+survey/release, the asset is linked to that connector, and the asset/product is
+registered for that release. The immutable evidence specification is retained
+on the scan history record. This produces a private candidate only; publishing
+to `Astro-Survey-Atlas-Assets` remains a separate reviewed release that writes
+versioned MOC/HEALPix artifacts, input manifests and provenance hashes.
+
 The existing PostgreSQL instance in the `database` namespace belongs to an
 unrelated application and uses its own `n8n` database. It should not be reused
 without an explicit owner-approved database and role. The first production

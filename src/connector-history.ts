@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 
 import type { ConnectorKind } from "./connectors.js";
+import { validateCoverageJobSnapshot, type CoverageJobSnapshot } from "./coverage-jobs.js";
 import type { MetadataStore } from "./storage/types.js";
 
 export type ConnectorIngestRunStatus = "queued" | "running" | "succeeded" | "failed";
@@ -36,6 +37,8 @@ export interface ConnectorIngestRun {
   /** Retained as a legacy alias for target.uri. */
   sourcePath?: string;
   esIndex?: string;
+  /** Present only for an explicit survey coverage derivation. */
+  coverage?: CoverageJobSnapshot;
   createdAt: string;
   updatedAt?: string;
 }
@@ -65,6 +68,7 @@ export interface ConnectorIngestRunInput {
   error?: string;
   sourcePath?: string;
   esIndex?: string;
+  coverage?: CoverageJobSnapshot;
 }
 
 export interface ConnectorIngestRunInternalInput extends ConnectorIngestRunInput {
@@ -176,6 +180,7 @@ export class ConnectorIngestRunCatalog {
       error: optionalText(input.error, 2000),
       sourcePath: optionalText(input.sourcePath, 2048),
       esIndex: optionalText(input.esIndex, 160),
+      ...(input.coverage === undefined ? {} : { coverage: validateCoverageJobSnapshot(input.coverage) }),
       secretName: optionalText(input.secretName, 63),
       idempotencyKeyHash: keyHash,
       createdAt: now,
@@ -218,6 +223,7 @@ export class ConnectorIngestRunCatalog {
       ...(patch.error === undefined ? {} : { error: optionalText(patch.error, 2000) }),
       ...(patch.sourcePath === undefined ? {} : { sourcePath: optionalText(patch.sourcePath, 2048) }),
       ...(patch.esIndex === undefined ? {} : { esIndex: optionalText(patch.esIndex, 160) }),
+      ...(patch.coverage === undefined ? {} : { coverage: validateCoverageJobSnapshot(patch.coverage) }),
       ...(patch.secretName === undefined ? {} : { secretName: optionalText(patch.secretName, 63) }),
       updatedAt: new Date().toISOString(),
     };
@@ -255,6 +261,7 @@ export function normalizeConnectorIngestRuns(entries: unknown[]): ConnectorInges
     optionalTarget(record.target);
     optionalCount(record.fileCount, "fileCount");
     optionalCount(record.documentCount, "documentCount");
+    if (record.coverage !== undefined) validateCoverageJobSnapshot(record.coverage);
     return structuredClone(record);
   });
 }

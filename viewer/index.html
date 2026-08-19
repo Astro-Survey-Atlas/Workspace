@@ -262,6 +262,7 @@
           <div id="connector-list-search" class="catalog-search-bar connector-search-bar">
             <label class="sr-only" for="connector-search">搜索连接器</label>
             <input id="connector-search" class="field-input" type="search" placeholder="搜索名称、路径、类型、状态、巡天或发布" />
+            <button id="survey-new" class="command-button secondary compact-command" type="button"><i data-lucide="plus"></i><span>新增巡天</span></button>
             <button id="connector-new" class="primary-command compact-command" type="button"><i data-lucide="plus"></i><span>新增 Connector</span></button>
           </div>
           <div class="connector-columns"><span>连接器</span><span>路径</span><span>类型</span><span>连接状态 <button class="status-help" type="button" aria-label="连接状态说明"><i data-lucide="info" aria-hidden="true"></i><span class="sr-only">连接状态说明</span><span class="status-help-tooltip" role="tooltip">未检测：配置已保存但尚未验证。可用：最近一次检测通过。异常：最近一次检测失败。已停用：不会用于新的访问或扫描。</span></button></span></div>
@@ -446,6 +447,18 @@
           <div id="connector-config-jdbc" data-config="jdbc" class="connector-config-grid" hidden><label><span class="field-label">JDBC URL</span><input id="connector-jdbc-url" name="url" class="field-input" /></label><label><span class="field-label">Database</span><input id="connector-jdbc-database" name="database" class="field-input" /></label><label><span class="field-label">Schema</span><input id="connector-jdbc-schema" name="schema" class="field-input" value="public" /></label></div>
           <div class="connector-registration-actions"><button id="connector-check-form" class="command-button secondary" type="button">检测此配置</button><output id="connector-form-message" class="connector-check-feedback" aria-live="polite"><strong>尚未检测</strong></output></div>
           <footer><button id="connector-form-cancel" class="command-button secondary" type="button">取消</button><button id="connector-form-submit" class="command-button" type="submit">登记 Connector</button></footer>
+        </form>
+      </dialog>
+
+      <dialog id="survey-registration-dialog" class="workspace-dialog wide-dialog">
+        <form id="survey-registration-form" class="dialog-form survey-registration">
+          <header><div><span class="panel-kicker">NEW SURVEY</span><h2>登记巡天与首个发布</h2></div><button id="survey-registration-close" class="icon-button" type="button" aria-label="关闭"><span aria-hidden="true">×</span></button></header>
+          <div class="catalog-form-grid"><label><span class="field-label">巡天 ID</span><input name="id" class="field-input" placeholder="csst" pattern="[a-z0-9][a-z0-9._-]*" required /></label><label><span class="field-label">名称</span><input name="name" class="field-input" placeholder="CSST" maxlength="160" required /></label><label><span class="field-label">任务 / 项目</span><input name="mission" class="field-input" placeholder="Chinese Space Station Telescope" maxlength="160" /></label><label><span class="field-label">来源 URL</span><input name="sourceUrl" class="field-input" type="url" placeholder="https://..." required /></label></div>
+          <label class="field-label" for="survey-registration-description">说明</label><input id="survey-registration-description" name="description" class="field-input" maxlength="1000" />
+          <label class="field-label" for="survey-registration-modalities">模态</label><select id="survey-registration-modalities" name="modalities" class="field-input" multiple required><option value="imaging">图像</option><option value="spectroscopy">光谱</option><option value="photometry">测光</option><option value="time-domain">时域</option><option value="integral-field">积分场</option><option value="ultraviolet">紫外</option><option value="infrared">红外</option><option value="catalog">目录</option></select>
+          <fieldset class="catalog-connector-field"><legend class="field-label">首个公开发布</legend><div class="catalog-form-grid"><label><span class="field-label">发布 ID</span><input name="releaseId" class="field-input" placeholder="csst-sim-w1-20250731" pattern="[a-z0-9][a-z0-9._-]*" required /></label><label><span class="field-label">发布名称</span><input name="releaseLabel" class="field-input" placeholder="CSST Simulation W1" maxlength="160" required /></label><label><span class="field-label">产品</span><input name="product" class="field-input" placeholder="W1 photometric catalog" maxlength="160" required /></label><label><span class="field-label">产品模态</span><select name="productModality" class="field-input"><option value="photometry">测光</option><option value="imaging">图像</option><option value="spectroscopy">光谱</option><option value="catalog">目录</option></select></label></div><label class="field-label" for="survey-registration-product-description">产品说明</label><input id="survey-registration-product-description" name="productDescription" class="field-input" maxlength="500" required /><p class="control-note">登记后，在 Connector 绑定此巡天和发布；再以关联的资产提交 coverage job。OSS 凭证不会保存在巡天记录中。</p></fieldset>
+          <output id="survey-registration-feedback" class="connector-check-feedback" aria-live="polite">尚未保存</output>
+          <footer><button id="survey-registration-cancel" class="command-button secondary" type="button">取消</button><button class="command-button" type="submit">登记巡天</button></footer>
         </form>
       </dialog>
 

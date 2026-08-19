@@ -61,11 +61,11 @@ subjects:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
-  name: astro-workspace-flink-bridge
+  name: astro-workspace-metadata-scan-bridge
   namespace: warehouse
 rules:
   - apiGroups: ["org.zhejianglab.astro.metadata"]
-    resources: ["flinkingesttasks", "flinkingesttasks/status"]
+    resources: ["astrodatasources", "astrodatasources/status", "astrometadatascantasks", "astrometadatascantasks/status"]
     verbs: ["get", "list", "watch", "create", "patch", "update"]
   - apiGroups: [""]
     resources: ["secrets"]
@@ -74,12 +74,12 @@ rules:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
-  name: astro-workspace-flink-bridge
+  name: astro-workspace-metadata-scan-bridge
   namespace: warehouse
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role
-  name: astro-workspace-flink-bridge
+  name: astro-workspace-metadata-scan-bridge
 subjects:
   - kind: ServiceAccount
     name: astro-data-workspace-mcp
@@ -151,7 +151,7 @@ spec:
         fsGroupChangePolicy: OnRootMismatch
       containers:
         - name: mcp
-          image: crpi-wixjy6gci86ms14e.cn-hongkong.personal.cr.aliyuncs.com/ay-dev/astro-data-workspace-mcp:0.10.38-20260819132914
+          image: crpi-wixjy6gci86ms14e.cn-hongkong.personal.cr.aliyuncs.com/ay-dev/astro-data-workspace-mcp:0.10.38-20260819-scantask
           imagePullPolicy: Always
           ports:
             - name: http

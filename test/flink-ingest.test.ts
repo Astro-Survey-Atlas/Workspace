@@ -74,6 +74,11 @@ async function scanFixture(connectorRecord: ConnectorRecord, assets: DataAssetRe
   const catalogAssets = structuredClone(assets);
   const dataCatalog: DataCatalogRegistry = {
     list: async () => structuredClone(catalogAssets),
+    get: async (id: string) => {
+      const record = catalogAssets.find((candidate) => candidate.id === id);
+      if (!record) throw new Error(`Data asset not found: ${id}`);
+      return structuredClone(record);
+    },
     register: async (input: DataAssetRegistrationInput) => {
       const now = timestamp;
       const record: DataAssetRecord = {
@@ -104,7 +109,10 @@ async function scanFixture(connectorRecord: ConnectorRecord, assets: DataAssetRe
   } as unknown as DataCatalogRegistry;
   const service = new FlinkScanService({
     enabled: true,
-    connectors: { get: async () => structuredClone(connectorRecord) } as unknown as ConnectorRegistry,
+    connectors: {
+      get: async () => structuredClone(connectorRecord),
+      list: async () => [structuredClone(connectorRecord)],
+    } as unknown as ConnectorRegistry,
     dataCatalog,
     credentials: { get: async () => ({ accessKeyId: "access", secretAccessKey: "secret", endpoint: "https://s3.example" }) } as unknown as ConnectorCredentialStore,
     runs,
@@ -299,6 +307,102 @@ test("connector self-scan idempotency returns one run and submits one task", asy
     assert.equal(retry.id, first.id);
     assert.equal((await fixture.runs.list()).length, 1);
     assert.equal(fixture.requests.filter((request) => request.path.endsWith("/astrometadatascantasks") && request.method === "POST").length, 1);
+  } finally {
+    await fixture.store.close();
+    await rm(fixture.directory, { recursive: true, force: true });
+  }
+});
+
+test("explicit coverage job binds the survey asset connector and scanner evidence contract", async () => {
+  const record = connector({ surveyId: "csst", releaseId: "csst-sim-w1-20250731" });
+  const csstAsset = {
+    ...asset("csst-sim-w1-phot", record),
+    surveyId: "csst",
+    releaseId: "csst-sim-w1-20250731",
+    ownershipSnapshotVersion: 1 as const,
+    product: "W1 photometric catalog",
+  };
+  const fixture = await scanFixture(record, [csstAsset]);
+  try {
+    const request = {
+      connectorId: record.id,
+      assetId: csstAsset.id,
+      releaseId: "csst-sim-w1-20250731",
+      product: "W1 photometric catalog",
+      coverage: {
+        mode: "catalog-radec",
+        coordinateFrame: "ICRS",
+        coordinateUnits: "deg",
+        raColumn: "RA",
+        decColumn: "DEC",
+      },
+    };
+    const first = await fixture.service.submitCoverageJob("csst", request, "csst-coverage-one");
+    const retry = await fixture.service.submitCoverageJob("csst", request, "csst-coverage-one");
+    assert.equal(retry.id, first.id);
+    assert.equal(first.executor, "flink-coverage");
+    assert.deepEqual(first.coverage, {
+      surveyId: "csst",
+      releaseId: "csst-sim-w1-20250731",
+      product: "W1 photometric catalog",
+      mode: "catalog-radec",
+      coordinateFrame: "ICRS",
+      coordinateUnits: "deg",
+      raColumn: "RA",
+      decColumn: "DEC",
+      healpixOrder: 8,
+      evidenceRole: "object_presence",
+    });
+    const task = fixture.requests.find((entry) => entry.method === "POST" && entry.path.endsWith("/astrometadatascantasks"));
+    assert.ok(task);
+    const body = task.body as { metadata?: { name?: string }; spec?: { handlers?: string[]; userProperties?: Record<string, string>; extraEnv?: Record<string, string> } };
+    assert.match(body.metadata?.name ?? "", /^astro-coverage-/);
+    assert.deepEqual(body.spec?.handlers, ["default", "fits", "coverage", "object"]);
+    assert.deepEqual(body.spec?.userProperties, {
+      survey: "csst",
+      release: "csst-sim-w1-20250731",
+      product: "W1 photometric catalog",
+      modality: "catalog",
+      assetId: "csst-sim-w1-phot",
+      connector: "s3://survey/release",
+      fileIndex: "astro_file_index_v1",
+      coverageIndex: "astro_coverage_index_v1",
+      objectIndex: "astro_object_index_v1",
+      spatialMode: "catalog",
+      raColumn: "RA",
+      decColumn: "DEC",
+      coordinateFrame: "ICRS",
+      coordinateUnits: "deg",
+      coverageRole: "object_presence",
+      healpixOrder: "8",
+    });
+  } finally {
+    await fixture.store.close();
+    await rm(fixture.directory, { recursive: true, force: true });
+  }
+});
+
+test("coverage job refuses an unbound or mismatched scientific asset before writing a task", async () => {
+  const record = connector({ surveyId: "csst", releaseId: "csst-sim-w1-20250731" });
+  const unrelated = {
+    ...asset("other-asset", record),
+    product: "Other product",
+    connectorIds: [],
+    connectorLocationKeys: [],
+    access: { connector: "metadata" as const, uri: "asset://other", format: "metadata" },
+    accesses: [],
+  };
+  const fixture = await scanFixture(record, [unrelated]);
+  try {
+    await assert.rejects(fixture.service.submitCoverageJob("csst", {
+      connectorId: record.id,
+      assetId: unrelated.id,
+      releaseId: "csst-sim-w1-20250731",
+      product: "Other product",
+      coverage: { mode: "fits-wcs", coordinateFrame: "ICRS" },
+    }), /linked to the selected Connector/);
+    assert.deepEqual(await fixture.runs.list(), []);
+    assert.equal(fixture.requests.length, 0);
   } finally {
     await fixture.store.close();
     await rm(fixture.directory, { recursive: true, force: true });

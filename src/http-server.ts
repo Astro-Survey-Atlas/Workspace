@@ -15,6 +15,7 @@ import { McpCatalogQueryClient } from "./catalog-mcp-client.js";
 import { createConnectorCredentialStore, type StoredConnectorCredentials } from "./connector-credentials.js";
 import { ConnectorRegistry, connectorLocationKey, validateConnectorInput, type ConnectorCheckInput, type ConnectorPublicRecord, type ConnectorRecord, type ConnectorRegistrationInput } from "./connectors.js";
 import { ConnectorIngestRunCatalog, publicConnectorIngestRun, type ConnectorIngestRunFilter, type ConnectorIngestRunInput, type ConnectorIngestRunRecord, type ConnectorIngestRunStatus } from "./connector-history.js";
+import { COVERAGE_JOB_CAPABILITIES, validateCoverageJobSubmission } from "./coverage-jobs.js";
 import { DataCatalogRegistry, type DataAssetAccess, type DataAssetRecord, type DataAssetRegistrationInput } from "./data-catalog.js";
 import { ownershipKey, resolveDataOwnership, type EffectiveDataOwnership } from "./data-ownership.js";
 import { ConnectorScanCapabilityError, ConnectorScanPreconditionError, DataWarehouseDisabledError, dataWarehouseEnabled, FlinkScanService, parseLegacyConnectorScanCommand, validateConnectorSelfScanBody } from "./flink-ingest.js";
@@ -358,7 +359,7 @@ async function validateConnectorIds(input: DataAssetRegistrationInput): Promise<
 
 function sendApiError(response: Response, error: unknown): void {
   const message = error instanceof Error ? error.message : String(error);
-  const notFound = message.startsWith("Dataset not found:") || message.startsWith("Data asset not found:") || message.startsWith("Connector not found:") || message.startsWith("Connector ingest run not found:") || message.startsWith("Volume not found:") || message.startsWith("Atlas not found:") || message.startsWith("Survey not found:") || message.startsWith("Resource package not found:") || message.startsWith("Resource package is not installed:") || message.startsWith("Resource package job not found:")
+  const notFound = message.startsWith("Dataset not found:") || message.startsWith("Data asset not found:") || message.startsWith("Connector not found:") || message.startsWith("Connector ingest run not found:") || message.startsWith("Coverage job not found:") || message.startsWith("Volume not found:") || message.startsWith("Atlas not found:") || message.startsWith("Survey not found:") || message.startsWith("Resource package not found:") || message.startsWith("Resource package is not installed:") || message.startsWith("Resource package job not found:")
     || message.startsWith("Scan run not found:") || message.startsWith("Lineage not found:") || message.startsWith("Workflow not found:")
     || message.startsWith("Workflow run not found:") || message.startsWith("Workflow artifact not found:") || message.startsWith("Agent session not found:");
   const status = error instanceof LocalConnectorPolicyError ? error.statusCode
@@ -781,6 +782,73 @@ app.get("/api/surveys", (_request: Request, response: Response) => {
 app.get("/api/surveys/:id", (request: Request, response: Response) => {
   try {
     response.json({ survey: surveys.get(datasetIdFrom(request)) });
+  } catch (error) {
+    sendApiError(response, error);
+  }
+});
+
+/**
+ * Coverage derivation is intentionally a private Workspace operation. The
+ * public Assets site receives only reviewed, versioned artifacts and never
+ * receives connector credentials or an OSS listing capability.
+ */
+app.get("/api/coverage-jobs/capabilities", (_request: Request, response: Response) => {
+  response.json({
+    output: { coordinateFrame: "ICRS", ordering: "NESTED", nside: 256, healpixOrder: 8 },
+    modes: COVERAGE_JOB_CAPABILITIES,
+  });
+});
+
+app.get("/api/surveys/:id/coverage-jobs", async (request: Request, response: Response) => {
+  try {
+    const surveyId = datasetIdFrom(request);
+    surveys.get(surveyId);
+    const releaseId = typeof request.query.releaseId === "string" ? request.query.releaseId.trim() : undefined;
+    const status = typeof request.query.status === "string" ? request.query.status.trim() : undefined;
+    if (status !== undefined && !["queued", "running", "succeeded", "failed"].includes(status)) {
+      throw new RangeError("status is not supported");
+    }
+    if (releaseId !== undefined && !releaseId) throw new RangeError("releaseId must not be empty");
+    if (warehouseEnabled) void flinkScans.poll();
+    const runs = (await connectorRuns.list()).filter((run) => run.coverage?.surveyId === surveyId
+      && (releaseId === undefined || run.coverage?.releaseId === releaseId)
+      && (status === undefined || run.status === status));
+    response.set("Cache-Control", "no-store");
+    response.json({ jobs: publicConnectorRuns(runs) });
+  } catch (error) {
+    sendApiError(response, error);
+  }
+});
+
+app.get("/api/surveys/:id/coverage-jobs/:jobId", async (request: Request, response: Response) => {
+  try {
+    const surveyId = datasetIdFrom(request);
+    surveys.get(surveyId);
+    const jobId = Array.isArray(request.params.jobId) ? request.params.jobId[0] : request.params.jobId;
+    if (!jobId) throw new RangeError("coverage job id is required");
+    if (warehouseEnabled) void flinkScans.poll();
+    const run = (await connectorRuns.list()).find((candidate) => candidate.id === jobId && candidate.coverage?.surveyId === surveyId);
+    if (!run) throw new Error(`Coverage job not found: ${jobId}`);
+    response.set("Cache-Control", "no-store");
+    response.json({ job: publicConnectorIngestRun(run) });
+  } catch (error) {
+    sendApiError(response, error);
+  }
+});
+
+app.post("/api/surveys/:id/coverage-jobs", async (request: Request, response: Response) => {
+  try {
+    const surveyId = datasetIdFrom(request);
+    const survey = surveys.get(surveyId);
+    const submission = validateCoverageJobSubmission(request.body);
+    const release = survey.releases.find((candidate) => candidate.id === submission.releaseId);
+    if (!release) throw new RangeError(`releaseId ${submission.releaseId} does not belong to survey ${surveyId}`);
+    if (release.availability === "planned") throw new RangeError("planned releases cannot run a coverage job");
+    if (!release.products.some((candidate) => candidate.name === submission.product)) {
+      throw new RangeError(`product ${submission.product} is not registered for release ${submission.releaseId}`);
+    }
+    const run = await flinkScans.submitCoverageJob(surveyId, submission, idempotencyKey(request));
+    response.status(202).json({ job: publicConnectorIngestRun(run), run: publicConnectorIngestRun(run) });
   } catch (error) {
     sendApiError(response, error);
   }
