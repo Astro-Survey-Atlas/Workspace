@@ -6,7 +6,7 @@ import test from "node:test";
 
 import { parseDesiObservedTiles, rasterizeObservedTiles } from "../scripts/build_desi_footprints.js";
 
-const geometryRoot = path.join(process.cwd(), "artifacts", "public-survey-footprints", "raw", "geometry");
+const geometryRoot = path.join(process.env.ASTRO_PUBLIC_ASSETS_ROOT ?? path.resolve(process.cwd(), "..", "Astro-Survey-Atlas-Assets"), "artifacts", "public-survey-footprints", "raw", "geometry");
 
 const cases = [
   {

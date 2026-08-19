@@ -505,12 +505,13 @@ export async function buildSurveyFootprints(euclidQ1Source?: EuclidQ1RegionSourc
 }
 
 async function main(): Promise<void> {
-  const outputDirectory = path.resolve(process.argv[2] ?? "src/footprints");
+  const assetRoot = path.resolve(process.env.ASTRO_PUBLIC_ASSETS_ROOT ?? path.join(process.cwd(), "..", "Astro-Survey-Atlas-Assets"));
+  const outputDirectory = path.resolve(process.argv[2] ?? path.join(assetRoot, "src", "footprints"));
   const retrievedAt = new Date().toISOString();
   const euclidQ1Source = await fetchEuclidQ1RegionSource(retrievedAt);
   const manifest = await buildSurveyFootprints(euclidQ1Source);
-  const rawMocRoot = path.resolve("artifacts/public-survey-footprints/raw/moc");
-  const rawGeometryRoot = path.resolve("artifacts/public-survey-footprints/raw/geometry");
+  const rawMocRoot = path.join(assetRoot, "artifacts/public-survey-footprints/raw/moc");
+  const rawGeometryRoot = path.join(assetRoot, "artifacts/public-survey-footprints/raw/geometry");
   await Promise.all([preserveNativeMocs(rawMocRoot, manifest.generatedAt), preserveEuclidQ1RegionSource(rawGeometryRoot, euclidQ1Source)]);
   await mkdir(outputDirectory, { recursive: true });
   const outputPath = path.join(outputDirectory, "survey-footprints.json");

@@ -10,10 +10,21 @@ export interface AstroDataSource { apiVersion?: string; kind?: "AstroDataSource"
 export interface ScanDataSourceRef { name: string }
 export interface AstroMetadataScanTask { apiVersion?: string; kind?: "AstroMetadataScanTask"; metadata?: { name?: string; namespace?: string; labels?: Record<string, string> }; spec: { backend?: ScanBackend; source: { dataSourceRef?: ScanDataSourceRef; paths: string[] }; tags?: string[]; userProperties?: Record<string, string>; pathPatterns?: Record<string, string>; handlers?: string[]; sink?: { dataSourceRef: ScanDataSourceRef }; extraEnv?: Record<string, string> } }
 export interface ScanExecutionPlan { apiVersion: string; taskName: string; backend: ScanBackend; source: { dataSourceRef?: ScanDataSourceRef; paths: string[] }; tags: string[]; userProperties: Record<string, string>; pathPatterns: Record<string, string>; handlers: HandlerName[]; sink?: { dataSourceRef: ScanDataSourceRef }; extraEnv: Record<string, string> }
+export type ScanPhase = "Pending" | "Running" | "Succeeded" | "Failed";
+export interface AstroMetadataScanStatus { phase: ScanPhase; backend: ScanBackend; runId: string; discoveredFiles: number; processedHdus: number; coverageDocuments: number; objectDocuments: number; startedAt?: string; completedAt?: string; message?: string }
+
+export function scanPhase(value: unknown): ScanPhase {
+  const textValue = typeof value === "string" ? value.toLowerCase() : "";
+  if (["succeeded", "finished", "complete", "completed"].includes(textValue)) return "Succeeded";
+  if (["failed", "error", "canceled", "cancelled"].includes(textValue)) return "Failed";
+  if (["running", "active"].includes(textValue)) return "Running";
+  return "Pending";
+}
 
 const text = (value: unknown, name: string, max = 512): string => { if (typeof value !== "string" || !value.trim()) throw new RangeError(`${name} is required`); if (value.trim().length > max) throw new RangeError(`${name} is too long`); return value.trim(); };
 const record = (value: unknown, name: string): Record<string, unknown> => { if (value === undefined) return {}; if (!value || typeof value !== "object" || Array.isArray(value)) throw new RangeError(`${name} must be an object`); return value as Record<string, unknown>; };
 const name = (value: unknown, field: string): string => { const result = text(value, field, 253); if (!/^[a-z0-9]([-a-z0-9]*[a-z0-9])?$/.test(result)) throw new RangeError(`${field} must be a DNS label`); return result; };
+const MANAGED_ENV_KEYS = new Set(["S3_ENDPOINT", "S3_ACCESS_KEY", "S3_ACCESS_SECRET", "S3_REGION", "ES_HOST", "ES_PORT", "ES_USER", "ES_PASSWORD", "SCAN_PATHS", "SCAN_PATH", "SCAN_CONFIG", "BATCH_ID"]);
 
 export function validateAstroDataSource(input: unknown): AstroDataSource {
   if (!input || typeof input !== "object") throw new RangeError("AstroDataSource must be an object");
@@ -24,8 +35,11 @@ export function validateAstroDataSource(input: unknown): AstroDataSource {
   const type = spec.type as DataSourceType;
   const endpoint = spec.endpoint === undefined ? undefined : text(spec.endpoint, "spec.endpoint", 2048);
   if (type !== "local" && !endpoint) throw new RangeError("spec.endpoint is required for remote data sources");
+  if (endpoint) { try { const parsed = new URL(endpoint); if (!["http:", "https:"].includes(parsed.protocol)) throw new Error(); } catch { throw new RangeError("spec.endpoint must be an HTTP(S) URL"); } }
   if ((type === "s3" || type === "oss") && !spec.bucket) throw new RangeError("spec.bucket is required for object storage data sources");
   if (type === "local" && (!spec.mount || !name(spec.mount.pvcName, "spec.mount.pvcName"))) throw new RangeError("spec.mount.pvcName is required for local data sources");
+  if (spec.prefix && spec.prefix.split("/").some((segment) => segment === "." || segment === "..")) throw new RangeError("spec.prefix cannot contain dot segments");
+  if (spec.mount?.subPath && (spec.mount.subPath.startsWith("/") || spec.mount.subPath.split("/").some((segment) => segment === "." || segment === ".."))) throw new RangeError("spec.mount.subPath must stay inside the managed PVC");
   return structuredClone({ ...value, spec: { ...spec, type, ...(endpoint ? { endpoint } : {}) } }) as AstroDataSource;
 }
 
@@ -45,19 +59,20 @@ export function validateAstroMetadataScanTask(input: unknown): AstroMetadataScan
   const tags = (spec.tags ?? []).map((tag, index) => text(tag, `spec.tags[${index}]`, 128));
   const userProperties = Object.fromEntries(Object.entries(record(spec.userProperties, "spec.userProperties")).map(([key, value]) => [text(key, "userProperties key", 256), text(value, `userProperties.${key}`, 4096)]));
   const pathPatterns = Object.fromEntries(Object.entries(record(spec.pathPatterns, "spec.pathPatterns")).map(([key, value]) => { const pattern = text(value, `pathPatterns.${key}`, 4096); try { new RegExp(pattern); } catch { throw new RangeError(`pathPatterns.${key} is not a valid regular expression`); } return [text(key, "pathPatterns key", 256), pattern]; }));
-  const extraEnv = Object.fromEntries(Object.entries(record(spec.extraEnv, "spec.extraEnv")).map(([key, value]) => [text(key, "extraEnv key", 256), text(value, `extraEnv.${key}`, 8192)]));
+  const extraEnv = Object.fromEntries(Object.entries(record(spec.extraEnv, "spec.extraEnv")).map(([key, value]) => { const normalized = text(key, "extraEnv key", 256); if (MANAGED_ENV_KEYS.has(normalized)) throw new RangeError(`extraEnv cannot override managed key: ${normalized}`); return [normalized, text(value, `extraEnv.${key}`, 8192)]; }));
   return structuredClone({ ...value, apiVersion: ASTRO_METADATA_API, kind: "AstroMetadataScanTask", spec: { ...spec, backend, source: { ...source, paths }, handlers, tags, userProperties, pathPatterns, extraEnv } }) as AstroMetadataScanTask;
 }
 
 function sourcePathWithin(sourcePath: string, dataSource: AstroDataSource): boolean {
   const type = dataSource.spec.type;
-  if (type === "local") return sourcePath.startsWith("/") || sourcePath.startsWith("file:");
+  if (type === "local") { const path = sourcePath.startsWith("file:") ? (() => { try { return new URL(sourcePath).pathname; } catch { return ""; } })() : sourcePath; return path === "/data" || path.startsWith("/data/"); }
   let parsed: URL; try { parsed = new URL(sourcePath); } catch { return false; }
+  if (parsed.search || parsed.hash) return false;
   if (type === "s3" || type === "oss") {
-    if (parsed.protocol !== "s3:" && parsed.protocol !== "oss:") return false;
+    if (parsed.protocol !== "s3:" && parsed.protocol !== "s3a:" && parsed.protocol !== "oss:") return false;
     if (dataSource.spec.bucket && parsed.hostname !== dataSource.spec.bucket) return false;
     const prefix = (dataSource.spec.prefix ?? "").replace(/^\/+|\/+$/g, "");
-    const key = parsed.pathname.replace(/^\/+/, "");
+    let key: string; try { key = decodeURIComponent(parsed.pathname).replace(/^\/+/, ""); } catch { return false; }
     return !prefix || key === prefix || key.startsWith(`${prefix}/`);
   }
   return !!dataSource.spec.endpoint && new URL(dataSource.spec.endpoint).origin === parsed.origin;

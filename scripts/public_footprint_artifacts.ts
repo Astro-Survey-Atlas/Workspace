@@ -6,11 +6,13 @@ import { CURATED_SURVEYS } from "../src/survey-registry.js";
 import { normalizeSurveyFootprintManifest, type SurveyFootprintManifest } from "../src/survey-footprints.js";
 
 const root = process.cwd();
-const artifactRoot = path.join(root, "artifacts", "public-survey-footprints");
+const assetRoot = path.resolve(process.env.ASTRO_PUBLIC_ASSETS_ROOT ?? path.join(root, "..", "Astro-Survey-Atlas-Assets"));
+const artifactRoot = path.join(assetRoot, "artifacts", "public-survey-footprints");
 const sourcesPath = path.join(artifactRoot, "sources.json");
-const sourceManifestPath = path.join(root, "src", "footprints", "survey-footprints.json");
-const catalogPath = path.join(root, "bootstrap", "resource-packages", "catalog.json");
-const packageRoot = path.join(root, "bootstrap", "resource-packages");
+const canonicalRoot = path.resolve(process.env.ASTRO_PUBLIC_ASSETS_CANONICAL_ROOT ?? root);
+const sourceManifestPath = path.join(canonicalRoot, "src", "footprints", "survey-footprints.json");
+const catalogPath = path.resolve(process.env.ASTRO_RESOURCE_CATALOG_PATH ?? path.join(root, "bootstrap", "resource-packages", "catalog.json"));
+const packageRoot = path.resolve(process.env.ASTRO_RESOURCE_PACKAGE_SOURCE_ROOT ?? path.join(root, "bootstrap", "resource-packages"));
 const manualFootprintsPath = path.join(artifactRoot, "manual", "footprints.json");
 const rawMocIndexPath = path.join(artifactRoot, "raw", "moc", "index.json");
 const rawGeometryIndexPath = path.join(artifactRoot, "raw", "geometry", "index.json");

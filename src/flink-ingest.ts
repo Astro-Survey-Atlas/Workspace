@@ -16,8 +16,19 @@ const PILOT_ASSETS = [
 ] as const;
 
 interface KubernetesResource {
-  metadata?: { name?: string; namespace?: string; labels?: Record<string, string> };
-  status?: { batchId?: string; ingestStatus?: string; jobStatus?: string; exception?: string };
+  metadata?: { name?: string; namespace?: string; labels?: Record<string, string>; resourceVersion?: string };
+  status?: {
+    phase?: string;
+    backend?: "job" | "flink";
+    runId?: string;
+    discoveredFiles?: number;
+    processedHdus?: number;
+    coverageDocuments?: number;
+    objectDocuments?: number;
+    startedAt?: string;
+    completedAt?: string;
+    message?: string;
+  };
 }
 
 interface KubernetesList<T> { items?: T[]; }
@@ -190,11 +201,11 @@ export function connectorScanPath(connector: ConnectorRecord, requested?: string
 }
 
 function statusFromTask(task: KubernetesResource): "queued" | "running" | "succeeded" | "failed" {
-  const ingest = task.status?.ingestStatus?.toUpperCase();
-  const job = task.status?.jobStatus?.toUpperCase();
-  if (ingest === "FINISHED" || job === "FINISHED") return "succeeded";
-  if (job === "FAILED" || job === "CANCELED" || job === "CANCELLED" || job === "ERROR") return "failed";
-  return task.status ? "running" : "queued";
+  const phase = task.status?.phase?.toLowerCase();
+  if (phase === "succeeded") return "succeeded";
+  if (phase === "failed") return "failed";
+  if (phase === "pending") return "queued";
+  return phase === "running" ? "running" : "queued";
 }
 
 export interface FlinkScanServiceOptions {
@@ -285,7 +296,7 @@ export class FlinkScanService {
     });
 
     const token = randomUUID().replace(/-/g, "").slice(0, 12);
-    const secretName = `astro-scan-${token}`;
+    const secretName = this.#scanSecretName(connector.id);
     await this.#createSecret(secretName, stored, connector.config.endpoint ?? stored.endpoint, token);
     const created: ConnectorIngestRunRecord[] = [];
     try {
@@ -358,7 +369,7 @@ export class FlinkScanService {
     if (!stored?.accessKeyId || !stored.secretAccessKey) throw new RangeError("Connector has no saved S3 credentials");
     const path = connectorScanPath(connector, input.path);
     const token = randomUUID().replace(/-/g, "").slice(0, 12);
-    const secretName = `astro-scan-${token}`;
+    const secretName = this.#scanSecretName(connector.id);
     const taskName = taskNameWithToken("astro-scan", asset.id, token);
     const batchId = `workspace-scan-${token}`;
     await this.#createSecret(secretName, stored, connector.config.endpoint ?? stored.endpoint, token);
@@ -417,7 +428,7 @@ export class FlinkScanService {
     const assets = await this.#ensureScanAssets(connector, target);
     const assetIds = [...new Set(assets.map((asset) => asset.id))].sort();
     const token = randomUUID().replace(/-/g, "").slice(0, 12);
-    const secretName = `astro-scan-${token}`;
+    const secretName = this.#scanSecretName(connector.id);
     const taskName = taskNameWithToken("astro-connector-scan", connector.id, token);
     const batchId = `workspace-connector-scan-${token}`;
     const created = await this.#runs.create(connector.locationKey, {
@@ -471,14 +482,14 @@ export class FlinkScanService {
   }
 
   async #pollRun(run: ConnectorIngestRunRecord): Promise<void> {
-    const result = await this.#client!.request<KubernetesResource>("GET", `${TASK_API}/namespaces/${encodeURIComponent(this.#namespace)}/flinkingesttasks/${encodeURIComponent(run.jobId!)}`);
+    const result = await this.#client!.request<KubernetesResource>("GET", `${TASK_API}/namespaces/${encodeURIComponent(this.#namespace)}/astrometadatascantasks/${encodeURIComponent(run.jobId!)}`);
     if (result.status === 404) return;
     if (!result.ok || !result.value) {
-      throw new Error(`Unable to read FlinkIngestTask (HTTP ${result.status})`);
+      throw new Error(`Unable to read AstroMetadataScanTask (HTTP ${result.status})`);
     }
-    const actualBatchId = result.value.status?.batchId?.trim();
-    if (actualBatchId && actualBatchId !== run.batchId) {
-      run = await this.#runs.update(run.id, { batchId: actualBatchId });
+    const actualRunId = result.value.status?.runId?.trim();
+    if (actualRunId && actualRunId !== run.batchId) {
+      run = await this.#runs.update(run.id, { batchId: actualRunId });
     }
     const nextStatus = statusFromTask(result.value);
     if (nextStatus === "succeeded") {
@@ -496,7 +507,7 @@ export class FlinkScanService {
       return;
     }
     if (nextStatus === "failed") {
-      await this.#runs.update(run.id, { status: "failed", error: result.value.status?.exception || `Flink job status: ${result.value.status?.jobStatus ?? "FAILED"}`, completedAt: new Date().toISOString() });
+      await this.#runs.update(run.id, { status: "failed", error: result.value.status?.message || "AstroMetadataScanTask failed", completedAt: new Date().toISOString() });
       await this.#cleanupSecret(run.secretName);
       return;
     }
@@ -514,7 +525,7 @@ export class FlinkScanService {
         const response = await fetch(`${this.#esUrl}/${encodeURIComponent(this.#esIndex)}/_count`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ query: { bool: { filter: [{ term: { scan_run_id: batchId } }] } } }),
+          body: JSON.stringify({ query: { bool: { filter: [{ term: { run_id: batchId } }] } } }),
           signal: AbortSignal.timeout(15000),
         });
         if (!response.ok) throw new Error(`Elasticsearch count failed (HTTP ${response.status})`);
@@ -532,7 +543,7 @@ export class FlinkScanService {
   }
 
   async #createSecret(name: string, credentials: StoredConnectorCredentials, endpoint: string, token: string): Promise<void> {
-    const result = await this.#client!.request("POST", `/api/v1/namespaces/${encodeURIComponent(this.#secretNamespace)}/secrets`, {
+    const body = {
       metadata: {
         name,
         namespace: this.#secretNamespace,
@@ -544,16 +555,29 @@ export class FlinkScanService {
       },
       type: "Opaque",
       stringData: { "access-key": credentials.accessKeyId, "secret-key": credentials.secretAccessKey, "s3-endpoint": endpoint },
-    });
-    if (!result.ok) throw new Error(`Unable to create scan Secret (HTTP ${result.status}): ${result.text.slice(0, 240)}`);
+    };
+    const itemPath = `/api/v1/namespaces/${encodeURIComponent(this.#secretNamespace)}/secrets/${encodeURIComponent(name)}`;
+    const current = await this.#client!.request<KubernetesResource>("GET", itemPath);
+    const result = current.status === 404
+      ? await this.#client!.request("POST", `/api/v1/namespaces/${encodeURIComponent(this.#secretNamespace)}/secrets`, body)
+      : await this.#client!.request("PUT", itemPath, current.value?.metadata?.resourceVersion
+        ? { ...body, metadata: { ...body.metadata, resourceVersion: current.value.metadata.resourceVersion } }
+        : body);
+    if (!result.ok && result.status !== 409) throw new Error(`Unable to register scan Secret (HTTP ${result.status}): ${result.text.slice(0, 240)}`);
   }
 
   async #cleanupSecret(name?: string): Promise<void> {
     if (!name || !this.#client) return;
+    if (name.startsWith("astro-connector-scan-")) return;
     const active = (await this.#runs.list()).some((run) => run.secretName === name && (run.status === "queued" || run.status === "running"));
     if (active) return;
     const result = await this.#client.request("DELETE", `/api/v1/namespaces/${encodeURIComponent(this.#secretNamespace)}/secrets/${encodeURIComponent(name)}`);
     if (!result.ok && result.status !== 404) console.warn(`Unable to remove scan Secret ${name} (HTTP ${result.status})`);
+  }
+
+  #scanSecretName(connectorId: string): string {
+    const suffix = safeName(connectorId).slice(0, 45).replace(/-+$/g, "");
+    return `astro-connector-scan-${suffix}`.slice(0, 63).replace(/-+$/g, "");
   }
 
   async #createTask(input: {
@@ -570,7 +594,7 @@ export class FlinkScanService {
     const { connector, asset, paths, allowedSuffixes, spatial, taskName, batchId, secretName, ownership } = input;
     const astro = spatial ?? {};
     const body = {
-      apiVersion: "org.zhejianglab.astro.metadata/v1",
+      apiVersion: "org.zhejianglab.astro.metadata/v1alpha1",
       kind: "AstroMetadataScanTask",
       metadata: {
         name: taskName,
@@ -591,6 +615,7 @@ export class FlinkScanService {
           ...Object.fromEntries(Object.entries({
             survey: ownership.surveyId ?? "", release: ownership.releaseId ?? "", product: asset.product,
             modality: asset.modalities.join("+"), assetId: asset.id, connector: connector.locationKey,
+            fileIndex: this.#esIndex, coverageIndex: this.#esCoverageIndex, objectIndex: this.#esObjectIndex,
             ...(astro.raColumn ? { raColumn: astro.raColumn } : {}), ...(astro.decColumn ? { decColumn: astro.decColumn } : {}),
             ...(astro.healpixColumn ? { healpixColumn: astro.healpixColumn } : {}),
           }).filter(([, value]) => value !== "")),
@@ -600,17 +625,11 @@ export class FlinkScanService {
         extraEnv: {
           allowedSuffixes: allowedSuffixes.join(","),
           batchId,
-          esHost: this.#esHost,
-          esPort: this.#esPort,
-          datasetIndex: this.#esIndex,
-          astroFileIndex: this.#esIndex,
-          ES_SCHEMA: this.#esSchema,
-          ES_DATASET_GROUP_INDEX: this.#esObjectIndex,
-          ES_INGEST_JOB_INFO_INDEX: this.#esCoverageIndex,
         },
         
       },
     };
+    await this.#ensureAstroDataSources(connector, secretName);
     const result = await this.#client!.request("POST", `${TASK_API}/namespaces/${encodeURIComponent(this.#namespace)}/astrometadatascantasks`, body);
     if (!result.ok) throw new Error(`Unable to create AstroMetadataScanTask (HTTP ${result.status}): ${result.text.slice(0, 240)}`);
   }
@@ -628,7 +647,7 @@ export class FlinkScanService {
     const tags = [...new Set(assets.flatMap((asset) => asset.tags ?? asset.modalities))].sort();
     const modalities = [...new Set(assets.flatMap((asset) => asset.modalities))].sort();
     const body = {
-      apiVersion: "org.zhejianglab.astro.metadata/v1",
+      apiVersion: "org.zhejianglab.astro.metadata/v1alpha1",
       kind: "AstroMetadataScanTask",
       metadata: {
         name: taskName,
@@ -652,26 +671,54 @@ export class FlinkScanService {
           modality: modalities.join("+"),
           assetId: assetIds.length === 1 ? assetIds[0] : "",
           connectorLocationKey: connector.locationKey,
+          fileIndex: this.#esIndex,
+          coverageIndex: this.#esCoverageIndex,
+          objectIndex: this.#esObjectIndex,
         },
         sink: { dataSourceRef: { name: `${connector.id}-sink` } },
         extraEnv: {
           batchId,
-          esHost: this.#esHost,
-          esPort: this.#esPort,
-          datasetIndex: this.#esIndex,
-          astroFileIndex: this.#esIndex,
-          ES_SCHEMA: this.#esSchema,
-          ES_DATASET_GROUP_INDEX: this.#esObjectIndex,
-          ES_INGEST_JOB_INFO_INDEX: this.#esCoverageIndex,
         },
       },
     };
+    await this.#ensureAstroDataSources(connector, secretName);
     const result = await this.#client!.request("POST", `${TASK_API}/namespaces/${encodeURIComponent(this.#namespace)}/astrometadatascantasks`, body);
     if (!result.ok) throw new Error(`Unable to create AstroMetadataScanTask (HTTP ${result.status}): ${result.text.slice(0, 240)}`);
   }
 
+  async #ensureAstroDataSources(connector: ConnectorRecord, secretName: string): Promise<void> {
+    if (!this.#client || connector.kind !== "s3") return;
+    const source = {
+      apiVersion: "org.zhejianglab.astro.metadata/v1alpha1", kind: "AstroDataSource",
+      metadata: { name: connector.id, namespace: this.#namespace, labels: { "app.kubernetes.io/managed-by": "astro-data-workspace" } },
+      spec: { type: "s3", endpoint: connector.config.endpoint, bucket: connector.config.bucket, prefix: connector.config.prefix ?? "", credentialSecretRef: { name: secretName } },
+    };
+    await this.#upsertAstroDataSource(connector.id, source);
+    const sinkName = `${connector.id}-sink`.slice(0, 63).replace(/-+$/g, "");
+    const sink = { apiVersion: "org.zhejianglab.astro.metadata/v1alpha1", kind: "AstroDataSource", metadata: { name: sinkName, namespace: this.#namespace, labels: { "app.kubernetes.io/managed-by": "astro-data-workspace" } }, spec: { type: "elasticsearch", endpoint: this.#esUrl } };
+    await this.#upsertAstroDataSource(sinkName, sink);
+  }
+
+  async #upsertAstroDataSource(name: string, body: Record<string, unknown>): Promise<void> {
+    const itemPath = `${TASK_API}/namespaces/${encodeURIComponent(this.#namespace)}/astrodatasources/${encodeURIComponent(name)}`;
+    const current = await this.#client!.request<KubernetesResource>("GET", itemPath);
+    if (current.status === 404) {
+      const created = await this.#client!.request("POST", `${TASK_API}/namespaces/${encodeURIComponent(this.#namespace)}/astrodatasources`, body);
+      if (!created.ok && created.status !== 409) throw new Error(`Unable to register AstroDataSource (HTTP ${created.status}): ${created.text.slice(0, 240)}`);
+      return;
+    }
+    if (!current.ok) throw new Error(`Unable to read AstroDataSource (HTTP ${current.status}): ${current.text.slice(0, 240)}`);
+    const resourceVersion = current.value?.metadata?.resourceVersion;
+    const update = resourceVersion
+      ? { ...body, metadata: { ...(body.metadata as Record<string, unknown>), resourceVersion } }
+      : body;
+    const updated = await this.#client!.request("PUT", itemPath, update);
+    if (!updated.ok) throw new Error(`Unable to update AstroDataSource (HTTP ${updated.status}): ${updated.text.slice(0, 240)}`);
+  }
+
   #assertScannable(connector: ConnectorRecord): void {
     if (connector.status === "disabled") throw new ConnectorScanPreconditionError("Disabled connectors cannot be scanned");
+    if (!this.#esUrl) throw new ConnectorScanPreconditionError("Elasticsearch is not configured for AstroMetadataScanTask output");
     if (!hasCurrentSuccessfulConnectorCheck(connector)) {
       throw new ConnectorScanPreconditionError("Connector must have a current successful connection check for its current configuration before scanning");
     }

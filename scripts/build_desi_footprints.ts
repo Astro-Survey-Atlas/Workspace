@@ -16,7 +16,7 @@ const INCLUSIVE_FACT = 8;
 const TILE_RADIUS_DEG = 1.6280324520485583;
 const FOCAL_PLANE_RADIUS_MM = 413.4839307227412;
 const DESIMODEL_VERSION = "0.20.0";
-const RAW_GEOMETRY_ROOT = path.resolve("artifacts/public-survey-footprints/raw/geometry");
+const RAW_GEOMETRY_ROOT = path.join(path.resolve(process.env.ASTRO_PUBLIC_ASSETS_ROOT ?? path.join(process.cwd(), "..", "Astro-Survey-Atlas-Assets")), "artifacts/public-survey-footprints/raw/geometry");
 const RAW_GEOMETRY_INDEX = path.join(RAW_GEOMETRY_ROOT, "index.json");
 
 interface DesiSourceDefinition {

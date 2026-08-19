@@ -114,7 +114,7 @@ workspace API
   |-- MinIO/S3:   MOC/HEALPix artifacts, scan manifests, cutouts, exports,
   |               package bundles, Agent task artifacts
   |-- Elasticsearch: searchable FITS/header/object metadata produced by scans
-  |-- data-warehouse: FlinkIngestTask and scan execution
+  |-- data-warehouse: AstroMetadataScanTask operator and scan execution
   `-- Agent worker: cross-match/cutout/package orchestration and status updates
 ```
 
@@ -125,7 +125,7 @@ Built-in public cards are seeded read-only records with a version, while user
 cards and overrides are ordinary PostgreSQL rows. A normalized Connector path
 remains unique, so an upsert cannot create duplicate scan targets.
 
-Flink execution status is observational workspace data, not a dependency
+Metadata scan execution status is observational workspace data, not a dependency
 health gate. Polling is best-effort and asynchronous. An unreachable Kubernetes
 API preserves the last recorded task state, and a failed task affects only its
 own scan record. Core asset and coverage APIs continue to use workspace-owned
@@ -134,10 +134,12 @@ block the project-sky view.
 
 Connector credentials remain Kubernetes Secrets and are referenced by an
 internal identifier only. When a scan is submitted, the workspace service
-creates or synchronizes a task-scoped Secret in the `warehouse` namespace and
-submits a `FlinkIngestTask`; the UI never needs to know the Secret name. The
-task record stores the Connector path, requested prefix/MOC, Flink resource
-identity, and status, but never stores raw keys.
+creates or synchronizes an `AstroDataSource` and submits an
+`AstroMetadataScanTask` with `backend: job`; the UI never needs to know the
+Secret name. The task record stores the Connector path, requested prefix/MOC,
+scan backend identity, and status, but never stores raw keys. A task explicitly
+using `backend: flink` is compiled by the operator's adapter and is not a
+legacy `FlinkIngestTask` submission.
 
 The existing PostgreSQL instance in the `database` namespace belongs to an
 unrelated application and uses its own `n8n` database. It should not be reused

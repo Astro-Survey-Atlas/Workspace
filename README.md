@@ -23,11 +23,18 @@ The current vertical slice can:
 14. Select connected eight-neighbour sky regions, refine exact NESTED HEALPix masks, and filter registered assets by survey, release, and modality.
 15. Expose the first astro-code production action, cross-match, with cutout and package contracts ready for adapter work.
 16. Maintain editable data-asset detail pages with public sources, multiple access locations, project-stage facets, and lineage placeholders.
-17. Register S3/OSS, local-path, and JDBC connectors with path-based upsert identity, non-enumerating connection checks, and FlinkIngest run history.
+17. Register S3/OSS, local-path, and JDBC connectors with path-based upsert identity, non-enumerating connection checks, and `AstroMetadataScanTask` run history.
 
 The viewer and API do not depend on `cosmos-data-linkage`, its PostgreSQL
 database, or its Aladin viewer. The old service is only a read-only acceptance
 reference for the COSMOS catalog.
+
+The `AstroMetadataScanTask` execution module lives in the sibling
+`data-warehouse` checkout at
+`/home/aaron/Repo/data-warehouse/astro-file-scanner`. Its deployable artifact
+is `astro-file-scanner-0.1.0-SNAPSHOT-all.jar`; the default Job backend uses the
+standalone `AstroMetadataScanJobMain` entry point, while `backend: flink` uses
+the existing `MetadataExtractorJob` adapter.
 
 ## Development
 
@@ -169,7 +176,10 @@ imaging or local COSMOS data for it.
 
 ### Public footprint artifacts
 
-The fixed public-footprint directory is `artifacts/public-survey-footprints/`.
+The public-footprint release is owned by the sibling `Astro-Survey-Atlas-Assets`
+repository. Set `ASTRO_PUBLIC_ASSETS_ROOT` to that checkout when generating or
+validating the release; the workspace runtime consumes only the bundled compact
+manifest under `src/footprints/`.
 `sources.json` is the product-level acquisition ledger for every available
 release in `src/survey-registry.ts`: `acquired` identifies an existing manifest
 identity, `overview_only` identifies a bounded but non-product-exact overview,
@@ -182,6 +192,7 @@ The checked-in bootstrap resources are copied once into this directory by:
 
 ```bash
 npm run artifacts:footprints
+npm run assets:publish
 ```
 
 The command validates sources, normalizes the existing manifest into
@@ -264,13 +275,13 @@ REST endpoints:
 - `POST /api/agent/sessions`
 - `POST /api/agent/sessions/:id/messages`
 
-Generic connector scans use the same derived index as the Euclid pilot. The
+Connector scans submit an `AstroMetadataScanTask` to the metadata operator. The
 request can point at a connector prefix or a child path and declare catalog
-coordinates without exposing credentials:
+coordinates without exposing credentials. The operator creates the managed
+`AstroDataSource` objects and runs the default `backend: job` scanner:
 
 ```json
 {
-  "mode": "scan",
   "assetId": "my-user-catalog",
   "path": "projects/astro/catalogs/sample.csv",
   "allowedSuffixes": [".csv"],
@@ -285,7 +296,9 @@ coordinates without exposing credentials:
 ```
 
 The scanner records files without valid coordinates as metadata-only; it does
-not invent a footprint from the path or filename.
+not invent a footprint from the path or filename. `backend: flink` is available
+only as the new task's migration adapter; workspace submissions do not create
+or update a legacy `FlinkIngestTask`.
 
 Catalogs that already carry NESTED HEALPix pixels can instead use
 `"mode": "healpix"` with `"healpixColumn": "hpix"`. The resulting document

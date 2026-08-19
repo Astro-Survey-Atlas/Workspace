@@ -232,17 +232,19 @@ test("connector self-scan derives its target and snapshots zero, one, or multipl
       assert.ok(token);
       assert.match(run.jobId ?? "", new RegExp(`^astro-connector-scan-.*-${token}$`));
       assert.ok((run.jobId?.length ?? 64) <= 63);
-      const task = fixture.requests.find((request) => request.path.includes("/flinkingesttasks"));
+      const task = fixture.requests.find((request) => request.path.endsWith("/astrometadatascantasks"));
       assert.ok(task);
-      const body = task.body as { spec?: { paths?: string[]; extraEnvs?: Record<string, unknown> } };
-      assert.deepEqual(body.spec?.paths, ["s3://survey/release"]);
-      assert.equal(body.spec?.extraEnvs?.esHost, "elasticsearch");
-      assert.equal(body.spec?.extraEnvs?.datasetIndex, "astro_file_index_v1");
-      assert.deepEqual(body.spec?.extraEnvs?.others, {
-        ES_SCHEMA: "http",
-        ES_DATASET_GROUP_INDEX: "astro_object_index_v1",
-        ES_INGEST_JOB_INFO_INDEX: "astro_coverage_index_v1",
-      });
+      const body = task.body as { spec?: { backend?: string; source?: { paths?: string[]; dataSourceRef?: { name?: string } }; handlers?: string[]; userProperties?: Record<string, unknown>; sink?: { dataSourceRef?: { name?: string } }; extraEnv?: Record<string, unknown> } };
+      assert.equal(body.spec?.backend, "job");
+      assert.deepEqual(body.spec?.source?.paths, ["s3://survey/release"]);
+      assert.equal(body.spec?.source?.dataSourceRef?.name, "connector-s3");
+      assert.deepEqual(body.spec?.handlers, ["default", "fits", "coverage"]);
+      assert.equal(body.spec?.userProperties?.fileIndex, "astro_file_index_v1");
+      assert.equal(body.spec?.userProperties?.coverageIndex, "astro_coverage_index_v1");
+      assert.equal(body.spec?.userProperties?.objectIndex, "astro_object_index_v1");
+      assert.equal(body.spec?.sink?.dataSourceRef?.name, "connector-s3-sink");
+      assert.equal(body.spec?.extraEnv?.batchId, run.batchId);
+      assert.equal(body.spec?.extraEnv?.esHost, undefined);
     } finally {
       await fixture.store.close();
       await rm(fixture.directory, { recursive: true, force: true });
@@ -296,7 +298,7 @@ test("connector self-scan idempotency returns one run and submits one task", asy
     const retry = await fixture.service.submitConnectorScan(record.id, "same-request");
     assert.equal(retry.id, first.id);
     assert.equal((await fixture.runs.list()).length, 1);
-    assert.equal(fixture.requests.filter((request) => request.path.includes("/flinkingesttasks") && request.method === "POST").length, 1);
+    assert.equal(fixture.requests.filter((request) => request.path.endsWith("/astrometadatascantasks") && request.method === "POST").length, 1);
   } finally {
     await fixture.store.close();
     await rm(fixture.directory, { recursive: true, force: true });

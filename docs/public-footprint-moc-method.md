@@ -4,6 +4,8 @@
 
 ## 证据等级
 
+发布后的产品级台账位于官网仓库 `Astro-Survey-Atlas-Assets/artifacts/public-survey-footprints/`；工作区只保留生成和校验流程。
+
 `artifacts/public-survey-footprints/sources.json` 是产品级台账。只有存在产品级几何来源、且原始制品已保存并通过校验的记录才标为 `acquired`。本次新增的 CDS 产品直接来自公开的 CDS MocServer/HiPS MOC；Euclid Q1 使用 Euclid Consortium 发布的 DS9 区域文件计算。尚未有产品几何的记录仍是 `overview_only` 或 `awaiting_geometry`，没有用面积、中心点、示意图或相邻产品代填。
 
 ## CDS MOC 产品

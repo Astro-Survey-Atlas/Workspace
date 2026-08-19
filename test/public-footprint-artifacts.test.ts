@@ -8,7 +8,8 @@ import { CURATED_SURVEYS } from "../src/survey-registry.js";
 import { validate } from "../scripts/public_footprint_artifacts.js";
 
 const root = process.cwd();
-const sourcesPath = path.join(root, "artifacts", "public-survey-footprints", "sources.json");
+const assetRoot = process.env.ASTRO_PUBLIC_ASSETS_ROOT ?? path.resolve(root, "..", "Astro-Survey-Atlas-Assets");
+const sourcesPath = path.join(assetRoot, "artifacts", "public-survey-footprints", "sources.json");
 
 test("public sources cover every available release and product", async () => {
   const result = await validate();
@@ -39,12 +40,12 @@ test("all acquired identities are represented by the existing manifest", async (
 });
 
 test("sync provenance records input and output SHA256 values", async () => {
-  const provenance = JSON.parse(await readFile(path.join(root, "artifacts", "public-survey-footprints", "provenance.json"), "utf8")) as { inputs: Record<string, { path: string; sha256: string }>; files: { manifest: { path: string; sha256: string }; catalog: { path: string; sha256: string } } };
-  for (const file of [...Object.values(provenance.inputs), provenance.files.manifest, provenance.files.catalog]) assert.equal(createHash("sha256").update(await readFile(path.resolve(root, "artifacts", "public-survey-footprints", file.path))).digest("hex"), file.sha256);
+  const provenance = JSON.parse(await readFile(path.join(assetRoot, "artifacts", "public-survey-footprints", "provenance.json"), "utf8")) as { inputs: Record<string, { path: string; sha256: string }>; files: { manifest: { path: string; sha256: string }; catalog: { path: string; sha256: string } } };
+  for (const file of [...Object.values(provenance.inputs), provenance.files.manifest, provenance.files.catalog]) assert.equal(createHash("sha256").update(await readFile(path.resolve(assetRoot, "artifacts", "public-survey-footprints", file.path))).digest("hex"), file.sha256);
 });
 
 test("manual footprint submission file starts empty and validates", async () => {
-  const manual = JSON.parse(await readFile(path.join(root, "artifacts", "public-survey-footprints", "manual", "footprints.json"), "utf8")) as { schemaVersion: number; ordering: string; footprints: unknown[] };
+  const manual = JSON.parse(await readFile(path.join(assetRoot, "artifacts", "public-survey-footprints", "manual", "footprints.json"), "utf8")) as { schemaVersion: number; ordering: string; footprints: unknown[] };
   assert.equal(manual.schemaVersion, 1);
   assert.equal(manual.ordering, "NESTED");
   assert.deepEqual(manual.footprints, []);
