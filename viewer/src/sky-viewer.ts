@@ -73,6 +73,7 @@ export class SkyViewer {
   #renderQueued = false;
   #dragStart: { x: number; y: number; ra: number; dec: number } | null = null;
   #dragDistance = 0;
+  #backgroundColor: number | null = null;
 
   constructor(
     canvas: HTMLCanvasElement,
@@ -114,12 +115,24 @@ export class SkyViewer {
 
   setTheme(theme: "light" | "dark"): void {
     this.#canvas.dataset.theme = theme;
-    this.#renderer.setClearColor(theme === "light" ? 0xe8eef0 : 0x05070a, 1);
-    (this.#starField.material as THREE.PointsMaterial).color.setHex(theme === "light" ? 0x65757d : 0xa8b0bc);
+    this.#renderer.setClearColor(this.#backgroundColor ?? (theme === "light" ? 0xaebbc1 : 0x000000), 1);
+    (this.#starField.material as THREE.PointsMaterial).color.setHex(theme === "light" ? 0x879ca8 : 0xa8b0bc);
     this.#coordinateGrid.traverse((object) => {
       const material = (object as THREE.Line).material;
-      if (material instanceof THREE.LineBasicMaterial) material.color.setHex(theme === "light" ? 0x66747c : 0x8d98a8);
+      if (material instanceof THREE.LineBasicMaterial) material.color.setHex(theme === "light" ? 0x7d98a4 : 0x8d98a8);
     });
+    this.#requestRender();
+  }
+
+  setBackgroundColor(color: string | null): void {
+    if (color === null) {
+      this.#backgroundColor = null;
+      this.setTheme(document.documentElement.dataset.theme === "light" ? "light" : "dark");
+      return;
+    }
+    const parsed = new THREE.Color(color);
+    this.#backgroundColor = parsed.getHex();
+    this.#renderer.setClearColor(parsed, 1);
     this.#requestRender();
   }
 

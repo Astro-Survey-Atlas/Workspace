@@ -49,11 +49,9 @@
       "products": [
         {
           "product": "Early Data Release spectra",
-          "status": "awaiting_geometry",
+          "status": "acquired",
           "sourceUrl": "https://data.desi.lbl.gov/doc/releases/edr/",
-          "reason": "The official EDR tile table is available, but its observed tile geometry has not been converted to an acquired spectra MOC.",
-          "geometrySourceUrl": "https://data.desi.lbl.gov/public/edr/spectro/redux/fuji/tiles-fuji.fits",
-          "manualStep": "Download tiles-fuji.fits, retain EDR tiles with completed observations, convert each retained tile center and official DESI tile radius to an ICRS footprint, and union those footprints into the spectra MOC."
+          "geometrySourceUrl": "https://data.desi.lbl.gov/public/edr/spectro/redux/fuji/tiles-fuji.fits"
         }
       ]
     },
@@ -63,11 +61,9 @@
       "products": [
         {
           "product": "DR1 spectra and redshifts",
-          "status": "overview_only",
+          "status": "acquired",
           "sourceUrl": "https://data.desi.lbl.gov/doc/releases/dr1/",
-          "reason": "Official program area summaries provide an overview, while the official DR1 observed-tile table has not been converted to an exact spectra-and-redshifts MOC.",
-          "geometrySourceUrl": "https://data.desi.lbl.gov/public/dr1/spectro/redux/iron/tiles-iron.fits",
-          "manualStep": "Download tiles-iron.fits, retain DR1 tiles with completed observations, convert each retained tile center and official DESI tile radius to an ICRS footprint, and union those footprints into the spectra-and-redshifts MOC."
+          "geometrySourceUrl": "https://data.desi.lbl.gov/public/dr1/spectro/redux/iron/tiles-iron.fits"
         }
       ]
     },

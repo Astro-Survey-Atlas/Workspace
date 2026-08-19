@@ -312,6 +312,9 @@
             <span id="scene-camera-readout"><b>CAMERA</b> <output id="camera-distance">--</output></span>
           </div>
           <div class="scene-tools">
+            <button id="scene-background-settings" class="icon-button scene-action" type="button" aria-label="天球背景设置" title="天球背景设置">
+              <i data-lucide="sliders-horizontal"></i>
+            </button>
             <button id="reset-button" class="icon-button scene-reset scene-action" type="button" aria-label="重置视图" title="重置视图">
               <i data-lucide="rotate-ccw"></i>
             </button>
@@ -322,6 +325,17 @@
               <i data-lucide="maximize-2"></i>
             </button>
           </div>
+        </div>
+        <div id="scene-background-popover" class="scene-background-popover" hidden>
+          <div class="scene-background-heading"><strong>天球背景</strong><button id="scene-background-close" class="icon-button" type="button" aria-label="关闭天球背景设置" title="关闭"><i data-lucide="x"></i></button></div>
+          <label class="scene-background-color"><span>自定义颜色</span><input id="scene-background-color" type="color" value="#aebbc1" /></label>
+          <div class="scene-background-presets" aria-label="背景颜色预设">
+            <button type="button" data-scene-background="#e8eef0" style="--swatch: #e8eef0" aria-label="浅灰背景" title="浅灰背景"></button>
+            <button type="button" data-scene-background="#aebbc1" style="--swatch: #aebbc1" aria-label="中灰背景" title="中灰背景"></button>
+            <button type="button" data-scene-background="#68757c" style="--swatch: #68757c" aria-label="深灰背景" title="深灰背景"></button>
+            <button type="button" data-scene-background="#000000" style="--swatch: #000000" aria-label="纯黑背景" title="纯黑背景"></button>
+          </div>
+          <button id="scene-background-reset" class="command-button secondary" type="button">恢复主题默认</button>
         </div>
         <div id="scene-legend" class="distance-legend" aria-label="场景颜色图例">
           <span id="legend-min">INNER</span><i></i><span id="legend-max">OUTER</span>

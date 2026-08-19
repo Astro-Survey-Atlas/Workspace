@@ -110,6 +110,12 @@ spec:
               value: {{ .Values.dataWarehouse.namespace | quote }}
             - name: ASTRO_FLINK_POLL_MS
               value: {{ .Values.dataWarehouse.pollIntervalMs | quote }}
+            - name: ASTRO_FLINK_ES_HOST
+              value: {{ .Values.dataWarehouse.elasticsearch.host | quote }}
+            - name: ASTRO_FLINK_ES_PORT
+              value: {{ .Values.dataWarehouse.elasticsearch.port | quote }}
+            - name: ASTRO_FLINK_ES_SCHEMA
+              value: {{ .Values.dataWarehouse.elasticsearch.schema | quote }}
             {{- end }}
             {{- with .Values.env }}
             {{- toYaml . | nindent 12 }}

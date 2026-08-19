@@ -1,5 +1,9 @@
 import * as THREE from "three";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+import { EffectComposer } from "three/addons/postprocessing/EffectComposer.js";
+import { RenderPass } from "three/addons/postprocessing/RenderPass.js";
+import { UnrealBloomPass } from "three/addons/postprocessing/UnrealBloomPass.js";
+import { OutputPass } from "three/addons/postprocessing/OutputPass.js";
 
 import {
   buildSurveyLayerModel,
@@ -234,8 +238,7 @@ const SELECTION_EDGE_COLOR = new THREE.Color("#e7fffb");
 const WORKSPACE_COLOR = new THREE.Color("#d69b4e");
 const COVERAGE_OPACITY = 0.17;
 const COVERAGE_EDGE_OPACITY = 0.22;
-// Keep the surrounding layers subdued without making the selected region read as
-// a hole in the sphere. The selection outline still carries the emphasis.
+// Keep surrounding layers subdued while the selected region remains readable.
 const DIMMED_OPACITY = 0.075;
 const DIMMED_EDGE_OPACITY = 0.12;
 const EXPLODED_OPACITY = 0.58;
@@ -284,8 +287,6 @@ function narrativeCameraPose(direction: THREE.Vector3, distance: number, outerRa
   const tangent = new THREE.Vector3().crossVectors(reference, direction).normalize();
   const camera = direction.clone().multiplyScalar(distance).addScaledVector(tangent, outerRadius * tangentRatio);
   camera.setLength(distance);
-  // Aim close to the selected surface so the cell stays centered while the
-  // camera's tangential offset supplies the oblique, narrative perspective.
   const target = direction.clone().multiplyScalar(outerRadius * 0.98);
   return { camera, target };
 }
@@ -374,8 +375,12 @@ export class SurveyLayerViewer {
   readonly #scene = new THREE.Scene();
   readonly #camera = new THREE.PerspectiveCamera(48, 1, 0.015, 24);
   readonly #renderer: THREE.WebGLRenderer;
+  readonly #composer: EffectComposer;
+  readonly #bloomPass: UnrealBloomPass;
   readonly #starField: THREE.Points;
   readonly #controls: OrbitControls;
+  #bloomStrength = 0.4;
+  #backgroundColor: number | null = null;
   readonly #raycaster = new THREE.Raycaster();
   readonly #pointer = new THREE.Vector2();
   readonly #coverageGroup = new THREE.Group();
@@ -449,6 +454,14 @@ export class SurveyLayerViewer {
     this.#renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     this.#renderer.outputColorSpace = THREE.SRGBColorSpace;
     this.#renderer.debug.checkShaderErrors = true;
+
+    this.#composer = new EffectComposer(this.#renderer);
+    this.#composer.addPass(new RenderPass(this.#scene, this.#camera));
+    // The high threshold keeps bloom focused on the white selection core.
+    this.#bloomPass = new UnrealBloomPass(new THREE.Vector2(1, 1), this.#bloomStrength, 0.4, 0.85);
+    this.#composer.addPass(this.#bloomPass);
+    this.#composer.addPass(new OutputPass());
+
     this.#controls = new OrbitControls(this.#camera, canvas);
     this.#controls.enablePan = false;
     this.#controls.enableDamping = true;
@@ -478,9 +491,21 @@ export class SurveyLayerViewer {
 
   setTheme(theme: "light" | "dark"): void {
     this.#canvas.dataset.theme = theme;
-    this.#renderer.setClearColor(theme === "light" ? 0xe8eef0 : 0x03070a, 1);
-    (this.#starField.material as THREE.PointsMaterial).color.setHex(theme === "light" ? 0x65757d : 0x71808b);
-    (this.#starField.material as THREE.PointsMaterial).opacity = theme === "light" ? 0.25 : 0.28;
+    this.#renderer.setClearColor(this.#backgroundColor ?? (theme === "light" ? 0xaebbc1 : 0x000000), 1);
+    (this.#starField.material as THREE.PointsMaterial).color.setHex(theme === "light" ? 0x879ca8 : 0x71808b);
+    (this.#starField.material as THREE.PointsMaterial).opacity = theme === "light" ? 0.34 : 0.28;
+    this.#requestRender();
+  }
+
+  setBackgroundColor(color: string | null): void {
+    if (color === null) {
+      this.#backgroundColor = null;
+      this.setTheme(document.documentElement.dataset.theme === "light" ? "light" : "dark");
+      return;
+    }
+    const parsed = new THREE.Color(color);
+    this.#backgroundColor = parsed.getHex();
+    this.#renderer.setClearColor(parsed, 1);
     this.#requestRender();
   }
 
@@ -724,7 +749,7 @@ export class SurveyLayerViewer {
   }
 
   setLayerOrder(keys: Iterable<string>): void {
-    const next = normalizeLayerOrder(this.#knownLayerKeys(), keys, this.#defaultLayerOrder());
+    const next = normalizeLayerOrder(this.#knownLayerKeys(), keys, []);
     if (next.length === this.#layerOrder.length && next.every((key, index) => key === this.#layerOrder[index])) return;
     this.#layerOrder = next;
     this.#rebuildVisible(true);
@@ -974,7 +999,7 @@ export class SurveyLayerViewer {
   #knownLayerKeys(): string[] {
     return [
       ...this.#model.slots.filter((slot) => slot.hasFootprint).map((slot) => `public-survey:${slot.surveyId}`),
-      ...[...this.#workspaceLayers.values()].filter((layer) => layer.pixels.length).map((layer) => this.#workspaceLayerKey(layer)),
+      ...[...this.#workspaceLayers.values()].map((layer) => this.#workspaceLayerKey(layer)),
     ];
   }
 
@@ -983,7 +1008,7 @@ export class SurveyLayerViewer {
   }
 
   #normalizedLayerOrder(): string[] {
-    return normalizeLayerOrder(this.#knownLayerKeys(), this.#layerOrder, this.#defaultLayerOrder());
+    return normalizeLayerOrder(this.#knownLayerKeys(), this.#layerOrder, []);
   }
 
   #visibleLayerKeys(): string[] {
@@ -999,7 +1024,8 @@ export class SurveyLayerViewer {
 
   #displayDepths(): LayerDepth[] {
     const order = this.#normalizedLayerOrder();
-    return visibleLayerDepths(order, this.#visibleLayerKeys(), this.#layoutMode);
+    const visible = this.#visibleLayerKeys();
+    return visibleLayerDepths(order, visible, this.#layoutMode);
   }
 
   #visibleWorkspaceLayerAssetIds(layer: WorkspaceCoverageLayer): string[] {
@@ -1802,6 +1828,7 @@ export class SurveyLayerViewer {
     const height = Math.max(1, Math.round(bounds.height));
     this.#renderer.setSize(width, height, false);
     this.#renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    this.#composer.setSize(width, height);
     this.#camera.aspect = width / height;
     this.#camera.updateProjectionMatrix();
     this.#requestRender();
@@ -1818,7 +1845,7 @@ export class SurveyLayerViewer {
       this.#advanceSelectionAnimation(now);
       const moving = this.#controls.enabled && this.#controls.update();
       this.#keepCameraOutside();
-      this.#renderer.render(this.#scene, this.#camera);
+      this.#composer.render();
       if (moving || this.#cameraTransition || this.#fragmentTransitions.length || this.#explosionTransition || this.#selectionEdgeMaterial) this.#requestRender();
     });
   }

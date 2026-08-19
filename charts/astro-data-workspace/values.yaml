@@ -8,7 +8,7 @@ global:
 
 image:
   repository: crpi-wixjy6gci86ms14e.cn-hongkong.personal.cr.aliyuncs.com/ay-dev/astro-data-workspace-mcp
-  tag: "0.10.38-20260812062146"
+  tag: "0.10.38-20260819091906"
   pullPolicy: IfNotPresent
 
 imagePullSecrets: []
@@ -92,9 +92,13 @@ metadataStore:
     existingSecretKey: database-url
 
 dataWarehouse:
-  enabled: false
+  enabled: true
   namespace: warehouse
   pollIntervalMs: 5000
+  elasticsearch:
+    host: astro-search-elasticsearch.astro-data-workspace.svc.cluster.local
+    port: 9200
+    schema: http
 
 env: []
 resources:

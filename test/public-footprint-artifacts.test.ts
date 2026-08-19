@@ -13,9 +13,9 @@ const sourcesPath = path.join(root, "artifacts", "public-survey-footprints", "so
 test("public sources cover every available release and product", async () => {
   const result = await validate();
   assert.equal(result.releases, CURATED_SURVEYS.flatMap((survey) => survey.releases.filter((release) => release.availability === "available")).length);
-  assert.equal(result.acquired, 29);
-  assert.equal(result.overview_only, 12);
-  assert.equal(result.awaiting_geometry, 42);
+  assert.equal(result.acquired, 31);
+  assert.equal(result.overview_only, 11);
+  assert.equal(result.awaiting_geometry, 41);
   assert.equal(result.not_applicable, 0);
 });
 
@@ -34,7 +34,7 @@ test("all acquired identities are represented by the existing manifest", async (
   const manifest = JSON.parse(await readFile(path.join(root, "src", "footprints", "survey-footprints.json"), "utf8")) as { footprints: Array<{ surveyId: string; releaseId: string; product: string }> };
   const identities = new Set(manifest.footprints.map((entry) => `${entry.surveyId}:${entry.releaseId}:${entry.product}`));
   const acquired = sources.releases.flatMap((release) => release.products.filter((product) => product.status === "acquired").map((product) => `${release.surveyId}:${release.releaseId}:${product.product}`));
-  assert.equal(acquired.length, 29);
+  assert.equal(acquired.length, 31);
   assert.deepEqual(acquired.filter((identity) => !identities.has(identity)), []);
 });
 

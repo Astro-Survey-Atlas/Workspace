@@ -77,6 +77,8 @@ const flinkSecretNamespace = process.env.ASTRO_FLINK_SECRET_NAMESPACE ?? flinkNa
 const flinkPollMs = Number(process.env.ASTRO_FLINK_POLL_MS ?? "5000");
 const astroEsUrl = process.env.ASTRO_ES_URL ?? "";
 const astroEsIndex = process.env.ASTRO_ES_ASTRO_INDEX ?? "astro_file_index_v1";
+const astroEsObjectIndex = process.env.ASTRO_ES_OBJECT_INDEX ?? "astro_object_index_v1";
+const astroEsCoverageIndex = process.env.ASTRO_ES_COVERAGE_INDEX ?? "astro_coverage_index_v1";
 const warehouseEnabled = dataWarehouseEnabled();
 const localCsvScanEnabled = localScanEnabled();
 const metadataStoreEngine = process.env.ASTRO_METADATA_STORE || "sqlite";
@@ -112,6 +114,8 @@ const flinkScans = new FlinkScanService({
   secretNamespace: flinkSecretNamespace,
   esUrl: astroEsUrl,
   esIndex: astroEsIndex,
+  esObjectIndex: astroEsObjectIndex,
+  esCoverageIndex: astroEsCoverageIndex,
   pollMs: flinkPollMs,
 });
 const resourcePackages = new ResourcePackageManager({ catalogUrl: resourceCatalogUrl, root: resourcePackageRoot, statePath: resourcePackageStatePath });

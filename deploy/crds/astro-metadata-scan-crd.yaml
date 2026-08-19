@@ -1,0 +1,98 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: astrodatasources.org.zhejianglab.astro.metadata
+spec:
+  group: org.zhejianglab.astro.metadata
+  scope: Namespaced
+  names:
+    plural: astrodatasources
+    singular: astrodatasource
+    kind: AstroDataSource
+    shortNames: [ads]
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      schema:
+        openAPIV3Schema:
+          type: object
+          required: [spec]
+          properties:
+            spec:
+              type: object
+              required: [type]
+              properties:
+                type: {type: string, enum: [s3, oss, elasticsearch, local]}
+                endpoint: {type: string}
+                bucket: {type: string}
+                prefix: {type: string}
+                credentialSecretRef:
+                  type: object
+                  required: [name]
+                  properties: {name: {type: string}}
+                mount:
+                  type: object
+                  required: [pvcName]
+                  properties:
+                    pvcName: {type: string}
+                    subPath: {type: string}
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: astrometadatascantasks.org.zhejianglab.astro.metadata
+spec:
+  group: org.zhejianglab.astro.metadata
+  scope: Namespaced
+  names:
+    plural: astrometadatascantasks
+    singular: astrometadatascantask
+    kind: AstroMetadataScanTask
+    shortNames: [amst]
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      schema:
+        openAPIV3Schema:
+          type: object
+          required: [spec]
+          properties:
+            spec:
+              type: object
+              required: [source]
+              properties:
+                backend: {type: string, enum: [job, flink], default: job}
+                source:
+                  type: object
+                  required: [paths]
+                  properties:
+                    dataSourceRef:
+                      type: object
+                      required: [name]
+                      properties: {name: {type: string}}
+                    paths:
+                      type: array
+                      minItems: 1
+                      items: {type: string}
+                tags: {type: array, items: {type: string}}
+                userProperties: {type: object, additionalProperties: {type: string}}
+                pathPatterns: {type: object, additionalProperties: {type: string}}
+                handlers:
+                  type: array
+                  minItems: 1
+                  items: {type: string, enum: [default, fits, coverage, object]}
+                sink:
+                  type: object
+                  required: [dataSourceRef]
+                  properties:
+                    dataSourceRef:
+                      type: object
+                      required: [name]
+                      properties: {name: {type: string}}
+                extraEnv: {type: object, additionalProperties: {type: string}}
+      subresources: {status: {}}
+      additionalPrinterColumns:
+        - {name: Backend, type: string, jsonPath: .spec.backend}
+        - {name: Phase, type: string, jsonPath: .status.phase}

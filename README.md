@@ -153,7 +153,7 @@ wavelength. A connected selection of `NSIDE 16` cells can be expanded into a
 local, per-survey stack for visual comparison. The stack preserves coverage
 membership and provenance only; it is not a radial data cube. Hovering a cell
 shows its survey, release, product, modalities, geometry quality, and source.
-The bundled compact catalog includes available MOC artifacts for GALEX GR6/GR7,
+The bundled compact catalog includes available MOC artifacts for DESI EDR/DR1 observed spectroscopic tiles, GALEX GR6/GR7,
 Legacy Surveys DR10, SDSS DR9 imaging, HSC-SSP PDR2, HST archive discovery,
 Pan-STARRS1 DR1, DES DR2, 2MASS J/H/K, AllWISE W1-W4, KiDS DR5, NVSS, and an
 official-boundary Euclid Q1 field MOC. It contains no catalog rows or image
@@ -300,7 +300,7 @@ filesystem path.
 
 ## k3s deployment
 
-`deploy/k3s.yaml` deploys version `0.10.38-20260811150930` into the isolated
+`deploy/k3s.yaml` deploys version `0.10.38-20260818131750` into the isolated
 `astro-data-workspace` namespace. The Pod is pinned to `eva7028`; compact catalog
 metadata and derived indexes live in a 128 MiB `nfs-data` PVC backed by
 `/mnt/data`, mounted read-only by the service. Registry state uses a separate
@@ -344,10 +344,10 @@ Build and apply:
 ```bash
 docker build \
   --build-arg NPM_REGISTRY=https://registry.npmmirror.com \
-  -t crpi-wixjy6gci86ms14e.cn-hongkong.personal.cr.aliyuncs.com/ay-dev/astro-data-workspace-mcp:0.10.38-20260811150930 .
+  -t crpi-wixjy6gci86ms14e.cn-hongkong.personal.cr.aliyuncs.com/ay-dev/astro-data-workspace-mcp:0.10.38-20260818131750 .
 
 podman push \
-  crpi-wixjy6gci86ms14e.cn-hongkong.personal.cr.aliyuncs.com/ay-dev/astro-data-workspace-mcp:0.10.38-20260811150930
+  crpi-wixjy6gci86ms14e.cn-hongkong.personal.cr.aliyuncs.com/ay-dev/astro-data-workspace-mcp:0.10.38-20260818131750
 
 kubectl apply -f deploy/k3s.yaml
 kubectl -n astro-data-workspace rollout status deployment/astro-data-workspace-mcp

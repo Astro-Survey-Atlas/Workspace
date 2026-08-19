@@ -105,18 +105,50 @@ export async function validate(): Promise<PublicFootprintStatistics> {
     if (fits.byteLength !== artifact.byteLength || createHash("sha256").update(fits).digest("hex") !== artifact.sha256) errors.push(`raw MOC checksum mismatch ${artifact.sourceId}`);
     try { await readJson(path.join(path.dirname(rawMocIndexPath), artifact.metadataPath)); } catch { errors.push(`invalid raw MOC metadata ${artifact.sourceId}`); }
   }
-  const rawGeometry = await readJson<{ schemaVersion: number; coordinateFrame: string; artifacts: Array<{ surveyId: string; releaseId: string; product: string; sourceUrl: string; filePath: string; byteLength: number; sha256: string; polygonCount: number; parser: string }> }>(rawGeometryIndexPath);
+  type RawGeometryArtifact = {
+    surveyId: string;
+    releaseId: string;
+    product: string;
+    sourceUrl: string;
+    filePath: string;
+    byteLength: number;
+    sha256: string;
+    parser: string;
+    polygonCount?: number;
+    rowCount?: number;
+    selectedRowCount?: number;
+    filter?: string;
+    coordinateColumns?: string[];
+    tileRadiusDeg?: number;
+    focalPlaneRadiusMm?: number;
+    desimodelVersion?: string;
+    radiusSourceUrl?: string;
+  };
+  const rawGeometry = await readJson<{ schemaVersion: number; coordinateFrame: string; artifacts: RawGeometryArtifact[] }>(rawGeometryIndexPath);
   if (rawGeometry.schemaVersion !== 1 || rawGeometry.coordinateFrame !== "ICRS" || !Array.isArray(rawGeometry.artifacts)) errors.push("raw geometry index has an unsupported schema");
+  for (const artifact of rawGeometry.artifacts ?? []) {
+    const identity = `${artifact.surveyId}:${artifact.releaseId}:${artifact.product}`;
+    if (!artifact.surveyId?.trim() || !artifact.releaseId?.trim() || !artifact.product?.trim() || !validUrl(artifact.sourceUrl) || !artifact.filePath?.trim() || path.basename(artifact.filePath) !== artifact.filePath || !Number.isSafeInteger(artifact.byteLength) || artifact.byteLength <= 0 || !/^[a-f0-9]{64}$/.test(artifact.sha256) || !artifact.parser?.trim()) {
+      errors.push(`invalid raw geometry record ${identity}`);
+      continue;
+    }
+    try {
+      const bytes = await readFile(path.join(path.dirname(rawGeometryIndexPath), artifact.filePath));
+      if (bytes.byteLength !== artifact.byteLength || createHash("sha256").update(bytes).digest("hex") !== artifact.sha256) errors.push(`raw geometry checksum mismatch ${identity}`);
+    } catch { errors.push(`missing raw geometry artifact ${identity}`); }
+  }
   const euclidQ1Geometry = rawGeometry.artifacts?.find((artifact) => artifact.surveyId === "euclid" && artifact.releaseId === "euclid-q1" && artifact.product === "Euclid Q1 deep fields");
   if (!euclidQ1Geometry) errors.push("missing Euclid Q1 raw geometry record");
   else {
-    if (!validUrl(euclidQ1Geometry.sourceUrl) || euclidQ1Geometry.filePath !== "euclid-q1-region-files.zip" || !Number.isSafeInteger(euclidQ1Geometry.byteLength) || euclidQ1Geometry.byteLength <= 0 || !/^[a-f0-9]{64}$/.test(euclidQ1Geometry.sha256) || !Number.isSafeInteger(euclidQ1Geometry.polygonCount) || euclidQ1Geometry.polygonCount <= 0 || !euclidQ1Geometry.parser.includes("DS9 ICRS polygon")) {
+    if (!validUrl(euclidQ1Geometry.sourceUrl) || euclidQ1Geometry.filePath !== "euclid-q1-region-files.zip" || !Number.isSafeInteger(euclidQ1Geometry.byteLength) || euclidQ1Geometry.byteLength <= 0 || !/^[a-f0-9]{64}$/.test(euclidQ1Geometry.sha256) || !Number.isSafeInteger(euclidQ1Geometry.polygonCount) || Number(euclidQ1Geometry.polygonCount) <= 0 || !euclidQ1Geometry.parser.includes("DS9 ICRS polygon")) {
       errors.push("invalid Euclid Q1 raw geometry record");
-    } else {
-      try {
-        const archive = await readFile(path.join(path.dirname(rawGeometryIndexPath), euclidQ1Geometry.filePath));
-        if (archive.byteLength !== euclidQ1Geometry.byteLength || createHash("sha256").update(archive).digest("hex") !== euclidQ1Geometry.sha256) errors.push("Euclid Q1 raw geometry checksum mismatch");
-      } catch { errors.push("missing Euclid Q1 raw geometry archive"); }
+    }
+  }
+  for (const [releaseId, filePath] of [["desi-edr", "desi-edr-tiles-fuji.fits"], ["desi-dr1", "desi-dr1-tiles-iron.fits"]] as const) {
+    const geometry = rawGeometry.artifacts?.find((artifact) => artifact.surveyId === "desi" && artifact.releaseId === releaseId);
+    if (!geometry) { errors.push(`missing DESI raw geometry record ${releaseId}`); continue; }
+    if (geometry.filePath !== filePath || !geometry.filePath.endsWith(".fits") || !Number.isSafeInteger(geometry.rowCount) || geometry.rowCount! <= 0 || !Number.isSafeInteger(geometry.selectedRowCount) || geometry.selectedRowCount! <= 0 || geometry.selectedRowCount! > geometry.rowCount! || geometry.filter !== "NEXP > 0" || geometry.coordinateColumns?.join(",") !== "TILERA,TILEDEC" || !Number.isFinite(geometry.tileRadiusDeg) || geometry.tileRadiusDeg! <= 0 || !Number.isFinite(geometry.focalPlaneRadiusMm) || geometry.focalPlaneRadiusMm! <= 0 || geometry.desimodelVersion !== "0.20.0" || !validUrl(geometry.radiusSourceUrl) || !geometry.parser.includes("TILE_COMPLETENESS")) {
+      errors.push(`invalid DESI raw geometry record ${releaseId}`);
     }
   }
   if (errors.length) throw new Error(`public footprint validation failed:\n${errors.join("\n")}`);

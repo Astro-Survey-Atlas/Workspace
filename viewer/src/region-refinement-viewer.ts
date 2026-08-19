@@ -129,7 +129,7 @@ export class RegionRefinementViewer {
 
   setTheme(theme: "light" | "dark"): void {
     this.#canvas.dataset.theme = theme;
-    this.#renderer.setClearColor(theme === "light" ? 0xe8eef0 : 0x03070a, 1);
+    this.#renderer.setClearColor(theme === "light" ? 0xaebbc1 : 0x000000, 1);
     (this.#starField.material as THREE.PointsMaterial).color.setHex(theme === "light" ? 0x65757d : 0x71808b);
     (this.#starField.material as THREE.PointsMaterial).opacity = theme === "light" ? 0.24 : 0.24;
     this.#requestRender();

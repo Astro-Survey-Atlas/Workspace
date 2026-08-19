@@ -151,6 +151,7 @@ export class VolumeViewer {
   #radialMinMpc = 0;
   #radialMaxMpc: number;
   #renderQueued = false;
+  #backgroundColor: number | null = null;
   #pointerStart: { x: number; y: number } | null = null;
 
   constructor(
@@ -207,9 +208,21 @@ export class VolumeViewer {
 
   setTheme(theme: "light" | "dark"): void {
     this.#canvas.dataset.theme = theme;
-    this.#renderer.setClearColor(theme === "light" ? 0xe8eef0 : 0x05080b, 1);
-    (this.#starField.material as THREE.PointsMaterial).color.setHex(theme === "light" ? 0x65757d : 0x8793a0);
-    (this.#starField.material as THREE.PointsMaterial).opacity = theme === "light" ? 0.24 : 0.22;
+    this.#renderer.setClearColor(this.#backgroundColor ?? (theme === "light" ? 0xaebbc1 : 0x000000), 1);
+    (this.#starField.material as THREE.PointsMaterial).color.setHex(theme === "light" ? 0x879ca8 : 0x8793a0);
+    (this.#starField.material as THREE.PointsMaterial).opacity = theme === "light" ? 0.34 : 0.22;
+    this.#requestRender();
+  }
+
+  setBackgroundColor(color: string | null): void {
+    if (color === null) {
+      this.#backgroundColor = null;
+      this.setTheme(document.documentElement.dataset.theme === "light" ? "light" : "dark");
+      return;
+    }
+    const parsed = new THREE.Color(color);
+    this.#backgroundColor = parsed.getHex();
+    this.#renderer.setClearColor(parsed, 1);
     this.#requestRender();
   }
 

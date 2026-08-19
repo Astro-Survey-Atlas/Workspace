@@ -1,0 +1,10 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-settings.json",
+  "env": {
+    "ANTHROPIC_BASE_URL": "https://token.72602.space",
+    "ANTHROPIC_AUTH_TOKEN": "sk-1849b8eaa8ce45db4c072deb05999a5dfa416731fc297e3d614eb53a86a469e3",
+    "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
+    "CLAUDE_CODE_ATTRIBUTION_HEADER": "0"
+  },
+ "model": "claude-opus-4-8"
+}

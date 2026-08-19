@@ -164,7 +164,7 @@ test("resource packages list lifecycle status and survive a registry restart", a
   }
 });
 
-test("overview-only releases are retained on disk but removed from legacy active state", async () => {
+test("official overview releases are selectable and retain their coverage label", async () => {
   const paths = await fixture({ quality: "official_overview" });
   try {
     await waitForJob(paths.manager, paths.manager.install("public-legacy-surveys-footprints"));
@@ -175,10 +175,12 @@ test("overview-only releases are retained on disk but removed from legacy active
     const restarted = new ResourcePackageManager({ catalogUrl: paths.catalogUrl, root: paths.root, statePath: paths.statePath });
     await restarted.initialize();
     const record = restarted.get("public-legacy-surveys-footprints");
-    assert.equal(record.status, "installed");
-    assert.deepEqual(record.availableReleaseIds, []);
-    assert.deepEqual(record.activeReleaseIds, []);
-    assert.deepEqual((await restarted.activeFootprints()).footprints, []);
+    assert.equal(record.status, "active");
+    assert.deepEqual(record.availableReleaseIds, ["release-a", "release-b"]);
+    assert.deepEqual(record.activeReleaseIds, ["release-a"]);
+    const active = await restarted.activeFootprints();
+    assert.equal(active.footprints.length, 1);
+    assert.equal(active.footprints[0]!.quality, "official_overview");
   } finally {
     await rm(paths.directory, { recursive: true, force: true });
   }
@@ -296,7 +298,8 @@ test("updating a package preserves only selected releases still installed", asyn
     await writeCatalog(paths.directory, [updated, paths.packages[1]!]);
     const updater = new ResourcePackageManager({ catalogUrl: paths.catalogUrl, root: paths.root, statePath: paths.statePath });
     await updater.initialize();
-    assert.equal(updater.get(updated.id).status, "active");
+    assert.equal(updater.get(updated.id).status, "update_available");
+    assert.equal(updater.get(updated.id).active, true);
     await assert.rejects(() => updater.setActive([{ packageId: updated.id, releaseIds: ["release-b"] }]), /version must be current/);
 
     const result = await waitForJob(updater, updater.install(updated.id));

@@ -19,6 +19,12 @@ const PACKAGE_ID = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 const VERSION = /^[0-9]+\.[0-9]+\.[0-9]+$/;
 const ARCHIVE_FILES = new Set(["resource-package.json", "footprints/survey-footprints.json", "README.md"]);
 
+function isLoadableFootprint(footprint: SurveyFootprintManifest["footprints"][number]): boolean {
+  // Official overviews have verified display cells even though they are less
+  // precise than a MOC, so users must be able to load them.
+  return footprint.quality === "moc" || footprint.quality === "official_overview";
+}
+
 export interface ResourcePackageCatalogEntry {
   id: string;
   name: string;
@@ -466,7 +472,7 @@ export class ResourcePackageManager {
         const available = new Set(this.#releaseIds(manifest));
         for (const releaseId of load.releaseIds) if (!available.has(releaseId)) throw new RangeError(`Unknown release for resource package ${load.packageId}: ${releaseId}`);
         installed.activeReleaseIds = [...load.releaseIds];
-        if (load.releaseIds.length) selected.push({ ...manifest, footprints: manifest.footprints.filter((footprint) => footprint.quality === "moc" && load.releaseIds.includes(footprint.releaseId)) });
+        if (load.releaseIds.length) selected.push({ ...manifest, footprints: manifest.footprints.filter((footprint) => isLoadableFootprint(footprint) && load.releaseIds.includes(footprint.releaseId)) });
       }
       this.#validateSelection(selected);
       await this.#persist(draft);
@@ -496,7 +502,7 @@ export class ResourcePackageManager {
     const manifests = this.#state.packages.filter((record) => record.activeReleaseIds.length).map((record) => {
       const manifest = this.#installedFootprints.get(record.id);
       if (!manifest) throw new Error(`Installed resource package manifest is unavailable: ${record.id}`);
-      return { ...manifest, footprints: manifest.footprints.filter((footprint) => footprint.quality === "moc" && record.activeReleaseIds.includes(footprint.releaseId)) };
+      return { ...manifest, footprints: manifest.footprints.filter((footprint) => isLoadableFootprint(footprint) && record.activeReleaseIds.includes(footprint.releaseId)) };
     });
     if (!manifests.length) return { schemaVersion: 1, generatedAt: new Date().toISOString(), coordinateFrame: "ICRS", nside: 16, footprints: [] };
     this.#validateSelection(manifests);
@@ -596,7 +602,7 @@ export class ResourcePackageManager {
   }
 
   #releaseIds(manifest: SurveyFootprintManifest): string[] {
-    return [...new Set(manifest.footprints.filter((footprint) => footprint.quality === "moc").map((footprint) => footprint.releaseId))];
+    return [...new Set(manifest.footprints.filter(isLoadableFootprint).map((footprint) => footprint.releaseId))];
   }
 
   #availableReleaseIds(installed: InstalledPackage): string[] {
@@ -611,7 +617,7 @@ export class ResourcePackageManager {
   #toPublic(entry: ResourcePackageCatalogEntry, installed: InstalledPackage | undefined, update: boolean): PublicResourcePackage {
     const activeReleaseIds = installed ? [...installed.activeReleaseIds] : [];
     const active = activeReleaseIds.length > 0;
-    return { ...entry, installedVersion: installed?.version, installedAt: installed?.installedAt, activeReleaseIds, availableReleaseIds: installed ? this.#availableReleaseIds(installed) : [], active, status: active ? "active" : update ? "update_available" : installed ? "installed" : "not_installed" };
+    return { ...entry, installedVersion: installed?.version, installedAt: installed?.installedAt, activeReleaseIds, availableReleaseIds: installed ? this.#availableReleaseIds(installed) : [], active, status: update ? "update_available" : active ? "active" : installed ? "installed" : "not_installed" };
   }
 
   #validateSelection(manifests: SurveyFootprintManifest[]): void {

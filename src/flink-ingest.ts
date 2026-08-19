@@ -8,7 +8,7 @@ import type { DataAssetRecord, DataCatalogRegistry } from "./data-catalog.js";
 import type { ConnectorRegistry } from "./connectors.js";
 import { resolveDataOwnership, type EffectiveDataOwnership } from "./data-ownership.js";
 
-const TASK_API = "/apis/org.zhejianglab.astro.metadata/v1";
+const TASK_API = "/apis/org.zhejianglab.astro.metadata/v1alpha1";
 const PILOT_ASSETS = [
   { assetId: "euclid-q1-mer-final", key: "cat", pattern: /EUC_MER_FINAL-CAT_TILE[^/]+\.fits$/i },
   { assetId: "euclid-q1-mer-cutouts-cat", key: "cutouts", pattern: /EUC_MER_FINAL-CUTOUTS-CAT_TILE[^/]+\.fits$/i },
@@ -133,6 +133,12 @@ function safeName(value: string): string {
   return normalized || "scan";
 }
 
+function taskNameWithToken(prefix: string, identity: string, token: string): string {
+  const suffix = `-${safeName(token)}`;
+  const base = safeName(`${prefix}-${identity}`).slice(0, 63 - suffix.length).replace(/-+$/g, "");
+  return `${base}${suffix}`;
+}
+
 function s3Uri(connector: ConnectorRecord, key: string): string {
   return `s3://${connector.config.bucket}/${key}`;
 }
@@ -201,6 +207,8 @@ export interface FlinkScanServiceOptions {
   secretNamespace: string;
   esUrl: string;
   esIndex: string;
+  esObjectIndex?: string;
+  esCoverageIndex?: string;
   pollMs: number;
   resourceClient?: FlinkResourceClient;
 }
@@ -215,6 +223,11 @@ export class FlinkScanService {
   readonly #secretNamespace: string;
   readonly #esUrl: string;
   readonly #esIndex: string;
+  readonly #esHost: string;
+  readonly #esPort: number;
+  readonly #esSchema: string;
+  readonly #esObjectIndex: string;
+  readonly #esCoverageIndex: string;
   readonly #client: FlinkResourceClient | undefined;
   readonly #pollMs: number;
   #timer: ReturnType<typeof setInterval> | undefined;
@@ -230,6 +243,13 @@ export class FlinkScanService {
     this.#secretNamespace = options.secretNamespace;
     this.#esUrl = options.esUrl.replace(/\/+$/, "");
     this.#esIndex = options.esIndex;
+    let parsedEsUrl: URL | undefined;
+    try { parsedEsUrl = this.#esUrl ? new URL(this.#esUrl) : undefined; } catch { parsedEsUrl = undefined; }
+    this.#esHost = process.env.ASTRO_FLINK_ES_HOST ?? parsedEsUrl?.hostname ?? "astro-search-elasticsearch.astro-data-workspace.svc.cluster.local";
+    this.#esPort = Number(process.env.ASTRO_FLINK_ES_PORT ?? parsedEsUrl?.port ?? (parsedEsUrl?.protocol === "https:" ? 443 : 9200));
+    this.#esSchema = process.env.ASTRO_FLINK_ES_SCHEMA ?? parsedEsUrl?.protocol.replace(":", "") ?? "http";
+    this.#esObjectIndex = options.esObjectIndex ?? process.env.ASTRO_ES_OBJECT_INDEX ?? "astro_object_index_v1";
+    this.#esCoverageIndex = options.esCoverageIndex ?? process.env.ASTRO_ES_COVERAGE_INDEX ?? "astro_coverage_index_v1";
     this.#pollMs = Math.max(1000, options.pollMs);
     this.#client = this.#enabled
       ? options.resourceClient ?? (process.env.KUBERNETES_SERVICE_HOST ? new KubernetesResourceClient() : undefined)
@@ -272,7 +292,7 @@ export class FlinkScanService {
       for (const entry of selected) {
         const asset = await this.#dataCatalog.get(entry.definition.assetId);
         const ownership = await this.#scanOwnership(asset, connector);
-        const taskName = safeName(`euclid-q1-mer-pilot-${entry.definition.key}-${token}`).slice(0, 63).replace(/-+$/g, "");
+        const taskName = taskNameWithToken("euclid-q1-mer-pilot", entry.definition.key, token);
         const batchId = `workspace-pilot-${token}-${entry.definition.key}`;
         const run = await this.#runs.add(connector.locationKey, {
           connectorId: connector.id,
@@ -339,7 +359,7 @@ export class FlinkScanService {
     const path = connectorScanPath(connector, input.path);
     const token = randomUUID().replace(/-/g, "").slice(0, 12);
     const secretName = `astro-scan-${token}`;
-    const taskName = safeName(`astro-scan-${asset.id}-${token}`).slice(0, 63).replace(/-+$/g, "");
+    const taskName = taskNameWithToken("astro-scan", asset.id, token);
     const batchId = `workspace-scan-${token}`;
     await this.#createSecret(secretName, stored, connector.config.endpoint ?? stored.endpoint, token);
     const run = await this.#runs.add(connector.locationKey, {
@@ -394,11 +414,11 @@ export class FlinkScanService {
     }
 
     const target = connectorScanTarget(connector);
-    const assets = (await this.#dataCatalog.list()).filter((asset) => asset.origin === "user" && this.#isLinkedAsset(asset, connector));
+    const assets = await this.#ensureScanAssets(connector, target);
     const assetIds = [...new Set(assets.map((asset) => asset.id))].sort();
     const token = randomUUID().replace(/-/g, "").slice(0, 12);
     const secretName = `astro-scan-${token}`;
-    const taskName = safeName(`astro-connector-scan-${connector.id}-${token}`).slice(0, 63).replace(/-+$/g, "");
+    const taskName = taskNameWithToken("astro-connector-scan", connector.id, token);
     const batchId = `workspace-connector-scan-${token}`;
     const created = await this.#runs.create(connector.locationKey, {
       connectorId: connector.id,
@@ -551,7 +571,7 @@ export class FlinkScanService {
     const astro = spatial ?? {};
     const body = {
       apiVersion: "org.zhejianglab.astro.metadata/v1",
-      kind: "FlinkIngestTask",
+      kind: "AstroMetadataScanTask",
       metadata: {
         name: taskName,
         namespace: this.#namespace,
@@ -563,48 +583,36 @@ export class FlinkScanService {
         },
       },
       spec: {
-        platform: "s3",
-        paths,
-        batchId,
-        jobParallelism: 1,
-        allowedSuffixes,
-        activatedHandlers: ["default", "fits", "catalog"],
+        backend: "job",
+        source: { dataSourceRef: { name: connector.id }, paths },
+        handlers: ["default", "fits", "coverage", ...(spatial?.mode === "catalog" ? ["object"] : [])],
         tags: asset.tags ?? asset.modalities,
-        astro: {
-          mode: "file",
-          wcs: "auto",
-          spatialMode: astro.mode ?? "auto",
-          ...(astro.raColumn ? { raColumn: astro.raColumn } : {}),
-          ...(astro.decColumn ? { decColumn: astro.decColumn } : {}),
-          ...(astro.healpixColumn ? { healpixColumn: astro.healpixColumn } : {}),
-          coordinateFrame: astro.frame ?? "ICRS",
-          coordinateUnits: astro.units ?? "deg",
-          coverageRole: astro.role ?? "object_presence",
-          healpixOrder: astro.healpixOrder ?? 8,
-          survey: ownership.surveyId ?? "",
-          release: ownership.releaseId ?? "",
-          product: asset.product,
-          modality: asset.modalities.join("+"),
-          assetId: asset.id,
-          connectorLocationKey: connector.locationKey,
+        userProperties: {
+          ...Object.fromEntries(Object.entries({
+            survey: ownership.surveyId ?? "", release: ownership.releaseId ?? "", product: asset.product,
+            modality: asset.modalities.join("+"), assetId: asset.id, connector: connector.locationKey,
+            ...(astro.raColumn ? { raColumn: astro.raColumn } : {}), ...(astro.decColumn ? { decColumn: astro.decColumn } : {}),
+            ...(astro.healpixColumn ? { healpixColumn: astro.healpixColumn } : {}),
+          }).filter(([, value]) => value !== "")),
         },
-        extraEnvs: {
-          esHost: "warehouse-elasticsearch.warehouse.svc.cluster.local",
-          esPort: 9200,
-          datasetIndex: "datasetindex",
+        pathPatterns: {},
+        sink: { dataSourceRef: { name: `${connector.id}-sink` } },
+        extraEnv: {
+          allowedSuffixes: allowedSuffixes.join(","),
+          batchId,
+          esHost: this.#esHost,
+          esPort: this.#esPort,
+          datasetIndex: this.#esIndex,
           astroFileIndex: this.#esIndex,
+          ES_SCHEMA: this.#esSchema,
+          ES_DATASET_GROUP_INDEX: this.#esObjectIndex,
+          ES_INGEST_JOB_INFO_INDEX: this.#esCoverageIndex,
         },
-        extraSecret: {
-          name: secretName,
-          namespace: this.#secretNamespace,
-          accessKeyName: "access-key",
-          secretKeyName: "secret-key",
-          endpointKeyName: "s3-endpoint",
-        },
+        
       },
     };
-    const result = await this.#client!.request("POST", `${TASK_API}/namespaces/${encodeURIComponent(this.#namespace)}/flinkingesttasks`, body);
-    if (!result.ok) throw new Error(`Unable to create FlinkIngestTask (HTTP ${result.status}): ${result.text.slice(0, 240)}`);
+    const result = await this.#client!.request("POST", `${TASK_API}/namespaces/${encodeURIComponent(this.#namespace)}/astrometadatascantasks`, body);
+    if (!result.ok) throw new Error(`Unable to create AstroMetadataScanTask (HTTP ${result.status}): ${result.text.slice(0, 240)}`);
   }
 
   async #createConnectorTask(input: {
@@ -621,7 +629,7 @@ export class FlinkScanService {
     const modalities = [...new Set(assets.flatMap((asset) => asset.modalities))].sort();
     const body = {
       apiVersion: "org.zhejianglab.astro.metadata/v1",
-      kind: "FlinkIngestTask",
+      kind: "AstroMetadataScanTask",
       metadata: {
         name: taskName,
         namespace: this.#namespace,
@@ -633,21 +641,11 @@ export class FlinkScanService {
         },
       },
       spec: {
-        platform: "s3",
-        paths: [path],
-        batchId,
-        jobParallelism: 1,
-        allowedSuffixes: ["*"],
-        activatedHandlers: ["default", "fits", "catalog"],
+        backend: "job",
+        source: { dataSourceRef: { name: connector.id }, paths: [path] },
+        handlers: ["default", "fits", "coverage"],
         tags,
-        astro: {
-          mode: "file",
-          wcs: "auto",
-          spatialMode: "auto",
-          coordinateFrame: "ICRS",
-          coordinateUnits: "deg",
-          coverageRole: "object_presence",
-          healpixOrder: 8,
+        userProperties: {
           survey: connector.surveyId ?? "",
           release: connector.releaseId ?? "",
           product: assets.length === 1 ? assets[0]!.product : connector.name,
@@ -655,23 +653,21 @@ export class FlinkScanService {
           assetId: assetIds.length === 1 ? assetIds[0] : "",
           connectorLocationKey: connector.locationKey,
         },
-        extraEnvs: {
-          esHost: "warehouse-elasticsearch.warehouse.svc.cluster.local",
-          esPort: 9200,
-          datasetIndex: "datasetindex",
+        sink: { dataSourceRef: { name: `${connector.id}-sink` } },
+        extraEnv: {
+          batchId,
+          esHost: this.#esHost,
+          esPort: this.#esPort,
+          datasetIndex: this.#esIndex,
           astroFileIndex: this.#esIndex,
-        },
-        extraSecret: {
-          name: secretName,
-          namespace: this.#secretNamespace,
-          accessKeyName: "access-key",
-          secretKeyName: "secret-key",
-          endpointKeyName: "s3-endpoint",
+          ES_SCHEMA: this.#esSchema,
+          ES_DATASET_GROUP_INDEX: this.#esObjectIndex,
+          ES_INGEST_JOB_INFO_INDEX: this.#esCoverageIndex,
         },
       },
     };
-    const result = await this.#client!.request("POST", `${TASK_API}/namespaces/${encodeURIComponent(this.#namespace)}/flinkingesttasks`, body);
-    if (!result.ok) throw new Error(`Unable to create FlinkIngestTask (HTTP ${result.status}): ${result.text.slice(0, 240)}`);
+    const result = await this.#client!.request("POST", `${TASK_API}/namespaces/${encodeURIComponent(this.#namespace)}/astrometadatascantasks`, body);
+    if (!result.ok) throw new Error(`Unable to create AstroMetadataScanTask (HTTP ${result.status}): ${result.text.slice(0, 240)}`);
   }
 
   #assertScannable(connector: ConnectorRecord): void {
@@ -684,7 +680,34 @@ export class FlinkScanService {
   #isLinkedAsset(asset: DataAssetRecord, connector: ConnectorRecord): boolean {
     return (asset.connectorIds ?? []).includes(connector.id)
       || (asset.connectorLocationKeys ?? []).includes(connector.locationKey)
-      || [asset.access, ...(asset.accesses ?? [])].some((access) => access.connectorId === connector.id);
+      || [asset.access, ...(asset.accesses ?? [])].some((access) => access.connectorId === connector.id || access.uri === connector.locationKey);
+  }
+
+  async #ensureScanAssets(connector: ConnectorRecord, target: ConnectorScanTargetSnapshot): Promise<DataAssetRecord[]> {
+    const userAssets = (await this.#dataCatalog.list()).filter((asset) => asset.origin === "user");
+    const linked = userAssets.filter((asset) => this.#isLinkedAsset(asset, connector));
+    if (linked.length) return linked;
+
+    // A connector self-scan is also a catalog registration workflow. Without a
+    // user asset, the scanner can write files to ES but the UI has no stable
+    // asset_id by which to discover those documents or their sky coverage.
+    const registered = await this.#dataCatalog.register({
+      name: connector.name,
+      description: `Scanned catalog from ${target.uri}. Created automatically when the connector was scanned.`,
+      ...(connector.surveyId ? { surveyId: connector.surveyId } : {}),
+      ...(connector.releaseId ? { releaseId: connector.releaseId } : {}),
+      product: connector.name,
+      kind: "catalog",
+      modalities: ["catalog"],
+      connector: "s3",
+      sourceUri: target.uri,
+      format: "directory",
+      connectorIds: [connector.id],
+      connectorLocationKeys: [connector.locationKey],
+      status: "ready",
+      projectState: "acquired",
+    });
+    return [registered];
   }
 
   async #scanOwnership(asset: DataAssetRecord, connector: ConnectorRecord): Promise<EffectiveDataOwnership> {

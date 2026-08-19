@@ -1,4 +1,4 @@
-import { ChevronLeft, ChevronRight, createIcons, Download, Globe2, GripVertical, Info, Layers3, Maximize2, Minimize2, Moon, Pin, PinOff, Play, Plus, RefreshCw, RotateCcw, SlidersHorizontal, Sun, Undo2 } from "lucide";
+import { ChevronLeft, ChevronRight, createIcons, Download, Globe2, GripVertical, Info, Layers3, Maximize2, Minimize2, Moon, Pin, PinOff, Play, Plus, RefreshCw, RotateCcw, SlidersHorizontal, Sun, Undo2, X } from "lucide";
 
 import "./styles.css";
 import {
@@ -357,12 +357,39 @@ const LAYER_PREFERENCES_KEY = "astro-workspace:survey-layer-preferences:v3";
 const PREVIOUS_LAYER_PREFERENCES_KEY = "astro-workspace:survey-layer-preferences:v2";
 const LEGACY_LAYER_PREFERENCES_KEY = "astro-workspace:survey-layer-preferences:v1";
 const THEME_PREFERENCE_KEY = "astro-workspace:theme:v1";
+const SCENE_BACKGROUND_PREFERENCE_KEY = "astro-workspace:scene-background:v1";
 type WorkspaceTheme = "light" | "dark";
 
-createIcons({ icons: { ChevronLeft, ChevronRight, Download, Globe2, GripVertical, Info, Layers3, Maximize2, Minimize2, Moon, Pin, PinOff, Play, Plus, RefreshCw, RotateCcw, SlidersHorizontal, Sun, Undo2 } });
+createIcons({ icons: { ChevronLeft, ChevronRight, Download, Globe2, GripVertical, Info, Layers3, Maximize2, Minimize2, Moon, Pin, PinOff, Play, Plus, RefreshCw, RotateCcw, SlidersHorizontal, Sun, Undo2, X } });
 
 const themeQuery = window.matchMedia("(prefers-color-scheme: dark)");
 const themeToggle = byId<HTMLButtonElement>("theme-toggle");
+const sceneBackgroundSettings = byId<HTMLButtonElement>("scene-background-settings");
+const sceneBackgroundPopover = byId<HTMLDivElement>("scene-background-popover");
+const sceneBackgroundColor = byId<HTMLInputElement>("scene-background-color");
+
+function normalizedSceneBackground(value: string | null): string | null {
+  return value && /^#[0-9a-f]{6}$/i.test(value) ? value.toLowerCase() : null;
+}
+
+function storedSceneBackground(): string | null {
+  try {
+    return normalizedSceneBackground(localStorage.getItem(SCENE_BACKGROUND_PREFERENCE_KEY));
+  } catch {
+    return null;
+  }
+}
+
+function defaultSceneBackground(): string {
+  return document.documentElement.dataset.theme === "light" ? "#aebbc1" : "#000000";
+}
+
+function applySceneBackground(color: string | null): void {
+  layerViewer?.setBackgroundColor(color);
+  volumeViewer?.setBackgroundColor(color);
+  sceneBackgroundColor.value = color ?? defaultSceneBackground();
+  sceneBackgroundSettings.dataset.customized = color ? "true" : "false";
+}
 
 function storedTheme(): WorkspaceTheme | null {
   try {
@@ -387,6 +414,7 @@ function applyTheme(theme: WorkspaceTheme, source: "initial" | "user" | "system"
   createIcons({ icons: { Moon, Sun }, attrs: { "aria-hidden": "true" } });
   layerViewer?.setTheme(theme);
   volumeViewer?.setTheme(theme);
+  applySceneBackground(storedSceneBackground());
   window.dispatchEvent(new CustomEvent("astro:theme-change", { detail: { theme, source } }));
 }
 
@@ -400,6 +428,39 @@ themeToggle.addEventListener("click", () => {
 });
 themeQuery.addEventListener("change", (event) => {
   if (!storedTheme()) applyTheme(event.matches ? "dark" : "light", "system");
+});
+
+sceneBackgroundSettings.addEventListener("click", () => {
+  sceneBackgroundPopover.hidden = !sceneBackgroundPopover.hidden;
+  if (!sceneBackgroundPopover.hidden) sceneBackgroundColor.focus();
+});
+byId<HTMLButtonElement>("scene-background-close").addEventListener("click", () => {
+  sceneBackgroundPopover.hidden = true;
+});
+sceneBackgroundColor.addEventListener("input", () => {
+  const color = normalizedSceneBackground(sceneBackgroundColor.value);
+  if (!color) return;
+  try { localStorage.setItem(SCENE_BACKGROUND_PREFERENCE_KEY, color); } catch {}
+  applySceneBackground(color);
+});
+document.querySelectorAll<HTMLButtonElement>("[data-scene-background]").forEach((button) => {
+  button.addEventListener("click", () => {
+    const color = normalizedSceneBackground(button.dataset.sceneBackground ?? null);
+    if (!color) return;
+    try { localStorage.setItem(SCENE_BACKGROUND_PREFERENCE_KEY, color); } catch {}
+    applySceneBackground(color);
+  });
+});
+byId<HTMLButtonElement>("scene-background-reset").addEventListener("click", () => {
+  try { localStorage.removeItem(SCENE_BACKGROUND_PREFERENCE_KEY); } catch {}
+  applySceneBackground(null);
+});
+document.addEventListener("pointerdown", (event) => {
+  if (sceneBackgroundPopover.hidden) return;
+  const target = event.target;
+  if (target instanceof Node && !sceneBackgroundPopover.contains(target) && !sceneBackgroundSettings.contains(target)) {
+    sceneBackgroundPopover.hidden = true;
+  }
 });
 
 function showFatal(error: unknown): void {
@@ -1542,7 +1603,13 @@ async function loadWorkspaceAssetCoverage(scannedAssetId?: string): Promise<void
   if (scannedAssetId && coveredAssetIds.has(scannedAssetId)) visibleAssetIds.add(scannedAssetId);
 
   layerViewer?.setWorkspaceCoverageLayers([...coverage.layers, ...legacyWorkspaceLayers], nside);
-  applyLayerOrder();
+  // Add newly covered assets to layer order, but don't add all known layers
+  const knownKeys = new Set(knownLayerOrderKeys());
+  const filteredOrder = layerOrder.filter((key) => knownKeys.has(key));
+  const newAssetKeys = assets.map((asset) => `asset:${asset.id}`).filter((key) => knownKeys.has(key) && !filteredOrder.includes(key));
+  const newUnassignedKey = hasUnassignedWorkspaceCoverage && !filteredOrder.includes("workspace-unassigned") ? ["workspace-unassigned"] : [];
+  layerOrder = [...filteredOrder, ...newAssetKeys, ...newUnassignedKey];
+  applyLayerOrder(false);
   layerViewer?.setVisibleAssets(visibleAssetIds);
   layerViewer?.setVisibleSurveys(new Set([...visibleSurveyIds, ...(unassignedWorkspaceVisible ? ["__unassigned__"] : [])]));
   buildSurveyList();
@@ -1717,12 +1784,12 @@ function knownLayerOrderKeys(): string[] {
   ];
 }
 
-function normalizeCurrentLayerOrder(stored: Iterable<string> = layerOrder): string[] {
-  return normalizeLayerOrder(knownLayerOrderKeys(), stored, knownLayerOrderKeys());
+function normalizeCurrentLayerOrder(stored: Iterable<string> = layerOrder, addMissing: boolean = false): string[] {
+  return normalizeLayerOrder(knownLayerOrderKeys(), stored, addMissing ? knownLayerOrderKeys() : []);
 }
 
-function applyLayerOrder(): void {
-  layerOrder = normalizeCurrentLayerOrder();
+function applyLayerOrder(addMissing: boolean = false): void {
+  layerOrder = normalizeCurrentLayerOrder(layerOrder, addMissing);
   layerViewer?.setLayerOrder(layerOrder);
 }
 
@@ -1752,7 +1819,8 @@ function restoreLayerPreferences(): void {
     unassignedWorkspaceVisible = stored?.unassignedWorkspaceVisible === true;
     assetVisibilityPreferenceRestored = preferenceValue !== null && Array.isArray(stored?.visibleAssetIds);
     visibleAssetIds = new Set((stored?.visibleAssetIds ?? []).filter((assetId) => availableAssets.has(assetId)));
-    layerOrder = normalizeCurrentLayerOrder(stored?.layerOrder ?? []);
+    const addMissing = Array.isArray(stored?.layerOrder) && stored.layerOrder.length > 0;
+    layerOrder = normalizeCurrentLayerOrder(stored?.layerOrder ?? [], addMissing);
   } catch {
     visibleSurveyIds = available.has("legacy-surveys") ? new Set(["legacy-surveys"]) : new Set([...available].slice(0, 1));
     layerLayoutMode = "overlap";
@@ -1760,7 +1828,7 @@ function restoreLayerPreferences(): void {
     unassignedWorkspaceVisible = false;
     visibleAssetIds.clear();
     assetVisibilityPreferenceRestored = false;
-    layerOrder = normalizeCurrentLayerOrder();
+    layerOrder = normalizeCurrentLayerOrder([], false);
   }
 }
 
@@ -1784,13 +1852,21 @@ async function refreshActiveFootprints(before: PublicResourcePackage[], after: P
   const available = new Set(footprintSurveyIds());
   visibleSurveyIds = new Set([...visibleSurveyIds].filter((surveyId) => available.has(surveyId)));
   const previouslyActive = new Set(before.filter((record) => record.active).map((record) => record.id));
+  const newlyActiveSurveys: string[] = [];
   for (const record of after) {
-    if (record.active && !previouslyActive.has(record.id) && available.has(record.surveyId)) visibleSurveyIds.add(record.surveyId);
+    if (record.active && !previouslyActive.has(record.id) && available.has(record.surveyId)) {
+      visibleSurveyIds.add(record.surveyId);
+      newlyActiveSurveys.push(`public-survey:${record.surveyId}`);
+    }
   }
   selectedLayerRegion = null;
   astroOverview = null;
   workspaceCellSummaries.clear();
-  applyLayerOrder();
+  // Add newly activated surveys to layer order, but don't add all known layers
+  const knownKeys = new Set(knownLayerOrderKeys());
+  const filteredOrder = layerOrder.filter((key) => knownKeys.has(key));
+  layerOrder = [...filteredOrder, ...newlyActiveSurveys.filter((key) => !filteredOrder.includes(key))];
+  applyLayerOrder(false);
   buildSurveyList();
   persistLayerPreferences();
   if (mode === "layers") await activateMode("layers");
@@ -2339,20 +2415,19 @@ function renderLayerAssetDetails(asset: DataAssetRecord): void {
 }
 
 function moveLayer(key: string, targetIndex: number): void {
-  const next = normalizeCurrentLayerOrder();
+  const next = [...layerOrder];
   const currentIndex = next.indexOf(key);
   if (currentIndex < 0) return;
   next.splice(currentIndex, 1);
   next.splice(Math.max(0, Math.min(targetIndex, next.length)), 0, key);
   layerOrder = next;
-  applyLayerOrder();
+  applyLayerOrder(false);
   buildSurveyList();
   persistLayerPreferences();
 }
 
 function buildSurveyList(): void {
   const list = byId("sky-layer-list");
-  layerOrder = normalizeCurrentLayerOrder();
   const publicLayers = new Map(footprintSurveyIds().map((surveyId) => [`public-survey:${surveyId}`, surveyCards.find((survey) => survey.id === surveyId)!]));
   const assetLayers = new Map(userDataAssets().map((asset) => [`asset:${asset.id}`, asset]));
   if (!publicLayers.size && !assetLayers.size && !hasUnassignedWorkspaceCoverage) {
@@ -2561,6 +2636,7 @@ async function activateMode(nextMode: ViewMode): Promise<void> {
   byId("public-survey-overview-stage").hidden = true;
   byId("connector-stage").hidden = mode !== "connectors";
   byId("scene-stage").hidden = mode === "workflow" || mode === "catalog" || mode === "connectors" || mode === "packages";
+  sceneBackgroundPopover.hidden = true;
   byId("aladin-explorer").hidden = true;
   byId("aladin-controls").hidden = true;
   byId("workflow-stage").hidden = mode !== "workflow";
@@ -2692,6 +2768,7 @@ async function activateMode(nextMode: ViewMode): Promise<void> {
     byId("legend-max").textContent = "项目资产";
     byId("object-status").textContent = `${surveyFootprints?.footprints.length ?? 0} COVERAGE SOURCES`;
      layerViewer = new SurveyLayerViewer(targetCanvas, surveyFootprints!, surveyCards, renderSurveySelection, renderSurveyHover, renderSurveyInspection, renderSurveyContextMenu, renderLayerState, renderSurveyObjectPoint);
+    applySceneBackground(storedSceneBackground());
     layerViewer.setLayoutMode(layerLayoutMode);
     layerViewer.setVisibleSurveys(visibleSurveyIds);
     layerViewer.setInteractionMode(layerInteractionMode);
@@ -2718,6 +2795,7 @@ async function activateMode(nextMode: ViewMode): Promise<void> {
     byId("legend-min").textContent = "0";
     byId("legend-max").textContent = "6000 MPC";
     volumeViewer = new VolumeViewer(targetCanvas, volumeManifest!, renderVolumeSelection, renderVolumeState);
+    applySceneBackground(storedSceneBackground());
     volumeViewer.setRepresentation(representation);
     byId("render-status").textContent = volumeViewer.webglVersion;
     updateJointControls();

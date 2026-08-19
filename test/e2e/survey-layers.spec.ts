@@ -344,6 +344,8 @@ test("public resource package installs and applies all releases atomically", asy
   await apply.click();
   await expect(apply).toBeDisabled();
   await expect(loadableRow.locator(".resource-package-status")).toHaveText("已应用");
+  await expect(page.locator("#resource-package-feedback")).toHaveAttribute("data-status", "success");
+  await expect(page.locator("#resource-package-feedback")).toContainText("数据覆盖天球已刷新");
   await expect(packageButton).toHaveClass(/active/);
 
   await loadableToggle.uncheck();

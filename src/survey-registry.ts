@@ -245,9 +245,9 @@ const legacyReleases: SurveyRelease[] = Array.from({ length: 10 }, (_, index) =>
       { name: "Tractor catalog", modality: "catalog", description: "Forced photometry catalog derived from the imaging releases." },
     ],
     coverage: {
-      status: "pending",
-      summary: "Release is registered; exact brick/MOC footprint is pending ingestion from release metadata.",
-      sourceUrl: "https://www.legacysurvey.org/",
+      status: "summary_only",
+      summary: `Official DR${number} observed-brick overview is bundled for coadded imaging; accepted-CCD and Tractor-product geometry remain separate pending products.`,
+      sourceUrl: `https://www.legacysurvey.org/dr${number}/`,
     },
   });
 });
@@ -310,7 +310,7 @@ export const CURATED_SURVEYS: readonly SurveyRecord[] = [
         releasedYear: 2023,
         modalities: ["spectroscopy", "catalog"],
         products: [{ name: "Early Data Release spectra", modality: "spectroscopy", description: "DESI public early-release spectra and catalogs." }],
-        coverage: { status: "pending", summary: "Exact EDR footprint artifact is pending ingestion.", sourceUrl: "https://data.desi.lbl.gov/doc/releases/edr/" },
+        coverage: { status: "verified", summary: "Observed EDR spectroscopic tile envelopes derived from the official Fuji TILE_COMPLETENESS table (NEXP > 0).", sourceUrl: "https://data.desi.lbl.gov/public/edr/spectro/redux/fuji/tiles-fuji.fits" },
       }),
       release("desi-dr1", "DR1", {
         kind: "public_release",
@@ -318,7 +318,7 @@ export const CURATED_SURVEYS: readonly SurveyRecord[] = [
         releasedYear: 2025,
         modalities: ["spectroscopy", "catalog"],
         products: [{ name: "DR1 spectra and redshifts", modality: "spectroscopy", description: "Main-survey spectra observed from May 2021 through June 2022." }],
-        coverage: { status: "summary_only", summary: "DR1 published area summaries: Backup 2,726 deg2, Bright 9,739 deg2, Dark 9,528 deg2. Product-level MOC is pending ingestion.", areaDeg2: 9528, sourceUrl: "https://data.desi.lbl.gov/doc/releases/dr1/" },
+        coverage: { status: "verified", summary: "Observed DR1 spectroscopic tile envelopes derived from the official Iron TILE_COMPLETENESS table (NEXP > 0).", areaDeg2: 9528, sourceUrl: "https://data.desi.lbl.gov/public/dr1/spectro/redux/iron/tiles-iron.fits" },
       }),
       release("desi-dr2-results", "DR2 cosmology results", {
         kind: "science_results",
@@ -361,10 +361,10 @@ export const CURATED_SURVEYS: readonly SurveyRecord[] = [
   },
   {
     id: "legacy-surveys",
-    name: "Legacy Surveys",
+    name: "DESI Legacy Surveys",
     mission: "DECaLS, BASS and MzLS",
     color: "#fd8ea1",
-    description: "Optical imaging and Tractor catalogs from the Legacy Surveys release sequence.",
+    description: "DESI Legacy Surveys optical imaging and Tractor catalogs. These DR1-DR10 releases are imaging products, not DESI spectroscopic data releases.",
     modalities: ["imaging", "photometry", "catalog"],
     origin: "curated",
     releases: legacyReleases,

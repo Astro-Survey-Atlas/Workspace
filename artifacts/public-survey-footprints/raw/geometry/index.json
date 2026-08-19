@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "generatedAt": "2026-08-18T08:58:49.557Z",
+  "generatedAt": "2026-08-19T01:00:38.290Z",
   "coordinateFrame": "ICRS",
   "artifacts": [
     {
@@ -17,6 +17,52 @@
       "sha256": "1cf306fab4995179219fbefd32b9648ce0455b65c48cab9246138cc72eff20ef",
       "polygonCount": 118,
       "parser": "DS9 ICRS polygon; Healpix.queryPolygonInclusive at NSIDE 16 with fact 8"
+    },
+    {
+      "surveyId": "desi",
+      "releaseId": "desi-edr",
+      "product": "Early Data Release spectra",
+      "sourceUrl": "https://data.desi.lbl.gov/public/edr/spectro/redux/fuji/tiles-fuji.fits",
+      "filePath": "desi-edr-tiles-fuji.fits",
+      "retrievedAt": "2026-08-19T01:00:38.290Z",
+      "mediaType": "application/fits",
+      "byteLength": 169920,
+      "sha256": "7ddf26cdda548d1cc133d078db73862856c8e1c4912de85d52fd650a1b8f5a0d",
+      "rowCount": 732,
+      "selectedRowCount": 732,
+      "filter": "NEXP > 0",
+      "coordinateColumns": [
+        "TILERA",
+        "TILEDEC"
+      ],
+      "tileRadiusDeg": 1.6280324520485583,
+      "focalPlaneRadiusMm": 413.4839307227412,
+      "desimodelVersion": "0.20.0",
+      "radiusSourceUrl": "https://github.com/desihub/desimodel/tree/0.20.0",
+      "parser": "FITS TILE_COMPLETENESS BINTABLE; Healpix.queryDiscInclusive at NSIDE 16 with fact 8"
+    },
+    {
+      "surveyId": "desi",
+      "releaseId": "desi-dr1",
+      "product": "DR1 spectra and redshifts",
+      "sourceUrl": "https://data.desi.lbl.gov/public/dr1/spectro/redux/iron/tiles-iron.fits",
+      "filePath": "desi-dr1-tiles-iron.fits",
+      "retrievedAt": "2026-08-19T01:00:38.290Z",
+      "mediaType": "application/fits",
+      "byteLength": 1339200,
+      "sha256": "99320a3a8940cb1c98d36526233e14bafcd1e137d6e2a0c0563e7b9c4f83d71a",
+      "rowCount": 6101,
+      "selectedRowCount": 6101,
+      "filter": "NEXP > 0",
+      "coordinateColumns": [
+        "TILERA",
+        "TILEDEC"
+      ],
+      "tileRadiusDeg": 1.6280324520485583,
+      "focalPlaneRadiusMm": 413.4839307227412,
+      "desimodelVersion": "0.20.0",
+      "radiusSourceUrl": "https://github.com/desihub/desimodel/tree/0.20.0",
+      "parser": "FITS TILE_COMPLETENESS BINTABLE; Healpix.queryDiscInclusive at NSIDE 16 with fact 8"
     }
   ]
 }

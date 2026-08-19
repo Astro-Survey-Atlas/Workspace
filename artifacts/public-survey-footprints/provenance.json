@@ -1,27 +1,27 @@
 {
   "schemaVersion": 2,
-  "generatedAt": "2026-08-18T09:13:25.202Z",
+  "generatedAt": "2026-08-19T01:18:20.548Z",
   "generator": {
     "name": "scripts/public_footprint_artifacts.ts"
   },
   "statistics": {
     "releases": 48,
     "products": 83,
-    "acquired": 29,
-    "overview_only": 12,
-    "awaiting_geometry": 42,
+    "acquired": 31,
+    "overview_only": 11,
+    "awaiting_geometry": 41,
     "not_applicable": 0,
-    "manifestFootprints": 29,
-    "packages": 14
+    "manifestFootprints": 40,
+    "packages": 15
   },
   "inputs": {
     "canonicalManifest": {
       "path": "../../src/footprints/survey-footprints.json",
-      "sha256": "6d4d25a6fa09790f8ce9a3e0300f1c53fae959b6b9f6d0c6ef0a5619fc884f87"
+      "sha256": "a738881a0364155b09285eb57bb0ff645c3ab5e86dc87f654ff026a924080b59"
     },
     "sources": {
       "path": "sources.json",
-      "sha256": "9dd09968f31ecbe505533ce87e0c5e9a22e7b8b397f20ffe7235bcfd22c86e3f"
+      "sha256": "29d88149a946ba64ac73a7a5e5f1beb63e8c3a3a8d5bf32a5ddd22eb8b9c96ef"
     },
     "manual": {
       "path": "manual/footprints.json",
@@ -33,102 +33,109 @@
     },
     "rawGeometryIndex": {
       "path": "raw/geometry/index.json",
-      "sha256": "dde9b9db3e054a06113e8222ced7ac73ce153a7510b41c6dc459283ba18096a3"
+      "sha256": "fcd5c680a5025ae03ae9dbffefa49d48e202a3cacac79a270c210a0a1e7bb1dd"
     }
   },
   "files": {
     "manifest": {
       "path": "normalized/survey-footprints.json",
-      "sha256": "6d4d25a6fa09790f8ce9a3e0300f1c53fae959b6b9f6d0c6ef0a5619fc884f87"
+      "sha256": "a738881a0364155b09285eb57bb0ff645c3ab5e86dc87f654ff026a924080b59"
     },
     "catalog": {
       "path": "packages/catalog.json",
-      "sha256": "2a57b89fa18e2646c6dea00e968f2525358243679dc874c51b1f383ac9ffc17a"
+      "sha256": "7285938aa9efaed6aad7c8459d3291d381295c6c2230fbba04eda0469f813a90"
     },
     "packages": [
       {
         "id": "public-euclid-footprints",
-        "version": "2.0.2",
-        "archive": "packages/public-euclid-footprints-2.0.2.zip",
-        "sizeBytes": 1120,
-        "sha256": "460a8a0e4326f2dec4add2fcf114aa9218ed494123db3fb99687bd638b90c52c"
+        "version": "2.0.3",
+        "archive": "packages/public-euclid-footprints-2.0.3.zip",
+        "sizeBytes": 1132,
+        "sha256": "9bbed4c2a0bf383cb043ec2da47da3aba2607f80d87f2a0376d062ecfa20773e"
       },
       {
         "id": "public-galex-footprints",
-        "version": "2.0.2",
-        "archive": "packages/public-galex-footprints-2.0.2.zip",
-        "sizeBytes": 22582,
-        "sha256": "80c74433058d69571a93b3cec905cbae76d3ccc5904f6ab1248261b32c826eef"
+        "version": "2.0.3",
+        "archive": "packages/public-galex-footprints-2.0.3.zip",
+        "sizeBytes": 22583,
+        "sha256": "919352c943484c69f4b7e3eb21f628cb99df7bc2b207484ae69debe732a42a17"
+      },
+      {
+        "id": "public-desi-footprints",
+        "version": "2.0.3",
+        "archive": "packages/public-desi-footprints-2.0.3.zip",
+        "sizeBytes": 5492,
+        "sha256": "6f4f9499d9e980088f05a589dbf04a64c1fadb5218be760452ac859f65fde43e"
       },
       {
         "id": "public-legacy-surveys-footprints",
-        "version": "2.0.2",
-        "archive": "packages/public-legacy-surveys-footprints-2.0.2.zip",
-        "sizeBytes": 6826,
-        "sha256": "c7c9a889479241720a2e729e7da482a792a5895f74605dfbc54c2d01d3a41a53"
+        "version": "2.0.4",
+        "archive": "packages/public-legacy-surveys-footprints-2.0.4.zip",
+        "sizeBytes": 13275,
+        "sha256": "56dbdc6b4e06bf64de82f32bc0c3e3c7d48fdd11a9f0af925e9fb98e8a3a31f3"
       },
       {
         "id": "public-sdss-footprints",
-        "version": "2.0.2",
-        "archive": "packages/public-sdss-footprints-2.0.2.zip",
-        "sizeBytes": 5296,
-        "sha256": "55ba1d346cb92de51205692bc4a28fe780fcbe82ca5b943ecd65940d8418118f"
+        "version": "2.0.3",
+        "archive": "packages/public-sdss-footprints-2.0.3.zip",
+        "sizeBytes": 5308,
+        "sha256": "21e1c94ae5dbbe5a022d9e014161b30814911e3753450a7f8b5fc3d80cc2e4e2"
       },
       {
         "id": "public-hsc-ssp-footprints",
-        "version": "2.0.2",
-        "archive": "packages/public-hsc-ssp-footprints-2.0.2.zip",
-        "sizeBytes": 2108,
-        "sha256": "93397ad8b1dea1ee66f4f252bea5178af66cc6e54dc66f7d41d58ea7f2299b80"
+        "version": "2.0.3",
+        "archive": "packages/public-hsc-ssp-footprints-2.0.3.zip",
+        "sizeBytes": 2121,
+        "sha256": "1bcdedae1558ba0a73702c8c299be50892ab3b9cc9ab40632d1457080b537eb6"
       },
       {
         "id": "public-hst-footprints",
-        "version": "2.0.2",
-        "archive": "packages/public-hst-footprints-2.0.2.zip",
-        "sizeBytes": 8544,
-        "sha256": "292a400e940a17852b11b4dc636024b7ab83fd4a6b7ab7f316e03757e589f44d"
+        "version": "2.0.3",
+        "archive": "packages/public-hst-footprints-2.0.3.zip",
+        "sizeBytes": 8545,
+        "sha256": "9062432b79c41e1b4292aed1dc369993196945a3f592faef700ce153633fc1f2"
       },
       {
         "id": "public-panstarrs-footprints",
-        "version": "2.0.2",
-        "archive": "packages/public-panstarrs-footprints-2.0.2.zip",
-        "sizeBytes": 36962,
-        "sha256": "a4b2b37e6a2bd9d5fa4b5e3fe472934975823229f47f2eddbbbd6f204d38a188"
+        "version": "2.0.3",
+        "archive": "packages/public-panstarrs-footprints-2.0.3.zip",
+        "sizeBytes": 36964,
+        "sha256": "2a70f147edbf36535735528517b699594e0d6f558d1073ca768c1ee2d3f9f63f"
       },
       {
         "id": "public-des-footprints",
-        "version": "2.0.2",
-        "archive": "packages/public-des-footprints-2.0.2.zip",
-        "sizeBytes": 2263,
-        "sha256": "d42dc551fff6a9e8443225a8c51ec4e632453abeb2317fa7e1169af294e4775f"
+        "version": "2.0.3",
+        "archive": "packages/public-des-footprints-2.0.3.zip",
+        "sizeBytes": 2275,
+        "sha256": "5511f7cfc07ededa2ab3899185cc041f934d413b8b36a3f1d567d5e8cfe351c2"
       },
       {
         "id": "public-2mass-footprints",
-        "version": "2.0.2",
-        "archive": "packages/public-2mass-footprints-2.0.2.zip",
-        "sizeBytes": 23076,
-        "sha256": "0e76b875ed7bdf15d004ca3b2a9d912909b197d94d064ac7876e508025079724"
+        "version": "2.0.3",
+        "archive": "packages/public-2mass-footprints-2.0.3.zip",
+        "sizeBytes": 23077,
+        "sha256": "4adb195aecdde33043d278cb80003dc665be374a187cf083666bc15ce2cdd57e"
       },
       {
         "id": "public-allwise-footprints",
-        "version": "2.0.2",
-        "archive": "packages/public-allwise-footprints-2.0.2.zip",
-        "sizeBytes": 30300,
-        "sha256": "086d90534a910ddc36eaee87ce64eb57691e1cf353c95c4b54d5dcda774cf094"
+        "version": "2.0.3",
+        "archive": "packages/public-allwise-footprints-2.0.3.zip",
+        "sizeBytes": 30302,
+        "sha256": "54458feb2ee8f82671d826018dafd27f24777aa83f6dc9c9327fb4ece959d710"
       },
       {
         "id": "public-kids-footprints",
-        "version": "2.0.2",
-        "archive": "packages/public-kids-footprints-2.0.2.zip",
-        "sizeBytes": 1505,
-        "sha256": "8eb3b6944bd350db9cca24aa57ec6f1d7d21fded0dee6d52437416d6e4b1d3c2"
+        "version": "2.0.3",
+        "archive": "packages/public-kids-footprints-2.0.3.zip",
+        "sizeBytes": 1516,
+        "sha256": "6a532fda524bce275539fd72a8475d157ce4f2a539c1c101df63f38d8ce6b0d3"
       },
       {
         "id": "public-nvss-footprints",
-        "version": "2.0.2",
-        "archive": "packages/public-nvss-footprints-2.0.2.zip",
+        "version": "2.0.3",
+        "archive": "packages/public-nvss-footprints-2.0.3.zip",
         "sizeBytes": 7712,
-        "sha256": "4161b5c439e78442469f5558e0c23f80faef86bd2fb8eb789757c44058537e41"
+        "sha256": "5495fe8633217542290817a0880533e59395a14d3a870a29cff67b6dadb0dbcc"
       },
       {
         "id": "public-imaging-footprints",

@@ -7,7 +7,7 @@ import test from "node:test";
 import type { ConnectorCredentialStore } from "../src/connector-credentials.js";
 import { ConnectorIngestRunCatalog } from "../src/connector-history.js";
 import { connectorConfigurationHash, type ConnectorRecord, type ConnectorRegistry } from "../src/connectors.js";
-import type { DataAssetRecord, DataCatalogRegistry } from "../src/data-catalog.js";
+import type { DataAssetRecord, DataAssetRegistrationInput, DataCatalogRegistry } from "../src/data-catalog.js";
 import { ConnectorScanCapabilityError, ConnectorScanPreconditionError, connectorScanPath, connectorScanTarget, DataWarehouseDisabledError, dataWarehouseEnabled, FlinkScanService, parseLegacyConnectorScanCommand, validateConnectorSelfScanBody, type FlinkResourceClient } from "../src/flink-ingest.js";
 import { SqliteMetadataStore } from "../src/storage/index.js";
 
@@ -71,10 +71,41 @@ async function scanFixture(connectorRecord: ConnectorRecord, assets: DataAssetRe
       return { status: method === "POST" ? 201 : 200, ok: true, text: "{}" };
     },
   };
+  const catalogAssets = structuredClone(assets);
+  const dataCatalog: DataCatalogRegistry = {
+    list: async () => structuredClone(catalogAssets),
+    register: async (input: DataAssetRegistrationInput) => {
+      const now = timestamp;
+      const record: DataAssetRecord = {
+        id: `user-auto-${catalogAssets.length + 1}`,
+        name: input.name,
+        description: input.description ?? "",
+        surveyId: input.surveyId,
+        releaseId: input.releaseId,
+        product: input.product ?? input.name,
+        kind: input.kind,
+        modalities: input.modalities ?? input.tags ?? [],
+        tags: input.tags ?? input.modalities ?? [],
+        access: { connector: input.connector ?? "metadata", uri: input.sourceUri ?? "asset://fixture", format: input.format ?? "metadata" },
+        accesses: input.accesses ?? [{ connector: input.connector ?? "metadata", uri: input.sourceUri ?? "asset://fixture", format: input.format ?? "metadata" }],
+        connectorIds: input.connectorIds ?? [],
+        connectorLocationKeys: input.connectorLocationKeys ?? [],
+        status: input.status ?? "metadata_only",
+        projectState: input.projectState ?? "planned",
+        projectStates: input.projectStates,
+        footprintIds: input.footprintIds ?? [],
+        origin: "user",
+        createdAt: now,
+        updatedAt: now,
+      };
+      catalogAssets.push(record);
+      return structuredClone(record);
+    },
+  } as unknown as DataCatalogRegistry;
   const service = new FlinkScanService({
     enabled: true,
     connectors: { get: async () => structuredClone(connectorRecord) } as unknown as ConnectorRegistry,
-    dataCatalog: { list: async () => structuredClone(assets) } as unknown as DataCatalogRegistry,
+    dataCatalog,
     credentials: { get: async () => ({ accessKeyId: "access", secretAccessKey: "secret", endpoint: "https://s3.example" }) } as unknown as ConnectorCredentialStore,
     runs,
     namespace: "warehouse",
@@ -84,7 +115,7 @@ async function scanFixture(connectorRecord: ConnectorRecord, assets: DataAssetRe
     pollMs: 1000,
     resourceClient,
   });
-  return { directory, store, runs, requests, service };
+  return { directory, store, runs, requests, service, catalogAssets };
 }
 
 test("external Flink polling failures preserve the stored scan state", async () => {
@@ -196,15 +227,64 @@ test("connector self-scan derives its target and snapshots zero, one, or multipl
       assert.equal(run.connectorKind, "s3");
       assert.equal(run.executor, "flink-ingest");
       assert.deepEqual(run.target, { uri: "s3://survey/release", bucket: "survey", prefix: "release" });
-      assert.deepEqual(run.assetIds, [...assetIds].sort());
+      assert.deepEqual(run.assetIds, assetIds.length ? [...assetIds].sort() : ["user-auto-2"]);
+      const token = run.batchId?.replace("workspace-connector-scan-", "");
+      assert.ok(token);
+      assert.match(run.jobId ?? "", new RegExp(`^astro-connector-scan-.*-${token}$`));
+      assert.ok((run.jobId?.length ?? 64) <= 63);
       const task = fixture.requests.find((request) => request.path.includes("/flinkingesttasks"));
       assert.ok(task);
-      const body = task.body as { spec?: { paths?: string[] } };
+      const body = task.body as { spec?: { paths?: string[]; extraEnvs?: Record<string, unknown> } };
       assert.deepEqual(body.spec?.paths, ["s3://survey/release"]);
+      assert.equal(body.spec?.extraEnvs?.esHost, "elasticsearch");
+      assert.equal(body.spec?.extraEnvs?.datasetIndex, "astro_file_index_v1");
+      assert.deepEqual(body.spec?.extraEnvs?.others, {
+        ES_SCHEMA: "http",
+        ES_DATASET_GROUP_INDEX: "astro_object_index_v1",
+        ES_INGEST_JOB_INFO_INDEX: "astro_coverage_index_v1",
+      });
     } finally {
       await fixture.store.close();
       await rm(fixture.directory, { recursive: true, force: true });
     }
+  }
+});
+
+test("connector self-scan registers one user asset when no asset is linked", async () => {
+  const record = connector({ surveyId: "euclid", releaseId: "euclid-q1", name: "Euclid Q1 MER Catalog" });
+  const fixture = await scanFixture(record);
+  try {
+    const run = await fixture.service.submitConnectorScan(record.id, "auto-register");
+    assert.deepEqual(run.assetIds, ["user-auto-1"]);
+    assert.equal(fixture.catalogAssets.length, 1);
+    assert.deepEqual(fixture.catalogAssets[0], {
+      id: "user-auto-1",
+      name: "Euclid Q1 MER Catalog",
+      description: "Scanned catalog from s3://survey/release. Created automatically when the connector was scanned.",
+      surveyId: "euclid",
+      releaseId: "euclid-q1",
+      product: "Euclid Q1 MER Catalog",
+      kind: "catalog",
+      modalities: ["catalog"],
+      tags: ["catalog"],
+      access: { connector: "s3", uri: "s3://survey/release", format: "directory" },
+      accesses: [{ connector: "s3", uri: "s3://survey/release", format: "directory" }],
+      connectorIds: ["connector-s3"],
+      connectorLocationKeys: ["s3://survey/release"],
+      status: "ready",
+      projectState: "acquired",
+      projectStates: undefined,
+      footprintIds: [],
+      origin: "user",
+      createdAt: timestamp,
+      updatedAt: timestamp,
+    });
+    const retry = await fixture.service.submitConnectorScan(record.id, "auto-register-retry");
+    assert.deepEqual(retry.assetIds, ["user-auto-1"]);
+    assert.equal(fixture.catalogAssets.length, 1);
+  } finally {
+    await fixture.store.close();
+    await rm(fixture.directory, { recursive: true, force: true });
   }
 });
 

@@ -21,7 +21,11 @@ export function normalizeLayerOrder(
   };
   for (const key of storedKeys) add(key);
   for (const key of defaultKeys) add(key);
-  for (const key of known) add(key);
+  // Only add all known keys if defaultKeys was provided and non-empty
+  const defaults = Array.isArray(defaultKeys) ? defaultKeys : [...defaultKeys];
+  if (defaults.length > 0) {
+    for (const key of known) add(key);
+  }
   return ordered;
 }
 

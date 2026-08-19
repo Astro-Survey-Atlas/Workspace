@@ -14,7 +14,7 @@ const outputRoot = path.join(root, "bootstrap", "resource-packages");
 const source = JSON.parse(await readFile(path.join(root, "src", "footprints", "survey-footprints.json"), "utf8")) as SurveyFootprintManifest;
 const generatedAt = source.generatedAt;
 const catalogOnly = process.argv.includes("--catalog-only");
-const packageVersion = "2.0.2";
+const packageVersion = "2.0.3";
 
 interface PackageDefinition {
   surveyId: string;
@@ -26,6 +26,7 @@ interface PackageDefinition {
   facilities: string[];
   coverageAuthorities: string[];
   accessModes: string[];
+  version?: string;
   sources: Array<{ releaseId: string; label: string; url: string; authority: string; license?: string }>;
 }
 
@@ -41,9 +42,19 @@ const definitions: readonly PackageDefinition[] = [
     sources: [{ releaseId: "galex-gr6-gr7", label: "GALEX GR6/GR7 HiPS MOC", url: "https://alasky.cds.unistra.fr/MocServer/query?ID=CDS%2FP%2FGALEXGR6_7%2Fcolor&get=record&fmt=json", authority: "CDS", license: "ODbL-1.0 derivative" }],
   },
   {
-    surveyId: "legacy-surveys", name: "Legacy Surveys", description: "Legacy Surveys DR10 彩色成像覆盖，不代表 DESI 光谱覆盖。",
+    surveyId: "desi", name: "DESI Spectroscopy", description: "DESI EDR and DR1 observed spectroscopic tile coverage derived from the official Fuji and Iron TILE_COMPLETENESS tables; this is separate from Legacy Surveys imaging.",
+    modalities: ["spectroscopy", "catalog"], wavelengths: ["optical-spectroscopy"], productTypes: ["observed-tile-MOC"], facilities: ["DESI", "Mayall 4-meter Telescope"], coverageAuthorities: ["official-tile-table"], accessModes: ["DESI Data Release"],
+    version: "2.0.3",
+    sources: [
+      { releaseId: "desi-edr", label: "DESI EDR Fuji observed tiles", url: "https://data.desi.lbl.gov/public/edr/spectro/redux/fuji/tiles-fuji.fits", authority: "DESI Collaboration" },
+      { releaseId: "desi-dr1", label: "DESI DR1 Iron observed tiles", url: "https://data.desi.lbl.gov/public/dr1/spectro/redux/iron/tiles-iron.fits", authority: "DESI Collaboration" },
+    ],
+  },
+  {
+    surveyId: "legacy-surveys", name: "DESI Legacy Surveys", description: "DESI Legacy Surveys DR1-DR10 coadded-imaging coverage overviews and the exact DR10 color HiPS MOC; this is imaging coverage, not DESI spectroscopy.",
     modalities: ["imaging", "photometry"], wavelengths: ["optical", "infrared-photometry"], productTypes: ["HiPS-image"], facilities: ["DECam", "BASS", "MzLS"], coverageAuthorities: ["third-party-moc"], accessModes: ["Legacy Survey viewer", "CDS HiPS"],
-    sources: [{ releaseId: "legacy-dr10", label: "Legacy Surveys DR10 HiPS MOC", url: "https://alasky.cds.unistra.fr/MocServer/query?ID=CDS%2FP%2FDESI-Legacy-Surveys%2FDR10%2Fcolor&get=record&fmt=json", authority: "CDS", license: "ODbL-1.0 derivative" }],
+    version: "2.0.4",
+    sources: Array.from({ length: 10 }, (_, index) => ({ releaseId: `legacy-dr${index + 1}`, label: `Legacy Surveys DR${index + 1} observed-brick coverage`, url: `https://www.legacysurvey.org/dr${index + 1}/`, authority: "Legacy Surveys", license: "Legacy Surveys public data" })),
   },
   {
     surveyId: "sdss", name: "SDSS", description: "SDSS DR9 彩色成像覆盖；光谱和后续数据发布需独立覆盖制品。",
@@ -93,7 +104,7 @@ const definitions: readonly PackageDefinition[] = [
 ];
 
 async function createArchive(definition: PackageDefinition): Promise<{ fileName: string; sizeBytes: number; sha256: string }> {
-  const version = packageVersion;
+  const version = definition.version ?? packageVersion;
   const id = `public-${definition.surveyId}-footprints`;
   const manifest = {
     schemaVersion: 2,
@@ -138,7 +149,7 @@ for (const definition of definitions) {
     id: `public-${definition.surveyId}-footprints`,
     releases,
     releaseLabels: Object.fromEntries(releases.map((releaseId) => [releaseId, survey?.releases.find((release) => release.id === releaseId)?.label ?? releaseId])),
-    version: packageVersion,
+    version: definition.version ?? packageVersion,
     archiveUrl: archive.fileName,
     sizeBytes: archive.sizeBytes,
     sha256: archive.sha256,

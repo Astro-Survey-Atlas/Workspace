@@ -36,6 +36,23 @@ CDS 返回的是分层 NESTED MOC。显示目录统一到 NSIDE 16（order 4）�
 
 原始 ZIP 保存在 `artifacts/public-survey-footprints/raw/geometry/euclid-q1-region-files.zip`，索引 `raw/geometry/index.json` 记录来源、抓取时间、文件大小、SHA-256、多边形数量和解析器参数。`npm run artifacts:footprints` 会再次校验 ZIP 的大小与哈希；校验失败时不会生成可发布的 provenance。
 
+## DESI EDR 与 DR1 光谱 tile 覆盖
+
+DESI 光谱覆盖使用官方发布的 `TILE_COMPLETENESS` FITS 表，而不是 Legacy Surveys 成像范围：
+
+- EDR：`tiles-fuji.fits`，732 行；
+- DR1：`tiles-iron.fits`，6101 行。
+
+生成器 `scripts/build_desi_footprints.ts` 只保留 `NEXP > 0` 的实际观测 tile，并读取 `TILERA`、`TILEDEC` 作为 ICRS 圆心。本次两张表的全部行都满足该筛选。每个 tile 使用 DESI 官方焦平面几何所给的 413.4839307227412 mm 半径；通过 `desimodel 0.20.0` 的焦平面到天空换算得到 1.6280324520485583 度角半径。生成器用 `Healpix.queryDiscInclusive`、NSIDE 16、`fact = 8` 将圆盘并集栅格化为固定分辨率 NESTED 覆盖。
+
+原始 FITS 保存在 `artifacts/public-survey-footprints/raw/geometry/`。`raw/geometry/index.json` 记录官方 URL、行数、筛选条件、坐标列、半径、`desimodel` 版本、字节数和 SHA-256。这个制品表达已观测 tile 的焦平面包络，不表达每根光纤是否成功、目标选择函数、曝光深度或红移成功率。
+
+可复现命令：
+
+```bash
+npm run build:desi-footprints -- --edr /path/to/tiles-fuji.fits --dr1 /path/to/tiles-iron.fits
+```
+
 ## 复现命令
 
 在网络可访问时，从仓库根目录运行：
@@ -51,4 +68,4 @@ npm run validate
 
 ## 未完成产品
 
-SDSS 各版本的完整 release catalog、DESI 光谱、Legacy Surveys Tractor/CCD 几何、HSC PDR1/PDR3、HST Source Catalog/Advanced Products、GALEX 早期 release 和 Euclid ERO/Q2 等仍没有被本次 MOC 代填。它们继续在台账中明确写出缺少的官方几何和下一步提取方式。
+SDSS 各版本的完整 release catalog、DESI DR2 science-result tables、Legacy Surveys Tractor/CCD 精确几何、HSC PDR1/PDR3、HST Source Catalog/Advanced Products、GALEX 早期 release 和 Euclid ERO/Q2 等仍没有被本次 MOC 代填。它们继续在台账中明确写出缺少的官方几何和下一步提取方式。
