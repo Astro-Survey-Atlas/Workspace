@@ -9,13 +9,14 @@ const catalogRequest = {
   releaseId: "csst-sim-w1-20250731",
   product: "W1 photometric catalog",
   allowedSuffixes: [".csv", ".fits"],
+  fileNamePattern: "^CSST_MSC_MS_WIDE_.*\\.fits$",
   coverage: {
     mode: "catalog-radec",
     coordinateFrame: "ICRS",
     coordinateUnits: "deg",
     raColumn: "RA",
     decColumn: "DEC",
-    evidenceRole: "object_presence",
+    coverageRole: "object_presence",
   },
 };
 
@@ -27,8 +28,13 @@ test("coverage job normalizes catalog occupancy as an explicit non-footprint evi
     coordinateUnits: "deg",
     raColumn: "RA",
     decColumn: "DEC",
-    healpixOrder: 8,
-    evidenceRole: "object_presence",
+    coverageRole: "object_presence",
+    dataOrigin: "observed",
+    sourceTier: "user_file_derived",
+    maxOrder: 10,
+    queryOrder: 8,
+    previewOrder: 4,
+    fileNamePattern: "^CSST_MSC_MS_WIDE_.*\\.fits$",
   });
   assert.deepEqual(scannerCoverageProperties(request.coverage), {
     spatialMode: "catalog",
@@ -37,7 +43,12 @@ test("coverage job normalizes catalog occupancy as an explicit non-footprint evi
     coordinateFrame: "ICRS",
     coordinateUnits: "deg",
     coverageRole: "object_presence",
-    healpixOrder: "8",
+    maxOrder: "10",
+    queryOrder: "8",
+    previewOrder: "4",
+    dataOrigin: "observed",
+    sourceTier: "user_file_derived",
+    fileNamePattern: "^CSST_MSC_MS_WIDE_.*\\.fits$",
   });
   assert.deepEqual(coverageJobSnapshot("csst", request), {
     surveyId: "csst",
@@ -57,34 +68,48 @@ test("coverage job accepts declared NESTED pixels and WCS image extent with sepa
     healpixColumn: "HPX8",
     coordinateFrame: "ICRS",
     coverageRole: "object_presence",
-    healpixOrder: "8",
+    inputHealpixOrder: "8",
+    maxOrder: "10",
+    queryOrder: "8",
+    previewOrder: "4",
+    dataOrigin: "observed",
+    sourceTier: "user_file_derived",
+    fileNamePattern: "^CSST_MSC_MS_WIDE_.*\\.fits$",
   });
 
   const fits = validateCoverageJobSubmission({
     ...catalogRequest,
-    coverage: { mode: "fits-wcs", coordinateFrame: "ICRS", evidenceRole: "image_extent" },
+    coverage: { mode: "fits-wcs", coordinateFrame: "ICRS", coverageRole: "image_extent" },
   });
   assert.deepEqual(scannerCoverageProperties(fits.coverage), {
     spatialMode: "auto",
     coordinateFrame: "ICRS",
     coverageRole: "image_extent",
+    maxOrder: "10",
+    queryOrder: "8",
+    previewOrder: "4",
+    dataOrigin: "observed",
+    sourceTier: "user_file_derived",
+    fileNamePattern: "^CSST_MSC_MS_WIDE_.*\\.fits$",
   });
 });
 
 test("coverage job rejects ambiguous or unsupported scientific claims", () => {
   assert.throws(() => validateCoverageJobSubmission({
     ...catalogRequest,
-    coverage: { mode: "catalog-radec", coordinateFrame: "ICRS", raColumn: "RA", decColumn: "DEC", evidenceRole: "image_extent" },
+    coverage: { mode: "catalog-radec", coordinateFrame: "ICRS", raColumn: "RA", decColumn: "DEC", coverageRole: "image_extent" },
   }), /object_presence/);
-  assert.throws(() => validateCoverageJobSubmission({
+  assert.doesNotThrow(() => validateCoverageJobSubmission({
     ...catalogRequest,
     coverage: { mode: "nested-healpix", coordinateFrame: "ICRS", healpixColumn: "HPX", healpixOrder: 6 },
-  }), /healpixOrder/);
+  }));
   assert.throws(() => validateCoverageJobSubmission({
     ...catalogRequest,
     coverage: { mode: "fits-wcs", coordinateFrame: "ICRS", raColumn: "RA" },
   }), /does not accept/);
   assert.throws(() => validateCoverageJobSubmission({ ...catalogRequest, connectorId: "not a connector" }), /stable identifier/);
+  assert.throws(() => validateCoverageJobSubmission({ ...catalogRequest, fileNamePattern: "foo/bar" }), /basename/);
+  assert.throws(() => validateCoverageJobSubmission({ ...catalogRequest, fileNamePattern: "bad\npattern" }), /basename|newlines/);
   assert.throws(() => validateCoverageJobSnapshot({
     surveyId: "csst",
     releaseId: "csst-sim-w1-20250731",

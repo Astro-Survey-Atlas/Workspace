@@ -1,13 +1,14 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 
-import { connectorLocationKey, hasCurrentSuccessfulConnectorCheck, listConnectorObjects, type ConnectorRecord } from "./connectors.js";
+import { connectorConfigurationHash, connectorLocationKey, hasCurrentSuccessfulConnectorCheck, listConnectorObjects, type ConnectorRecord } from "./connectors.js";
 import type { ConnectorCredentialStore, StoredConnectorCredentials } from "./connector-credentials.js";
 import { ConnectorIngestRunCatalog, type ConnectorIngestRunRecord, type ConnectorScanTargetSnapshot } from "./connector-history.js";
 import { coverageJobSnapshot, scannerCoverageProperties, validateCoverageJobSnapshot, validateCoverageJobSubmission, type CoverageJobSnapshot } from "./coverage-jobs.js";
 import type { DataAssetRecord, DataCatalogRegistry } from "./data-catalog.js";
 import type { ConnectorRegistry } from "./connectors.js";
 import { resolveDataOwnership, type EffectiveDataOwnership } from "./data-ownership.js";
+import { assetsCoreContext } from "./assets-core.js";
 
 const TASK_API = "/apis/org.zhejianglab.astro.metadata/v1alpha1";
 const PILOT_ASSETS = [
@@ -37,6 +38,7 @@ interface KubernetesList<T> { items?: T[]; }
 export interface GenericScanInput {
   assetId: string;
   path?: string;
+  fileNamePattern?: string;
   allowedSuffixes?: string[];
   spatial?: {
     mode?: "none" | "auto" | "catalog" | "healpix";
@@ -46,7 +48,7 @@ export interface GenericScanInput {
     healpixColumn?: string;
     frame?: string;
     units?: string;
-    role?: string;
+    coverageRole?: string;
     healpixOrder?: number;
   };
   /** Explicit survey coverage evidence; populated only by the coverage-job API. */
@@ -107,6 +109,24 @@ export function dataWarehouseEnabled(value = process.env.ASTRO_DATA_WAREHOUSE_EN
   if (value === undefined || value === "false") return false;
   if (value === "true") return true;
   throw new RangeError("ASTRO_DATA_WAREHOUSE_ENABLED must be true or false");
+}
+
+function coverageIdempotencyKey(connector: ConnectorRecord, submission: ReturnType<typeof validateCoverageJobSubmission>, surveyId: string): string {
+  const normalized = {
+    algorithmVersion: "astro-survey-assets-moc-core-v3",
+    scannerVersion: process.env.ASTRO_SCANNER_VERSION ?? "astro-survey-assets",
+    surveyId,
+    releaseId: submission.releaseId,
+    product: submission.product,
+    connectorId: connector.id,
+    connectorLocationKey: connector.locationKey,
+    connectorConfigHash: connectorConfigurationHash(connector),
+    path: submission.path ?? "",
+    fileNamePattern: submission.fileNamePattern ?? "",
+    allowedSuffixes: [...(submission.allowedSuffixes ?? [])].sort(),
+    coverage: submission.coverage,
+  };
+  return `coverage:${createHash("sha256").update(JSON.stringify(normalized)).digest("hex")}`;
 }
 
 class KubernetesResourceClient implements FlinkResourceClient {
@@ -360,10 +380,10 @@ export class FlinkScanService {
     const coverage = input.coverage ? validateCoverageJobSnapshot(input.coverage) : undefined;
     const coverageSpatial = coverage
       ? coverage.mode === "catalog-radec"
-        ? { mode: "catalog" as const, raColumn: coverage.raColumn, decColumn: coverage.decColumn, frame: coverage.coordinateFrame, units: coverage.coordinateUnits, role: coverage.evidenceRole, healpixOrder: coverage.healpixOrder }
+          ? { mode: "catalog" as const, raColumn: coverage.raColumn, decColumn: coverage.decColumn, frame: coverage.coordinateFrame, units: coverage.coordinateUnits, coverageRole: coverage.coverageRole, healpixOrder: coverage.healpixOrder, maxOrder: coverage.maxOrder, queryOrder: coverage.queryOrder, previewOrder: coverage.previewOrder }
         : coverage.mode === "nested-healpix"
-          ? { mode: "healpix" as const, healpixColumn: coverage.healpixColumn, frame: coverage.coordinateFrame, role: coverage.evidenceRole, healpixOrder: coverage.healpixOrder }
-          : { mode: "auto" as const, frame: coverage.coordinateFrame, role: coverage.evidenceRole, healpixOrder: 8 }
+          ? { mode: "healpix" as const, healpixColumn: coverage.healpixColumn, frame: coverage.coordinateFrame, coverageRole: coverage.coverageRole, healpixOrder: coverage.healpixOrder, maxOrder: coverage.maxOrder, queryOrder: coverage.queryOrder, previewOrder: coverage.previewOrder }
+          : { mode: "auto" as const, frame: coverage.coordinateFrame, coverageRole: coverage.coverageRole, maxOrder: coverage.maxOrder, queryOrder: coverage.queryOrder, previewOrder: coverage.previewOrder }
       : undefined;
     const spatial = coverageSpatial ?? input.spatial;
     const spatialMode = spatial?.mode ?? "auto";
@@ -374,9 +394,7 @@ export class FlinkScanService {
     if (spatialMode === "healpix" && !spatial?.healpixColumn?.trim()) {
       throw new RangeError("healpix spatial mode requires healpixColumn");
     }
-    if ((spatial?.healpixOrder ?? 8) !== 8) {
-      throw new RangeError("workspace sky coverage currently requires healpixOrder=8");
-    }
+    if (spatial?.healpixOrder !== undefined && (!Number.isInteger(spatial.healpixOrder) || spatial.healpixOrder < 0 || spatial.healpixOrder > 29)) throw new RangeError("spatial.healpixOrder must be an integer between 0 and 29");
     const stored = connector.credentialRef ? await this.#credentials.get(connector.credentialRef) : undefined;
     if (!stored?.accessKeyId || !stored.secretAccessKey) throw new RangeError("Connector has no saved S3 credentials");
     const path = connectorScanPath(connector, input.path);
@@ -411,6 +429,7 @@ export class FlinkScanService {
         asset,
         paths: [path],
         allowedSuffixes: input.allowedSuffixes?.length ? input.allowedSuffixes : ["*"],
+        fileNamePattern: input.fileNamePattern,
         spatial,
         coverage,
         taskName,
@@ -450,9 +469,10 @@ export class FlinkScanService {
     return this.submitScan(submission.connectorId, {
       assetId: submission.assetId,
       ...(submission.path === undefined ? {} : { path: submission.path }),
+      ...(submission.fileNamePattern === undefined ? {} : { fileNamePattern: submission.fileNamePattern }),
       allowedSuffixes,
       coverage,
-    }, idempotencyKey);
+    }, idempotencyKey ?? coverageIdempotencyKey(connector, submission, surveyId));
   }
 
   async submitConnectorScan(connectorId: string, idempotencyKey?: string): Promise<ConnectorIngestRunRecord> {
@@ -536,6 +556,10 @@ export class FlinkScanService {
     if (actualRunId && actualRunId !== run.batchId) {
       run = await this.#runs.update(run.id, { batchId: actualRunId });
     }
+    const discoveredFiles = result.value.status?.discoveredFiles;
+    if (Number.isInteger(discoveredFiles) && discoveredFiles! >= 0 && discoveredFiles !== run.fileCount) {
+      run = await this.#runs.update(run.id, { fileCount: discoveredFiles });
+    }
     const nextStatus = statusFromTask(result.value);
     if (nextStatus === "succeeded") {
       try {
@@ -570,7 +594,7 @@ export class FlinkScanService {
         const response = await fetch(`${this.#esUrl}/${encodeURIComponent(this.#esIndex)}/_count`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ query: { bool: { filter: [{ term: { run_id: batchId } }] } } }),
+          body: JSON.stringify({ query: { bool: { filter: [{ term: { scan_run_id: batchId } }] } } }),
           signal: AbortSignal.timeout(15000),
         });
         if (!response.ok) throw new Error(`Elasticsearch count failed (HTTP ${response.status})`);
@@ -629,6 +653,7 @@ export class FlinkScanService {
     connector: ConnectorRecord;
     asset: DataAssetRecord;
     paths: string[];
+    fileNamePattern?: string;
     allowedSuffixes: string[];
     spatial?: GenericScanInput["spatial"];
     coverage?: CoverageJobSnapshot;
@@ -637,7 +662,7 @@ export class FlinkScanService {
     batchId: string;
     secretName: string;
   }): Promise<void> {
-    const { connector, asset, paths, allowedSuffixes, spatial, coverage, taskName, batchId, secretName, ownership } = input;
+    const { connector, asset, paths, allowedSuffixes, fileNamePattern, spatial, coverage, taskName, batchId, secretName, ownership } = input;
     const astro = spatial ?? {};
     const scannerSpatial = coverage ? scannerCoverageProperties(coverage) : {
       ...(astro.mode ? { spatialMode: astro.mode } : {}),
@@ -646,8 +671,9 @@ export class FlinkScanService {
       ...(astro.healpixColumn ? { healpixColumn: astro.healpixColumn } : {}),
       ...(astro.frame ? { coordinateFrame: astro.frame } : {}),
       ...(astro.units ? { coordinateUnits: astro.units } : {}),
-      ...(astro.role ? { coverageRole: astro.role } : {}),
-      ...(astro.healpixOrder === undefined ? {} : { healpixOrder: String(astro.healpixOrder) }),
+      ...(astro.coverageRole ? { coverageRole: astro.coverageRole } : {}),
+      ...(astro.healpixOrder === undefined ? {} : { inputHealpixOrder: String(astro.healpixOrder) }),
+      ...(fileNamePattern ? { fileNamePattern } : {}),
     };
     const body = {
       apiVersion: "org.zhejianglab.astro.metadata/v1alpha1",
@@ -665,12 +691,18 @@ export class FlinkScanService {
       spec: {
         backend: "job",
         source: { dataSourceRef: { name: connector.id }, paths },
+        ...(fileNamePattern ? { fileNamePattern } : {}),
         handlers: ["default", "fits", "coverage", ...(spatial?.mode === "catalog" ? ["object"] : [])],
         tags: asset.tags ?? asset.modalities,
         userProperties: {
           ...Object.fromEntries(Object.entries({
             survey: ownership.surveyId ?? "", release: ownership.releaseId ?? "", product: asset.product,
             modality: asset.modalities.join("+"), assetId: asset.id, connector: connector.locationKey,
+            connectorConfigHash: connectorConfigurationHash(connector),
+            mocCoreDistribution: assetsCoreContext().distribution,
+            mocCoreImport: assetsCoreContext().importName,
+            mocCoreCli: assetsCoreContext().cli,
+            mocCoreContract: assetsCoreContext().contractVersion,
             fileIndex: this.#esIndex, coverageIndex: this.#esCoverageIndex, objectIndex: this.#esObjectIndex,
             ...scannerSpatial,
           }).filter(([, value]) => value !== "")),
@@ -729,6 +761,10 @@ export class FlinkScanService {
           fileIndex: this.#esIndex,
           coverageIndex: this.#esCoverageIndex,
           objectIndex: this.#esObjectIndex,
+          mocCoreDistribution: assetsCoreContext().distribution,
+          mocCoreImport: assetsCoreContext().importName,
+          mocCoreCli: assetsCoreContext().cli,
+          mocCoreContract: assetsCoreContext().contractVersion,
         },
         sink: { dataSourceRef: { name: `${connector.id}-sink` } },
         extraEnv: {

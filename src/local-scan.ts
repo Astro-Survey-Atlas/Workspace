@@ -96,6 +96,12 @@ export interface LocalCoverageFactDocument {
   asset_id: string;
   source_file_id: string;
   scan_run_id: string;
+  coverage_role?: "image_extent" | "object_presence" | "footprint_extent";
+  data_origin?: "observed" | "simulated" | "derived" | "unknown";
+  source_tier?: "user_file_derived" | "survey_authoritative" | "catalog_derived" | "unknown";
+  max_order?: number;
+  query_order?: number;
+  preview_order?: number;
 }
 
 export type LocalScanDocument = LocalObjectIndexDocument | LocalCoverageFactDocument;
@@ -469,6 +475,12 @@ export async function scanLocalCsv(
       asset_id: options.assetId,
       source_file_id: options.sourceFileId,
       scan_run_id: options.scanRunId,
+      coverage_role: "object_presence",
+      data_origin: "observed",
+      source_tier: "user_file_derived",
+      max_order: 10,
+      query_order: 8,
+      preview_order: 4,
     }));
 
   for (const document of coverageDocuments) {

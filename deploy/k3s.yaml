@@ -151,7 +151,7 @@ spec:
         fsGroupChangePolicy: OnRootMismatch
       containers:
         - name: mcp
-          image: crpi-wixjy6gci86ms14e.cn-hongkong.personal.cr.aliyuncs.com/ay-dev/astro-data-workspace-mcp:0.10.38-20260819-scantask
+          image: crpi-wixjy6gci86ms14e.cn-hongkong.personal.cr.aliyuncs.com/ay-dev/astro-data-workspace-mcp:0.10.38-20260821-atlas-cleanup4
           imagePullPolicy: Always
           ports:
             - name: http
@@ -179,22 +179,10 @@ spec:
               value: /state/connectors.json
             - name: ASTRO_CONNECTOR_RUN_STATE
               value: /state/connector-ingest-runs.json
-            - name: ASTRO_MANUAL_FOOTPRINT_STATE
-              value: /state/manual-footprints.json
-            - name: ASTRO_MANUAL_FOOTPRINT_ADMIN_TOKEN
-              valueFrom:
-                secretKeyRef:
-                  name: astro-data-workspace-manual-footprints
-                  key: admin-token
-                  optional: true
             - name: ASTRO_ALLOWED_ROOTS
               value: /catalogs:/data/local
             - name: ASTRO_LOCAL_CONNECTOR_ROOTS
               value: /data/local:/catalogs
-            - name: ASTRO_BOOTSTRAP_CATALOG
-              value: /catalogs/cosmos-clean-v2/processing_summary.csv
-            - name: ASTRO_BOOTSTRAP_NAME
-              value: COSMOS Clean V2
             - name: ASTRO_VOLUME_ROOT
               value: /volumes
             - name: ASTRO_ATLAS_ROOT
@@ -202,7 +190,16 @@ spec:
             - name: ASTRO_WORKFLOW_ROOT
               value: /state/workflow-runs
             - name: ASTRO_RESOURCE_CATALOG_URL
-              value: file:///app/bootstrap/resource-packages/catalog.json
+              value: http://astro-survey-atlas-assets.astro-survey-atlas-assets.svc.cluster.local/api/v1/resource-packages/catalog.json
+            - name: ASTRO_RESOURCE_CATALOG_ALLOWED_ORIGINS
+              value: http://astro-survey-atlas-assets.astro-survey-atlas-assets.svc.cluster.local
+            - name: ASTRO_RESOURCE_ADMIN_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: astro-data-workspace-resource-admin
+                  key: admin-token
+            - name: ASTRO_RESOURCE_SNAPSHOT_ROOT
+              value: /state
             - name: ASTRO_RESOURCE_PACKAGE_ROOT
               value: /resource-packages
             - name: ASTRO_RESOURCE_PACKAGE_STATE
@@ -216,7 +213,7 @@ spec:
             # Independent search service for local object and coverage indices.
             # Keep this inside the cluster; the public NodePort is for the workspace API only.
             - name: ASTRO_ES_URL
-              value: http://astro-search-elasticsearch:9200
+              value: http://astro-search-elasticsearch.astro-data-workspace.svc.cluster.local:9200
             - name: ASTRO_ES_ASTRO_INDEX
               value: astro_file_index_v1
             - name: ASTRO_ES_OBJECT_INDEX

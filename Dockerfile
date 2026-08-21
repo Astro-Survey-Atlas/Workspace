@@ -20,18 +20,18 @@ ENV NODE_ENV=production \
     ASTRO_METADATA_STORE=sqlite \
     ASTRO_SQLITE_PATH=/state/workspace.sqlite \
     ASTRO_WORKSPACE_STATE=/state/registry.json \
-    ASTRO_DATA_CATALOG_BOOTSTRAP=/app/bootstrap/catalogs.json \
+    ASTRO_DATA_CATALOG_BOOTSTRAP=/state/assets-current/data-catalog.json \
     ASTRO_DATA_CATALOG_STATE=/state/data-catalog.json \
     ASTRO_CONNECTOR_BOOTSTRAP=/app/bootstrap/connectors.json \
     ASTRO_CONNECTOR_STATE=/state/connectors.json \
     ASTRO_CONNECTOR_RUN_STATE=/state/connector-ingest-runs.json \
     ASTRO_WORKFLOW_ROOT=/state/workflow-runs \
-    ASTRO_RESOURCE_CATALOG_URL=file:///app/bootstrap/resource-packages/catalog.json \
+    ASTRO_RESOURCE_CATALOG_URL=file:///state/assets-current/catalog.json \
+    ASTRO_RESOURCE_SNAPSHOT_ROOT=/state \
     ASTRO_RESOURCE_PACKAGE_ROOT=/state/resource-packages \
     ASTRO_RESOURCE_PACKAGE_STATE=/state/resource-package-state.json \
     ASTRO_ALLOWED_ROOTS=/app/fixtures \
-    ASTRO_VIEWER_ROOT=/app/viewer \
-    ASTRO_SURVEY_FOOTPRINT_ROOT=/app/footprints
+    ASTRO_VIEWER_ROOT=/app/viewer
 
 WORKDIR /app
 RUN groupadd --gid 10001 astro \
@@ -42,8 +42,7 @@ RUN groupadd --gid 10001 astro \
 COPY --from=build --chown=astro:astro /app/node_modules ./node_modules
 COPY --from=build --chown=astro:astro /app/dist/src ./dist
 COPY --from=build --chown=astro:astro /app/dist/viewer ./viewer
-COPY --chown=astro:astro bootstrap ./bootstrap
-COPY --chown=astro:astro src/footprints ./footprints
+COPY --chown=astro:astro bootstrap/connectors.json ./bootstrap/connectors.json
 COPY --chown=astro:astro test/fixtures ./fixtures
 
 USER 10001:10001

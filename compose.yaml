@@ -20,7 +20,6 @@ services:
       ASTRO_WORKSPACE_STATE: /state/registry.json
       ASTRO_DATA_CATALOG_STATE: /state/data-catalog.json
       ASTRO_SURVEY_REGISTRY_STATE: /state/survey-registrations.json
-      ASTRO_MANUAL_FOOTPRINT_STATE: /state/manual-footprints.json
       ASTRO_CONNECTOR_STATE: /state/connectors.json
       ASTRO_CONNECTOR_RUN_STATE: /state/connector-ingest-runs.json
       ASTRO_CONNECTOR_BOOTSTRAP: /app/bootstrap/connectors.json

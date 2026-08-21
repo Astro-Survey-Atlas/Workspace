@@ -204,41 +204,15 @@
         <div class="catalog-search-bar">
           <label class="sr-only" for="resource-package-search">搜索巡天资源</label>
           <input id="resource-package-search" class="field-input" type="search" placeholder="搜索名称、设施、波段、发布或产品" />
+          <button id="resource-package-sync" class="icon-button compact-icon-command" type="button" aria-label="同步公开巡天目录" title="同步公开巡天目录"><i data-lucide="refresh-cw"></i></button>
+          <button id="resource-package-settings" class="icon-button compact-icon-command" type="button" aria-label="配置公开巡天目录" title="配置公开巡天目录"><i data-lucide="settings-2"></i></button>
           <button id="resource-package-apply" class="primary-command compact-command" type="button" disabled><span>应用到天球</span></button>
          </div>
+          <output id="resource-package-feedback" class="resource-package-feedback" aria-live="polite"></output>
           <div class="resource-package-columns"><span></span><span>巡天</span><span>已收录覆盖 <button class="status-help" type="button" aria-label="已收录覆盖说明"><i data-lucide="info" aria-hidden="true"></i><span class="sr-only">已收录覆盖说明</span><span class="status-help-tooltip" role="tooltip"><span><strong>真实覆盖：</strong>已有验证过的像素几何，可以加载到 3D 天球。</span><span><strong>官方概览：</strong>只有大致范围说明，不能当作精确覆盖。</span><span><strong>待补充几何：</strong>已有官方资料，但还没有可验证的像素几何。</span><span><strong>未收录：</strong>当前没有可用的公开覆盖制品。</span></span></button></span><span>服务器状态 <button class="status-help" type="button" aria-label="服务器状态说明"><i data-lucide="info" aria-hidden="true"></i><span class="sr-only">服务器状态说明</span><span class="status-help-tooltip" role="tooltip"><span><strong>未下载：</strong>当前服务器还没有覆盖包。</span><span><strong>下载中：</strong>正在把覆盖包保存到当前服务器。</span><span><strong>已下载：</strong>覆盖包已保存，但还没有显示到天球。</span><span><strong>已应用：</strong>覆盖正在“数据覆盖”天球中显示。</span><span><strong>可更新：</strong>目录有比本地更近的覆盖包版本。</span><span><strong>失败：</strong>下载或校验没有完成，可以再次点击“应用到天球”。</span></span></button></span></div>
         <div id="resource-package-list" class="resource-package-list"></div>
         <div id="resource-package-empty" class="catalog-empty" hidden>暂无符合当前条件的公开覆盖资源。</div>
         <footer class="catalog-stage-footer">应用后可前往“数据覆盖”查看 3D 天球。未下载的选择会先自动下载到当前服务器；用户数据始终由 Connector 独立管理。</footer>
-      </section>
-
-      <section id="public-release-detail-stage" class="catalog-stage public-release-detail-stage" aria-label="公开版本详情" hidden>
-        <header class="public-release-detail-header">
-           <button id="public-release-detail-back" class="command-button secondary" type="button">返回巡天版本</button>
-          <div>
-            <span id="public-release-detail-kicker" class="panel-kicker">PUBLIC RELEASE</span>
-            <h2 id="public-release-detail-title">公开版本</h2>
-            <p id="public-release-detail-summary"></p>
-          </div>
-          <a id="public-release-detail-source" class="release-detail-link" target="_blank" rel="noreferrer">数据发布页 ↗</a>
-        </header>
-        <dl id="public-release-detail-metadata" class="public-release-detail-metadata"></dl>
-        <section class="public-release-products-section">
-           <div class="section-heading"><span>数据产品与天空覆盖</span><output id="public-release-product-count">0 / 0 已收录</output></div>
-          <p class="catalog-stage-copy">状态按产品分别记录。只有带有真实几何制品的产品可用于天球；“待人工处理”表示官方资料已登记，但仍需从官方边界、tile、brick、tract 或 MOC 计算覆盖。</p>
-          <div id="public-release-product-list" class="public-release-product-list"></div>
-        </section>
-      </section>
-
-      <section id="public-survey-overview-stage" class="catalog-stage public-survey-overview-stage" aria-label="巡天公开版本列表" hidden>
-        <header class="catalog-stage-header public-survey-overview-header">
-          <button id="public-survey-overview-back" class="command-button secondary" type="button">返回公开资源集</button>
-          <div><span class="panel-kicker">PUBLIC SURVEY</span><h2 id="public-survey-overview-title">巡天</h2><p id="public-survey-overview-summary"></p></div>
-        </header>
-        <section class="public-survey-overview-releases-section">
-          <div class="public-survey-overview-columns"><span>公开版本</span><span>覆盖状态</span></div>
-          <div id="public-survey-overview-releases" class="public-survey-overview-releases"></div>
-        </section>
       </section>
 
       <section id="connector-stage" class="catalog-stage connector-stage" aria-label="连接器目录" hidden>
@@ -262,7 +236,6 @@
           <div id="connector-list-search" class="catalog-search-bar connector-search-bar">
             <label class="sr-only" for="connector-search">搜索连接器</label>
             <input id="connector-search" class="field-input" type="search" placeholder="搜索名称、路径、类型、状态、巡天或发布" />
-            <button id="survey-new" class="command-button secondary compact-command" type="button"><i data-lucide="plus"></i><span>新增巡天</span></button>
             <button id="connector-new" class="primary-command compact-command" type="button"><i data-lucide="plus"></i><span>新增 Connector</span></button>
           </div>
           <div class="connector-columns"><span>连接器</span><span>路径</span><span>类型</span><span>连接状态 <button class="status-help" type="button" aria-label="连接状态说明"><i data-lucide="info" aria-hidden="true"></i><span class="sr-only">连接状态说明</span><span class="status-help-tooltip" role="tooltip">未检测：配置已保存但尚未验证。可用：最近一次检测通过。异常：最近一次检测失败。已停用：不会用于新的访问或扫描。</span></button></span></div>
@@ -422,7 +395,7 @@
         <form id="catalog-registration-form" class="dialog-form">
           <header><div><span class="panel-kicker">NEW DATA ASSET</span><h2 id="catalog-form-title">登记用户数据</h2></div><button id="catalog-dialog-close" class="icon-button" type="button" aria-label="关闭"><span aria-hidden="true">×</span></button></header>
           <label class="field-label" for="catalog-name">名称</label><input id="catalog-name" class="field-input" maxlength="120" required />
-          <div class="catalog-form-grid"><label><span class="field-label">巡天</span><select id="catalog-survey" class="field-input"></select></label><label><span class="field-label">数据发布</span><select id="catalog-release" class="field-input"></select></label><label><span class="field-label">数据类型</span><select id="catalog-kind" class="field-input"><option value="catalog">星表</option><option value="image">图像</option><option value="spectra">光谱</option><option value="cube">数据立方</option><option value="timeseries">时序</option><option value="other">其他</option></select></label></div>
+          <div class="catalog-form-grid"><label><span class="field-label">巡天</span><div class="catalog-survey-picker"><select id="catalog-survey" class="field-input"></select><button id="catalog-new-survey" class="text-button" type="button"><i data-lucide="plus"></i><span>登记巡天</span></button></div></label><label><span class="field-label">数据发布</span><select id="catalog-release" class="field-input"></select></label><label><span class="field-label">数据类型</span><select id="catalog-kind" class="field-input"><option value="catalog">星表</option><option value="image">图像</option><option value="spectra">光谱</option><option value="cube">数据立方</option><option value="timeseries">时序</option><option value="other">其他</option></select></label></div>
            <fieldset class="catalog-connector-field"><legend class="field-label">Connector <span class="required-marker">必选</span></legend><div id="catalog-connector-list" class="connector-picker catalog-connector-list"></div><button id="catalog-new-connector" class="text-button" type="button">新建 Connector</button></fieldset>
            <fieldset id="catalog-scan-fieldset" class="catalog-scan-fieldset" hidden>
              <legend class="field-label">本地 CSV 文件与列</legend>
@@ -455,21 +428,22 @@
           <header><div><span class="panel-kicker">NEW SURVEY</span><h2>登记巡天与首个发布</h2></div><button id="survey-registration-close" class="icon-button" type="button" aria-label="关闭"><span aria-hidden="true">×</span></button></header>
           <div class="catalog-form-grid"><label><span class="field-label">巡天 ID</span><input name="id" class="field-input" placeholder="csst" pattern="[a-z0-9][a-z0-9._-]*" required /></label><label><span class="field-label">名称</span><input name="name" class="field-input" placeholder="CSST" maxlength="160" required /></label><label><span class="field-label">任务 / 项目</span><input name="mission" class="field-input" placeholder="Chinese Space Station Telescope" maxlength="160" /></label><label><span class="field-label">来源 URL</span><input name="sourceUrl" class="field-input" type="url" placeholder="https://..." required /></label></div>
           <label class="field-label" for="survey-registration-description">说明</label><input id="survey-registration-description" name="description" class="field-input" maxlength="1000" />
-          <label class="field-label" for="survey-registration-modalities">模态</label><select id="survey-registration-modalities" name="modalities" class="field-input" multiple required><option value="imaging">图像</option><option value="spectroscopy">光谱</option><option value="photometry">测光</option><option value="time-domain">时域</option><option value="integral-field">积分场</option><option value="ultraviolet">紫外</option><option value="infrared">红外</option><option value="catalog">目录</option></select>
-          <fieldset class="catalog-connector-field"><legend class="field-label">首个公开发布</legend><div class="catalog-form-grid"><label><span class="field-label">发布 ID</span><input name="releaseId" class="field-input" placeholder="csst-sim-w1-20250731" pattern="[a-z0-9][a-z0-9._-]*" required /></label><label><span class="field-label">发布名称</span><input name="releaseLabel" class="field-input" placeholder="CSST Simulation W1" maxlength="160" required /></label><label><span class="field-label">产品</span><input name="product" class="field-input" placeholder="W1 photometric catalog" maxlength="160" required /></label><label><span class="field-label">产品模态</span><select name="productModality" class="field-input"><option value="photometry">测光</option><option value="imaging">图像</option><option value="spectroscopy">光谱</option><option value="catalog">目录</option></select></label></div><label class="field-label" for="survey-registration-product-description">产品说明</label><input id="survey-registration-product-description" name="productDescription" class="field-input" maxlength="500" required /><p class="control-note">登记后，在 Connector 绑定此巡天和发布；再以关联的资产提交 coverage job。OSS 凭证不会保存在巡天记录中。</p></fieldset>
+          <label class="field-label" for="survey-registration-modalities">模态</label><select id="survey-registration-modalities" name="modalities" class="field-input" multiple required><option value="imaging">图像</option><option value="spectroscopy">光谱</option><option value="photometry">测光</option><option value="time-domain">时域</option><option value="integral-field">积分场</option><option value="ultraviolet">紫外</option><option value="infrared">红外</option><option value="catalog">目录</option><option value="simulation">仿真</option></select>
+          <fieldset class="survey-release-field"><legend class="field-label">首个发布</legend><div class="catalog-form-grid"><label><span class="field-label">发布 ID</span><input name="releaseId" class="field-input" placeholder="cosmos-custom-v1" pattern="[a-z0-9][a-z0-9._-]*" required /></label><label><span class="field-label">发布名称</span><input name="releaseLabel" class="field-input" placeholder="COSMOS custom v1" maxlength="160" required /></label><label><span class="field-label">产品</span><input name="product" class="field-input" placeholder="Photometric catalog" maxlength="160" required /></label><label><span class="field-label">产品模态</span><select name="productModality" class="field-input"><option value="photometry">测光</option><option value="imaging">图像</option><option value="spectroscopy">光谱</option><option value="catalog">目录</option></select></label></div><label class="field-label" for="survey-registration-product-description">产品说明</label><input id="survey-registration-product-description" name="productDescription" class="field-input" maxlength="500" required /><p class="control-note">登记后，在 Connector 中绑定此巡天和发布。本地文件由 Atlas 扫描，S3/JDBC 可由已安装的 data-warehouse 插件扫描；凭据不会保存在巡天记录中。</p></fieldset>
           <output id="survey-registration-feedback" class="connector-check-feedback" aria-live="polite">尚未保存</output>
           <footer><button id="survey-registration-cancel" class="command-button secondary" type="button">取消</button><button class="command-button" type="submit">登记巡天</button></footer>
         </form>
       </dialog>
 
-      <dialog id="manual-footprint-dialog" class="workspace-dialog wide-dialog">
-        <form id="manual-footprint-form" class="dialog-form manual-footprint-form">
-          <header><div><span class="panel-kicker">MANUAL FOOTPRINT</span><h2>填写覆盖范围</h2></div><button id="manual-footprint-dialog-close" class="icon-button" type="button" aria-label="关闭"><span aria-hidden="true">×</span></button></header>
-          <fieldset class="manual-footprint-identity"><legend class="field-label">产品身份</legend><label><span>Survey</span><input id="manual-footprint-survey-id" name="surveyId" class="field-input" readonly /></label><label><span>Release</span><input id="manual-footprint-release-id" name="releaseId" class="field-input" readonly /></label><label><span>Product</span><input id="manual-footprint-product" name="product" class="field-input" readonly /></label></fieldset>
-          <div class="manual-footprint-fields"><label><span class="field-label">Label</span><input id="manual-footprint-label" name="label" class="field-input" maxlength="160" required /></label><label><span class="field-label">Source URL</span><input id="manual-footprint-source-url" name="sourceUrl" class="field-input" type="url" required /></label><label><span class="field-label">Method</span><input id="manual-footprint-method" name="method" class="field-input" maxlength="160" required /></label><label><span class="field-label">Calculated at</span><input id="manual-footprint-calculated-at" name="calculatedAt" class="field-input" type="datetime-local" required /></label><label><span class="field-label">Admin token</span><input id="manual-footprint-token" class="field-input" type="password" autocomplete="off" required /></label></div>
-          <label class="field-label" for="manual-footprint-pixels">HEALPix pixels</label><textarea id="manual-footprint-pixels" name="pixels" class="field-input manual-footprint-pixels" rows="7" placeholder="以逗号、空格或换行分隔 pixel ID" required></textarea>
-          <output id="manual-footprint-feedback" class="manual-footprint-feedback" aria-live="polite">尚未保存</output>
-          <footer><button id="manual-footprint-unpublish" class="command-button secondary" type="button">撤回</button><button id="manual-footprint-validate" class="command-button secondary" type="button">校验</button><button id="manual-footprint-publish" class="command-button secondary" type="button">发布</button><button class="command-button" type="submit">保存草稿</button></footer>
+      <dialog id="resource-catalog-settings-dialog" class="workspace-dialog compact-dialog">
+        <form id="resource-catalog-settings-form" class="dialog-form">
+          <header><div><span class="panel-kicker">ASSETS CATALOG</span><h2>配置公开巡天目录</h2></div><button id="resource-catalog-settings-close" class="icon-button" type="button" aria-label="关闭"><i data-lucide="x"></i></button></header>
+          <label class="field-label" for="resource-catalog-url">Assets catalog URL</label>
+          <input id="resource-catalog-url" class="field-input" type="url" required />
+          <label class="field-label" for="resource-catalog-admin-token">资源管理员 token</label>
+          <input id="resource-catalog-admin-token" class="field-input" type="password" autocomplete="off" placeholder="仅保存在当前页面内存" required />
+          <output id="resource-catalog-settings-status" class="connector-check-feedback" aria-live="polite">尚未保存</output>
+          <footer><button id="resource-catalog-settings-cancel" class="command-button secondary" type="button">取消</button><button id="resource-catalog-settings-save" class="command-button" type="submit">保存配置</button><button id="resource-catalog-settings-sync" class="primary-command" type="button"><i data-lucide="refresh-cw"></i><span>保存并同步</span></button></footer>
         </form>
       </dialog>
 

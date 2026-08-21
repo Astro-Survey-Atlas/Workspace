@@ -164,6 +164,52 @@ test("external Flink polling failures preserve the stored scan state", async () 
   }
 });
 
+test("successful task polling records discovered files and counts the exact scan run", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "astro-flink-success-"));
+  const originalFetch = globalThis.fetch;
+  try {
+    const store = new SqliteMetadataStore(path.join(directory, "workspace.sqlite"));
+    await store.initialize();
+    const runs = new ConnectorIngestRunCatalog(store);
+    await runs.initialize();
+    const run = await runs.add("s3://example/catalogs", { status: "running", jobId: "successful-task", batchId: "batch-12", fileCount: 0 });
+    let countBody: unknown;
+    globalThis.fetch = (async (_input: string | URL | Request, init?: RequestInit) => {
+      countBody = JSON.parse(String(init?.body));
+      return new Response(JSON.stringify({ count: 12 }), { status: 200, headers: { "Content-Type": "application/json" } });
+    }) as typeof fetch;
+    const service = new FlinkScanService({
+      enabled: true,
+      connectors: {} as ConnectorRegistry,
+      dataCatalog: {} as DataCatalogRegistry,
+      credentials: {} as ConnectorCredentialStore,
+      runs,
+      namespace: "warehouse",
+      secretNamespace: "warehouse",
+      esUrl: "http://elasticsearch",
+      esIndex: "astro_file_index_v1",
+      pollMs: 1000,
+      resourceClient: {
+        async request<T>() {
+          return { status: 200, ok: true, text: "{}", value: { status: { phase: "Succeeded", runId: "batch-12", discoveredFiles: 12 } } as T };
+        },
+      },
+    });
+
+    await service.poll();
+
+    const stored = (await runs.list()).find((candidate) => candidate.id === run.id);
+    assert.equal(stored?.status, "succeeded");
+    assert.equal(stored?.fileCount, 12);
+    assert.equal(stored?.documentCount, 12);
+    assert.deepEqual(countBody, { query: { bool: { filter: [{ term: { scan_run_id: "batch-12" } }] } } });
+    await store.close();
+  } finally {
+    globalThis.fetch = originalFetch;
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test("data warehouse configuration accepts only strict booleans and defaults off", () => {
   assert.equal(dataWarehouseEnabled(undefined), false);
   assert.equal(dataWarehouseEnabled("false"), false);
@@ -350,8 +396,12 @@ test("explicit coverage job binds the survey asset connector and scanner evidenc
       coordinateUnits: "deg",
       raColumn: "RA",
       decColumn: "DEC",
-      healpixOrder: 8,
-      evidenceRole: "object_presence",
+      coverageRole: "object_presence",
+      dataOrigin: "observed",
+      sourceTier: "user_file_derived",
+      maxOrder: 10,
+      queryOrder: 8,
+      previewOrder: 4,
     });
     const task = fixture.requests.find((entry) => entry.method === "POST" && entry.path.endsWith("/astrometadatascantasks"));
     assert.ok(task);
@@ -365,16 +415,25 @@ test("explicit coverage job binds the survey asset connector and scanner evidenc
       modality: "catalog",
       assetId: "csst-sim-w1-phot",
       connector: "s3://survey/release",
+      connectorConfigHash: connectorConfigurationHash(record),
       fileIndex: "astro_file_index_v1",
       coverageIndex: "astro_coverage_index_v1",
       objectIndex: "astro_object_index_v1",
+      mocCoreDistribution: "astro-survey-atlas-assets",
+      mocCoreImport: "astro_survey_moc_core",
+      mocCoreCli: "astro-survey-assets",
+      mocCoreContract: "3.0.0",
       spatialMode: "catalog",
       raColumn: "RA",
       decColumn: "DEC",
       coordinateFrame: "ICRS",
       coordinateUnits: "deg",
       coverageRole: "object_presence",
-      healpixOrder: "8",
+      dataOrigin: "observed",
+      sourceTier: "user_file_derived",
+      maxOrder: "10",
+      queryOrder: "8",
+      previewOrder: "4",
     });
   } finally {
     await fixture.store.close();

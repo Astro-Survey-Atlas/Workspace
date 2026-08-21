@@ -1,15 +1,14 @@
 import type { SurveyRecord } from "./survey-registry.js";
 import type { SurveyFootprintManifest } from "./survey-footprints.js";
 
-export type PublicCoverageStatus = "acquired" | "overview_only" | "awaiting_geometry" | "not_applicable";
+export type PublicCoverageStatus = "acquired" | "overview_only" | "awaiting_geometry";
 
 export interface PublicReleaseProductDetail {
   name: string;
   modality: string;
   description: string;
   coverageStatus: PublicCoverageStatus;
-  sourceUrl?: string;
-  reason?: string;
+  sourceUrl: string;
   artifactKey?: string;
 }
 
@@ -26,31 +25,17 @@ export interface PublicReleaseDetail {
   products: PublicReleaseProductDetail[];
 }
 
-export interface PublicReleaseProductStatus {
-  surveyId: string;
-  releaseId: string;
-  product: string;
-  status: PublicCoverageStatus;
-  sourceUrl: string;
-  reason?: string;
-}
-
 export function buildPublicReleaseDetails(
   surveys: readonly SurveyRecord[],
-  productStatuses: readonly PublicReleaseProductStatus[],
   manifest: SurveyFootprintManifest,
 ): PublicReleaseDetail[] {
-  const statusByProduct = new Map(productStatuses.map((item) => [`${item.surveyId}:${item.releaseId}:${item.product}`, item]));
   const footprints = new Map(manifest.footprints.map((item) => [`${item.surveyId}:${item.releaseId}:${item.product}`, item]));
   return surveys.flatMap((survey) => survey.releases.filter((release) => release.availability === "available").map((release) => {
-    const sourceProducts = productStatuses.filter((item) => item.surveyId === survey.id && item.releaseId === release.id);
-    const products = [...release.products.map((product) => ({
+    const products = release.products.map((product) => ({
       name: product.name,
       modality: product.modality,
       description: product.description,
-    })), ...sourceProducts
-      .filter((source) => !release.products.some((product) => product.name === source.product))
-      .map((source) => ({ name: source.product, modality: "catalog", description: "公开资料中登记的产品。" }))];
+    }));
     return {
       surveyId: survey.id,
       releaseId: release.id,
@@ -63,7 +48,6 @@ export function buildPublicReleaseDetails(
       officialSourceUrl: release.coverage.sourceUrl,
       products: products.map((product) => {
         const key = `${survey.id}:${release.id}:${product.name}`;
-        const source = statusByProduct.get(key);
         const footprint = footprints.get(key);
         return {
           ...product,
@@ -71,9 +55,8 @@ export function buildPublicReleaseDetails(
             ? "acquired"
             : footprint?.quality === "official_overview"
               ? "overview_only"
-              : source?.status ?? "awaiting_geometry",
-          sourceUrl: source?.sourceUrl ?? release.coverage.sourceUrl,
-          reason: source?.reason,
+              : "awaiting_geometry",
+          sourceUrl: release.coverage.sourceUrl,
           ...(footprint ? { artifactKey: key } : {}),
         };
       }),

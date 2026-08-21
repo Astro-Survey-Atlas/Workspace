@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -43,6 +43,39 @@ test("HST is represented as an archive snapshot, not a fabricated DR series", as
   assert.equal(hst.releases.length, 1);
   assert.equal(hst.releases[0]?.kind, "archive_snapshot");
   assert.equal(hst.releases[0]?.coverage.status, "pending");
+});
+
+test("a reviewed curated survey retires its matching legacy user registration", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "astro-survey-registry-curated-migration-"));
+  const statePath = path.join(root, "registrations.json");
+  try {
+    await writeFile(statePath, JSON.stringify([{
+      id: "csst",
+      name: "CSST",
+      mission: "中国空间站望远镜",
+      color: "#58b7c9",
+      description: "Legacy user registration before review.",
+      modalities: ["imaging", "photometry", "catalog"],
+      origin: "user",
+      releases: [{
+        id: "csst-sim-w1-20250731",
+        label: "CSST W1 Simulation 2025-07-31",
+        kind: "early_release",
+        availability: "available",
+        releasedYear: 2025,
+        modalities: ["imaging", "photometry", "catalog"],
+        products: [{ name: "W1 simulated wide-field images", modality: "imaging", description: "Legacy pending record." }],
+        coverage: { status: "pending", summary: "Awaiting review.", sourceUrl: "https://nadc.china-vo.org/data/" },
+      }],
+    }]), "utf8");
+    const value = new SurveyRegistry(statePath);
+    await value.initialize();
+    assert.equal(value.get("csst").origin, "curated");
+    assert.equal(value.get("csst").releases[0]?.coverage.status, "verified");
+    assert.deepEqual(JSON.parse(await readFile(statePath, "utf8")), []);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test("user source registration preserves metadata without claiming a footprint", async () => {

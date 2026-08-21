@@ -95,6 +95,12 @@ export interface AstroCoverageFact {
   asset_id: string;
   source_file_id?: string;
   scan_run_id?: string;
+  coverage_role?: "image_extent" | "object_presence" | "footprint_extent";
+  data_origin?: "observed" | "simulated" | "derived" | "unknown";
+  source_tier?: "user_file_derived" | "survey_authoritative" | "catalog_derived" | "unknown";
+  max_order?: number;
+  query_order?: number;
+  preview_order?: number;
 }
 
 export interface AstroCoverageFactQueryInput {
@@ -219,6 +225,12 @@ const COVERAGE_SOURCE_FIELDS = [
   "asset_id",
   "source_file_id",
   "scan_run_id",
+  "coverage_role",
+  "data_origin",
+  "source_tier",
+  "max_order",
+  "query_order",
+  "preview_order",
 ] as const;
 
 interface ElasticsearchSearchHit {
@@ -631,6 +643,18 @@ function coverageFactFromHit(hit: ElasticsearchSearchHit, targetNside: number): 
   const product = text("product");
   const modality = text("modality");
   if (!assetId || !survey || !release || !product || !modality) return undefined;
+  const coverageRole = source.coverage_role === "image_extent" || source.coverage_role === "object_presence" || source.coverage_role === "footprint_extent"
+    ? source.coverage_role
+    : undefined;
+  const dataOrigin = source.data_origin === "observed" || source.data_origin === "simulated" || source.data_origin === "derived" || source.data_origin === "unknown"
+    ? source.data_origin
+    : undefined;
+  const sourceTier = source.source_tier === "user_file_derived" || source.source_tier === "survey_authoritative" || source.source_tier === "catalog_derived" || source.source_tier === "unknown"
+    ? source.source_tier
+    : undefined;
+  const maxOrder = typeof source.max_order === "number" && Number.isSafeInteger(source.max_order) ? source.max_order : undefined;
+  const queryOrder = typeof source.query_order === "number" && Number.isSafeInteger(source.query_order) ? source.query_order : undefined;
+  const previewOrder = typeof source.preview_order === "number" && Number.isSafeInteger(source.preview_order) ? source.preview_order : undefined;
   return {
     healpix_order: Math.log2(targetNside),
     healpix_pixel: targetPixel,
@@ -642,6 +666,12 @@ function coverageFactFromHit(hit: ElasticsearchSearchHit, targetNside: number): 
     asset_id: assetId,
     ...(typeof source.source_file_id === "string" ? { source_file_id: source.source_file_id } : {}),
     ...(typeof source.scan_run_id === "string" ? { scan_run_id: source.scan_run_id } : {}),
+    ...(coverageRole === undefined ? {} : { coverage_role: coverageRole }),
+    ...(dataOrigin === undefined ? {} : { data_origin: dataOrigin }),
+    ...(sourceTier === undefined ? {} : { source_tier: sourceTier }),
+    ...(maxOrder === undefined ? {} : { max_order: maxOrder }),
+    ...(queryOrder === undefined ? {} : { query_order: queryOrder }),
+    ...(previewOrder === undefined ? {} : { preview_order: previewOrder }),
   };
 }
 
@@ -1103,6 +1133,12 @@ export class AstroObjectIndexService {
         asset_id: { type: "keyword" },
         source_file_id: { type: "keyword" },
         scan_run_id: { type: "keyword" },
+        coverage_role: { type: "keyword" },
+        data_origin: { type: "keyword" },
+        source_tier: { type: "keyword" },
+        max_order: { type: "byte" },
+        query_order: { type: "byte" },
+        preview_order: { type: "byte" },
       },
     });
   }

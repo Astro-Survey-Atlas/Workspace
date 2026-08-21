@@ -92,6 +92,10 @@ export class DataCatalogPanel {
     return { catalogAssetCount: this.#assets.length, selectedCatalogAssetId: this.#selectedId };
   }
 
+  startNew(surveyId?: string): void {
+    this.#startNew(surveyId);
+  }
+
   async #loadUserAssets(): Promise<DataAssetRecord[]> {
     return (await workspaceApi.dataAssets("user")).filter((asset) => asset.origin === "user");
   }
@@ -353,12 +357,16 @@ export class DataCatalogPanel {
     await this.#onAssetChanged?.(asset.id);
   }
 
-  #startNew(): void {
+  #startNew(surveyId?: string): void {
     this.#scanInspection = null;
     this.#scanConnectorId = null;
     byId<HTMLFormElement>("catalog-registration-form").reset();
     this.#renderSurveyOptions();
     byId<HTMLSelectElement>("catalog-kind").value = "catalog";
+    if (surveyId && this.#surveys.some((survey) => survey.id === surveyId)) {
+      byId<HTMLSelectElement>("catalog-survey").value = surveyId;
+      this.#syncReleaseOptions();
+    }
     byId("catalog-scan-fieldset").hidden = true;
     this.#renderCreateConnectors();
     byId("catalog-form-title").textContent = "登记用户数据";

@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { createReadStream, createWriteStream } from "node:fs";
-import { mkdir, open, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, open, readFile, readdir, rename, rm, stat, symlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { pipeline } from "node:stream/promises";
 
@@ -8,16 +8,17 @@ import yauzl from "yauzl";
 
 import { normalizeSurveyFootprintManifest, type SurveyFootprintManifest } from "./survey-footprints.js";
 
-const CATALOG_SCHEMA_VERSION = 2;
-const PACKAGE_SCHEMA_VERSION = 2;
-const STATE_SCHEMA_VERSION = 2;
+const CATALOG_SCHEMA_VERSION = 3;
+const PACKAGE_SCHEMA_VERSION = 3;
+const PACKAGE_FORMAT_VERSION = "3.0.0";
+const STATE_SCHEMA_VERSION = 3;
 const MAX_ARCHIVE_BYTES = 128 * 1024 * 1024;
 const MAX_EXTRACTED_BYTES = 256 * 1024 * 1024;
-const MAX_ZIP_ENTRIES = 16;
+const MAX_ZIP_ENTRIES = 256;
 const DOWNLOAD_TIMEOUT_MS = 60_000;
 const PACKAGE_ID = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 const VERSION = /^[0-9]+\.[0-9]+\.[0-9]+$/;
-const ARCHIVE_FILES = new Set(["resource-package.json", "footprints/survey-footprints.json", "README.md"]);
+const REQUIRED_ARCHIVE_FILES = new Set(["resource-package.json", "footprints/survey-footprints.json", "provenance.json", "README.md"]);
 
 function isLoadableFootprint(footprint: SurveyFootprintManifest["footprints"][number]): boolean {
   // Official overviews have verified display cells even though they are less
@@ -47,23 +48,34 @@ export interface ResourcePackageCatalogEntry {
   hidden: boolean;
   deprecated: boolean;
   replacedBy: string[];
+  origin?: "public";
 }
 
 interface ResourcePackageCatalogDocument {
   schemaVersion: number;
+  version: string;
   generatedAt: string;
   packages: ResourcePackageCatalogEntry[];
 }
 
 interface ResourcePackageManifest {
   schemaVersion: number;
-  id: string;
-  name: string;
-  description: string;
-  surveyId: string;
   version: string;
-  createdAt: string;
-  footprintManifest: "footprints/survey-footprints.json";
+  id: string;
+  surveyId: string;
+  files: Array<{ path: "README.md" | "footprints/survey-footprints.json" | "provenance.json"; sizeBytes: number; sha256: string }>;
+  layers: Array<{
+    layerId: string;
+    surveyId: string;
+    coverageRole: string;
+    dataOrigin: string;
+    sourceTier: string;
+    modality: string;
+    releaseId: string;
+    path: `mocs/${string}.moc.fits`;
+    sizeBytes: number;
+    sha256: string;
+  }>;
 }
 
 interface InstalledPackage {
@@ -95,6 +107,14 @@ export interface ResourcePackageLoad {
   releaseIds: string[];
 }
 
+export interface LocalResourcePackage {
+  id: string;
+  version: string;
+  surveyId: string;
+  userAssetId: string;
+  footprints: SurveyFootprintManifest;
+}
+
 export interface ResourcePackageJob {
   id: string;
   packageId: string;
@@ -112,9 +132,56 @@ export interface ResourcePackageManagerOptions {
   catalogUrl: string;
   root: string;
   statePath: string;
+  /** Parent of assets-snapshots/ and assets-current/. */
+  snapshotRoot?: string;
+  /** Optional allow-list for remote catalog origins. An empty list allows any HTTP(S) origin. */
+  allowedOrigins?: readonly string[];
   maxArchiveBytes?: number;
   maxExtractedBytes?: number;
   downloadTimeoutMs?: number;
+}
+
+export class ResourceCatalogUnavailableError extends Error {
+  constructor(message: string) {
+    super(`Assets catalog unavailable: ${message}`);
+    this.name = "ResourceCatalogUnavailableError";
+  }
+}
+
+export class ResourceCatalogSyncError extends Error {
+  constructor(message: string) {
+    super(`Assets catalog sync failed: ${message}`);
+    this.name = "ResourceCatalogSyncError";
+  }
+}
+
+export interface ResourceCatalogStatus {
+  catalogUrl: string;
+  available: boolean;
+  unavailableReason?: string;
+  catalogSha256?: string;
+  generatedAt?: string;
+  syncedAt?: string;
+}
+
+function normalizeAllowedOrigins(origins: readonly string[] | undefined): Set<string> {
+  return new Set((origins ?? []).map((origin) => {
+    const parsed = new URL(origin);
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") throw new Error(`Unsupported resource catalog origin: ${origin}`);
+    return parsed.origin;
+  }));
+}
+
+export function validateResourceCatalogUrl(value: string, allowedOrigins: readonly string[] = [], allowFile = true): URL {
+  const url = new URL(value);
+  if (url.protocol === "file:") {
+    if (!allowFile) throw new RangeError("Resource catalog URL must use HTTP or HTTPS");
+    return url;
+  }
+  if (url.protocol !== "http:" && url.protocol !== "https:") throw new RangeError(`Unsupported resource catalog protocol: ${url.protocol}`);
+  const allowed = normalizeAllowedOrigins(allowedOrigins);
+  if (allowed.size && !allowed.has(url.origin)) throw new RangeError(`Resource catalog origin is not allowed: ${url.origin}`);
+  return url;
 }
 
 function object(value: unknown, label: string): Record<string, unknown> {
@@ -190,86 +257,84 @@ function parseEntry(value: unknown): ResourcePackageCatalogEntry {
     hidden: entry.hidden === true,
     deprecated: entry.deprecated === true,
     replacedBy: optionalStringList(entry.replacedBy, "Resource package replacements"),
-  };
-}
-
-function parseLegacyEntry(value: unknown): ResourcePackageCatalogEntry {
-  const entry = object(value, "Legacy resource package catalog entry");
-  const surveys = stringList(entry.surveys, "Legacy resource package surveys");
-  const id = text(entry.id, "Resource package id", 80);
-  const version = text(entry.version, "Resource package version", 40);
-  const sha256 = text(entry.sha256, "Resource package SHA-256", 64).toLowerCase();
-  if (!PACKAGE_ID.test(id) || !VERSION.test(version) || !/^[a-f0-9]{64}$/.test(sha256) || !Number.isSafeInteger(entry.sizeBytes) || Number(entry.sizeBytes) <= 0) throw new Error(`Resource package catalog contains an invalid identity: ${id}`);
-  return {
-    id,
-    name: text(entry.name, "Resource package name", 160),
-    description: text(entry.description, "Resource package description", 2000),
-    surveyId: surveys[0]!,
-    modalities: [text(entry.modality, "Resource package modality", 80)],
-    wavelengths: ["legacy"], productTypes: ["coverage"], facilities: ["multiple"], coverageAuthorities: ["legacy"], accessModes: ["archive"], releases: ["legacy"],
-    releaseLabels: { legacy: "Legacy" },
-    sources: [{ releaseId: "legacy", label: "Legacy bundled coverage", url: "https://astro.workspace.dev.72602.space", authority: "legacy" }],
-    version, archiveUrl: text(entry.archiveUrl, "Resource package archive URL"), sizeBytes: Number(entry.sizeBytes), sha256,
-    updatedAt: text(entry.updatedAt, "Resource package update time", 80), hidden: true, deprecated: true, replacedBy: optionalStringList(entry.replacedBy, "Resource package replacements"),
+    ...(entry.origin === undefined ? {} : { origin: "public" as const }),
   };
 }
 
 function parseCatalog(value: unknown): ResourcePackageCatalogDocument {
   const document = object(value, "Resource package catalog");
-  if ((document.schemaVersion !== CATALOG_SCHEMA_VERSION && document.schemaVersion !== 1) || !Array.isArray(document.packages)) throw new Error("Resource package catalog has an unsupported schema");
-  const packages = document.packages.map((entry) => document.schemaVersion === 1 || object(entry, "Resource package catalog entry").surveys ? parseLegacyEntry(entry) : parseEntry(entry));
+  if (document.schemaVersion !== CATALOG_SCHEMA_VERSION || document.version !== PACKAGE_FORMAT_VERSION || !Array.isArray(document.packages)) throw new Error("Resource package catalog has an unsupported schema");
+  const packages = document.packages.map((entry) => parseEntry(entry));
   const identities = new Set<string>();
   for (const entry of packages) {
     const identity = `${entry.id}@${entry.version}`;
     if (identities.has(identity)) throw new Error(`Resource package catalog contains a duplicate: ${identity}`);
     identities.add(identity);
   }
-  return { schemaVersion: CATALOG_SCHEMA_VERSION, generatedAt: text(document.generatedAt, "Resource package catalog generation time", 80), packages };
+  return { schemaVersion: CATALOG_SCHEMA_VERSION, version: PACKAGE_FORMAT_VERSION, generatedAt: text(document.generatedAt, "Resource package catalog generation time", 80), packages };
 }
 
 function parseManifest(value: unknown): ResourcePackageManifest {
   const manifest = object(value, "Resource package manifest");
-  if (manifest.schemaVersion !== PACKAGE_SCHEMA_VERSION || manifest.footprintManifest !== "footprints/survey-footprints.json") throw new Error("Resource package manifest has an unsupported schema");
+  if (manifest.schemaVersion !== PACKAGE_SCHEMA_VERSION || typeof manifest.version !== "string") throw new Error("Resource package manifest has an unsupported schema");
   const id = text(manifest.id, "Resource package id", 80);
   const version = text(manifest.version, "Resource package version", 40);
   if (!PACKAGE_ID.test(id) || !VERSION.test(version)) throw new Error("Resource package manifest has an invalid identity");
-  return {
-    schemaVersion: PACKAGE_SCHEMA_VERSION,
-    id,
-    name: text(manifest.name, "Resource package name", 160),
-    description: text(manifest.description, "Resource package description", 2000),
-    surveyId: text(manifest.surveyId, "Resource package survey id", 80),
-    version,
-    createdAt: text(manifest.createdAt, "Resource package creation time", 80),
-    footprintManifest: "footprints/survey-footprints.json",
-  };
+  const files = Array.isArray(manifest.files) ? manifest.files.map((item, index) => {
+    const record = object(item, `Resource package supporting file ${index}`);
+    const filePath = text(record.path, `Resource package supporting file ${index} path`, 120);
+    const sizeBytes = record.sizeBytes;
+    const sha256 = text(record.sha256, `Resource package supporting file ${index} SHA-256`, 64).toLowerCase();
+    if (!(REQUIRED_ARCHIVE_FILES.has(filePath) && filePath !== "resource-package.json") || !Number.isSafeInteger(sizeBytes) || Number(sizeBytes) <= 0 || !/^[a-f0-9]{64}$/.test(sha256)) throw new Error(`Resource package supporting file ${index} is invalid`);
+    return { path: filePath as "README.md" | "footprints/survey-footprints.json" | "provenance.json", sizeBytes: Number(sizeBytes), sha256 };
+  }) : [];
+  if (files.length !== 3 || new Set(files.map((file) => file.path)).size !== 3 || !files.every((file) => ["README.md", "footprints/survey-footprints.json", "provenance.json"].includes(file.path))) throw new Error("Resource package supporting files are invalid");
+  const layers = Array.isArray(manifest.layers) ? manifest.layers.map((item, index) => {
+    const layer = object(item, `Resource package layer ${index}`);
+    const layerId = text(layer.layerId, `Resource package layer ${index} layer id`, 160);
+    const layerPath = text(layer.path, `Resource package layer ${index} path`, 512);
+    const sizeBytes = layer.sizeBytes;
+    const sha256 = text(layer.sha256, `Resource package layer ${index} SHA-256`, 64).toLowerCase();
+    if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(layerId) || layerPath !== `mocs/${layerId}.moc.fits` || !Number.isSafeInteger(sizeBytes) || Number(sizeBytes) <= 0 || !/^[a-f0-9]{64}$/.test(sha256)) throw new Error(`Resource package layer ${index} is invalid`);
+    for (const field of ["surveyId", "coverageRole", "dataOrigin", "sourceTier", "modality", "releaseId"]) text(layer[field], `Resource package layer ${index} ${field}`, 160);
+    return {
+      layerId,
+      surveyId: text(layer.surveyId, `Resource package layer ${index} survey id`, 80),
+      coverageRole: text(layer.coverageRole, `Resource package layer ${index} coverage role`, 80),
+      dataOrigin: text(layer.dataOrigin, `Resource package layer ${index} data origin`, 80),
+      sourceTier: text(layer.sourceTier, `Resource package layer ${index} source tier`, 80),
+      modality: text(layer.modality, `Resource package layer ${index} modality`, 80),
+      releaseId: text(layer.releaseId, `Resource package layer ${index} release id`, 120),
+      path: layerPath as `mocs/${string}.moc.fits`,
+      sizeBytes: Number(sizeBytes),
+      sha256,
+    };
+  }) : [];
+  if (layers.length === 0 || layers.length > MAX_ZIP_ENTRIES || new Set(layers.map((layer) => layer.layerId)).size !== layers.length || new Set(layers.map((layer) => layer.path)).size !== layers.length) throw new Error("Resource package layers are invalid");
+  return { schemaVersion: PACKAGE_SCHEMA_VERSION, version, id, surveyId: text(manifest.surveyId, "Resource package survey id", 80), files, layers };
 }
 
-function parseState(value: unknown): { state: ResourcePackageState; legacy: boolean } {
+function parseState(value: unknown): ResourcePackageState {
   const state = object(value, "Resource package state");
-  if ((state.schemaVersion !== STATE_SCHEMA_VERSION && state.schemaVersion !== 1) || !Array.isArray(state.packages)) throw new Error("Resource package state has an unsupported schema");
-  const legacy = state.schemaVersion === 1;
+  if (state.schemaVersion !== STATE_SCHEMA_VERSION || !Array.isArray(state.packages)) throw new Error("Resource package state has an unsupported schema");
   const packages = state.packages.map((item) => {
     const record = object(item, "Installed resource package");
     const id = text(record.id, "Installed resource package id", 80);
     const version = text(record.version, "Installed resource package version", 40);
     const sha256 = text(record.sha256, "Installed resource package SHA-256", 64);
-    const activeReleaseIds = legacy
-      ? []
-      : Array.isArray(record.activeReleaseIds) && record.activeReleaseIds.every((releaseId) => typeof releaseId === "string" && releaseId.trim())
-        ? record.activeReleaseIds.map((releaseId) => String(releaseId).trim())
-        : null;
-    if (!PACKAGE_ID.test(id) || !VERSION.test(version) || !/^[a-f0-9]{64}$/i.test(sha256) || (legacy ? typeof record.active !== "boolean" : !activeReleaseIds || new Set(activeReleaseIds).size !== activeReleaseIds.length)) throw new Error(`Installed resource package is invalid: ${id}`);
+    const activeReleaseIds = Array.isArray(record.activeReleaseIds) && record.activeReleaseIds.every((releaseId) => typeof releaseId === "string" && releaseId.trim())
+      ? record.activeReleaseIds.map((releaseId) => String(releaseId).trim())
+      : null;
+    if (!PACKAGE_ID.test(id) || !VERSION.test(version) || !/^[a-f0-9]{64}$/i.test(sha256) || !activeReleaseIds || new Set(activeReleaseIds).size !== activeReleaseIds.length) throw new Error(`Installed resource package is invalid: ${id}`);
     return {
       id,
       version,
       sha256: sha256.toLowerCase(),
       installedAt: text(record.installedAt, "Resource package install time", 80),
-      activeReleaseIds: activeReleaseIds ?? [],
-      ...(legacy && record.active === true ? { legacyActive: true } : {}),
+      activeReleaseIds,
     };
   });
-  return { state: { schemaVersion: STATE_SCHEMA_VERSION, packages }, legacy };
+  return { schemaVersion: STATE_SCHEMA_VERSION, packages };
 }
 
 async function readUrl(url: URL, timeoutMs: number): Promise<Buffer> {
@@ -338,7 +403,8 @@ async function extractArchive(archivePath: string, destination: string, maximumB
         entries += 1;
         const name = entry.fileName.replaceAll("\\", "/");
         const mode = (entry.externalFileAttributes >>> 16) & 0xffff;
-        if (entries > MAX_ZIP_ENTRIES || !ARCHIVE_FILES.has(name) || name.startsWith("/") || name.split("/").includes("..") || (mode & 0o170000) === 0o120000 || seen.has(name)) throw new Error(`Resource package contains an unsafe ZIP entry: ${name}`);
+        const allowed = REQUIRED_ARCHIVE_FILES.has(name) || /^mocs\/[a-zA-Z0-9._-]+\.moc\.fits$/.test(name);
+        if (entries > MAX_ZIP_ENTRIES || !allowed || name.startsWith("/") || name.split("/").includes("..") || (mode & 0o170000) === 0o120000 || seen.has(name)) throw new Error(`Resource package contains an unsafe ZIP entry: ${name}`);
         seen.add(name);
         extractedBytes += entry.uncompressedSize;
         if (extractedBytes > maximumBytes) throw new Error("Resource package exceeds the configured extraction limit");
@@ -350,56 +416,120 @@ async function extractArchive(archivePath: string, destination: string, maximumB
       })().catch(fail);
     });
     zip.on("end", () => {
-      if (!["resource-package.json", "footprints/survey-footprints.json", "README.md"].every((name) => seen.has(name))) reject(new Error("Resource package is missing required files"));
+      if (![...REQUIRED_ARCHIVE_FILES].every((name) => seen.has(name))) reject(new Error("Resource package is missing required files"));
       else resolve();
     });
     zip.readEntry();
   });
 }
 
+async function filesUnder(root: string, prefix = ""): Promise<string[]> {
+  const result: string[] = [];
+  for (const entry of await readdir(path.join(root, prefix), { withFileTypes: true })) {
+    const relative = prefix ? `${prefix}/${entry.name}` : entry.name;
+    if (entry.isDirectory()) result.push(...await filesUnder(root, relative));
+    else if (entry.isFile()) result.push(relative);
+    else throw new Error(`Resource package contains an invalid extracted entry: ${relative}`);
+  }
+  return result;
+}
+
+function validateFitsMoc(bytes: Buffer, label: string): void {
+  if (bytes.length < 2880 || bytes.length % 2880 !== 0) throw new Error(`Invalid FITS MOC: ${label}`);
+  const header = bytes.subarray(0, Math.min(bytes.length, 2880 * 4)).toString("ascii");
+  if (!header.startsWith("SIMPLE  =") || !/NAXIS\s*=/.test(header) || !/(NUNIQ|PIXEL|MOCORDER|MOCVERS)/i.test(header)) throw new Error(`Invalid FITS MOC: ${label}`);
+}
+
+async function validateManifestFiles(stagingPath: string, manifest: ResourcePackageManifest): Promise<void> {
+  const expected = new Set([...REQUIRED_ARCHIVE_FILES, ...manifest.layers.map((layer) => layer.path)]);
+  const actual = await filesUnder(stagingPath);
+  if (actual.length !== expected.size || actual.some((file) => !expected.has(file))) throw new Error("Resource package contains extra or undeclared ZIP entries");
+  const provenance = object(JSON.parse(await readFile(path.join(stagingPath, "provenance.json"), "utf8")) as unknown, "Resource package provenance");
+  if (!Number.isSafeInteger(provenance.schemaVersion)) throw new Error("Resource package provenance has an unsupported schema");
+  for (const file of manifest.files) {
+    const bytes = await readFile(path.join(stagingPath, file.path));
+    if (bytes.length !== file.sizeBytes) throw new Error(`Supporting file size does not match manifest: ${file.path}`);
+    if (createHash("sha256").update(bytes).digest("hex") !== file.sha256) throw new Error(`Supporting file SHA-256 does not match manifest: ${file.path}`);
+  }
+  for (const layer of manifest.layers) {
+    const bytes = await readFile(path.join(stagingPath, layer.path));
+    if (bytes.length !== layer.sizeBytes) throw new Error(`MOC size does not match manifest: ${layer.path}`);
+    if (createHash("sha256").update(bytes).digest("hex") !== layer.sha256) throw new Error(`MOC SHA-256 does not match manifest: ${layer.path}`);
+    validateFitsMoc(bytes, layer.path);
+  }
+}
+
 export class ResourcePackageManager {
-  readonly #catalogUrl: URL;
+  #catalogUrl: URL;
   readonly #root: string;
   readonly #statePath: string;
   readonly #maxArchiveBytes: number;
   readonly #maxExtractedBytes: number;
   readonly #downloadTimeoutMs: number;
-  #catalog: ResourcePackageCatalogDocument = { schemaVersion: CATALOG_SCHEMA_VERSION, generatedAt: "", packages: [] };
+  readonly #snapshotRoot?: string;
+  readonly #allowedOrigins: Set<string>;
+  #catalog: ResourcePackageCatalogDocument = { schemaVersion: CATALOG_SCHEMA_VERSION, version: PACKAGE_FORMAT_VERSION, generatedAt: "", packages: [] };
   #state: ResourcePackageState = { schemaVersion: STATE_SCHEMA_VERSION, packages: [] };
   #jobs = new Map<string, ResourcePackageJob>();
   #installedFootprints = new Map<string, SurveyFootprintManifest>();
   #installing = new Set<string>();
   #mutation = Promise.resolve();
+  #catalogError?: Error;
+  #catalogSha256?: string;
+  #catalogSyncedAt?: string;
 
   constructor(options: ResourcePackageManagerOptions) {
-    this.#catalogUrl = new URL(options.catalogUrl);
+    this.#allowedOrigins = normalizeAllowedOrigins(options.allowedOrigins);
+    this.#catalogUrl = validateResourceCatalogUrl(options.catalogUrl, [...this.#allowedOrigins]);
     this.#root = options.root;
     this.#statePath = options.statePath;
     this.#maxArchiveBytes = options.maxArchiveBytes ?? MAX_ARCHIVE_BYTES;
     this.#maxExtractedBytes = options.maxExtractedBytes ?? MAX_EXTRACTED_BYTES;
     this.#downloadTimeoutMs = options.downloadTimeoutMs ?? DOWNLOAD_TIMEOUT_MS;
+    this.#snapshotRoot = options.snapshotRoot;
   }
 
   async initialize(): Promise<void> {
-    this.#catalog = parseCatalog(JSON.parse((await readUrl(this.#catalogUrl, this.#downloadTimeoutMs)).toString("utf8")) as unknown);
+    let catalog: ResourcePackageCatalogDocument | undefined;
+    try {
+      const catalogBytes = await readUrl(this.#catalogUrl, this.#downloadTimeoutMs);
+      const parsed = parseCatalog(JSON.parse(catalogBytes.toString("utf8")) as unknown);
+      catalog = parsed;
+      this.#catalogError = undefined;
+      this.#catalogSha256 = createHash("sha256").update(catalogBytes).digest("hex");
+      this.#catalogSyncedAt = new Date().toISOString();
+      if (this.#snapshotRoot) await this.#writeSnapshot(catalogBytes);
+    } catch (error) {
+      this.#catalogError = error instanceof Error ? error : new Error(String(error));
+      if (this.#snapshotRoot) {
+        try {
+          const snapshotBytes = await readFile(path.join(this.#snapshotRoot, "assets-current", "catalog.json"));
+          catalog = parseCatalog(JSON.parse(snapshotBytes.toString("utf8")) as unknown);
+          this.#catalogError = undefined;
+          this.#catalogSha256 = createHash("sha256").update(snapshotBytes).digest("hex");
+          this.#catalogSyncedAt = undefined;
+        } catch {
+          catalog = undefined;
+        }
+      }
+    }
+    this.#catalog = catalog ?? { schemaVersion: CATALOG_SCHEMA_VERSION, version: PACKAGE_FORMAT_VERSION, generatedAt: "", packages: [] };
     await mkdir(path.join(this.#root, "downloads"), { recursive: true });
     await mkdir(path.join(this.#root, "staging"), { recursive: true });
     await mkdir(path.join(this.#root, "installed"), { recursive: true });
     try {
       const parsed = parseState(JSON.parse(await readFile(this.#statePath, "utf8")) as unknown);
-      this.#state = parsed.state;
-      let stateChanged = parsed.legacy;
+      this.#state = parsed;
+      let stateChanged = false;
       for (const installed of this.#state.packages) {
         const manifest = await this.#validateInstalled(installed);
         this.#installedFootprints.set(installed.id, manifest);
-        if (parsed.legacy && (installed as InstalledPackage & { legacyActive?: boolean }).legacyActive) installed.activeReleaseIds = this.#releaseIds(manifest);
         const available = new Set(this.#releaseIds(manifest));
         const retained = installed.activeReleaseIds.filter((releaseId) => available.has(releaseId));
         if (retained.length !== installed.activeReleaseIds.length) {
           installed.activeReleaseIds = retained;
           stateChanged = true;
         }
-        delete (installed as InstalledPackage & { legacyActive?: boolean }).legacyActive;
       }
       if (stateChanged) await this.#persist();
     } catch (error) {
@@ -408,7 +538,79 @@ export class ResourcePackageManager {
     }
   }
 
+  get available(): boolean { return this.#catalogError === undefined; }
+
+  get unavailableReason(): string | undefined { return this.#catalogError?.message; }
+
+  get catalogUrl(): string { return this.#catalogUrl.href; }
+
+  setCatalogUrl(value: string): string {
+    this.#catalogUrl = validateResourceCatalogUrl(value, [...this.#allowedOrigins], false);
+    return this.#catalogUrl.href;
+  }
+
+  catalogStatus(): ResourceCatalogStatus {
+    return {
+      catalogUrl: this.#catalogUrl.href,
+      available: this.available,
+      ...(this.#catalogError ? { unavailableReason: this.#catalogError.message } : {}),
+      ...(this.#catalogSha256 ? { catalogSha256: this.#catalogSha256 } : {}),
+      ...(this.#catalog.generatedAt ? { generatedAt: this.#catalog.generatedAt } : {}),
+      ...(this.#catalogSyncedAt ? { syncedAt: this.#catalogSyncedAt } : {}),
+    };
+  }
+
+  /** Fetch and trust a v3 catalog without downloading any package archive. */
+  async sync(): Promise<ResourceCatalogStatus> {
+    let catalogBytes: Buffer;
+    let parsed: ResourcePackageCatalogDocument;
+    try {
+      catalogBytes = await readUrl(this.#catalogUrl, this.#downloadTimeoutMs);
+      parsed = parseCatalog(JSON.parse(catalogBytes.toString("utf8")) as unknown);
+      for (const installed of this.#state.packages) {
+        const entry = parsed.packages.find((candidate) => candidate.id === installed.id);
+        if (!entry || (entry.version === installed.version && entry.sha256 !== installed.sha256)) {
+          throw new Error(`Installed resource package is absent from the trusted catalog: ${installed.id}@${installed.version}`);
+        }
+        await this.#readFootprints(installed);
+      }
+      if (this.#snapshotRoot) await this.#writeSnapshot(catalogBytes);
+    } catch (error) {
+      throw new ResourceCatalogSyncError(error instanceof Error ? error.message : String(error));
+    }
+    this.#catalog = parsed;
+    this.#catalogError = undefined;
+    this.#catalogSha256 = createHash("sha256").update(catalogBytes).digest("hex");
+    this.#catalogSyncedAt = new Date().toISOString();
+    return this.catalogStatus();
+  }
+
+  async #writeSnapshot(bytes: Buffer): Promise<void> {
+    if (!this.#snapshotRoot) return;
+    const digest = createHash("sha256").update(bytes).digest("hex");
+    const snapshots = path.join(this.#snapshotRoot, "assets-snapshots");
+    await mkdir(snapshots, { recursive: true });
+    const snapshot = path.join(snapshots, digest);
+    await mkdir(snapshot, { recursive: true });
+    await writeFile(path.join(snapshot, "catalog.json"), bytes, { flag: "wx" }).catch((error: unknown) => {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+    });
+    const current = path.join(this.#snapshotRoot, "assets-current");
+    const temporary = path.join(this.#snapshotRoot, `.assets-current-${process.pid}-${randomUUID()}`);
+    await symlink(path.relative(this.#snapshotRoot, snapshot), temporary, "dir");
+    await rename(temporary, current).catch(async (error: unknown) => {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+      await rm(current, { recursive: true, force: true });
+      await rename(temporary, current);
+    });
+  }
+
+  #assertAvailable(): void {
+    if (this.#catalogError) throw new ResourceCatalogUnavailableError(this.#catalogError.message);
+  }
+
   list(): PublicResourcePackage[] {
+    this.#assertAvailable();
     return this.#catalog.packages.filter((entry) => !entry.hidden).map((entry) => {
       const installed = this.#state.packages.find((record) => record.id === entry.id);
       const update = Boolean(installed && installed.version !== entry.version);
@@ -417,12 +619,14 @@ export class ResourcePackageManager {
   }
 
   get(id: string): PublicResourcePackage {
+    this.#assertAvailable();
     const result = this.#publicRecord(id);
     if (!result) throw new Error(`Resource package not found: ${id}`);
     return result;
   }
 
   install(id: string): ResourcePackageJob {
+    this.#assertAvailable();
     const entry = this.#catalog.packages.find((candidate) => candidate.id === id);
     if (!entry) throw new Error(`Resource package not found: ${id}`);
     if (this.#installing.has(id)) throw new RangeError(`Resource package install already in progress: ${id}`);
@@ -434,6 +638,26 @@ export class ResourcePackageManager {
     return { ...job };
   }
 
+  /** Validate a v3 package for a user asset without consulting the public catalog. */
+  async importLocal(archivePath: string, userAssetId: string): Promise<LocalResourcePackage> {
+    if (typeof archivePath !== "string" || !archivePath.trim()) throw new RangeError("archivePath is required");
+    if (typeof userAssetId !== "string" || !/^user-[a-zA-Z0-9._-]+$/.test(userAssetId.trim())) throw new RangeError("userAssetId must identify a user asset");
+    const stagingPath = path.join(this.#root, "staging", `local-${randomUUID()}`);
+    await mkdir(stagingPath, { recursive: true });
+    try {
+      const info = await stat(archivePath);
+      if (!info.isFile() || info.size > this.#maxArchiveBytes) throw new RangeError("local resource package archive is invalid");
+      await extractArchive(archivePath, stagingPath, this.#maxExtractedBytes);
+      const manifest = parseManifest(JSON.parse(await readFile(path.join(stagingPath, "resource-package.json"), "utf8")) as unknown);
+      await validateManifestFiles(stagingPath, manifest);
+      const footprints = normalizeSurveyFootprintManifest(JSON.parse(await readFile(path.join(stagingPath, "footprints/survey-footprints.json"), "utf8")) as unknown);
+      if (!footprints.footprints.length || footprints.footprints.some((footprint) => footprint.surveyId !== manifest.surveyId)) throw new Error("Resource package footprints do not match its survey");
+      return { id: manifest.id, version: manifest.version, surveyId: manifest.surveyId, userAssetId: userAssetId.trim(), footprints };
+    } finally {
+      await rm(stagingPath, { recursive: true, force: true });
+    }
+  }
+
   job(id: string): ResourcePackageJob {
     const job = this.#jobs.get(id);
     if (!job) throw new Error(`Resource package job not found: ${id}`);
@@ -441,18 +665,21 @@ export class ResourcePackageManager {
   }
 
   async activate(id: string): Promise<PublicResourcePackage> {
+    this.#assertAvailable();
     const installed = this.#installed(id);
     await this.setActive(this.#loadsExcept(id).concat({ packageId: id, releaseIds: this.#availableReleaseIds(installed) }));
     return this.get(id);
   }
 
   async deactivate(id: string): Promise<PublicResourcePackage> {
+    this.#assertAvailable();
     this.#installed(id);
     await this.setActive(this.#loadsExcept(id));
     return this.get(id);
   }
 
   async setActive(loads: ResourcePackageLoad[]): Promise<PublicResourcePackage[]> {
+    this.#assertAvailable();
     if (!Array.isArray(loads)) throw new RangeError("loads must be an array");
     const packageIds = loads.map((load) => load?.packageId);
     if (loads.some((load) => !load || typeof load.packageId !== "string" || !Array.isArray(load.releaseIds) || load.releaseIds.some((id) => typeof id !== "string" || !id.trim()))) throw new RangeError("loads must contain packageId and releaseIds");
@@ -499,6 +726,7 @@ export class ResourcePackageManager {
   }
 
   async activeFootprints(): Promise<SurveyFootprintManifest> {
+    this.#assertAvailable();
     const manifests = this.#state.packages.filter((record) => record.activeReleaseIds.length).map((record) => {
       const manifest = this.#installedFootprints.get(record.id);
       if (!manifest) throw new Error(`Installed resource package manifest is unavailable: ${record.id}`);
@@ -533,7 +761,8 @@ export class ResourcePackageManager {
       await extractArchive(archivePath, stagingPath, this.#maxExtractedBytes);
       const manifest = parseManifest(JSON.parse(await readFile(path.join(stagingPath, "resource-package.json"), "utf8")) as unknown);
       if (manifest.id !== entry.id || manifest.version !== entry.version || manifest.surveyId !== entry.surveyId) throw new Error("Resource package manifest does not match the catalog");
-      const footprints = normalizeSurveyFootprintManifest(JSON.parse(await readFile(path.join(stagingPath, manifest.footprintManifest), "utf8")) as unknown);
+      await validateManifestFiles(stagingPath, manifest);
+      const footprints = normalizeSurveyFootprintManifest(JSON.parse(await readFile(path.join(stagingPath, "footprints/survey-footprints.json"), "utf8")) as unknown);
       if (!footprints.footprints.length || footprints.footprints.some((footprint) => footprint.surveyId !== manifest.surveyId)) throw new Error("Resource package footprints do not match its survey");
       const finalParent = path.join(this.#root, "installed", entry.id);
       const finalPath = path.join(finalParent, entry.version);
@@ -579,6 +808,10 @@ export class ResourcePackageManager {
 
   async #validateInstalled(record: InstalledPackage): Promise<SurveyFootprintManifest> {
     const entry = this.#catalog.packages.find((candidate) => candidate.id === record.id);
+    // A previously trusted installation remains readable while Assets is
+    // offline. Public operations still fail through #assertAvailable until a
+    // trusted catalog is available again.
+    if (!entry && this.#catalogError) return this.#readFootprints(record);
     if (!entry || (entry.version === record.version && entry.sha256 !== record.sha256)) throw new Error(`Installed resource package is absent from the trusted catalog: ${record.id}@${record.version}`);
     const manifest = await this.#readFootprints(record);
     return manifest;

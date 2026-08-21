@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { createWriteStream } from "node:fs";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -9,10 +9,18 @@ import { pathToFileURL } from "node:url";
 
 import yazl from "yazl";
 
-import { ResourcePackageManager, type ResourcePackageJob } from "../src/resource-packages.js";
+import { ResourceCatalogUnavailableError, ResourcePackageManager, type ResourcePackageJob } from "../src/resource-packages.js";
 import type { SurveyFootprintManifest } from "../src/survey-footprints.js";
 
 const now = "2026-07-24T00:00:00.000Z";
+
+function fitsMoc(): Buffer {
+  const card = (key: string, value: string) => Buffer.from(`${key.padEnd(8, " ")}= ${value.padEnd(70, " ").slice(0, 70)}`.padEnd(80, " "), "ascii");
+  const header = Buffer.concat([card("SIMPLE", "                    T"), card("BITPIX", "                    32"), card("NAXIS", "                     1"), card("NAXIS1", "                     1"), card("EXTNAME", "'MOC'"), card("MOCVERS", "'1.1'"), card("TTYPE1", "'NUNIQ'"), Buffer.from("END".padEnd(80, " "), "ascii")]);
+  const padded = Buffer.concat([header, Buffer.alloc(Math.ceil(header.length / 2880) * 2880 - header.length)]);
+  const data = Buffer.alloc(2880); data.writeInt32BE(1024, 0);
+  return Buffer.concat([padded, data]);
+}
 
 function manifestFor(surveyId: string, releases: string[], nside = 16, quality: "moc" | "official_overview" = "moc"): SurveyFootprintManifest {
   const footprints = releases.map((releaseId, index) => ({
@@ -41,24 +49,32 @@ interface PackageFixture {
 }
 
 async function createPackage(directory: string, id: string, surveyId: string, options: { unsafeSymlink?: boolean; missingFile?: string; footprintSurveyId?: string; version?: string; releases?: string[]; nside?: number; quality?: "moc" | "official_overview" } = {}): Promise<PackageFixture> {
-  const version = options.version ?? "2.0.0";
+  const version = options.version ?? "3.0.0";
   const releases = options.releases ?? ["release-a", "release-b"];
-  const packageManifest = {
-    schemaVersion: 2,
-    id,
-    name: `Fixture ${id}`,
-    description: "Test fixture package",
-    version,
-    surveyId,
-    createdAt: now,
-    footprintManifest: "footprints/survey-footprints.json",
-  };
+  const mocBytes = fitsMoc();
   const footprints = manifestFor(options.footprintSurveyId ?? surveyId, releases, options.nside, options.quality);
+  const footprintBytes = Buffer.from(`${JSON.stringify(footprints, null, 2)}\n`);
+  const provenanceBytes = Buffer.from(JSON.stringify({ schemaVersion: 3, version: "3.0.0", files: [] }));
+  const readmeBytes = Buffer.from("# README\n");
+  const packageManifest = {
+    schemaVersion: 3,
+    version,
+    id,
+    surveyId,
+    files: [
+      { path: "README.md", sizeBytes: readmeBytes.length, sha256: createHash("sha256").update(readmeBytes).digest("hex") },
+      { path: "footprints/survey-footprints.json", sizeBytes: footprintBytes.length, sha256: createHash("sha256").update(footprintBytes).digest("hex") },
+      { path: "provenance.json", sizeBytes: provenanceBytes.length, sha256: createHash("sha256").update(provenanceBytes).digest("hex") },
+    ],
+    layers: [{ layerId: `${surveyId}-coverage`, surveyId, coverageRole: "image_extent", dataOrigin: "observed", sourceTier: "survey_authoritative", modality: "imaging", releaseId: releases[0]!, path: `mocs/${surveyId}-coverage.moc.fits`, sizeBytes: mocBytes.length, sha256: createHash("sha256").update(mocBytes).digest("hex") }],
+  };
   const zip = new yazl.ZipFile();
   zip.addBuffer(Buffer.from(`${JSON.stringify(packageManifest, null, 2)}\n`), "resource-package.json");
-  zip.addBuffer(Buffer.from(`${JSON.stringify(footprints, null, 2)}\n`), "footprints/survey-footprints.json");
+  zip.addBuffer(footprintBytes, "footprints/survey-footprints.json");
+  zip.addBuffer(mocBytes, `mocs/${surveyId}-coverage.moc.fits`);
+  zip.addBuffer(provenanceBytes, "provenance.json");
   if (options.unsafeSymlink) zip.addBuffer(Buffer.from("evil"), "evil-link", { mode: 0o120777 });
-  if (options.missingFile !== "README.md") zip.addBuffer(Buffer.from("# README\n"), "README.md");
+  if (options.missingFile !== "README.md") zip.addBuffer(readmeBytes, "README.md");
   if (options.missingFile === "footprints/survey-footprints.json") zip.addBuffer(Buffer.from("{}"), "footprints/survey-footprints.json");
   if (options.missingFile === "resource-package.json") zip.addBuffer(Buffer.from("{}"), "resource-package.json");
   const archivePath = path.join(directory, `${id}-${version}.zip`);
@@ -83,14 +99,14 @@ async function writeCatalog(directory: string, packages: { id: string; surveyId:
     releases: entry.releases ?? ["fixture-release"],
     releaseLabels: Object.fromEntries((entry.releases ?? ["fixture-release"]).map((releaseId) => [releaseId, releaseId.toUpperCase()])),
     sources: (entry.releases ?? ["fixture-release"]).map((releaseId) => ({ releaseId, label: "Fixture source", url: "https://example.test/coverage", authority: "official-moc" })),
-    version: entry.version ?? "2.0.0",
+    version: entry.version ?? "3.0.0",
     archiveUrl: path.basename(entry.archivePath),
     sizeBytes: entry.sizeBytes,
     sha256: tamperSha256 ? "0".repeat(64) : entry.sha256,
     updatedAt: entry.updatedAt ?? now,
   }));
   const catalogPath = path.join(directory, "catalog.json");
-  await writeFile(catalogPath, `${JSON.stringify({ schemaVersion: 2, generatedAt: now, packages: entries }, null, 2)}\n`, "utf8");
+  await writeFile(catalogPath, `${JSON.stringify({ schemaVersion: 3, version: "3.0.0", generatedAt: now, packages: entries }, null, 2)}\n`, "utf8");
   return pathToFileURL(catalogPath).href;
 }
 
@@ -126,6 +142,58 @@ async function waitForJob(manager: ResourcePackageManager, job: ResourcePackageJ
   throw new Error("timed out waiting for resource package job");
 }
 
+test("invalid or unavailable Assets catalogs keep the service alive and expose 503 state", async () => {
+  const paths = await fixture();
+  try {
+    const snapshotRoot = path.join(paths.directory, "state");
+    const seeded = new ResourcePackageManager({ catalogUrl: paths.catalogUrl, root: paths.root, statePath: paths.statePath, snapshotRoot });
+    await seeded.initialize();
+    const offline = new ResourcePackageManager({
+      catalogUrl: pathToFileURL(path.join(paths.directory, "missing-catalog.json")).href,
+      root: paths.root,
+      statePath: paths.statePath,
+      snapshotRoot,
+    });
+    await offline.initialize();
+    assert.equal(offline.available, true);
+    assert.equal(offline.list().length, 2);
+
+    const noSnapshot = new ResourcePackageManager({
+      catalogUrl: pathToFileURL(path.join(paths.directory, "missing-catalog-2.json")).href,
+      root: path.join(paths.directory, "empty-root"),
+      statePath: path.join(paths.directory, "empty-state.json"),
+    });
+    await noSnapshot.initialize();
+    assert.equal(noSnapshot.available, false);
+    assert.throws(() => noSnapshot.list(), ResourceCatalogUnavailableError);
+  } finally {
+    await rm(paths.directory, { recursive: true, force: true });
+  }
+});
+
+test("explicit catalog sync trusts v3 metadata without downloading package archives", async () => {
+  const paths = await fixture();
+  try {
+    const snapshotRoot = path.join(paths.directory, "snapshot-state");
+    const manager = new ResourcePackageManager({ catalogUrl: paths.catalogUrl, root: paths.root, statePath: paths.statePath, snapshotRoot });
+    await manager.initialize();
+    const before = await readdir(path.join(paths.root, "downloads"));
+    const status = await manager.sync();
+    assert.equal(status.available, true);
+    assert.equal(status.catalogSha256?.length, 64);
+    assert.equal(manager.list().length, 2);
+    assert.deepEqual(await readdir(path.join(paths.root, "downloads")), before);
+    assert.ok((await readFile(path.join(snapshotRoot, "assets-current", "catalog.json"), "utf8")).includes('"schemaVersion": 3'));
+
+    await writeFile(paths.catalogUrl.replace("file://", ""), "{\"schemaVersion\":1}\n", "utf8");
+    await assert.rejects(() => manager.sync(), /Assets catalog sync failed/);
+    assert.equal(manager.available, true);
+    assert.equal(manager.list().length, 2);
+  } finally {
+    await rm(paths.directory, { recursive: true, force: true });
+  }
+});
+
 test("resource packages list lifecycle status and survive a registry restart", async () => {
   const paths = await fixture();
   try {
@@ -138,7 +206,7 @@ test("resource packages list lifecycle status and survive a registry restart", a
     assert.equal(job.status, "completed");
     const installed = paths.manager.get("public-legacy-surveys-footprints");
     assert.equal(installed.status, "installed");
-    assert.equal(installed.installedVersion, "2.0.0");
+    assert.equal(installed.installedVersion, "3.0.0");
     assert.deepEqual(installed.availableReleaseIds, ["release-a", "release-b"]);
 
     await paths.manager.activate("public-legacy-surveys-footprints");
@@ -170,7 +238,7 @@ test("official overview releases are selectable and retain their coverage label"
     await waitForJob(paths.manager, paths.manager.install("public-legacy-surveys-footprints"));
     const state = JSON.parse(await readFile(paths.statePath, "utf8")) as { packages: Array<{ id: string; activeReleaseIds: string[] }> };
     state.packages.find((record) => record.id === "public-legacy-surveys-footprints")!.activeReleaseIds = ["release-a"];
-    await writeFile(paths.statePath, `${JSON.stringify({ schemaVersion: 2, packages: state.packages }, null, 2)}\n`, "utf8");
+    await writeFile(paths.statePath, `${JSON.stringify({ schemaVersion: 3, packages: state.packages }, null, 2)}\n`, "utf8");
 
     const restarted = new ResourcePackageManager({ catalogUrl: paths.catalogUrl, root: paths.root, statePath: paths.statePath });
     await restarted.initialize();
@@ -266,7 +334,7 @@ test("setActive rejects incompatible nside without changing the prior selection"
   }
 });
 
-test("initialize migrates v1 active state from the installed manifest and writes schema v2", async () => {
+test("initialize rejects legacy active state after the v3 cutover", async () => {
   const paths = await fixture();
   try {
     await waitForJob(paths.manager, paths.manager.install("public-legacy-surveys-footprints"));
@@ -277,12 +345,7 @@ test("initialize migrates v1 active state from the installed manifest and writes
     }, null, 2)}\n`, "utf8");
 
     const migrated = new ResourcePackageManager({ catalogUrl: paths.catalogUrl, root: paths.root, statePath: paths.statePath });
-    await migrated.initialize();
-    assert.deepEqual(migrated.get("public-legacy-surveys-footprints").activeReleaseIds, ["release-a", "release-b"]);
-    const state = JSON.parse(await readFile(paths.statePath, "utf8")) as { schemaVersion: number; packages: Array<Record<string, unknown>> };
-    assert.equal(state.schemaVersion, 2);
-    assert.deepEqual(state.packages[0]!.activeReleaseIds, ["release-a", "release-b"]);
-    assert.equal("active" in state.packages[0]!, false);
+    await assert.rejects(() => migrated.initialize(), /unsupported schema/);
   } finally {
     await rm(paths.directory, { recursive: true, force: true });
   }
@@ -294,7 +357,7 @@ test("updating a package preserves only selected releases still installed", asyn
     await waitForJob(paths.manager, paths.manager.install("public-legacy-surveys-footprints"));
     await paths.manager.setActive([{ packageId: "public-legacy-surveys-footprints", releaseIds: ["release-a", "release-b"] }]);
 
-    const updated = await createPackage(paths.directory, "public-legacy-surveys-footprints", "legacy-surveys", { version: "3.0.0", releases: ["release-b", "release-c"] });
+    const updated = await createPackage(paths.directory, "public-legacy-surveys-footprints", "legacy-surveys", { version: "3.1.0", releases: ["release-b", "release-c"] });
     await writeCatalog(paths.directory, [updated, paths.packages[1]!]);
     const updater = new ResourcePackageManager({ catalogUrl: paths.catalogUrl, root: paths.root, statePath: paths.statePath });
     await updater.initialize();
@@ -305,7 +368,7 @@ test("updating a package preserves only selected releases still installed", asyn
     const result = await waitForJob(updater, updater.install(updated.id));
     assert.equal(result.status, "completed");
     const record = updater.get(updated.id);
-    assert.equal(record.installedVersion, "3.0.0");
+    assert.equal(record.installedVersion, "3.1.0");
     assert.deepEqual(record.availableReleaseIds, ["release-b", "release-c"]);
     assert.deepEqual(record.activeReleaseIds, ["release-b"]);
     assert.equal(record.activeReleaseIds.includes("release-c"), false);
@@ -378,8 +441,8 @@ test("concurrent installs of distinct packages both complete and persist", async
 
     const reloaded = new ResourcePackageManager({ catalogUrl: paths.catalogUrl, root: paths.root, statePath: paths.statePath });
     await reloaded.initialize();
-    assert.equal(reloaded.get("public-legacy-surveys-footprints").installedVersion, "2.0.0");
-    assert.equal(reloaded.get("public-galex-footprints").installedVersion, "2.0.0");
+    assert.equal(reloaded.get("public-legacy-surveys-footprints").installedVersion, "3.0.0");
+    assert.equal(reloaded.get("public-galex-footprints").installedVersion, "3.0.0");
   } finally {
     await rm(paths.directory, { recursive: true, force: true });
   }
@@ -404,7 +467,7 @@ test("resource package manager options are honored and install is serialized per
     const statePath = path.join(directory, "state", "resource-package-state.json");
     const pack = await createPackage(directory, "public-legacy-surveys-footprints", "legacy-surveys");
     const catalogUrl = await writeCatalog(directory, [pack]);
-    const manager = new ResourcePackageManager({ catalogUrl, root, statePath, maxArchiveBytes: 1024, maxExtractedBytes: 4096, downloadTimeoutMs: 1000 });
+    const manager = new ResourcePackageManager({ catalogUrl, root, statePath, maxArchiveBytes: 20_000, maxExtractedBytes: 20_000, downloadTimeoutMs: 1000 });
     await manager.initialize();
     const first = manager.install("public-legacy-surveys-footprints");
     assert.throws(() => manager.install("public-legacy-surveys-footprints"), /install already in progress/);

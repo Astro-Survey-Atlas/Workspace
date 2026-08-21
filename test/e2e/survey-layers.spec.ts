@@ -317,7 +317,7 @@ test("public resource package installs and applies all releases atomically", asy
     await expect(page.locator(".public-release-product[data-coverage-status='overview_only']", { hasText: "仅有官方概览" })).not.toHaveCount(0);
   }
   await expect(page.locator(".public-release-product-links").getByRole("link", { name: /覆盖来源/ })).toHaveCount(2);
-  await expect(page.locator(".public-release-product").getByRole("button", { name: "填写覆盖范围" })).toHaveCount(euclidQ1Statuses.filter((status) => status === "awaiting_geometry").length);
+  await expect(page.locator(".public-release-product").getByRole("button", { name: /填写覆盖范围|维护覆盖范围/ })).toHaveCount(0);
   await expect.poll(() => new URL(page.url()).searchParams.get("release")).toBe("euclid-q1");
   await packageButton.click();
   await expect(page.locator("#resource-package-stage")).toBeVisible();

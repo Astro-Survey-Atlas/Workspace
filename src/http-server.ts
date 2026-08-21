@@ -1,5 +1,6 @@
 ﻿import path from "node:path";
-import { readFile } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
+import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { createMcpExpressApp } from "@modelcontextprotocol/sdk/server/express.js";
@@ -15,18 +16,15 @@ import { McpCatalogQueryClient } from "./catalog-mcp-client.js";
 import { createConnectorCredentialStore, type StoredConnectorCredentials } from "./connector-credentials.js";
 import { ConnectorRegistry, connectorLocationKey, validateConnectorInput, type ConnectorCheckInput, type ConnectorPublicRecord, type ConnectorRecord, type ConnectorRegistrationInput } from "./connectors.js";
 import { ConnectorIngestRunCatalog, publicConnectorIngestRun, type ConnectorIngestRunFilter, type ConnectorIngestRunInput, type ConnectorIngestRunRecord, type ConnectorIngestRunStatus } from "./connector-history.js";
-import { COVERAGE_JOB_CAPABILITIES, validateCoverageJobSubmission } from "./coverage-jobs.js";
 import { DataCatalogRegistry, type DataAssetAccess, type DataAssetRecord, type DataAssetRegistrationInput } from "./data-catalog.js";
 import { ownershipKey, resolveDataOwnership, type EffectiveDataOwnership } from "./data-ownership.js";
 import { ConnectorScanCapabilityError, ConnectorScanPreconditionError, DataWarehouseDisabledError, dataWarehouseEnabled, FlinkScanService, parseLegacyConnectorScanCommand, validateConnectorSelfScanBody } from "./flink-ingest.js";
-import { ManualFootprintRegistry, ManualFootprintRevisionError } from "./manual-footprints.js";
 import { createAstroMcpServer } from "./mcp.js";
 import { ScanRunCatalog } from "./provenance.js";
 import { JsonDatasetRegistry } from "./registry.js";
-import { ResourcePackageManager, type ResourcePackageLoad } from "./resource-packages.js";
-import { buildPublicReleaseDetails, type PublicReleaseProductStatus } from "./public-release-details.js";
-import { normalizeSurveyFootprintManifest, type SurveyFootprintManifest } from "./survey-footprints.js";
-import { CURATED_SURVEYS, SurveyRegistry, type SurveyRegistrationInput, type SurveyReleaseRegistrationInput } from "./survey-registry.js";
+import { ResourceCatalogSyncError, ResourceCatalogUnavailableError, ResourcePackageManager, type ResourcePackageLoad } from "./resource-packages.js";
+import type { SurveyFootprintManifest } from "./survey-footprints.js";
+import { publicSurveysFromPackages, surveyCardFor, SurveyRegistry, type SurveyRecord, type SurveyRegistrationInput, type SurveyReleaseRegistrationInput } from "./survey-registry.js";
 import { CatalogSkyIndexService } from "./sky-index.js";
 import type { DatasetRecord } from "./types.js";
 import { publicVolumeManifest, VolumeCatalog } from "./volume.js";
@@ -58,7 +56,7 @@ const atlasRoot = process.env.ASTRO_ATLAS_ROOT ?? volumeRoot;
 const provenanceRoot = process.env.ASTRO_PROVENANCE_ROOT ?? volumeRoot;
 const workflowRoot = process.env.ASTRO_WORKFLOW_ROOT ?? path.join(projectRoot, "data", "workflow-runs");
 const surveyRegistryStatePath = process.env.ASTRO_SURVEY_REGISTRY_STATE ?? path.join(path.dirname(statePath), "survey-registrations.json");
-const dataCatalogBootstrapPath = process.env.ASTRO_DATA_CATALOG_BOOTSTRAP ?? path.join(projectRoot, "bootstrap", "catalogs.json");
+const dataCatalogBootstrapPath = process.env.ASTRO_DATA_CATALOG_BOOTSTRAP ?? path.join(path.dirname(statePath), "assets-current", "data-catalog.json");
 const dataCatalogStatePath = process.env.ASTRO_DATA_CATALOG_STATE ?? path.join(path.dirname(statePath), "data-catalog.json");
 const connectorStatePath = process.env.ASTRO_CONNECTOR_STATE ?? path.join(path.dirname(statePath), "connectors.json");
 const connectorBootstrapPath = process.env.ASTRO_CONNECTOR_BOOTSTRAP ?? path.join(projectRoot, "bootstrap", "connectors.json");
@@ -66,11 +64,14 @@ const connectorRunStatePath = process.env.ASTRO_CONNECTOR_RUN_STATE ?? path.join
 const localConnectorRoots = LocalConnectorRootsPolicy.fromEnvironment();
 const resourcePackageRoot = process.env.ASTRO_RESOURCE_PACKAGE_ROOT ?? path.join(projectRoot, "data", "resource-packages");
 const resourcePackageStatePath = process.env.ASTRO_RESOURCE_PACKAGE_STATE ?? path.join(path.dirname(statePath), "resource-package-state.json");
-const resourceCatalogUrl = process.env.ASTRO_RESOURCE_CATALOG_URL ?? pathToFileURL(path.join(projectRoot, "bootstrap", "resource-packages", "catalog.json")).href;
-const publicReleaseDetailsPath = process.env.ASTRO_PUBLIC_RELEASE_DETAILS ?? path.join(projectRoot, "bootstrap", "resource-packages", "release-products.json");
-const bundledFootprintPath = process.env.ASTRO_SURVEY_FOOTPRINT_FILE ?? path.join(process.env.ASTRO_SURVEY_FOOTPRINT_ROOT ?? path.join(projectRoot, "src", "footprints"), "survey-footprints.json");
-const manualFootprintStatePath = process.env.ASTRO_MANUAL_FOOTPRINT_STATE ?? path.join(path.dirname(statePath), "manual-footprints.json");
-const manualFootprintAdminToken = process.env.ASTRO_MANUAL_FOOTPRINT_ADMIN_TOKEN;
+const resourceCatalogUrl = process.env.ASTRO_RESOURCE_CATALOG_URL ?? pathToFileURL(path.join(path.dirname(statePath), "assets-current", "catalog.json")).href;
+const resourceSnapshotRoot = process.env.ASTRO_RESOURCE_SNAPSHOT_ROOT ?? path.dirname(statePath);
+const resourceCatalogConfigPath = process.env.ASTRO_RESOURCE_CATALOG_CONFIG_STATE ?? path.join(path.dirname(statePath), "resource-catalog-config.json");
+const resourceCatalogAllowedOrigins = (process.env.ASTRO_RESOURCE_CATALOG_ALLOWED_ORIGINS ?? "")
+  .split(",")
+  .map((value) => value.trim())
+  .filter(Boolean);
+const resourceAdminToken = process.env.ASTRO_RESOURCE_ADMIN_TOKEN;
 const catalogMcpUrl = process.env.ASTRO_CATALOG_MCP_URL ?? "http://eva24002-entrance.lab.zverse.space:30082/mcp";
 const catalogMcpTimeoutMs = Number(process.env.ASTRO_CATALOG_MCP_TIMEOUT_MS ?? "15000");
 const flinkNamespace = process.env.ASTRO_FLINK_NAMESPACE ?? "warehouse";
@@ -119,10 +120,7 @@ const flinkScans = new FlinkScanService({
   esCoverageIndex: astroEsCoverageIndex,
   pollMs: flinkPollMs,
 });
-const resourcePackages = new ResourcePackageManager({ catalogUrl: resourceCatalogUrl, root: resourcePackageRoot, statePath: resourcePackageStatePath });
-let publicReleaseProductStatuses: PublicReleaseProductStatus[] = [];
-let bundledFootprintManifest: SurveyFootprintManifest;
-let manualFootprints: ManualFootprintRegistry;
+const resourcePackages = new ResourcePackageManager({ catalogUrl: resourceCatalogUrl, root: resourcePackageRoot, statePath: resourcePackageStatePath, snapshotRoot: resourceSnapshotRoot, allowedOrigins: resourceCatalogAllowedOrigins });
 // Search indices are independent from the optional warehouse integration.
 const astroIndex = new AstroIndexService({ baseUrl: astroEsUrl });
 const workflowEngine = new WorkflowEngine(workflowStore, new McpCatalogQueryClient(catalogMcpUrl, catalogMcpTimeoutMs, 1));
@@ -368,71 +366,74 @@ function sendApiError(response: Response, error: unknown): void {
     : error instanceof LocalScanPreconditionError ? error.statusCode
     : error instanceof LocalSourceInspectionCapabilityError ? error.statusCode
     : error instanceof LocalSourceInspectionError ? error.statusCode
-    : error instanceof DataWarehouseDisabledError ? 503
+  : error instanceof DataWarehouseDisabledError ? 503
+    : error instanceof ResourceCatalogUnavailableError ? 503
+    : error instanceof ResourceCatalogSyncError ? 502
     : error instanceof ConnectorScanCapabilityError ? 422
     : error instanceof ConnectorScanPreconditionError ? 409
-    : error instanceof ManualFootprintRevisionError ? 412
     : error instanceof RangeError ? 400
-    : notFound || message.startsWith("Manual footprint not found:") ? 404 : 500;
+    : notFound ? 404 : 500;
   if (status === 500) console.error("API request failed", error);
   response.status(status).json({ error: message });
 }
 
-function requireManualFootprintAdmin(request: Request, response: Response): boolean {
-  if (!manualFootprintAdminToken) {
-    response.status(503).json({ error: "Manual footprint administration is not configured" });
+interface ResourceCatalogConfigState {
+  schemaVersion: 1;
+  catalogUrl: string;
+  updatedAt: string;
+}
+
+async function loadResourceCatalogConfig(): Promise<void> {
+  try {
+    const parsed = JSON.parse(await readFile(resourceCatalogConfigPath, "utf8")) as Partial<ResourceCatalogConfigState>;
+    if (parsed.schemaVersion !== 1 || typeof parsed.catalogUrl !== "string") throw new Error("resource catalog config has an unsupported schema");
+    resourcePackages.setCatalogUrl(parsed.catalogUrl);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") console.warn("Ignoring invalid resource catalog config", error);
+  }
+}
+
+async function persistResourceCatalogConfig(catalogUrl: string): Promise<ResourceCatalogConfigState> {
+  const state: ResourceCatalogConfigState = { schemaVersion: 1, catalogUrl, updatedAt: new Date().toISOString() };
+  await mkdir(path.dirname(resourceCatalogConfigPath), { recursive: true });
+  const temporary = `${resourceCatalogConfigPath}.${process.pid}.${randomUUID()}.tmp`;
+  await writeFile(temporary, `${JSON.stringify(state, null, 2)}\n`, { encoding: "utf8", mode: 0o600, flag: "wx" });
+  await rename(temporary, resourceCatalogConfigPath);
+  return state;
+}
+
+function requireResourceAdmin(request: Request, response: Response): boolean {
+  if (!resourceAdminToken) {
+    response.status(503).json({ error: "Resource catalog administration is not configured" });
     return false;
   }
-  if (request.get("Authorization") !== `Bearer ${manualFootprintAdminToken}`) {
+  if (request.get("Authorization") !== `Bearer ${resourceAdminToken}`) {
     response.status(401).json({ error: "Unauthorized" });
     return false;
   }
   return true;
 }
 
-function manualFootprintRevision(request: Request, response: Response): number | undefined {
-  const value = request.get("If-Match");
-  if (!value) {
-    response.status(428).json({ error: "If-Match revision is required" });
-    return undefined;
-  }
-  const match = /^(?:W\/)?\"?(\d+)\"?$/.exec(value.trim());
-  if (!match || !Number.isSafeInteger(Number(match[1])) || Number(match[1]) < 1) {
-    response.status(400).json({ error: "If-Match must contain a valid revision" });
-    return undefined;
-  }
-  return Number(match[1]);
-}
-
-function manualFootprintIdentity(request: Request): { surveyId: string; releaseId: string; product: string } {
-  const value = (name: "surveyId" | "releaseId" | "product") => {
-    const parameter = request.params[name];
-    const result = Array.isArray(parameter) ? parameter[0] : parameter;
-    if (!result) throw new RangeError(`${name} is required`);
-    return result;
-  };
-  return { surveyId: value("surveyId"), releaseId: value("releaseId"), product: value("product") };
-}
-
-function footprintEtag(response: Response, revision: number): void {
-  response.set("ETag", `\"${revision}\"`);
-  response.set("Cache-Control", "no-store");
-}
-
-function mergeFootprintManifests(left: SurveyFootprintManifest, right: SurveyFootprintManifest): SurveyFootprintManifest {
-  if (left.nside !== right.nside) throw new Error("Footprint manifests use different NSIDE values");
-  const footprints = new Map(left.footprints.map((footprint) => [`${footprint.surveyId}:${footprint.releaseId}:${footprint.product}`, footprint]));
-  for (const footprint of right.footprints) {
-    const identity = `${footprint.surveyId}:${footprint.releaseId}:${footprint.product}`;
-    const existing = footprints.get(identity);
-    if (existing?.quality === "moc") throw new RangeError(`Footprint identity conflict: ${identity}`);
-    footprints.set(identity, footprint);
-  }
-  return { schemaVersion: 1, generatedAt: new Date().toISOString(), coordinateFrame: "ICRS", nside: left.nside, footprints: [...footprints.values()] };
-}
-
 async function effectiveFootprints(): Promise<SurveyFootprintManifest> {
-  return mergeFootprintManifests(await resourcePackages.activeFootprints(), manualFootprints.publishedManifest());
+  // Public coverage is sourced only from the trusted Assets snapshot.
+  return resourcePackages.activeFootprints();
+}
+
+function publicSurveyRecords(): SurveyRecord[] {
+  return resourcePackages.available ? publicSurveysFromPackages(resourcePackages.list()) : [];
+}
+
+function surveyRecords(): SurveyRecord[] {
+  const records = new Map(publicSurveyRecords().map((record) => [record.id, record]));
+  for (const card of surveys.list()) records.set(card.id, surveys.get(card.id));
+  return [...records.values()];
+}
+
+function surveyRecord(id: string): SurveyRecord {
+  if (surveys.list().some((record) => record.id === id)) return surveys.get(id);
+  const record = publicSurveyRecords().find((candidate) => candidate.id === id);
+  if (!record) throw new Error(`Survey not found: ${id}`);
+  return record;
 }
 
 function datasetIdFrom(request: Request): string {
@@ -776,79 +777,12 @@ app.delete("/api/connectors/:id", async (request: Request, response: Response) =
 });
 
 app.get("/api/surveys", (_request: Request, response: Response) => {
-  response.json({ surveys: surveys.list() });
+  response.json({ surveys: surveyRecords().map(surveyCardFor) });
 });
 
 app.get("/api/surveys/:id", (request: Request, response: Response) => {
   try {
-    response.json({ survey: surveys.get(datasetIdFrom(request)) });
-  } catch (error) {
-    sendApiError(response, error);
-  }
-});
-
-/**
- * Coverage derivation is intentionally a private Workspace operation. The
- * public Assets site receives only reviewed, versioned artifacts and never
- * receives connector credentials or an OSS listing capability.
- */
-app.get("/api/coverage-jobs/capabilities", (_request: Request, response: Response) => {
-  response.json({
-    output: { coordinateFrame: "ICRS", ordering: "NESTED", nside: 256, healpixOrder: 8 },
-    modes: COVERAGE_JOB_CAPABILITIES,
-  });
-});
-
-app.get("/api/surveys/:id/coverage-jobs", async (request: Request, response: Response) => {
-  try {
-    const surveyId = datasetIdFrom(request);
-    surveys.get(surveyId);
-    const releaseId = typeof request.query.releaseId === "string" ? request.query.releaseId.trim() : undefined;
-    const status = typeof request.query.status === "string" ? request.query.status.trim() : undefined;
-    if (status !== undefined && !["queued", "running", "succeeded", "failed"].includes(status)) {
-      throw new RangeError("status is not supported");
-    }
-    if (releaseId !== undefined && !releaseId) throw new RangeError("releaseId must not be empty");
-    if (warehouseEnabled) void flinkScans.poll();
-    const runs = (await connectorRuns.list()).filter((run) => run.coverage?.surveyId === surveyId
-      && (releaseId === undefined || run.coverage?.releaseId === releaseId)
-      && (status === undefined || run.status === status));
-    response.set("Cache-Control", "no-store");
-    response.json({ jobs: publicConnectorRuns(runs) });
-  } catch (error) {
-    sendApiError(response, error);
-  }
-});
-
-app.get("/api/surveys/:id/coverage-jobs/:jobId", async (request: Request, response: Response) => {
-  try {
-    const surveyId = datasetIdFrom(request);
-    surveys.get(surveyId);
-    const jobId = Array.isArray(request.params.jobId) ? request.params.jobId[0] : request.params.jobId;
-    if (!jobId) throw new RangeError("coverage job id is required");
-    if (warehouseEnabled) void flinkScans.poll();
-    const run = (await connectorRuns.list()).find((candidate) => candidate.id === jobId && candidate.coverage?.surveyId === surveyId);
-    if (!run) throw new Error(`Coverage job not found: ${jobId}`);
-    response.set("Cache-Control", "no-store");
-    response.json({ job: publicConnectorIngestRun(run) });
-  } catch (error) {
-    sendApiError(response, error);
-  }
-});
-
-app.post("/api/surveys/:id/coverage-jobs", async (request: Request, response: Response) => {
-  try {
-    const surveyId = datasetIdFrom(request);
-    const survey = surveys.get(surveyId);
-    const submission = validateCoverageJobSubmission(request.body);
-    const release = survey.releases.find((candidate) => candidate.id === submission.releaseId);
-    if (!release) throw new RangeError(`releaseId ${submission.releaseId} does not belong to survey ${surveyId}`);
-    if (release.availability === "planned") throw new RangeError("planned releases cannot run a coverage job");
-    if (!release.products.some((candidate) => candidate.name === submission.product)) {
-      throw new RangeError(`product ${submission.product} is not registered for release ${submission.releaseId}`);
-    }
-    const run = await flinkScans.submitCoverageJob(surveyId, submission, idempotencyKey(request));
-    response.status(202).json({ job: publicConnectorIngestRun(run), run: publicConnectorIngestRun(run) });
+    response.json({ survey: surveyRecord(datasetIdFrom(request)) });
   } catch (error) {
     sendApiError(response, error);
   }
@@ -857,16 +791,6 @@ app.post("/api/surveys/:id/coverage-jobs", async (request: Request, response: Re
 app.post("/api/surveys/:id/releases", async (request: Request, response: Response) => {
   try {
     response.status(201).json({ release: await surveys.addRelease(datasetIdFrom(request), request.body as SurveyReleaseRegistrationInput) });
-  } catch (error) {
-    sendApiError(response, error);
-  }
-});
-
-app.get("/api/public-release-details", async (_request: Request, response: Response) => {
-  try {
-    response.set("Cache-Control", "no-store");
-    const detailManifest = mergeFootprintManifests(bundledFootprintManifest, manualFootprints.publishedManifest());
-    response.json({ releases: buildPublicReleaseDetails(CURATED_SURVEYS, publicReleaseProductStatuses, detailManifest) });
   } catch (error) {
     sendApiError(response, error);
   }
@@ -882,8 +806,38 @@ app.get("/api/survey-footprints", async (_request: Request, response: Response) 
 });
 
 app.get("/api/resource-packages", (_request: Request, response: Response) => {
+  try {
+    response.set("Cache-Control", "no-store");
+    response.json({ packages: resourcePackages.list() });
+  } catch (error) {
+    sendApiError(response, error);
+  }
+});
+
+app.get("/api/resource-packages/config", (_request: Request, response: Response) => {
   response.set("Cache-Control", "no-store");
-  response.json({ packages: resourcePackages.list() });
+  response.json({ config: { ...resourcePackages.catalogStatus(), adminConfigured: Boolean(resourceAdminToken) } });
+});
+
+app.put("/api/resource-packages/config", async (request: Request, response: Response) => {
+  if (!requireResourceAdmin(request, response)) return;
+  try {
+    const catalogUrl = resourcePackages.setCatalogUrl(String(request.body?.catalogUrl ?? ""));
+    const config = await persistResourceCatalogConfig(catalogUrl);
+    response.json({ config: { ...resourcePackages.catalogStatus(), adminConfigured: true, updatedAt: config.updatedAt } });
+  } catch (error) {
+    sendApiError(response, error);
+  }
+});
+
+app.post("/api/resource-packages/sync", async (request: Request, response: Response) => {
+  if (!requireResourceAdmin(request, response)) return;
+  try {
+    const catalog = await resourcePackages.sync();
+    response.json({ catalog, packages: resourcePackages.list() });
+  } catch (error) {
+    sendApiError(response, error);
+  }
 });
 
 app.get("/api/resource-packages/active-footprints", async (_request: Request, response: Response) => {
@@ -894,73 +848,6 @@ app.get("/api/resource-packages/active-footprints", async (_request: Request, re
     sendApiError(response, error);
   }
 });
-
-app.get("/api/manual-footprints", (_request: Request, response: Response) => {
-  response.set("Cache-Control", "no-store");
-  response.json({ footprints: manualFootprints.list() });
-});
-
-app.get("/api/manual-footprints/:surveyId/:releaseId/:product", (request: Request, response: Response) => {
-  try {
-    const { surveyId, releaseId, product } = manualFootprintIdentity(request);
-    const record = manualFootprints.get(surveyId, releaseId, product);
-    footprintEtag(response, record.revision);
-    response.json({ footprint: record });
-  } catch (error) {
-    sendApiError(response, error);
-  }
-});
-
-app.post("/api/manual-footprints", async (request: Request, response: Response) => {
-  if (!requireManualFootprintAdmin(request, response)) return;
-  try {
-    const record = await manualFootprints.create(request.body);
-    footprintEtag(response, record.revision);
-    response.status(201).json({ footprint: record });
-  } catch (error) {
-    sendApiError(response, error);
-  }
-});
-
-app.put("/api/manual-footprints/:surveyId/:releaseId/:product", async (request: Request, response: Response) => {
-  if (!requireManualFootprintAdmin(request, response)) return;
-  const revision = manualFootprintRevision(request, response);
-  if (revision === undefined) return;
-  try {
-    const { surveyId, releaseId, product } = manualFootprintIdentity(request);
-    const record = await manualFootprints.update(surveyId, releaseId, product, revision, request.body);
-    footprintEtag(response, record.revision);
-    response.json({ footprint: record });
-  } catch (error) {
-    sendApiError(response, error);
-  }
-});
-
-for (const action of ["validate", "publish", "unpublish"] as const) {
-  app.post(`/api/manual-footprints/:surveyId/:releaseId/:product/${action}`, async (request: Request, response: Response) => {
-    if (!requireManualFootprintAdmin(request, response)) return;
-    const revision = manualFootprintRevision(request, response);
-    if (revision === undefined) return;
-    try {
-      const { surveyId, releaseId, product } = manualFootprintIdentity(request);
-      let record;
-      if (action === "publish") {
-        const active = await resourcePackages.activeFootprints();
-        const existing = {
-          ...active,
-          footprints: [...active.footprints, ...bundledFootprintManifest.footprints.filter((footprint) => footprint.quality === "moc")],
-        };
-        record = await manualFootprints.publish(surveyId, releaseId, product, revision, existing);
-      } else {
-        record = await manualFootprints[action](surveyId, releaseId, product, revision);
-      }
-      footprintEtag(response, record.revision);
-      response.json({ footprint: record });
-    } catch (error) {
-      sendApiError(response, error);
-    }
-  });
-}
 
 app.get("/api/resource-packages/jobs/:id", (request: Request, response: Response) => {
   try {
@@ -1019,6 +906,10 @@ app.delete("/api/resource-packages/:id", async (request: Request, response: Resp
 
 app.post("/api/surveys/registrations", async (request: Request, response: Response) => {
   try {
+    const requestedId = typeof request.body?.id === "string" ? request.body.id.trim() : "";
+    if (requestedId && publicSurveyRecords().some((record) => record.id === requestedId || record.releases.some((release) => release.id === requestedId))) {
+      throw new RangeError(`Survey id already exists in the Assets catalog: ${requestedId}`);
+    }
     response.status(201).json({ survey: await surveys.register(request.body as SurveyRegistrationInput) });
   } catch (error) {
     sendApiError(response, error);
@@ -1590,32 +1481,9 @@ async function start(): Promise<void> {
   await dataCatalog.initialize();
   await connectors.initialize();
   await connectorRuns.initialize();
+  await loadResourceCatalogConfig();
   await resourcePackages.initialize();
-  const productStatus = JSON.parse(await readFile(publicReleaseDetailsPath, "utf8")) as { releases?: Array<{ surveyId: string; releaseId: string; products: Array<Omit<PublicReleaseProductStatus, "surveyId" | "releaseId">> }> };
-  publicReleaseProductStatuses = (productStatus.releases ?? []).flatMap((release) => release.products.map((product) => ({
-    ...product,
-    surveyId: release.surveyId,
-    releaseId: release.releaseId,
-  })));
-  bundledFootprintManifest = normalizeSurveyFootprintManifest(JSON.parse(await readFile(bundledFootprintPath, "utf8")) as SurveyFootprintManifest);
-  manualFootprints = new ManualFootprintRegistry({
-    statePath: manualFootprintStatePath,
-    resolveSurvey: (surveyId) => {
-      try { return surveys.get(surveyId); } catch { return undefined; }
-    },
-    releaseProducts: publicReleaseProductStatuses,
-  });
-  await manualFootprints.initialize();
   flinkScans.start();
-  const bootstrapCatalog = process.env.ASTRO_BOOTSTRAP_CATALOG;
-  if (bootstrapCatalog) {
-    const record = await registry.registerLocalCsv(
-      bootstrapCatalog,
-      process.env.ASTRO_BOOTSTRAP_NAME ?? "COSMOS Clean V2",
-    );
-    await skyIndexes.getSummary(record);
-    console.log(`Bootstrapped dataset ${record.id} from configured catalog`);
-  }
 
   httpServer = app.listen(port, host, () => {
     console.log(`astro-data-workspace listening on http://${host}:${port}`);

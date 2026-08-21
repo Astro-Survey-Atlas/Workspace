@@ -396,7 +396,12 @@ export class DataCatalogRegistry {
   }
 
   async initialize(): Promise<void> {
-    const builtin = JSON.parse(await readFile(this.#bootstrapPath, "utf8")) as unknown;
+    let builtin: unknown = [];
+    try {
+      builtin = JSON.parse(await readFile(this.#bootstrapPath, "utf8")) as unknown;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
     if (!Array.isArray(builtin)) throw new Error("data catalog bootstrap must be an array");
     this.#builtin = builtin.map((entry) => normalizeDataAssetRecord(entry as DataAssetRecord, "builtin"));
   }

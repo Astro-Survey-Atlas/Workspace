@@ -46,8 +46,6 @@ spec:
               value: /state/data-catalog.json
             - name: ASTRO_SURVEY_REGISTRY_STATE
               value: /state/survey-registrations.json
-            - name: ASTRO_MANUAL_FOOTPRINT_STATE
-              value: /state/manual-footprints.json
             - name: ASTRO_CONNECTOR_STATE
               value: /state/connectors.json
             - name: ASTRO_CONNECTOR_RUN_STATE

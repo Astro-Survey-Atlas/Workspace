@@ -23,13 +23,9 @@ const manifest: SurveyFootprintManifest = {
 };
 
 test("release details only mark products with real geometry as acquired", () => {
-  const details = buildPublicReleaseDetails([survey], [
-    { surveyId: "demo", releaseId: "demo-r1", product: "Imaging", status: "acquired", sourceUrl: "https://example.test/moc" },
-    { surveyId: "demo", releaseId: "demo-r1", product: "Spectra", status: "awaiting_geometry", sourceUrl: "https://example.test/r1", reason: "Official geometry has not been acquired." },
-  ], manifest);
+  const details = buildPublicReleaseDetails([survey], manifest);
   assert.equal(details[0]?.products[0]?.coverageStatus, "acquired");
   assert.equal(details[0]?.products[1]?.coverageStatus, "awaiting_geometry");
-  assert.equal(details[0]?.products[1]?.reason, "Official geometry has not been acquired.");
 });
 
 test("official overview artifacts remain overview-only", () => {
@@ -37,17 +33,13 @@ test("official overview artifacts remain overview-only", () => {
     ...manifest,
     footprints: manifest.footprints.map((footprint) => ({ ...footprint, quality: "official_overview" as const })),
   };
-  const details = buildPublicReleaseDetails([survey], [
-    { surveyId: "demo", releaseId: "demo-r1", product: "Imaging", status: "overview_only", sourceUrl: "https://example.test/overview" },
-  ], overviewManifest);
+  const details = buildPublicReleaseDetails([survey], overviewManifest);
   assert.equal(details[0]?.products[0]?.coverageStatus, "overview_only");
 });
 
-test("not-applicable ledger entries remain not applicable without geometry", () => {
-  const details = buildPublicReleaseDetails([survey], [
-    { surveyId: "demo", releaseId: "demo-r1", product: "Spectra", status: "not_applicable", sourceUrl: "https://example.test/r1", reason: "No spatial product exists." },
-  ], { ...manifest, footprints: [] });
-  assert.equal(details[0]?.products[1]?.coverageStatus, "not_applicable");
+test("products without a manifest remain awaiting geometry", () => {
+  const details = buildPublicReleaseDetails([survey], { ...manifest, footprints: [] });
+  assert.equal(details[0]?.products[1]?.coverageStatus, "awaiting_geometry");
 });
 
 test("every available curated release has one stable detail entry", () => {
@@ -58,10 +50,10 @@ test("every available curated release has one stable detail entry", () => {
     nside: 16,
     footprints: [],
   };
-  const details = buildPublicReleaseDetails(CURATED_SURVEYS, [], emptyManifest);
+  const details = buildPublicReleaseDetails(CURATED_SURVEYS, emptyManifest);
   const available = CURATED_SURVEYS.flatMap((entry) => entry.releases
     .filter((release) => release.availability === "available")
     .map((release) => `${entry.id}:${release.id}`));
-  assert.equal(details.length, 48);
+  assert.equal(details.length, 52);
   assert.deepEqual(new Set(details.map((detail) => `${detail.surveyId}:${detail.releaseId}`)), new Set(available));
 });

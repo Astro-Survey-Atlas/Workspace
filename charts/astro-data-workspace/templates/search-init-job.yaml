@@ -177,9 +177,9 @@ spec:
                 sleep "$RETRY_INTERVAL_SECONDS"
               done
 
-              file_mapping='{"dynamic":true,"properties":{"file_id":{"type":"keyword"},"source_document_id":{"type":"keyword"},"urn":{"type":"keyword"},"connector_location_key":{"type":"keyword"},"asset_id":{"type":"keyword"},"scan_run_id":{"type":"keyword"},"name":{"type":"keyword"},"parent_path":{"type":"keyword"},"file_type":{"type":"keyword"},"size_bytes":{"type":"long"},"last_modified":{"type":"date"},"survey":{"type":"keyword"},"release":{"type":"keyword"},"product":{"type":"keyword"},"modality":{"type":"keyword"},"band":{"type":"keyword"},"spatial_status":{"type":"keyword"},"spatial_error":{"type":"text"},"healpix_order":{"type":"byte"},"coverage_order":{"type":"byte"},"coverage_cells":{"type":"integer"},"coverage_method":{"type":"keyword"},"coverage_role":{"type":"keyword"},"coverage_quality":{"type":"keyword"},"coverage_frame":{"type":"keyword"},"coverage_moc_uri":{"type":"keyword"},"wcs_summary":{"type":"object","enabled":true},"parse_error":{"type":"text"}}}'
+              file_mapping='{"dynamic":true,"properties":{"file_id":{"type":"keyword"},"source_document_id":{"type":"keyword"},"urn":{"type":"keyword"},"connector_location_key":{"type":"keyword"},"asset_id":{"type":"keyword"},"scan_run_id":{"type":"keyword"},"name":{"type":"keyword"},"parent_path":{"type":"keyword"},"file_type":{"type":"keyword"},"size_bytes":{"type":"long"},"last_modified":{"type":"date"},"survey":{"type":"keyword"},"release":{"type":"keyword"},"product":{"type":"keyword"},"modality":{"type":"keyword"},"band":{"type":"keyword"},"spatial_status":{"type":"keyword"},"spatial_error":{"type":"text"},"healpix_order":{"type":"byte"},"coverage_order":{"type":"byte"},"coverage_cells":{"type":"integer"},"coverage_method":{"type":"keyword"},"coverage_role":{"type":"keyword"},"data_origin":{"type":"keyword"},"source_tier":{"type":"keyword"},"max_order":{"type":"byte"},"query_order":{"type":"byte"},"preview_order":{"type":"byte"},"coverage_quality":{"type":"keyword"},"coverage_frame":{"type":"keyword"},"coverage_moc_uri":{"type":"keyword"},"coverage_moc_sha256":{"type":"keyword"},"wcs_summary":{"type":"object","enabled":true},"parse_error":{"type":"text"}}}'
               object_mapping='{"dynamic":"strict","properties":{"object_id":{"type":"keyword"},"ra_deg":{"type":"double"},"dec_deg":{"type":"double"},"sky_position":{"type":"geo_point"},"healpix_order":{"type":"byte"},"healpix_pixel":{"type":"integer"},"survey":{"type":"keyword"},"release":{"type":"keyword"},"product":{"type":"keyword"},"modality":{"type":"keyword"},"asset_id":{"type":"keyword"},"source_file_id":{"type":"keyword"},"scan_run_id":{"type":"keyword"},"attributes":{"type":"flattened"}}}'
-              coverage_mapping='{"dynamic":"strict","properties":{"healpix_order":{"type":"byte"},"healpix_pixel":{"type":"integer"},"objectCount":{"type":"long"},"survey":{"type":"keyword"},"release":{"type":"keyword"},"product":{"type":"keyword"},"modality":{"type":"keyword"},"asset_id":{"type":"keyword"},"source_file_id":{"type":"keyword"},"scan_run_id":{"type":"keyword"}}}'
+              coverage_mapping='{"dynamic":"strict","properties":{"healpix_order":{"type":"byte"},"healpix_pixel":{"type":"integer"},"objectCount":{"type":"long"},"survey":{"type":"keyword"},"release":{"type":"keyword"},"product":{"type":"keyword"},"modality":{"type":"keyword"},"asset_id":{"type":"keyword"},"source_file_id":{"type":"keyword"},"scan_run_id":{"type":"keyword"},"coverage_role":{"type":"keyword"},"data_origin":{"type":"keyword"},"source_tier":{"type":"keyword"},"max_order":{"type":"byte"},"query_order":{"type":"byte"},"preview_order":{"type":"byte"}}}'
 
               reconcile_index "$FILE_INDEX" "$file_mapping"
               reconcile_index "$OBJECT_INDEX" "$object_mapping"
@@ -189,7 +189,8 @@ spec:
                 file_id:keyword source_document_id:keyword urn:keyword connector_location_key:keyword \
                 asset_id:keyword scan_run_id:keyword size_bytes:long last_modified:date \
                 survey:keyword release:keyword product:keyword modality:keyword spatial_status:keyword \
-                healpix_order:byte coverage_order:byte coverage_cells:integer coverage_method:keyword
+                healpix_order:byte coverage_order:byte coverage_cells:integer coverage_method:keyword coverage_role:keyword \
+                data_origin:keyword source_tier:keyword max_order:byte query_order:byte preview_order:byte
               verify_fields "$OBJECT_INDEX" \
                 object_id:keyword ra_deg:double dec_deg:double sky_position:geo_point \
                 healpix_order:byte healpix_pixel:integer survey:keyword release:keyword \
@@ -198,7 +199,8 @@ spec:
               verify_fields "$COVERAGE_INDEX" \
                 healpix_order:byte healpix_pixel:integer objectCount:long survey:keyword \
                 release:keyword product:keyword modality:keyword asset_id:keyword \
-                source_file_id:keyword scan_run_id:keyword
+                source_file_id:keyword scan_run_id:keyword coverage_role:keyword \
+                data_origin:keyword source_tier:keyword max_order:byte query_order:byte preview_order:byte
               verify_strict_mapping "$OBJECT_INDEX"
               verify_strict_mapping "$COVERAGE_INDEX"
               echo "Elasticsearch index mappings are compatible."

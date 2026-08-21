@@ -1,4 +1,4 @@
-import { ChevronLeft, ChevronRight, createIcons, Download, Globe2, GripVertical, Info, Layers3, Maximize2, Minimize2, Moon, Pin, PinOff, Play, Plus, RefreshCw, RotateCcw, SlidersHorizontal, Sun, Undo2, X } from "lucide";
+import { ChevronLeft, ChevronRight, createIcons, Download, Globe2, GripVertical, Info, Layers3, Maximize2, Minimize2, Moon, Pin, PinOff, Play, Plus, RefreshCw, RotateCcw, Settings2, SlidersHorizontal, Sun, Undo2, X } from "lucide";
 
 import "./styles.css";
 import {
@@ -35,9 +35,7 @@ import {
   type SurveyObjectPoint,
   type WorkspaceCoverageLayer,
 } from "./survey-layer-viewer";
-import type { PublicResourcePackage } from "../../src/resource-packages";
-import type { PublicCoverageStatus, PublicReleaseDetail } from "../../src/public-release-details";
-import type { ManualFootprintInput, ManualFootprintRecord } from "../../src/manual-footprints";
+import type { PublicResourcePackage, ResourceCatalogStatus } from "../../src/resource-packages";
 import type { SurveyModality, SurveyRegistrationInput } from "../../src/survey-registry";
 import {
   VolumeViewer,
@@ -270,10 +268,7 @@ let atlas: SurveyAtlasManifest | null = null;
 let angularCells: AtlasAngularCellData | null = null;
 let surveyCards: SurveyCard[] = [];
 let surveyFootprints: SurveyFootprintManifest | null = null;
-let publicReleaseDetails: PublicReleaseDetail[] = [];
-let manualFootprintRecords: ManualFootprintRecord[] = [];
-let releaseDetailInspectorWasOpen = false;
-let editingManualFootprint: ManualFootprintRecord | null = null;
+let publicCatalogUnavailable = false;
 let selectedSurvey: SurveyRecord | null = null;
 let selectedLayerAssetId: string | null = null;
 const surveyRecordsById = new Map<string, SurveyRecord>();
@@ -392,7 +387,12 @@ function setupSurveyRegistration(): void {
   const form = byId<HTMLFormElement>("survey-registration-form");
   const reset = () => { form.reset(); surveyRegistrationFeedback("尚未保存"); };
   const close = () => { reset(); if (dialog.open) dialog.close(); };
-  byId<HTMLButtonElement>("survey-new").addEventListener("click", () => { reset(); if (!dialog.open) dialog.showModal(); });
+  byId<HTMLButtonElement>("catalog-new-survey").addEventListener("click", () => {
+    const catalogDialog = byId<HTMLDialogElement>("catalog-create-dialog");
+    if (catalogDialog.open) catalogDialog.close();
+    reset();
+    if (!dialog.open) dialog.showModal();
+  });
   byId<HTMLButtonElement>("survey-registration-close").addEventListener("click", close);
   byId<HTMLButtonElement>("survey-registration-cancel").addEventListener("click", close);
   dialog.addEventListener("cancel", reset);
@@ -401,9 +401,9 @@ function setupSurveyRegistration(): void {
     if (!form.reportValidity()) return;
     if (!selectedModalities(form).length) { surveyRegistrationFeedback("请选择至少一种模态"); return; }
     surveyRegistrationFeedback("正在登记巡天…");
-    void workspaceApi.registerSurvey(surveyRegistrationInput(form)).then(() => {
+    void workspaceApi.registerSurvey(surveyRegistrationInput(form)).then((survey) => {
       close();
-      return activateMode("connectors");
+      return activateMode("catalog").then(() => dataCatalogPanel.startNew(survey.id));
     }).catch((error) => surveyRegistrationFeedback("登记失败", error instanceof Error ? error.message : String(error)));
   });
 }
@@ -411,9 +411,99 @@ setupSurveyRegistration();
 const resourcePackagePanel = new ResourcePackagePanel(
   (before, after) => refreshActiveFootprints(before, after),
   (record, draftReleaseIds, callbacks) => renderResourcePackageDetails(record, draftReleaseIds, callbacks),
-  (surveyId) => showPublicSurveyOverview(surveyId),
   (error) => showFatal(error),
+  () => openResourceCatalogSettings(true),
 );
+let resourceAdminToken = "";
+let resourceCatalogSyncPending = false;
+
+function resourceCatalogSettingsFeedback(summary: string, detail = "", status: "" | "error" | "success" = ""): void {
+  const output = byId<HTMLOutputElement>("resource-catalog-settings-status");
+  output.replaceChildren();
+  const title = document.createElement("strong");
+  title.textContent = summary;
+  output.append(title);
+  if (detail) {
+    const note = document.createElement("small");
+    note.textContent = detail;
+    output.append(note);
+  }
+  output.dataset.status = status;
+}
+
+async function syncResourceCatalog(): Promise<void> {
+  if (!resourceAdminToken) {
+    openResourceCatalogSettings(true);
+    return;
+  }
+  const syncButton = byId<HTMLButtonElement>("resource-package-sync");
+  syncButton.disabled = true;
+  syncButton.dataset.busy = "true";
+  byId("resource-package-feedback").textContent = "正在同步公开目录…";
+  try {
+    const result = await workspaceApi.syncResourceCatalog(resourceAdminToken);
+    resourcePackagePanel.setCatalogStatus(result.catalog);
+    await refreshPublicCatalogData();
+    resourceCatalogSettingsFeedback("同步完成", `已载入 ${result.packages.length} 个可下载资源包。`, "success");
+    byId("resource-package-feedback").textContent = `目录已同步 · ${result.catalog.catalogSha256?.slice(0, 12) ?? ""} · 资源包按需下载`;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    resourceCatalogSettingsFeedback("同步失败", message, "error");
+    byId("resource-package-feedback").textContent = `同步失败：${message}`;
+    byId("resource-package-feedback").setAttribute("data-status", "error");
+  } finally {
+    syncButton.disabled = false;
+    syncButton.dataset.busy = "false";
+  }
+}
+
+function openResourceCatalogSettings(syncAfterSave = false): void {
+  if (syncAfterSave && resourceAdminToken) {
+    void syncResourceCatalog();
+    return;
+  }
+  resourceCatalogSyncPending = syncAfterSave;
+  const dialog = byId<HTMLDialogElement>("resource-catalog-settings-dialog");
+  const form = byId<HTMLFormElement>("resource-catalog-settings-form");
+  void workspaceApi.resourceCatalogConfig().then((config) => {
+    byId<HTMLInputElement>("resource-catalog-url").value = config.catalogUrl;
+    resourcePackagePanel.setCatalogStatus(config);
+    resourceCatalogSettingsFeedback(config.available ? "当前目录可用" : "当前目录不可用", config.unavailableReason ?? "");
+  }).catch((error) => {
+    resourceCatalogSettingsFeedback("无法读取目录状态", error instanceof Error ? error.message : String(error), "error");
+  });
+  if (!dialog.open) dialog.showModal();
+  (form.elements.namedItem("resource-catalog-admin-token") as HTMLInputElement | null)?.focus();
+}
+
+async function saveResourceCatalogConfig(andSync: boolean): Promise<void> {
+  const catalogUrl = byId<HTMLInputElement>("resource-catalog-url").value.trim();
+  const token = byId<HTMLInputElement>("resource-catalog-admin-token").value.trim() || resourceAdminToken;
+  if (!token) throw new Error("请输入资源管理员 token");
+  resourceCatalogSettingsFeedback("正在保存…");
+  const config = await workspaceApi.setResourceCatalogConfig(catalogUrl, token);
+  resourceAdminToken = token;
+  resourcePackagePanel.setCatalogStatus(config);
+  resourceCatalogSettingsFeedback("配置已保存", "不会自动下载资源包。", "success");
+  if (andSync || resourceCatalogSyncPending) {
+    resourceCatalogSyncPending = false;
+    await syncResourceCatalog();
+  } else {
+    byId<HTMLDialogElement>("resource-catalog-settings-dialog").close();
+  }
+}
+
+byId<HTMLButtonElement>("resource-package-settings").addEventListener("click", () => openResourceCatalogSettings(false));
+byId<HTMLButtonElement>("resource-catalog-settings-close").addEventListener("click", () => byId<HTMLDialogElement>("resource-catalog-settings-dialog").close());
+byId<HTMLButtonElement>("resource-catalog-settings-cancel").addEventListener("click", () => byId<HTMLDialogElement>("resource-catalog-settings-dialog").close());
+byId<HTMLFormElement>("resource-catalog-settings-form").addEventListener("submit", (event) => {
+  event.preventDefault();
+  void saveResourceCatalogConfig(false).catch((error) => resourceCatalogSettingsFeedback("保存失败", error instanceof Error ? error.message : String(error), "error"));
+});
+byId<HTMLButtonElement>("resource-catalog-settings-sync").addEventListener("click", () => {
+  void saveResourceCatalogConfig(true).catch((error) => resourceCatalogSettingsFeedback("同步失败", error instanceof Error ? error.message : String(error), "error"));
+});
+byId<HTMLDialogElement>("resource-catalog-settings-dialog").addEventListener("cancel", () => { resourceCatalogSyncPending = false; });
 const LAYER_PREFERENCES_KEY = "astro-workspace:survey-layer-preferences:v3";
 const PREVIOUS_LAYER_PREFERENCES_KEY = "astro-workspace:survey-layer-preferences:v2";
 const LEGACY_LAYER_PREFERENCES_KEY = "astro-workspace:survey-layer-preferences:v1";
@@ -421,7 +511,7 @@ const THEME_PREFERENCE_KEY = "astro-workspace:theme:v1";
 const SCENE_BACKGROUND_PREFERENCE_KEY = "astro-workspace:scene-background:v1";
 type WorkspaceTheme = "light" | "dark";
 
-createIcons({ icons: { ChevronLeft, ChevronRight, Download, Globe2, GripVertical, Info, Layers3, Maximize2, Minimize2, Moon, Pin, PinOff, Play, Plus, RefreshCw, RotateCcw, SlidersHorizontal, Sun, Undo2, X } });
+createIcons({ icons: { ChevronLeft, ChevronRight, Download, Globe2, GripVertical, Info, Layers3, Maximize2, Minimize2, Moon, Pin, PinOff, Play, Plus, RefreshCw, RotateCcw, Settings2, SlidersHorizontal, Sun, Undo2, X } });
 
 const themeQuery = window.matchMedia("(prefers-color-scheme: dark)");
 const themeToggle = byId<HTMLButtonElement>("theme-toggle");
@@ -1933,6 +2023,25 @@ async function refreshActiveFootprints(before: PublicResourcePackage[], after: P
   if (mode === "layers") await activateMode("layers");
 }
 
+function emptySurveyFootprintManifest(): SurveyFootprintManifest {
+  return { schemaVersion: 1, generatedAt: new Date(0).toISOString(), coordinateFrame: "ICRS", nside: 16, footprints: [] };
+}
+
+async function refreshPublicCatalogData(): Promise<void> {
+  const [footprintsResult, surveysResult] = await Promise.allSettled([
+    workspaceApi.surveyFootprints(),
+    workspaceApi.surveys(),
+  ]);
+  surveyFootprints = footprintsResult.status === "fulfilled" ? footprintsResult.value : emptySurveyFootprintManifest();
+  if (surveysResult.status === "fulfilled") {
+    surveyCards = surveysResult.value;
+    const records = await Promise.allSettled(surveyCards.map((survey) => workspaceApi.survey(survey.id)));
+    surveyRecordsById.clear();
+    records.forEach((result) => { if (result.status === "fulfilled") surveyRecordsById.set(result.value.id, result.value); });
+  }
+  if (mode === "packages") await resourcePackagePanel.reload();
+}
+
 function renderResourcePackageDetails(
   record: PublicResourcePackage,
   draftReleaseIds: ReadonlySet<string>,
@@ -1970,55 +2079,41 @@ function renderResourcePackageDetails(
   const releaseTitle = document.createElement("span");
   releaseTitle.textContent = "公开版本";
   const releaseCount = document.createElement("output");
-  const releaseIds = [...new Set(publicReleaseDetails
-    .filter((detail) => detail.surveyId === record.surveyId && detail.products.some((product) => product.coverageStatus === "acquired"))
-    .map((detail) => detail.releaseId))];
-  const publicReleases = survey?.releases.filter((entry) => entry.availability === "available") ?? [];
-  releaseCount.textContent = `${releaseIds.length} 个已收录 / ${publicReleases.length || releaseIds.length} 个公开`;
+  const releaseIds = [...new Set(record.releases)];
+  releaseCount.textContent = `${releaseIds.length} 个已收录`;
   releaseHeading.append(releaseTitle, releaseCount);
   const releaseChoices = document.createElement("div");
   releaseChoices.className = "resource-release-choices";
-  const displayedReleases = publicReleases.length
-    ? publicReleases
-    : releaseIds.map((releaseId) => survey?.releases.find((candidate) => candidate.id === releaseId)).filter((entry) => entry !== undefined);
-  for (const entry of displayedReleases) {
-    const releaseId = entry.id;
-    const hasCoverage = releaseIds.includes(releaseId);
-    const releaseDetail = publicReleaseDetails.find((detail) => detail.surveyId === record.surveyId && detail.releaseId === releaseId);
+  for (const releaseId of releaseIds) {
+    const label = record.releaseLabels[releaseId] ?? releaseId;
     const choice = document.createElement("div");
     choice.className = "resource-release-choice";
-    choice.dataset.coverageAvailable = String(hasCoverage);
+    choice.dataset.coverageAvailable = "true";
     const checkbox = document.createElement("input");
     checkbox.type = "checkbox";
-    checkbox.checked = hasCoverage && draftReleaseIds.has(releaseId);
-    checkbox.disabled = !hasCoverage;
-    checkbox.setAttribute("aria-label", hasCoverage ? `选择 ${entry.label} 天空覆盖` : `${entry.label} 天空覆盖尚未收录`);
+    checkbox.checked = draftReleaseIds.has(releaseId);
+    checkbox.setAttribute("aria-label", `选择 ${label} 天空覆盖`);
     checkbox.addEventListener("change", () => {
       const next = new Set(draftReleaseIds);
       if (checkbox.checked) next.add(releaseId); else next.delete(releaseId);
       callbacks.setDraftReleases(next);
     });
-    const details = document.createElement("button");
-    details.type = "button";
-    details.className = "resource-release-detail-button";
-    details.setAttribute("aria-label", `查看 ${entry.label} 版本详情`);
-    details.addEventListener("click", () => showPublicReleaseDetail(record.surveyId, releaseId));
     const copy = document.createElement("span");
     copy.className = "resource-release-copy";
     const header = document.createElement("span");
     header.className = "resource-release-header";
     const title = document.createElement("strong");
-    title.textContent = entry.label;
+    title.textContent = label;
     const availability = document.createElement("small");
     availability.className = "resource-release-availability";
-    availability.dataset.available = String(hasCoverage);
-    availability.textContent = hasCoverage ? "天空覆盖已收录" : "覆盖范围尚未收录";
+    availability.dataset.available = "true";
+    availability.textContent = "天空覆盖已收录";
     header.append(title, availability);
     const detail = document.createElement("small");
-    detail.textContent = `${releaseDetail?.releasedYear ?? entry.releasedYear ?? "年份未注明"} · ${(releaseDetail?.kind ?? entry.kind).replaceAll("_", " ")}`;
+    const source = record.sources.find((entry) => entry.releaseId === releaseId);
+    detail.textContent = source ? `${source.authority} · ${source.label}` : releaseId;
     copy.append(header, detail);
-    details.append(copy);
-    choice.append(checkbox, details);
+    choice.append(checkbox, copy);
     releaseChoices.append(choice);
   }
   const releaseBulk = document.createElement("div");
@@ -2048,246 +2143,6 @@ function renderResourcePackageDetails(
     actions.append(remove);
   }
   content.replaceChildren(heading, summary, metadata, releaseSection, actions);
-}
-
-const PUBLIC_COVERAGE_LABELS: Record<PublicCoverageStatus, string> = {
-  acquired: "真实几何已收录",
-  overview_only: "仅有官方概览",
-  awaiting_geometry: "待人工处理几何",
-  not_applicable: "不适用天空覆盖",
-};
-
-function showPublicReleaseDetail(surveyId: string, releaseId: string, updateUrl = true): void {
-  const detail = publicReleaseDetails.find((entry) => entry.surveyId === surveyId && entry.releaseId === releaseId);
-  if (!detail) return;
-  byId("resource-package-stage").hidden = true;
-  byId("public-survey-overview-stage").hidden = true;
-  byId("public-release-detail-stage").hidden = false;
-  const inspector = byId("inspector-panel");
-  releaseDetailInspectorWasOpen = inspector.classList.contains("mobile-open");
-  inspector.classList.remove("mobile-open");
-  byId("public-release-detail-kicker").textContent = `${detail.mission} / PUBLIC RELEASE`;
-  byId("public-release-detail-title").textContent = detail.label;
-  byId("public-release-detail-summary").textContent = detail.description;
-  const source = byId<HTMLAnchorElement>("public-release-detail-source");
-  source.href = detail.officialSourceUrl;
-
-  const acquired = detail.products.filter((product) => product.coverageStatus === "acquired").length;
-  const metadata = byId("public-release-detail-metadata");
-  metadata.replaceChildren(...([
-    ["巡天 / 望远镜", detail.mission],
-    ["发布类型", detail.kind.replaceAll("_", " ")],
-    ["发布时间", detail.releasedYear ? String(detail.releasedYear) : "官方页面未注明"],
-    ["观测类型", detail.modalities.join(" / ")],
-    ["覆盖状态", acquired ? `${acquired} 个产品有真实几何` : "尚无产品可用于天球"],
-  ] as Array<[string, string]>).map(([label, value]) => {
-    const row = document.createElement("div");
-    const term = document.createElement("dt"); term.textContent = label;
-    const description = document.createElement("dd"); description.textContent = value;
-    row.append(term, description);
-    return row;
-  }));
-  byId("public-release-product-count").textContent = `${acquired} / ${detail.products.length} 已收录`;
-  const list = byId("public-release-product-list");
-  list.replaceChildren(...detail.products.map((product) => {
-    const article = document.createElement("article");
-    article.className = "public-release-product";
-    article.dataset.coverageStatus = product.coverageStatus;
-    const header = document.createElement("header");
-    const identity = document.createElement("div");
-    const name = document.createElement("h3"); name.textContent = product.name;
-    const modality = document.createElement("span"); modality.textContent = product.modality;
-    identity.append(name, modality);
-    const status = document.createElement("strong"); status.textContent = PUBLIC_COVERAGE_LABELS[product.coverageStatus];
-    header.append(identity, status);
-    const description = document.createElement("p"); description.textContent = product.description;
-    const explanation = document.createElement("p");
-    explanation.className = "public-release-product-reason";
-    explanation.textContent = product.coverageStatus === "acquired"
-      ? "已保存可验证的天空几何制品，可在安装并应用对应公开资源后显示于 3D 天球。"
-      : product.reason ?? "官方资料已登记，但尚未获得可验证的产品级天空几何。";
-    const links = document.createElement("div"); links.className = "public-release-product-links";
-    if (product.sourceUrl) {
-      const link = document.createElement("a");
-      link.href = product.sourceUrl; link.target = "_blank"; link.rel = "noreferrer";
-      link.textContent = "覆盖来源 ↗";
-      links.append(link);
-    }
-    if (product.artifactKey) {
-      const artifact = document.createElement("code"); artifact.textContent = product.artifactKey;
-      artifact.title = "覆盖制品的稳定身份";
-      links.append(artifact);
-    }
-    const manualRecord = manualFootprintRecords.find((record) => record.surveyId === detail.surveyId
-      && record.releaseId === detail.releaseId && record.product === product.name);
-    if (product.coverageStatus === "awaiting_geometry" || manualRecord) {
-      const edit = document.createElement("button");
-      edit.type = "button";
-      edit.className = "release-detail-link";
-      edit.textContent = manualRecord ? "维护覆盖范围" : "填写覆盖范围";
-      edit.addEventListener("click", () => void openManualFootprintDialog(detail, product.name, product.sourceUrl));
-      links.append(edit);
-    }
-    article.append(header, description, explanation, links);
-    return article;
-  }));
-  if (updateUrl) {
-    const url = new URL(window.location.href);
-    url.searchParams.set("mode", "packages");
-    url.searchParams.set("survey", surveyId);
-    url.searchParams.set("release", releaseId);
-    history.pushState(null, "", url);
-  }
-}
-
-function showPublicSurveyOverview(surveyId: string, updateUrl = true): void {
-  const survey = surveyRecordsById.get(surveyId);
-  const releases = publicReleaseDetails.filter((detail) => detail.surveyId === surveyId);
-  if (!survey || !releases.length) return;
-  byId("resource-package-stage").hidden = true;
-  byId("public-release-detail-stage").hidden = true;
-  const stage = byId("public-survey-overview-stage");
-  stage.hidden = false;
-  byId("public-survey-overview-title").textContent = survey.name;
-  byId("public-survey-overview-summary").textContent = survey.description;
-  const list = byId("public-survey-overview-releases");
-  list.replaceChildren(...releases.map((release) => {
-    const row = document.createElement("button");
-    row.type = "button";
-    row.className = "public-survey-overview-release";
-    row.addEventListener("click", () => showPublicReleaseDetail(surveyId, release.releaseId));
-    const title = document.createElement("strong"); title.textContent = release.label;
-    const meta = document.createElement("small");
-    const acquired = release.products.filter((product) => product.coverageStatus === "acquired").length;
-    meta.textContent = `${release.releasedYear ?? "年份未注明"} · ${acquired} / ${release.products.length} 个产品有真实覆盖`;
-    const status = document.createElement("span");
-    status.textContent = acquired ? "可加载覆盖" : "覆盖范围尚未收录";
-    status.dataset.available = String(acquired > 0);
-    row.append(title, meta, status);
-    return row;
-  }));
-  if (updateUrl) {
-    const url = new URL(window.location.href);
-    url.searchParams.set("mode", "packages");
-    url.searchParams.set("survey", surveyId);
-    url.searchParams.delete("release");
-    history.pushState(null, "", url);
-  }
-}
-
-function closePublicReleaseDetail(updateUrl = true): void {
-  byId("public-release-detail-stage").hidden = true;
-  byId("public-survey-overview-stage").hidden = true;
-  byId("resource-package-stage").hidden = mode !== "packages";
-  if (releaseDetailInspectorWasOpen && window.innerWidth <= 1040) byId("inspector-panel").classList.add("mobile-open");
-  releaseDetailInspectorWasOpen = false;
-  if (updateUrl) {
-    const url = new URL(window.location.href);
-    url.searchParams.set("mode", "packages");
-    url.searchParams.delete("survey");
-    url.searchParams.delete("release");
-    history.pushState(null, "", url);
-  }
-}
-
-function manualFootprintInput(): ManualFootprintInput {
-  const pixels = byId<HTMLTextAreaElement>("manual-footprint-pixels").value.split(/[\s,]+/).filter(Boolean).map(Number);
-  if (!pixels.length || pixels.some((pixel) => !Number.isSafeInteger(pixel) || pixel < 0)) throw new Error("pixels 必须是非负整数列表");
-  return {
-    surveyId: byId<HTMLInputElement>("manual-footprint-survey-id").value,
-    releaseId: byId<HTMLInputElement>("manual-footprint-release-id").value,
-    product: byId<HTMLInputElement>("manual-footprint-product").value,
-    label: byId<HTMLInputElement>("manual-footprint-label").value.trim(),
-    sourceUrl: byId<HTMLInputElement>("manual-footprint-source-url").value.trim(),
-    method: byId<HTMLInputElement>("manual-footprint-method").value.trim(),
-    calculatedAt: new Date(byId<HTMLInputElement>("manual-footprint-calculated-at").value).toISOString(),
-    ordering: "NESTED",
-    nside: 16,
-    pixels,
-  };
-}
-
-function setManualFootprintFeedback(message: string, status = "idle"): void {
-  const feedback = byId("manual-footprint-feedback");
-  feedback.textContent = message;
-  feedback.dataset.status = status;
-}
-
-async function openManualFootprintDialog(detail: PublicReleaseDetail, product: string, sourceUrl?: string): Promise<void> {
-  manualFootprintRecords = await workspaceApi.manualFootprints();
-  editingManualFootprint = manualFootprintRecords.find((record) => record.surveyId === detail.surveyId && record.releaseId === detail.releaseId && record.product === product) ?? null;
-  byId<HTMLInputElement>("manual-footprint-survey-id").value = detail.surveyId;
-  byId<HTMLInputElement>("manual-footprint-release-id").value = detail.releaseId;
-  byId<HTMLInputElement>("manual-footprint-product").value = product;
-  byId<HTMLInputElement>("manual-footprint-label").value = editingManualFootprint?.label ?? `${detail.label} ${product}`;
-  byId<HTMLInputElement>("manual-footprint-source-url").value = editingManualFootprint?.sourceUrl ?? sourceUrl ?? detail.officialSourceUrl;
-  byId<HTMLInputElement>("manual-footprint-method").value = editingManualFootprint?.method ?? "manual-healpix";
-  byId<HTMLInputElement>("manual-footprint-calculated-at").value = (editingManualFootprint?.calculatedAt ?? new Date().toISOString()).slice(0, 16);
-  byId<HTMLTextAreaElement>("manual-footprint-pixels").value = editingManualFootprint?.pixels.join(", ") ?? "";
-  byId<HTMLButtonElement>("manual-footprint-validate").disabled = editingManualFootprint?.status !== "draft";
-  byId<HTMLButtonElement>("manual-footprint-publish").disabled = editingManualFootprint?.status !== "validated";
-  byId<HTMLButtonElement>("manual-footprint-unpublish").disabled = editingManualFootprint?.status !== "published";
-  const manualStatusLabels: Record<ManualFootprintRecord["status"], string> = {
-    draft: "草稿，尚未校验",
-    validated: "已校验，尚未发布",
-    published: "已发布，正在用于数据覆盖",
-  };
-  setManualFootprintFeedback(editingManualFootprint ? `当前状态：${manualStatusLabels[editingManualFootprint.status]}` : "尚未保存");
-  byId<HTMLDialogElement>("manual-footprint-dialog").showModal();
-}
-
-async function saveManualFootprint(): Promise<ManualFootprintRecord> {
-  const input = manualFootprintInput();
-  const token = byId<HTMLInputElement>("manual-footprint-token").value;
-  editingManualFootprint = editingManualFootprint
-    ? await workspaceApi.updateManualFootprint(input, editingManualFootprint.revision, token)
-    : await workspaceApi.createManualFootprint(input, token);
-  manualFootprintRecords = manualFootprintRecords.filter((record) => !(record.surveyId === input.surveyId
-    && record.releaseId === input.releaseId && record.product === input.product));
-  manualFootprintRecords.push(editingManualFootprint);
-  byId<HTMLButtonElement>("manual-footprint-validate").disabled = false;
-  byId<HTMLButtonElement>("manual-footprint-publish").disabled = true;
-  byId<HTMLButtonElement>("manual-footprint-unpublish").disabled = true;
-  setManualFootprintFeedback("草稿已保存", "ok");
-  showPublicReleaseDetail(input.surveyId, input.releaseId, false);
-  return editingManualFootprint;
-}
-
-async function refreshManualCoverage(surveyId: string, releaseId: string): Promise<void> {
-  const previousSurveyIds = new Set(footprintSurveyIds());
-  const [footprints, releases, records] = await Promise.all([
-    workspaceApi.surveyFootprints(),
-    workspaceApi.publicReleaseDetails(),
-    workspaceApi.manualFootprints(),
-  ]);
-  surveyFootprints = footprints;
-  publicReleaseDetails = releases;
-  manualFootprintRecords = records;
-  resourcePackagePanel.setReleaseDetails(releases);
-  const available = new Set(footprintSurveyIds());
-  visibleSurveyIds = new Set([...visibleSurveyIds].filter((id) => available.has(id)));
-  for (const id of available) if (!previousSurveyIds.has(id)) visibleSurveyIds.add(id);
-  selectedLayerRegion = null;
-  buildSurveyList();
-  persistLayerPreferences();
-  if (mode === "packages") showPublicReleaseDetail(surveyId, releaseId, false);
-  else if (mode === "layers") await activateMode("layers");
-}
-
-async function runManualFootprintAction(action: "validate" | "publish" | "unpublish"): Promise<void> {
-  const record = editingManualFootprint ?? await saveManualFootprint();
-  const identity = { surveyId: record.surveyId, releaseId: record.releaseId, product: record.product };
-  const token = byId<HTMLInputElement>("manual-footprint-token").value;
-  editingManualFootprint = action === "validate"
-    ? await workspaceApi.validateManualFootprint(identity, record.revision, token)
-    : action === "publish"
-      ? await workspaceApi.publishManualFootprint(identity, record.revision, token)
-      : await workspaceApi.unpublishManualFootprint(identity, record.revision, token);
-  byId<HTMLButtonElement>("manual-footprint-validate").disabled = editingManualFootprint.status !== "draft";
-  byId<HTMLButtonElement>("manual-footprint-publish").disabled = editingManualFootprint.status !== "validated";
-  byId<HTMLButtonElement>("manual-footprint-unpublish").disabled = editingManualFootprint.status !== "published";
-  setManualFootprintFeedback(action === "validate" ? "校验通过" : action === "publish" ? "已发布" : "已撤回", "ok");
-  await refreshManualCoverage(record.surveyId, record.releaseId);
 }
 
 function applyLayerPreferences(): void {
@@ -2693,8 +2548,6 @@ async function activateMode(nextMode: ViewMode): Promise<void> {
   byId("workflow-controls").hidden = mode !== "workflow";
   byId("catalog-stage").hidden = mode !== "catalog";
   byId("resource-package-stage").hidden = mode !== "packages";
-  byId("public-release-detail-stage").hidden = true;
-  byId("public-survey-overview-stage").hidden = true;
   byId("connector-stage").hidden = mode !== "connectors";
   byId("scene-stage").hidden = mode === "workflow" || mode === "catalog" || mode === "connectors" || mode === "packages";
   sceneBackgroundPopover.hidden = true;
@@ -2744,8 +2597,15 @@ async function activateMode(nextMode: ViewMode): Promise<void> {
     byId("inspector-kicker").textContent = "SURVEY INFORMATION";
     byId("panel-kicker").textContent = "PUBLIC SURVEY COVERAGE";
     byId("panel-dataset-name").textContent = "公开资源集";
-    byId("dataset-state").textContent = "公开巡天与望远镜覆盖目录已加载";
-    const records = await workspaceApi.resourcePackages();
+    let records: PublicResourcePackage[] = [];
+    try {
+      records = await workspaceApi.resourcePackages();
+      publicCatalogUnavailable = false;
+    } catch (error) {
+      publicCatalogUnavailable = true;
+      console.warn("Public resource catalog is unavailable", error);
+    }
+    byId("dataset-state").textContent = publicCatalogUnavailable ? "公开目录不可用，可先同步 Assets catalog" : "公开巡天与望远镜覆盖目录已加载";
     byId("metric-one-label").textContent = "PACKAGES";
     byId("metric-one").textContent = String(records.length);
     byId("metric-two-label").textContent = "INSTALLED";
@@ -2760,11 +2620,6 @@ async function activateMode(nextMode: ViewMode): Promise<void> {
     byId("object-status").textContent = `${surveyFootprints?.footprints.length ?? 0} COVERAGE SOURCES`;
     loadingIndicator.classList.remove("visible");
     await resourcePackagePanel.activate();
-    const query = new URL(window.location.href).searchParams;
-    const surveyId = query.get("survey");
-    const releaseId = query.get("release");
-     if (surveyId && releaseId) showPublicReleaseDetail(surveyId, releaseId, false);
-     else if (surveyId) showPublicSurveyOverview(surveyId, false);
     return;
   }
   if (mode === "connectors") {
@@ -2868,7 +2723,6 @@ async function activateMode(nextMode: ViewMode): Promise<void> {
 
 document.querySelectorAll<HTMLButtonElement>("[data-mode]").forEach((button) => {
   button.addEventListener("click", () => {
-    if (button.dataset.mode === "packages") closePublicReleaseDetail();
     void activateMode(button.dataset.mode as ViewMode).catch(showFatal);
   });
 });
@@ -3079,32 +2933,6 @@ document.addEventListener("pointerdown", (event) => {
   if (!menu.hidden && !menu.contains(event.target as Node)) closeSkyContextMenu();
 });
 byId<HTMLButtonElement>("controls-toggle").addEventListener("click", () => controlsPanel.classList.toggle("mobile-open"));
-byId<HTMLButtonElement>("public-release-detail-back").addEventListener("click", () => {
-  const surveyId = new URL(window.location.href).searchParams.get("survey");
-  if (surveyId) showPublicSurveyOverview(surveyId);
-  else closePublicReleaseDetail();
-});
-byId<HTMLButtonElement>("public-survey-overview-back").addEventListener("click", () => closePublicReleaseDetail());
-byId<HTMLButtonElement>("manual-footprint-dialog-close").addEventListener("click", () => byId<HTMLDialogElement>("manual-footprint-dialog").close());
-byId<HTMLFormElement>("manual-footprint-form").addEventListener("submit", (event) => {
-  event.preventDefault();
-  void saveManualFootprint().catch((error) => setManualFootprintFeedback(error instanceof Error ? error.message : String(error), "error"));
-});
-for (const action of ["validate", "publish", "unpublish"] as const) {
-  byId<HTMLButtonElement>(`manual-footprint-${action}`).addEventListener("click", () => {
-    setManualFootprintFeedback("处理中…", "busy");
-    void runManualFootprintAction(action).catch((error) => setManualFootprintFeedback(error instanceof Error ? error.message : String(error), "error"));
-  });
-}
-window.addEventListener("popstate", () => {
-  if (mode !== "packages") return;
-  const query = new URL(window.location.href).searchParams;
-  const surveyId = query.get("survey");
-  const releaseId = query.get("release");
-   if (surveyId && releaseId) showPublicReleaseDetail(surveyId, releaseId, false);
-   else if (surveyId) showPublicSurveyOverview(surveyId, false);
-   else closePublicReleaseDetail(false);
-});
 window.addEventListener("astro:navigate", (event) => {
   const nextMode = (event as CustomEvent<{ mode?: ViewMode }>).detail?.mode;
   if (nextMode === "layers" || nextMode === "volume") void activateMode(nextMode).catch(showFatal);
@@ -3137,22 +2965,24 @@ declare global {
 }
 
 async function start(): Promise<void> {
-  const [surveys, footprints, assets, releases, manualRecords] = await Promise.all([
+  const [surveysResult, footprintsResult, assetsResult, catalogConfigResult] = await Promise.allSettled([
     workspaceApi.surveys(),
     workspaceApi.surveyFootprints(),
     workspaceApi.dataAssets(),
-    workspaceApi.publicReleaseDetails(),
-    workspaceApi.manualFootprints(),
+    workspaceApi.resourceCatalogConfig(),
   ]);
+  const surveys = surveysResult.status === "fulfilled" ? surveysResult.value : [];
+  const footprints = footprintsResult.status === "fulfilled" ? footprintsResult.value : emptySurveyFootprintManifest();
+  const assets = assetsResult.status === "fulfilled" ? assetsResult.value : [];
+  publicCatalogUnavailable = footprintsResult.status === "rejected" || catalogConfigResult.status === "rejected";
+  if (footprintsResult.status === "rejected") console.warn("Public coverage is unavailable until Assets catalog sync", footprintsResult.reason);
   surveyCards = surveys;
   surveyFootprints = footprints;
   dataAssets = assets;
-  publicReleaseDetails = releases;
-  manualFootprintRecords = manualRecords;
-  resourcePackagePanel.setReleaseDetails(releases);
-  const surveyRecords = await Promise.all(surveys.map((survey) => workspaceApi.survey(survey.id)));
+  if (catalogConfigResult.status === "fulfilled") resourcePackagePanel.setCatalogStatus(catalogConfigResult.value);
+  const surveyResults = await Promise.allSettled(surveys.map((survey) => workspaceApi.survey(survey.id)));
   surveyRecordsById.clear();
-  surveyRecords.forEach((survey) => surveyRecordsById.set(survey.id, survey));
+  surveyResults.forEach((result) => { if (result.status === "fulfilled") surveyRecordsById.set(result.value.id, result.value); });
   restoreLayerPreferences();
 
   const [atlasResult, volumeResult] = await Promise.allSettled([workspaceApi.atlases(), workspaceApi.volumes()]);
@@ -3170,8 +3000,8 @@ async function start(): Promise<void> {
       angularCells = null;
     }
   }
-  byId("dataset-name").textContent = "Curated survey releases";
-  byId("panel-dataset-name").textContent = "Survey registry";
+  byId("dataset-name").textContent = "Assets public coverage and user data";
+  byId("panel-dataset-name").textContent = "Atlas workspace";
   buildSurveyList();
   byId("service-status").textContent = "SERVICE ONLINE";
   window.__ASTRO_WORKSPACE_DEBUG__ = () => ({
@@ -3195,7 +3025,7 @@ async function start(): Promise<void> {
     ...workflowPanel.debugState(),
   });
   const initialQuery = new URL(window.location.href).searchParams;
-  await activateMode(initialQuery.get("mode") === "packages" ? "packages" : initialQuery.get("mode") === "catalog" ? "catalog" : "layers");
+  await activateMode(initialQuery.get("mode") === "packages" ? "packages" : initialQuery.get("mode") === "catalog" ? "catalog" : publicCatalogUnavailable ? "packages" : "layers");
 }
 
 void start().catch(showFatal);

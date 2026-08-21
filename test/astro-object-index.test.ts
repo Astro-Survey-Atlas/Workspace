@@ -480,6 +480,7 @@ test("queryCoverageFacts filters, downsamples, merges, and sorts coverage facts"
   assert.equal(queryBody?.size, 10_000);
   assert.deepEqual(queryBody?._source, [
     "healpix_order", "healpix_pixel", "objectCount", "survey", "release", "product", "modality", "asset_id", "source_file_id", "scan_run_id",
+    "coverage_role", "data_origin", "source_tier", "max_order", "query_order", "preview_order",
   ]);
   assert.deepEqual(queryBody?.sort, [
     { healpix_pixel: "asc" }, { asset_id: "asc" }, { release: "asc" }, { product: "asc" },

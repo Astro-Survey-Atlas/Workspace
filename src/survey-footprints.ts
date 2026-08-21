@@ -1,6 +1,3 @@
-import { readFile } from "node:fs/promises";
-import path from "node:path";
-
 export const SURVEY_FOOTPRINT_SCHEMA_VERSION = 1;
 
 export type FootprintGeometryQuality = "moc" | "official_overview";
@@ -41,7 +38,7 @@ function assertManifest(value: unknown): asserts value is SurveyFootprintManifes
     }
     try {
       const sourceUrl = new URL(footprint.sourceUrl);
-      if (sourceUrl.protocol !== "https:") throw new Error();
+      if (sourceUrl.protocol !== "https:" && sourceUrl.protocol !== "http:") throw new Error();
     } catch {
       throw new Error(`Survey footprint contains an invalid source URL: ${footprint.surveyId}`);
     }
@@ -63,21 +60,4 @@ export function normalizeSurveyFootprintManifest(value: unknown): SurveyFootprin
       pixels: [...new Set(footprint.pixels)].sort((left, right) => left - right),
     })),
   };
-}
-
-/** Read a compact, generated coverage catalog. It contains metadata only, never survey rows or images. */
-export class SurveyFootprintCatalog {
-  readonly #manifestPath: string;
-  #manifest: SurveyFootprintManifest | null = null;
-
-  constructor(root: string) {
-    this.#manifestPath = path.join(root, "survey-footprints.json");
-  }
-
-  async list(): Promise<SurveyFootprintManifest> {
-    if (this.#manifest) return this.#manifest;
-    const parsed = JSON.parse(await readFile(this.#manifestPath, "utf8")) as unknown;
-    this.#manifest = normalizeSurveyFootprintManifest(parsed);
-    return this.#manifest;
-  }
 }

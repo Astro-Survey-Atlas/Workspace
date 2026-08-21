@@ -37,15 +37,15 @@ coverage as absent and does not make unrelated views fail.
 
 Each logical data asset may have several project-stage facets and access
 locations. For example, a public Euclid release can be both `public_reference`
-and `acquired` when a local or S3 mirror is registered. Official source URLs,
-connector locations, and project-side metadata are editable from the asset
-detail view; built-in catalog entries use persistent overrides so the bundled
-public metadata remains reproducible. Connector registration stores only
-S3/OSS, local-path, and JDBC configuration plus a credential reference. Its
-normalized scan path is the business identity, so registration upserts an
-existing path. The UI can perform a non-enumerating endpoint/path check, while
-FlinkIngest scan history is kept separately and associated with that path. Raw
-secrets remain outside this service.
+and `acquired` when a local or S3 mirror is registered. Public release metadata
+and geometry come from the trusted Assets snapshot; user assets and their
+ownership bindings remain Atlas state. Official source URLs, connector
+locations, and project-side metadata are editable from the asset detail view.
+Connector registration stores only S3/OSS, local-path, and JDBC configuration
+plus a credential reference. Its normalized scan path is the business identity,
+so registration upserts an existing path. The UI can perform a non-enumerating
+endpoint/path check, while scan history is kept separately and associated with
+that path. Raw secrets remain outside this service.
 
 ## Deterministic data plane
 
@@ -65,11 +65,12 @@ The data plane is testable without an LLM:
 MCP is an adapter over this plane. Agent reasoning may select tools and interpret
 results, but it does not calculate catalog coordinates or indexes.
 
-### Spatial evidence v1
+### Assets Core coverage contract
 
 Every scanned file is eligible for the project sky only when the scanner can
 explain its position from the file content or explicitly declared catalog
-fields. The first stable contract accepts:
+fields. Geometry is produced by `astro_survey_moc_core` in the scanner image;
+Atlas transports the normalized context and indexes only its projections.
 
 - CSV/TSV/TXT catalogs with ICRS RA/Dec columns in degrees, radians, or
   hour-angle units;
@@ -78,12 +79,11 @@ fields. The first stable contract accepts:
 - FITS image headers with a linear or TAN WCS that can be sampled into ICRS
   NESTED HEALPix cells.
 
-These records are written to `astro_file_index_v1` with a method, role, frame,
-and HEALPix cells. Files without valid evidence remain searchable metadata with
+These records are written to the search indices with `coverageRole`,
+`dataOrigin`, `sourceTier`, frame, authority order, query order, preview order,
+and derived HEALPix/MOC cells. Files without valid coverage remain searchable metadata with
 `spatial_status=unknown` or `failed`; they are never assigned a footprint from
-their filename, path, survey label, or asset name. MOC files, FITS binary-table
-coordinates, and non-ICRS frames are deliberate later extensions rather than
-silent guesses.
+their filename, path, survey label, or asset name.
 
 ## Workflow control plane
 
@@ -121,9 +121,9 @@ workspace API
 PostgreSQL is the authoritative metadata store. Elasticsearch is a derived
 search index and must be rebuildable from scan manifests; it must not own
 Connector or data-card identity. MinIO stores bytes, not mutable card metadata.
-Built-in public cards are seeded read-only records with a version, while user
-cards and overrides are ordinary PostgreSQL rows. A normalized Connector path
-remains unique, so an upsert cannot create duplicate scan targets.
+Assets owns the public package catalog and release metadata; Atlas stores user
+cards and overrides as ordinary rows. A normalized Connector path remains
+unique, so an upsert cannot create duplicate scan targets.
 
 Metadata scan execution status is observational workspace data, not a dependency
 health gate. Polling is best-effort and asynchronous. An unreachable Kubernetes
@@ -158,8 +158,8 @@ products have the same kind of footprint:
   produces `object_presence` occupancy;
 - `fits-wcs` reads image headers and produces an `image_extent` candidate.
 
-Current workspace coverage output is NESTED order 8 (NSIDE 256). Before a task
-is created, the API verifies that the selected connector is bound to the named
+The Core contract uses `maxOrder=10`; query and preview projections are derived
+at order 8 and order 4. Before a task is created, the API verifies that the selected connector is bound to the named
 survey/release, the asset is linked to that connector, and the asset/product is
 registered for that release. The immutable evidence specification is retained
 on the scan history record. This produces a private candidate only; publishing
@@ -213,6 +213,17 @@ deterministic filter/configuration, producer version and code hash, output
 checksums, and explicit `derived_from` edges. Atlas inputs include the redshift
 volume manifest and binary hashes, so lineage traversal reaches the original
 FITS source without relying on mutable file paths.
+
+Before the Assets hard cutover, migrate active JSON run snapshots with the
+one-shot command below. It archives the original bytes, a SHA-256 manifest, and
+a read-only rollback tree before atomically writing the v3 coverage fields:
+
+```bash
+npm run migrate:coverage-history -- --root /state
+```
+
+The service does not invoke this utility at startup and contains no legacy
+`evidenceRole` parser.
 
 ## Isolation
 

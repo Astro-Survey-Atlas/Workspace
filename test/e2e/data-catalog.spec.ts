@@ -376,6 +376,26 @@ test("connector view exposes S3, local path, and JDBC registration without scan 
   }
 });
 
+test("survey registration belongs to user assets, not public resources or connector configuration", async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto("/");
+  await waitForWorkspace(page);
+
+  await page.locator('[data-mode="connectors"]').click();
+  await expect(page.locator('#connector-list-search [data-action="new-survey"]')).toHaveCount(0);
+
+  await page.locator('[data-mode="catalog"]').click();
+  await page.locator("#catalog-new").click();
+  await expect(page.locator("#catalog-create-dialog")).toBeVisible();
+  await expect(page.locator("#catalog-new-survey")).toBeVisible();
+  await page.locator("#catalog-new-survey").click();
+  await expect(page.locator("#survey-registration-dialog")).toBeVisible();
+  await page.locator("#survey-registration-close").click();
+
+  await page.locator('[data-mode="packages"]').click();
+  await expect(page.locator('#resource-package-stage [data-action="new-survey"]')).toHaveCount(0);
+});
+
 test("connector actions and unified scan history expose only supported execution", async ({ page }) => {
   const now = "2026-08-13T10:00:00.000Z";
   let warehouseEnabled = true;

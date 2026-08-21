@@ -54,13 +54,10 @@ import type { AgentSession, ToolDescriptor, WorkflowDefinition, WorkflowRun } fr
 import type { DataAssetRecord as CoreDataAssetRecord, DataAssetRegistrationInput as CoreDataAssetRegistrationInput } from "../../src/data-catalog";
 import type { ConnectorCheck, ConnectorCheckInput, ConnectorPublicRecord, ConnectorRegistrationInput } from "../../src/connectors";
 import type { ConnectorIngestRun, ConnectorIngestRunInput } from "../../src/connector-history";
-import type { CoverageJobCapability, CoverageJobSubmission } from "../../src/coverage-jobs";
 import type { TagDefinition } from "../../src/tags";
 import type { ReleaseAvailability, ReleaseKind, SurveyCard, SurveyModality, SurveyRecord, SurveyRegistrationInput } from "../../src/survey-registry";
 import type { SurveyFootprintManifest } from "../../src/survey-footprints";
-import type { ManualFootprintInput, ManualFootprintRecord } from "../../src/manual-footprints";
-import type { PublicResourcePackage, ResourcePackageJob, ResourcePackageLoad } from "../../src/resource-packages";
-import type { PublicReleaseDetail } from "../../src/public-release-details";
+import type { PublicResourcePackage, ResourceCatalogStatus, ResourcePackageJob, ResourcePackageLoad } from "../../src/resource-packages";
 import type { AstroOverviewResponse, AstroSkyQueryInput, AstroSpatialSummary } from "../../src/astro-index";
 import type {
   AstroCellsQueryInput,
@@ -76,12 +73,6 @@ export interface WorkspaceCapabilities {
 }
 
 export type ConnectorScanRun = ConnectorIngestRun;
-export type CoverageJob = ConnectorIngestRun;
-
-export interface CoverageJobCapabilities {
-  output: { coordinateFrame: "ICRS"; ordering: "NESTED"; nside: number; healpixOrder: number };
-  modes: readonly CoverageJobCapability[];
-}
 
 export interface DataAssetRecord extends CoreDataAssetRecord {
   sourceRelativePath?: string;
@@ -159,6 +150,11 @@ export interface WorkspaceAssetCoverageResponse {
   message?: string;
 }
 
+export interface ResourceCatalogConfig extends ResourceCatalogStatus {
+  adminConfigured: boolean;
+  updatedAt?: string;
+}
+
 async function getJson<T>(url: string): Promise<T> {
   const response = await fetch(url, { headers: { Accept: "application/json" } });
   if (!response.ok) {
@@ -203,20 +199,15 @@ async function deleteRequest(url: string): Promise<void> {
   }
 }
 
-async function manualFootprintRequest<T>(url: string, method: "POST" | "PUT", token: string, revision?: number, body?: unknown): Promise<T> {
+async function adminRequest<T>(url: string, method: "POST" | "PUT", token: string, body?: unknown): Promise<T> {
   const headers: Record<string, string> = { Accept: "application/json", Authorization: `Bearer ${token}` };
   if (body !== undefined) headers["Content-Type"] = "application/json";
-  if (revision !== undefined) headers["If-Match"] = String(revision);
-  const response = await fetch(url, { method, headers, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
+  const response = await fetch(url, { method, headers, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
   if (!response.ok) {
     const payload = (await response.json().catch(() => ({}))) as { error?: string };
     throw new Error(payload.error ?? `Request failed: ${response.status}`);
   }
   return response.json() as Promise<T>;
-}
-
-function manualFootprintUrl(identity: Pick<ManualFootprintInput, "surveyId" | "releaseId" | "product">): string {
-  return `/api/manual-footprints/${encodeURIComponent(identity.surveyId)}/${encodeURIComponent(identity.releaseId)}/${encodeURIComponent(identity.product)}`;
 }
 
 export const workspaceApi = {
@@ -312,32 +303,17 @@ export const workspaceApi = {
   async surveyFootprints(): Promise<SurveyFootprintManifest> {
     return getJson<SurveyFootprintManifest>("/api/survey-footprints");
   },
-  async manualFootprints(): Promise<ManualFootprintRecord[]> {
-    return (await getJson<{ footprints: ManualFootprintRecord[] }>("/api/manual-footprints")).footprints;
-  },
-  async manualFootprint(identity: Pick<ManualFootprintInput, "surveyId" | "releaseId" | "product">): Promise<ManualFootprintRecord> {
-    return (await getJson<{ footprint: ManualFootprintRecord }>(manualFootprintUrl(identity))).footprint;
-  },
-  async createManualFootprint(input: ManualFootprintInput, token: string): Promise<ManualFootprintRecord> {
-    return (await manualFootprintRequest<{ footprint: ManualFootprintRecord }>("/api/manual-footprints", "POST", token, undefined, input)).footprint;
-  },
-  async updateManualFootprint(input: ManualFootprintInput, revision: number, token: string): Promise<ManualFootprintRecord> {
-    return (await manualFootprintRequest<{ footprint: ManualFootprintRecord }>(manualFootprintUrl(input), "PUT", token, revision, input)).footprint;
-  },
-  async validateManualFootprint(identity: Pick<ManualFootprintInput, "surveyId" | "releaseId" | "product">, revision: number, token: string): Promise<ManualFootprintRecord> {
-    return (await manualFootprintRequest<{ footprint: ManualFootprintRecord }>(`${manualFootprintUrl(identity)}/validate`, "POST", token, revision)).footprint;
-  },
-  async publishManualFootprint(identity: Pick<ManualFootprintInput, "surveyId" | "releaseId" | "product">, revision: number, token: string): Promise<ManualFootprintRecord> {
-    return (await manualFootprintRequest<{ footprint: ManualFootprintRecord }>(`${manualFootprintUrl(identity)}/publish`, "POST", token, revision)).footprint;
-  },
-  async unpublishManualFootprint(identity: Pick<ManualFootprintInput, "surveyId" | "releaseId" | "product">, revision: number, token: string): Promise<ManualFootprintRecord> {
-    return (await manualFootprintRequest<{ footprint: ManualFootprintRecord }>(`${manualFootprintUrl(identity)}/unpublish`, "POST", token, revision)).footprint;
-  },
-  async publicReleaseDetails(): Promise<PublicReleaseDetail[]> {
-    return (await getJson<{ releases: PublicReleaseDetail[] }>("/api/public-release-details")).releases;
-  },
   async resourcePackages(): Promise<PublicResourcePackage[]> {
     return (await getJson<{ packages: PublicResourcePackage[] }>("/api/resource-packages")).packages;
+  },
+  async resourceCatalogConfig(): Promise<ResourceCatalogConfig> {
+    return (await getJson<{ config: ResourceCatalogConfig }>("/api/resource-packages/config")).config;
+  },
+  async setResourceCatalogConfig(catalogUrl: string, token: string): Promise<ResourceCatalogConfig> {
+    return (await adminRequest<{ config: ResourceCatalogConfig }>("/api/resource-packages/config", "PUT", token, { catalogUrl })).config;
+  },
+  async syncResourceCatalog(token: string): Promise<{ catalog: ResourceCatalogStatus; packages: PublicResourcePackage[] }> {
+    return adminRequest<{ catalog: ResourceCatalogStatus; packages: PublicResourcePackage[] }>("/api/resource-packages/sync", "POST", token, {});
   },
   async installResourcePackage(id: string): Promise<ResourcePackageJob> {
     return (await postJson<{ job: ResourcePackageJob }>(`/api/resource-packages/${encodeURIComponent(id)}/install`, {})).job;
@@ -388,19 +364,6 @@ export const workspaceApi = {
   },
   async addSurveyRelease(surveyId: string, input: SurveyReleaseRegistrationInput): Promise<SurveyRecord> {
     return (await postJson<{ survey: SurveyRecord }>(`/api/surveys/${encodeURIComponent(surveyId)}/releases`, input)).survey;
-  },
-  async coverageJobCapabilities(): Promise<CoverageJobCapabilities> {
-    return getJson<CoverageJobCapabilities>("/api/coverage-jobs/capabilities");
-  },
-  async surveyCoverageJobs(surveyId: string, filters: { releaseId?: string; status?: CoverageJob["status"] } = {}): Promise<CoverageJob[]> {
-    const parameters = new URLSearchParams();
-    if (filters.releaseId) parameters.set("releaseId", filters.releaseId);
-    if (filters.status) parameters.set("status", filters.status);
-    const query = parameters.size ? `?${parameters}` : "";
-    return (await getJson<{ jobs: CoverageJob[] }>(`/api/surveys/${encodeURIComponent(surveyId)}/coverage-jobs${query}`)).jobs;
-  },
-  async submitSurveyCoverageJob(surveyId: string, input: CoverageJobSubmission): Promise<CoverageJob> {
-    return (await postJson<{ job: CoverageJob }>(`/api/surveys/${encodeURIComponent(surveyId)}/coverage-jobs`, input)).job;
   },
   async skySummary(id: string): Promise<{ dataset: DatasetSummary; sky: SkySummary }> {
     return getJson(`/api/datasets/${encodeURIComponent(id)}/sky/summary`);
@@ -496,8 +459,6 @@ export type {
   SurveyRecord,
   SurveyRegistrationInput,
   SurveyFootprintManifest,
-  ManualFootprintInput,
-  ManualFootprintRecord,
   AstroOverviewResponse,
   AstroSkyQueryInput,
   AstroSpatialSummary,

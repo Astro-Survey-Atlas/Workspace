@@ -135,10 +135,9 @@ use `urn:sha256:` values, so the public API does not disclose absolute server pa
 
 ## Data catalog
 
-The default tab is the data foundation. Built-in catalog metadata lives in
-`bootstrap/catalogs.json` and is copied into the application image, so it moves
-with the deployment and does not depend on a runtime CDS, OSS, or MCP request.
-Built-in records are read-only. User records are stored separately at
+The default tab is the data foundation. Public coverage and release metadata
+come from the synchronized Assets Resource Package v3 catalog; Atlas no longer
+ships a second public catalog. User records are stored at
 `ASTRO_DATA_CATALOG_STATE` (default `/state/data-catalog.json`) and support
 create, update, and delete without copying source rows into this service.
 
@@ -164,12 +163,10 @@ wavelength. A connected selection of `NSIDE 16` cells can be expanded into a
 local, per-survey stack for visual comparison. The stack preserves coverage
 membership and provenance only; it is not a radial data cube. Hovering a cell
 shows its survey, release, product, modalities, geometry quality, and source.
-The bundled compact catalog includes available MOC artifacts for DESI EDR/DR1 observed spectroscopic tiles, GALEX GR6/GR7,
-Legacy Surveys DR10, SDSS DR9 imaging, HSC-SSP PDR2, HST archive discovery,
-Pan-STARRS1 DR1, DES DR2, 2MASS J/H/K, AllWISE W1-W4, KiDS DR5, NVSS, and an
-official-boundary Euclid Q1 field MOC. It contains no catalog rows or image
-pixels. The exact sources and the Euclid polygon rasterization are documented
-in [`docs/public-footprint-moc-method.md`](docs/public-footprint-moc-method.md).
+The active package list is whatever the trusted Assets catalog advertises. It
+contains geometry artifacts and provenance, never catalog rows or image pixels.
+The exact source and processing rules are documented in
+[`docs/public-footprint-moc-method.md`](docs/public-footprint-moc-method.md).
 
 Only a MOC/HEALPix footprint may drive regional release discovery. Entries
 marked `summary_only` retain an official area or field summary, while `pending`
@@ -181,9 +178,10 @@ imaging or local COSMOS data for it.
 ### Public footprint artifacts
 
 The public-footprint release is owned by the sibling `Astro-Survey-Atlas-Assets`
-repository. Set `ASTRO_PUBLIC_ASSETS_ROOT` to that checkout when generating or
-validating the release; the workspace runtime consumes only the bundled compact
-manifest under `src/footprints/`.
+repository. Atlas runtime reads only a verified Assets Resource Package v3
+catalog and its local `assets-current` snapshot. Old generated packages and
+rollback material are not startup inputs, are not scanned, and are not part of
+the active catalog.
 `sources.json` is the product-level acquisition ledger for every available
 release in `src/survey-registry.ts`: `acquired` identifies an existing manifest
 identity, `overview_only` identifies a bounded but non-product-exact overview,
@@ -192,23 +190,9 @@ been ingested. An incomplete product never receives fabricated pixels. These
 are release and product coverage artifacts, not catalog rows, image pixels, or
 a claim that every product in a release shares one footprint.
 
-The checked-in bootstrap resources are copied once into this directory by:
-
-```bash
-npm run artifacts:footprints
-npm run assets:publish
-```
-
-The command validates sources, normalizes the existing manifest into
-`normalized/survey-footprints.json`, copies the bootstrap resource-package
-catalog and ZIP files without rewriting them, and writes SHA-256 provenance to
-`provenance.json`. It performs no network download.
-
-Rebuild the bundled metadata artifact explicitly when sources change:
-
-```bash
-npm run build:footprints
-```
+Public package generation, geometry extraction, trust validation, and release
+publication are performed in `Astro-Survey-Atlas-Assets`. Atlas only downloads,
+verifies, installs, and displays the resulting v3 packages.
 
 The existing atlas remains a local COSMOS reference and the DESI radial-index
 input for the joint-volume prototype. It is not a global survey-footprint
@@ -232,6 +216,10 @@ Run the reproducible point-scan versus sparse-index benchmark with
 it may be the same directory as `ASTRO_VOLUME_ROOT`.
 
 ## Interfaces
+
+The maintained request and response contract is in
+[`docs/api-reference.md`](docs/api-reference.md). Update it together with the
+route implementation and tests whenever an API changes.
 
 MCP tools:
 
@@ -317,7 +305,7 @@ filesystem path.
 
 ## k3s deployment
 
-`deploy/k3s.yaml` deploys version `0.10.38-20260818131750` into the isolated
+`deploy/k3s.yaml` deploys the current image tag into the isolated
 `astro-data-workspace` namespace. The Pod is pinned to `eva7028`; compact catalog
 metadata and derived indexes live in a 128 MiB `nfs-data` PVC backed by
 `/mnt/data`, mounted read-only by the service. Registry state uses a separate
@@ -361,10 +349,10 @@ Build and apply:
 ```bash
 docker build \
   --build-arg NPM_REGISTRY=https://registry.npmmirror.com \
-  -t crpi-wixjy6gci86ms14e.cn-hongkong.personal.cr.aliyuncs.com/ay-dev/astro-data-workspace-mcp:0.10.38-20260818131750 .
+  -t crpi-wixjy6gci86ms14e.cn-hongkong.personal.cr.aliyuncs.com/ay-dev/astro-data-workspace-mcp:0.10.38-20260821-atlas-cleanup4 .
 
 podman push \
-  crpi-wixjy6gci86ms14e.cn-hongkong.personal.cr.aliyuncs.com/ay-dev/astro-data-workspace-mcp:0.10.38-20260818131750
+  crpi-wixjy6gci86ms14e.cn-hongkong.personal.cr.aliyuncs.com/ay-dev/astro-data-workspace-mcp:0.10.38-20260821-atlas-cleanup4
 
 kubectl apply -f deploy/k3s.yaml
 kubectl -n astro-data-workspace rollout status deployment/astro-data-workspace-mcp
