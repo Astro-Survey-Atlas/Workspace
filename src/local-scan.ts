@@ -1,9 +1,15 @@
 import { createHash } from "node:crypto";
-import { createReadStream } from "node:fs";
-import { stat } from "node:fs/promises";
+import { createReadStream, createWriteStream } from "node:fs";
+import { mkdtemp, rm, stat } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
+import { once } from "node:events";
 
 import { CsvError, parse } from "csv-parse";
 import { Healpix, Pointing } from "healpixjs";
+
+import type { CoverageDataOrigin, CoverageRole, CoverageSourceTier } from "./assets-core.js";
+import { defaultMocCoreAdapter, MOC_CORE_DEFAULT_MAX_ORDER, MOC_CORE_PREVIEW_ORDER, MOC_CORE_QUERY_ORDER, type MocCoreAdapter } from "./moc-core-adapter.js";
 
 export const LOCAL_SCAN_HEALPIX_ORDER = 8;
 export const LOCAL_SCAN_HEALPIX_NSIDE = 2 ** LOCAL_SCAN_HEALPIX_ORDER;
@@ -59,6 +65,8 @@ export interface LocalCsvScanOptions {
   /** Collect object documents in the result; disabled by default for large files. */
   collectObjects?: boolean;
   sink?: LocalCsvDocumentSink;
+  /** Assets Core adapter used for the authoritative coverage projection. */
+  mocCore?: MocCoreAdapter;
 }
 
 export interface LocalObjectIndexDocument {
@@ -96,9 +104,9 @@ export interface LocalCoverageFactDocument {
   asset_id: string;
   source_file_id: string;
   scan_run_id: string;
-  coverage_role?: "image_extent" | "object_presence" | "footprint_extent";
-  data_origin?: "observed" | "simulated" | "derived" | "unknown";
-  source_tier?: "user_file_derived" | "survey_authoritative" | "catalog_derived" | "unknown";
+  coverage_role?: CoverageRole;
+  data_origin?: CoverageDataOrigin;
+  source_tier?: CoverageSourceTier;
   max_order?: number;
   query_order?: number;
   preview_order?: number;
@@ -176,6 +184,7 @@ interface NormalizedOptions {
   limits: NormalizedLimits;
   collectObjects: boolean;
   sink?: LocalCsvDocumentSink;
+  mocCore: MocCoreAdapter;
 }
 
 function requiredText(value: unknown, name: string, maximum = TEXT_LIMIT): string {
@@ -256,6 +265,7 @@ function normalizeOptions(input: LocalCsvScanOptions): NormalizedOptions {
     limits: normalizedLimits,
     collectObjects: options.collectObjects ?? false,
     sink: options.sink,
+    mocCore: options.mocCore ?? defaultMocCoreAdapter,
   };
 }
 
@@ -307,6 +317,11 @@ function coordinateValue(value: unknown, name: string): number | null {
 
 function geoLongitudeForRa(raDeg: number): number {
   return raDeg > 180 ? raDeg - 360 : raDeg;
+}
+
+function csvField(value: string | number): string {
+  const text = String(value);
+  return /[",\r\n]/.test(text) ? `"${text.replaceAll('"', '""')}"` : text;
 }
 
 function digestTuple(values: readonly (string | number)[]): string {
@@ -399,7 +414,43 @@ export async function scanLocalCsv(
   if (!fileStat.isFile()) throw new LocalCsvScanConfigurationError(`CSV source is not a regular file: ${sourcePath}`);
   if (fileStat.size > options.limits.maxFileBytes) throw limitError("file byte", fileStat.size, options.limits.maxFileBytes);
 
-  const healpix = new Healpix(2 ** options.healpixOrder);
+  // This HEALPix lookup is only an object-index routing key. It is not used to
+  // build authoritative coverage; that projection comes from Assets Core.
+  const objectIndexHealpix = new Healpix(2 ** options.healpixOrder);
+  const mocInputDirectory = await mkdtemp(path.join(os.tmpdir(), "astro-atlas-moc-input-"));
+  const mocInputPath = path.join(mocInputDirectory, "normalized.csv");
+  const mocInput = createWriteStream(mocInputPath, { encoding: "utf8", flags: "wx" });
+  let mocInputEnded = false;
+  let mocInputError: Error | undefined;
+  mocInput.on("error", (error) => {
+    mocInputError = error instanceof Error ? error : new Error(String(error));
+  });
+  const finishMocInput = async (): Promise<void> => {
+    if (mocInputEnded) return;
+    if (mocInputError) throw mocInputError;
+    await new Promise<void>((resolve, reject) => {
+      const onError = (error: Error): void => {
+        cleanup();
+        reject(error);
+      };
+      const onFinish = (): void => {
+        cleanup();
+        mocInputEnded = true;
+        resolve();
+      };
+      const cleanup = (): void => {
+        mocInput.off("error", onError);
+        mocInput.off("finish", onFinish);
+      };
+      mocInput.once("error", onError);
+      mocInput.once("finish", onFinish);
+      mocInput.end();
+    });
+  };
+  const writeMocInput = async (line: string): Promise<void> => {
+    if (mocInput.write(line)) return;
+    await once(mocInput, "drain");
+  };
   const coverageCounts = new Map<number, number>();
   const objectDocuments: LocalObjectIndexDocument[] = [];
   let headers: string[] | undefined;
@@ -422,6 +473,7 @@ export async function scanLocalCsv(
     columns: (rawHeaders: string[]) => {
       const validated = validateHeaders(rawHeaders, options);
       headers = validated;
+      mocInput.write(`${csvField(options.raColumn)},${csvField(options.decColumn)}\n`);
       return validated;
     },
     max_record_size: options.limits.maxRecordSize,
@@ -434,11 +486,12 @@ export async function scanLocalCsv(
   }));
 
   try {
-    for await (const rawRow of parser) {
+    try {
+      for await (const rawRow of parser) {
       if (!headers) throw new LocalCsvScanHeaderError("CSV header is missing or invalid");
       rowCount += 1;
       if (rowCount > options.limits.maxRows) throw limitError("row", rowCount, options.limits.maxRows);
-      const document = objectDocument(rawRow as Record<string, unknown>, headers, options, healpix);
+      const document = objectDocument(rawRow as Record<string, unknown>, headers, options, objectIndexHealpix);
       if (!document) {
         invalidRowCount += 1;
         if (invalidRowCount > options.limits.maxInvalidRows) throw limitError("invalid row", invalidRowCount, options.limits.maxInvalidRows);
@@ -447,27 +500,39 @@ export async function scanLocalCsv(
       objectCount += 1;
       if (objectCount > options.limits.maxObjects) throw limitError("object", objectCount, options.limits.maxObjects);
       coverageCounts.set(document.healpix_pixel, (coverageCounts.get(document.healpix_pixel) ?? 0) + 1);
+      await writeMocInput(`${csvField(document.ra_deg)},${csvField(document.dec_deg)}\n`);
       if (options.collectObjects) objectDocuments.push(document);
       if (documentSink) await documentSink(document);
-    }
-  } catch (error) {
-    if (!headers && error instanceof LocalCsvScanHeaderError) throw error;
-    if (!headers) {
-      if (error instanceof CsvError) throw new LocalCsvScanHeaderError(`CSV header is invalid: ${error.message}`);
+      }
+    } catch (error) {
+      if (!headers && error instanceof LocalCsvScanHeaderError) throw error;
+      if (!headers) {
+        if (error instanceof CsvError) throw new LocalCsvScanHeaderError(`CSV header is invalid: ${error.message}`);
+        throw error;
+      }
       throw error;
     }
-    throw error;
-  }
 
   if (!headers) throw new LocalCsvScanHeaderError("CSV header is missing or invalid");
-  const coverageDocuments = [...coverageCounts.entries()]
-    .sort(([left], [right]) => left - right)
-    .map(([pixel, count]): LocalCoverageFactDocument => ({
+  await finishMocInput();
+  const moc = await options.mocCore.buildCatalog({
+    inputPath: mocInputPath,
+    layerId: `${options.assetId}-${options.sourceFileId}`,
+    raColumn: options.raColumn,
+    decColumn: options.decColumn,
+    coverageRole: "object_presence",
+    dataOrigin: "catalog",
+    sourceTier: "user_file_derived",
+    maxOrder: MOC_CORE_DEFAULT_MAX_ORDER,
+    queryOrder: MOC_CORE_QUERY_ORDER,
+    previewOrder: MOC_CORE_PREVIEW_ORDER,
+  });
+  const coverageDocuments = moc.queryPixels.map((pixel): LocalCoverageFactDocument => ({
       _index: options.coverageIndex,
       _id: stableCoverageDocumentId(options.assetId, options.sourceFileId, options.healpixOrder, pixel),
       healpix_order: options.healpixOrder,
       healpix_pixel: pixel,
-      objectCount: count,
+      objectCount: coverageCounts.get(pixel) ?? 0,
       survey: options.surveyId,
       release: options.releaseId,
       product: options.product,
@@ -476,7 +541,7 @@ export async function scanLocalCsv(
       source_file_id: options.sourceFileId,
       scan_run_id: options.scanRunId,
       coverage_role: "object_presence",
-      data_origin: "observed",
+      data_origin: "catalog",
       source_tier: "user_file_derived",
       max_order: 10,
       query_order: 8,
@@ -510,6 +575,12 @@ export async function scanLocalCsv(
     coverageDocuments,
     ...(options.collectObjects ? { objectDocuments } : {}),
   };
+  } finally {
+    if (!mocInputEnded && !mocInput.destroyed) {
+      await finishMocInput().catch(() => undefined);
+    }
+    await rm(mocInputDirectory, { recursive: true, force: true });
+  }
 }
 
 export const scanCsvFile = scanLocalCsv;

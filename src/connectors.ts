@@ -1,7 +1,6 @@
 /// <reference path="./ali-oss.d.ts" />
 
 import { createHash, randomUUID } from "node:crypto";
-import { readFile } from "node:fs/promises";
 import https from "node:https";
 import path from "node:path";
 import net from "node:net";
@@ -36,7 +35,7 @@ export interface ConnectorRecord {
   description: string;
   kind: ConnectorKind;
   config: Record<string, string>;
-  /** Optional scientific ownership carried by this data location. */
+  /** Optional Atlas-local survey/release labels for this data location. */
   surveyId?: string;
   releaseId?: string;
   credentialRef?: string;
@@ -221,27 +220,16 @@ function validateResolvedCredentials(input: unknown): ResolvedConnectorCredentia
 
 export class ConnectorRegistry {
   readonly #store: MetadataStore;
-  readonly #bootstrapPath?: string;
   readonly #localRoots: LocalConnectorRootsPolicy;
-  #legacyAliases = new Map<string, string>();
 
-  constructor(store: MetadataStore, bootstrapPath?: string, localRoots = LocalConnectorRootsPolicy.fromEnvironment()) {
+  constructor(store: MetadataStore, localRoots = LocalConnectorRootsPolicy.fromEnvironment()) {
     this.#store = store;
-    this.#bootstrapPath = bootstrapPath;
     this.#localRoots = localRoots;
   }
 
   async initialize(): Promise<void> {
-    await this.#store.transaction(async (transaction) => {
-      if ((await transaction.listConnectors()).length) return;
-      const marker = await transaction.getImportMarker("json-state-v1");
-      const importedConnectorState = marker
-        ? (JSON.parse(marker) as { connectorState?: string }).connectorState === "present"
-        : false;
-      if (importedConnectorState) return;
-      for (const record of await this.#loadBootstrap()) await transaction.putConnector(record);
-    });
-    await this.#loadLegacyAliases();
+    // Connector state is owned by Atlas. Legacy JSON migration is performed
+    // explicitly before startup and is never inferred from a bootstrap file.
   }
 
   async list(): Promise<ConnectorRecord[]> {
@@ -253,7 +241,7 @@ export class ConnectorRegistry {
   }
 
   async get(id: string): Promise<ConnectorRecord> {
-    const record = await this.#store.getConnector(this.#legacyAliases.get(id) ?? id);
+    const record = await this.#store.getConnector(id);
     if (!record) throw new Error(`Connector not found: ${id}`);
     return structuredClone(record);
   }
@@ -311,8 +299,7 @@ export class ConnectorRegistry {
     const value = validateConnectorInput(input);
     this.#assertLocalConfiguration(value);
     return this.#store.transaction(async (transaction) => {
-      const resolvedId = this.#legacyAliases.get(id) ?? id;
-      const current = await transaction.getConnector(resolvedId);
+      const current = await transaction.getConnector(id);
       if (!current) throw new Error(`Connector not found: ${id}`);
       const locationKey = connectorLocationKey(value.kind, value.config);
       const duplicate = await transaction.getConnectorByLocationKey(locationKey);
@@ -353,7 +340,7 @@ export class ConnectorRegistry {
   }
 
   async remove(id: string): Promise<void> {
-    const deleted = await this.#store.deleteConnector(this.#legacyAliases.get(id) ?? id);
+    const deleted = await this.#store.deleteConnector(id);
     if (!deleted) throw new Error(`Connector not found: ${id}`);
   }
 
@@ -395,32 +382,9 @@ export class ConnectorRegistry {
     }
   }
 
-  async #loadLegacyAliases(): Promise<void> {
-    this.#legacyAliases.clear();
-    if (!this.#bootstrapPath) return;
-    try {
-      const bootstrap = JSON.parse(await readFile(this.#bootstrapPath, "utf8")) as unknown;
-      if (!Array.isArray(bootstrap)) return;
-      const records = await this.#store.listConnectors();
-      for (const entry of normalizeConnectorRecords(bootstrap)) {
-        const current = records.find((record) => record.locationKey === entry.locationKey);
-        if (current && entry.id !== current.id) this.#legacyAliases.set(entry.id, current.id);
-      }
-    } catch {
-      // A missing optional bootstrap should not prevent persisted connectors from loading.
-    }
-  }
-
-  async #loadBootstrap(): Promise<ConnectorRecord[]> {
-    if (!this.#bootstrapPath) return [];
-    const bootstrap = JSON.parse(await readFile(this.#bootstrapPath, "utf8")) as unknown;
-    if (!Array.isArray(bootstrap)) throw new Error("connector bootstrap must be an array");
-    return normalizeConnectorRecords(bootstrap);
-  }
-
   async #updateRecord(id: string, update: (current: ConnectorRecord) => ConnectorRecord): Promise<ConnectorRecord> {
     return this.#store.transaction(async (transaction: MetadataTransaction) => {
-      const current = await transaction.getConnector(this.#legacyAliases.get(id) ?? id);
+      const current = await transaction.getConnector(id);
       if (!current) throw new Error(`Connector not found: ${id}`);
       const updated = update(current);
       await transaction.putConnector(updated);

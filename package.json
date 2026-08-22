@@ -3,7 +3,7 @@
   "version": "0.10.38",
   "private": true,
   "type": "module",
-  "description": "Minimal astronomy dataset registry and MCP service",
+  "description": "Atlas user-asset workspace and MCP service",
   "scripts": {
     "build": "npm run build:server && npm run build:viewer",
     "build:server": "tsc -p tsconfig.json",
@@ -13,14 +13,10 @@
     "start": "node dist/src/http-server.js",
     "test": "tsx --test test/*.test.ts",
     "test:e2e": "playwright test",
-    "test:volume": "python3 -m unittest scripts/test_build_redshift_volume.py",
-    "build:atlas": "tsx scripts/build_survey_atlas.ts",
-    "migrate:coverage-history": "tsx scripts/migrate_coverage_history.ts",
-    "benchmark:atlas": "tsx scripts/benchmark_joint_index.ts",
     "smoke:http": "tsx scripts/mcp-http-smoke.ts",
     "smoke:local-scan": "tsx scripts/smoke_local_csv_scan.ts",
     "smoke:workflow-real": "tsx scripts/smoke_real_workflow.ts",
-    "validate": "npm run build && npm test && npm run test:volume"
+    "validate": "npm run build && npm test"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1095.0",

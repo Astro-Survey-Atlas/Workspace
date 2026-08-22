@@ -1,8 +1,9 @@
-import type { ConnectorCheck, ConnectorCheckStatus, ConnectorKind, ConnectorPublicRecord, ConnectorRegistrationInput, ConnectorStatus } from "../../src/connectors";
+import type { ConnectorKind, ConnectorPublicRecord, ConnectorRegistrationInput, ConnectorStatus } from "../../src/connectors";
 import type { SurveyCard, SurveyRecord } from "../../src/survey-registry";
 import { createIcons, Pencil, Play, SearchCheck, Trash2 } from "lucide";
 
 import { workspaceApi, type ConnectorScanRun, type WorkspaceCapabilities } from "./api";
+import { notifyWorkspace } from "./notifications";
 
 export interface ConnectorMetrics {
   total: number;
@@ -39,22 +40,6 @@ function statusPill(record: ConnectorPublicRecord): HTMLSpanElement {
   return status;
 }
 
-function setFeedback(target: HTMLElement, status: ConnectorCheckStatus | "checking", summary: string, detail = ""): void {
-  target.dataset.status = status;
-  const title = document.createElement("strong"); title.textContent = summary;
-  const note = document.createElement("small"); note.textContent = detail;
-  target.replaceChildren(title, ...(detail ? [note] : []));
-}
-
-function checkFeedback(check?: ConnectorCheck): HTMLDivElement {
-  const feedback = document.createElement("div");
-  feedback.className = "connector-check-feedback";
-  feedback.setAttribute("aria-live", "polite");
-  if (check) setFeedback(feedback, check.status, check.summary, check.detail ?? "");
-  else setFeedback(feedback, "unknown", "尚未检测连接", "测试只验证当前路径和权限，不扫描目录。 ");
-  return feedback;
-}
-
 export class ConnectorPanel {
   readonly #onError: (error: unknown) => void;
   readonly #onMetrics: (metrics: ConnectorMetrics) => void;
@@ -77,7 +62,7 @@ export class ConnectorPanel {
     (registrationForm.elements.namedItem("kind") as HTMLSelectElement).addEventListener("change", () => this.#renderConfigFieldsFrom(registrationForm, true));
     registrationForm.addEventListener("submit", (event) => {
       event.preventDefault();
-      void this.#register().catch((error) => this.#registrationFeedback("failed", "登记失败", error));
+      void this.#register().catch((error) => notifyWorkspace("Connector 登记失败", error instanceof Error ? error.message : String(error), { tone: "error" }));
     });
     byId<HTMLButtonElement>("connector-form-cancel").addEventListener("click", () => this.#closeCreateDialog());
     byId<HTMLButtonElement>("connector-check-form").addEventListener("click", () => void this.#checkRegistrationInput());
@@ -263,7 +248,7 @@ export class ConnectorPanel {
     const title = document.createElement("strong");
     title.textContent = run.jobId ?? run.batchId ?? run.id;
     const asset = document.createElement("small");
-    asset.textContent = run.assetName ?? run.assetIds?.join(" / ") ?? run.assetId ?? "未绑定资产";
+    asset.textContent = run.assetName ?? run.assetIds?.join(" / ") ?? run.assetId ?? "未关联资产";
     identity.append(title, asset);
     const connectorName = document.createElement("span");
     connectorName.textContent = run.connectorName ?? connector?.name ?? "Connector 已删除";
@@ -293,7 +278,7 @@ export class ConnectorPanel {
     return this.#records.filter((record) => {
       if (kind !== "all" && record.kind !== kind) return false;
       if (status !== "all" && record.status !== status) return false;
-      if (survey !== "all" && (survey === "unbound" ? Boolean(record.surveyId) : record.surveyId !== survey)) return false;
+      if (survey !== "all" && (survey === "unassigned" ? Boolean(record.surveyId) : record.surveyId !== survey)) return false;
       if (!query) return true;
       const config = Object.entries(record.config)
         .filter(([key]) => !SENSITIVE_CONFIG_KEY.test(key))
@@ -311,8 +296,15 @@ export class ConnectorPanel {
   #populateSurveyFilter(): void {
     const select = byId<HTMLSelectElement>("connector-survey-filter");
     const selected = select.value || "all";
-    select.replaceChildren(new Option("全部巡天", "all"), new Option("未绑定巡天", "unbound"));
+    select.replaceChildren(new Option("全部巡天", "all"), new Option("未标注巡天", "unassigned"));
     this.#surveys.forEach((survey) => select.append(new Option(survey.name, survey.id)));
+    const known = new Set(this.#surveys.map((survey) => survey.id));
+    for (const surveyId of this.#records.map((record) => record.surveyId).filter((value): value is string => Boolean(value))) {
+      if (!known.has(surveyId)) {
+        known.add(surveyId);
+        select.append(new Option(`${surveyId}（本地标签）`, surveyId));
+      }
+    }
     select.value = [...select.options].some((option) => option.value === selected) ? selected : "all";
   }
 
@@ -333,14 +325,19 @@ export class ConnectorPanel {
     const releaseSelect = form.elements.namedItem("releaseId") as HTMLSelectElement | null;
     if (!surveySelect || !releaseSelect) return;
     const previousSurvey = selectedSurveyId || surveySelect.value;
-    surveySelect.replaceChildren(new Option("未绑定巡天（可稍后补充）", ""));
+    surveySelect.replaceChildren(new Option("未设置巡天标签", ""));
     this.#surveys.forEach((survey) => surveySelect.append(new Option(survey.name, survey.id)));
+    const registeredSurvey = this.#surveys.some((survey) => survey.id === previousSurvey);
+    if (previousSurvey && !registeredSurvey) surveySelect.append(new Option(`${previousSurvey}（本地标签）`, previousSurvey));
     surveySelect.value = this.#surveys.some((survey) => survey.id === previousSurvey) ? previousSurvey : "";
+    if (previousSurvey && !registeredSurvey) surveySelect.value = previousSurvey;
     const survey = this.#surveyRecords.get(surveySelect.value);
     const previousRelease = selectedReleaseId || releaseSelect.value;
-    releaseSelect.replaceChildren(new Option("未绑定发布", ""));
+    releaseSelect.replaceChildren(new Option("未设置发布标签", ""));
     survey?.releases.forEach((release) => releaseSelect.append(new Option(release.label, release.id)));
-    releaseSelect.value = survey?.releases.some((release) => release.id === previousRelease) ? previousRelease : "";
+    const registeredRelease = Boolean(survey?.releases.some((release) => release.id === previousRelease));
+    if (previousRelease && !registeredRelease) releaseSelect.append(new Option(`${previousRelease}（本地标签）`, previousRelease));
+    releaseSelect.value = previousRelease && [...releaseSelect.options].some((option) => option.value === previousRelease) ? previousRelease : "";
     surveySelect.onchange = () => this.#populateSurveySelects(form, surveySelect.value, "");
   }
 
@@ -366,16 +363,15 @@ export class ConnectorPanel {
     const header = document.createElement("div"); header.className = "connector-detail-header";
     const heading = document.createElement("h2"); heading.textContent = record.name;
     const actions = document.createElement("div"); actions.className = "connector-icon-actions";
-    const feedback = checkFeedback(record.lastCheck);
-    const checkButton = this.#iconButton("检测连接", "search-check", () => void this.#checkSelected(checkButton, feedback));
+    const checkButton = this.#iconButton("检测连接", "search-check", () => void this.#checkSelected(checkButton));
     const editButton = this.#iconButton("编辑配置", "pencil", () => { this.#editingId = record.id; this.#renderDetail(); });
-    const deleteButton = this.#iconButton("删除 Connector", "trash-2", () => void this.#remove().catch(this.#onError), "danger");
+    const deleteButton = this.#iconButton("删除 Connector", "trash-2", () => void this.#remove().catch((error) => notifyWorkspace("Connector 删除失败", error instanceof Error ? error.message : String(error), { tone: "error" })), "danger");
     actions.append(checkButton, editButton, deleteButton);
     header.append(heading, actions);
     const pathValue = document.createElement("code"); pathValue.className = "connector-detail-path"; pathValue.textContent = connectorLocation(record);
     const description = document.createElement("p"); description.className = "catalog-detail-copy"; description.textContent = record.description;
     const summary = document.createElement("dl");
-    const rows: Array<[string, string]> = [["类型", KIND_LABELS[record.kind]], ["连接状态", statusPill(record).textContent ?? STATUS_LABELS[record.status]], ["巡天归属", record.surveyId ?? "未绑定"], ["发布归属", record.releaseId ?? "未绑定"]];
+    const rows: Array<[string, string]> = [["类型", KIND_LABELS[record.kind]], ["连接状态", statusPill(record).textContent ?? STATUS_LABELS[record.status]], ["巡天标签", record.surveyId ?? "未设置"], ["发布标签", record.releaseId ?? "未设置"]];
     if (record.kind === "s3") {
       rows.push(["Bucket", record.config.bucket ?? ""], ["Prefix", record.config.prefix || "根目录"], ["Access Key", record.credentials.accessKeyId || "未配置"], ["Secret Key", record.credentials.secretConfigured ? "••••••••••••" : "未配置"]);
     }
@@ -383,7 +379,7 @@ export class ConnectorPanel {
       const row = document.createElement("div"); const term = document.createElement("dt"); const detail = document.createElement("dd"); term.textContent = label; detail.textContent = value; row.append(term, detail); summary.append(row);
     });
     const scanCommand = this.#scanCommand(record);
-    return [header, pathValue, statusPill(record), description, summary, feedback, scanCommand];
+    return [header, pathValue, statusPill(record), description, summary, scanCommand];
   }
 
   #iconButton(label: string, iconName: string, action: () => void, tone = ""): HTMLButtonElement {
@@ -425,32 +421,29 @@ export class ConnectorPanel {
     button.disabled = Boolean(reason);
     button.title = reason ?? "使用已保存的 Connector 配置执行扫描";
     note.textContent = reason ?? "使用已保存的 S3 / OSS 配置执行扫描；扫描范围由服务端任务定义。";
-    const output = document.createElement("output");
-    output.className = "connector-scan-feedback";
-    output.setAttribute("aria-live", "polite");
-    button.addEventListener("click", () => void this.#executeScan(record, button, output));
-    section.append(button, note, output);
+    button.addEventListener("click", () => void this.#executeScan(record, button));
+    section.append(button, note);
     return section;
   }
 
-  async #executeScan(record: ConnectorPublicRecord, button: HTMLButtonElement, output: HTMLElement): Promise<void> {
+  async #executeScan(record: ConnectorPublicRecord, button: HTMLButtonElement): Promise<void> {
     button.disabled = true;
-    setFeedback(output, "checking", "正在提交扫描任务…", "任务将使用已保存的 S3 / OSS 配置。 ");
+    notifyWorkspace("正在提交普通扫描任务", `${record.name} · 使用已保存的 S3 / OSS 配置`, { tone: "info" });
     try {
       const submitted = await workspaceApi.executeConnectorScan(record.id);
       this.#runs = await workspaceApi.connectorIngestRuns();
       this.#selectedRunId = submitted.id ?? this.#runs[0]?.id ?? null;
       this.#updateMetrics(this.#runs);
-      setFeedback(output, "ok", "扫描任务已提交", "前往“扫描记录”查看执行状态。 ");
+      notifyWorkspace("普通扫描任务已提交", `${record.name} · ${submitted.taskKind === "user_coverage" ? "用户覆盖任务" : "Atlas 用户扫描"}`, { tone: "success" });
     } catch (error) {
       button.disabled = false;
-      setFeedback(output, "failed", "扫描任务提交失败", error instanceof Error ? error.message : String(error));
+      notifyWorkspace("普通扫描任务提交失败", error instanceof Error ? error.message : String(error), { tone: "error" });
     }
   }
 
   #editForm(record: ConnectorPublicRecord): HTMLFormElement {
     const form = document.createElement("form"); form.className = "connector-inline-editor";
-    form.innerHTML = `<label class="connector-edit-title"><span>名称</span><input name="name" class="field-input" maxlength="120" required></label><label><span>说明</span><textarea name="description" class="field-input" maxlength="500" rows="3"></textarea></label><div class="connector-config-grid"><label><span>类型</span><select name="kind" class="field-input"><option value="s3">S3 / OSS</option><option value="local">本地路径</option><option value="jdbc">JDBC 数据库</option></select></label><label><span>状态</span><select name="status" class="field-input"><option value="draft">草稿</option><option value="ready">可用</option><option value="disabled">停用</option></select></label><label><span>归属巡天</span><select name="surveyId" class="field-input"></select></label><label><span>归属发布</span><select name="releaseId" class="field-input"></select></label></div><div data-config="s3" class="connector-config-grid"><label><span>Endpoint</span><input name="endpoint" class="field-input"></label><label><span>Bucket</span><input name="bucket" class="field-input"></label><label><span>Prefix</span><input name="prefix" class="field-input"></label><label><span>Region</span><input name="region" class="field-input"></label><label><span>Access Key</span><input name="accessKeyId" class="field-input" autocomplete="off"></label><label><span>Secret Key</span><input name="secretAccessKey" class="field-input" type="password" autocomplete="new-password" placeholder="已保存；留空保持不变"></label></div><div data-config="local" class="connector-config-grid" hidden><label><span>根路径</span><input name="rootPath" class="field-input"></label></div><div data-config="jdbc" class="connector-config-grid" hidden><label><span>JDBC URL</span><input name="url" class="field-input"></label><label><span>Database</span><input name="database" class="field-input"></label><label><span>Schema</span><input name="schema" class="field-input"></label></div><output class="connector-edit-feedback" aria-live="polite"></output><div class="detail-editor-actions"><button class="command-button" type="submit">保存修改</button><button class="command-button secondary" type="button" data-cancel>取消</button></div>`;
+    form.innerHTML = `<label class="connector-edit-title"><span>名称</span><input name="name" class="field-input" maxlength="120" required></label><label><span>说明</span><textarea name="description" class="field-input" maxlength="500" rows="3"></textarea></label><div class="connector-config-grid"><label><span>类型</span><select name="kind" class="field-input"><option value="s3">S3 / OSS</option><option value="local">本地路径</option><option value="jdbc">JDBC 数据库</option></select></label><label><span>状态</span><select name="status" class="field-input"><option value="draft">草稿</option><option value="ready">可用</option><option value="disabled">停用</option></select></label><label><span>巡天标签</span><select name="surveyId" class="field-input"></select></label><label><span>发布标签</span><select name="releaseId" class="field-input"></select></label></div><div data-config="s3" class="connector-config-grid"><label><span>Endpoint</span><input name="endpoint" class="field-input"></label><label><span>Bucket</span><input name="bucket" class="field-input"></label><label><span>Prefix</span><input name="prefix" class="field-input"></label><label><span>Region</span><input name="region" class="field-input"></label><label><span>Access Key</span><input name="accessKeyId" class="field-input" autocomplete="off"></label><label><span>Secret Key</span><input name="secretAccessKey" class="field-input" type="password" autocomplete="new-password" placeholder="已保存；留空保持不变"></label></div><div data-config="local" class="connector-config-grid" hidden><label><span>根路径</span><input name="rootPath" class="field-input"></label></div><div data-config="jdbc" class="connector-config-grid" hidden><label><span>JDBC URL</span><input name="url" class="field-input"></label><label><span>Database</span><input name="database" class="field-input"></label><label><span>Schema</span><input name="schema" class="field-input"></label></div><div class="detail-editor-actions"><button class="command-button" type="submit">保存修改</button><button class="command-button secondary" type="button" data-cancel>取消</button></div>`;
     const statusControl = form.elements.namedItem("status");
     if (statusControl instanceof HTMLElement) statusControl.closest("label")?.remove();
     const set = (name: string, value: string) => { const element = form.elements.namedItem(name) as HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement | null; if (element) element.value = value; };
@@ -459,9 +452,8 @@ export class ConnectorPanel {
     (form.elements.namedItem("kind") as HTMLSelectElement).addEventListener("change", () => this.#renderConfigFieldsFrom(form, false));
     form.addEventListener("submit", (event) => {
       event.preventDefault();
-      const output = form.querySelector<HTMLOutputElement>(".connector-edit-feedback")!;
-      setFeedback(output, "checking", "正在保存…");
-      void this.#saveEdit(record, form).catch((error) => setFeedback(output, "failed", "保存失败", error instanceof Error ? error.message : String(error)));
+      notifyWorkspace("正在保存 Connector 修改", record.name, { tone: "info" });
+      void this.#saveEdit(record, form).catch((error) => notifyWorkspace("Connector 修改失败", error instanceof Error ? error.message : String(error), { tone: "error" }));
     });
     form.querySelector("[data-cancel]")?.addEventListener("click", () => { this.#editingId = null; this.#renderDetail(); });
     this.#renderConfigFieldsFrom(form, false);
@@ -477,51 +469,52 @@ export class ConnectorPanel {
 
   async #register(): Promise<void> {
     const form = byId<HTMLFormElement>("connector-registration-form");
-    if (!form.reportValidity()) { this.#registrationFeedback("failed", "信息不完整", "请补全当前 Connector 所需字段。 "); return; }
-    this.#registrationFeedback("checking", "正在保存 Connector…");
+    if (!form.reportValidity()) { notifyWorkspace("Connector 信息不完整", "请补全当前 Connector 所需字段。", { tone: "warning" }); return; }
+    notifyWorkspace("正在保存 Connector", field(form, "name"), { tone: "info" });
     const record = await workspaceApi.registerConnector(this.#inputFromForm(form));
     this.#records = await workspaceApi.connectors(); this.#runs = await workspaceApi.connectorIngestRuns(); this.#updateMetrics(this.#runs); this.#selectedId = record.id; this.#closeCreateDialog(); this.#render();
+    notifyWorkspace("Connector 已登记", record.name, { tone: "success" });
   }
 
   async #saveEdit(record: ConnectorPublicRecord, form: HTMLFormElement): Promise<void> {
     if (!form.reportValidity()) return;
     const updated = await workspaceApi.updateConnector(record.id, this.#inputFromForm(form, record.status));
     this.#records = await workspaceApi.connectors(); this.#runs = await workspaceApi.connectorIngestRuns(); this.#updateMetrics(this.#runs); this.#selectedId = updated.id; this.#editingId = null; this.#render();
+    notifyWorkspace("Connector 修改已保存", updated.name, { tone: "success" });
   }
 
-  async #checkSelected(button: HTMLButtonElement, feedback: HTMLElement): Promise<void> {
+  async #checkSelected(button: HTMLButtonElement): Promise<void> {
     const id = this.#selectedId;
     if (!id) return;
-    button.disabled = true; button.setAttribute("aria-label", "正在检测连接"); button.title = "正在检测连接"; setFeedback(feedback, "checking", "正在验证已保存凭据和访问权限…");
+    button.disabled = true; button.setAttribute("aria-label", "正在检测连接"); button.title = "正在检测连接";
+    notifyWorkspace("正在检测 Connector", this.#records.find((record) => record.id === id)?.name ?? id, { tone: "info" });
     try {
       const result = await workspaceApi.checkConnector(id);
       this.#records = this.#records.map((record) => record.id === id ? result.connector : record);
       this.#runs = await workspaceApi.connectorIngestRuns();
       this.#updateMetrics(this.#runs);
       this.#render();
+      notifyWorkspace("Connector 连接检测完成", result.check.summary, { tone: result.check.status === "ok" ? "success" : "warning" });
     } catch (error) {
       button.disabled = false; button.setAttribute("aria-label", "重新检测连接"); button.title = "重新检测连接";
-      setFeedback(feedback, "failed", "连接检测失败", error instanceof Error ? error.message : String(error));
+      notifyWorkspace("Connector 连接检测失败", error instanceof Error ? error.message : String(error), { tone: "error" });
     }
   }
 
   async #checkRegistrationInput(): Promise<void> {
     const form = byId<HTMLFormElement>("connector-registration-form");
     const button = byId<HTMLButtonElement>("connector-check-form");
-    if (!form.reportValidity()) { this.#registrationFeedback("failed", "信息不完整", "请补全路径和凭据后重试。 "); return; }
-    button.disabled = true; button.textContent = "检测中…"; this.#registrationFeedback("checking", "正在验证连接与权限…");
+    if (!form.reportValidity()) { notifyWorkspace("Connector 信息不完整", "请补全路径和凭据后重试。", { tone: "warning" }); return; }
+    button.disabled = true; button.textContent = "检测中…";
+    notifyWorkspace("正在验证 Connector 配置", field(form, "name") || "新 Connector", { tone: "info" });
     try {
       const check = await workspaceApi.checkConnectorInput(this.#inputFromForm(form));
-      this.#registrationFeedback(check.status, check.summary, check.detail ?? "");
+      notifyWorkspace("Connector 配置检测完成", check.detail ? `${check.summary} · ${check.detail}` : check.summary, { tone: check.status === "ok" ? "success" : "warning" });
     } catch (error) {
-      this.#registrationFeedback("failed", "连接检测失败", error);
+      notifyWorkspace("Connector 配置检测失败", error instanceof Error ? error.message : String(error), { tone: "error" });
     } finally {
       button.disabled = false; button.textContent = "检测此配置";
     }
-  }
-
-  #registrationFeedback(status: ConnectorCheckStatus | "checking", summary: string, detail?: unknown): void {
-    setFeedback(byId("connector-form-message"), status, summary, detail instanceof Error ? detail.message : typeof detail === "string" ? detail : "");
   }
 
   #formatDateTime(value?: string): string {
@@ -540,7 +533,7 @@ export class ConnectorPanel {
         this.#runs = runs;
         this.#updateMetrics(runs);
         this.#renderHistory();
-      }).catch(this.#onError);
+      }).catch((error) => notifyWorkspace("扫描记录刷新失败", error instanceof Error ? error.message : String(error), { tone: "error" }));
     }, 2500);
   }
 
@@ -566,7 +559,7 @@ export class ConnectorPanel {
       ["Connector", run.connectorName ?? connector?.name ?? "Connector 已删除"],
       ["类型", this.#runConnectorKind(run) ? KIND_LABELS[this.#runConnectorKind(run)!] : "未注明"],
       ["执行器", this.#runExecutor(run)],
-      ["资产", run.assetName ?? run.assetIds?.join(" / ") ?? run.assetId ?? "未绑定资产"],
+      ["资产", run.assetName ?? run.assetIds?.join(" / ") ?? run.assetId ?? "未关联资产"],
       ["开始时间", this.#formatDateTime(run.startedAt)],
       ["完成时间", this.#formatDateTime(run.completedAt)],
       ["文件数", run.fileCount == null ? "未记录" : String(run.fileCount)],
@@ -601,12 +594,12 @@ export class ConnectorPanel {
     (form.elements.namedItem("schema") as HTMLInputElement).value = "public";
     this.#populateSurveySelects(form, "", "");
     this.#renderConfigFieldsFrom(form, true);
-    this.#registrationFeedback("unknown", "尚未检测", "填写后可先检测连接，也可以直接登记。 ");
   }
 
   async #remove(): Promise<void> {
     if (!this.#selectedId) return;
     await workspaceApi.deleteConnector(this.#selectedId);
     this.#records = await workspaceApi.connectors(); this.#runs = await workspaceApi.connectorIngestRuns(); this.#updateMetrics(this.#runs); this.#selectedId = this.#records[0]?.id ?? null; this.#resetRegistrationForm(); this.#render();
+    notifyWorkspace("Connector 已删除", "连接配置和其 Atlas 本地引用已移除", { tone: "success" });
   }
 }

@@ -66,7 +66,7 @@ export interface AstroCoverageInput {
   nside: number;
 }
 
-/** Coverage returned for one effective survey ownership group. */
+/** Coverage returned for one Atlas asset layer. */
 export interface AstroCoverageLayer {
   key: string;
   assetId?: string;

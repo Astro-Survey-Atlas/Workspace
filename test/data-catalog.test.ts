@@ -1,40 +1,22 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { DataCatalogRegistry, normalizeDataAssetRecord, normalizePersistedDataAsset, type DataAssetRecord, type DataAssetRegistrationInput, type DataAssetScanSpec } from "../src/data-catalog.js";
+import { DataCatalogRegistry, normalizeDataAssetRecord, normalizePersistedDataAsset, type DataAssetRegistrationInput, type DataAssetScanSpec } from "../src/data-catalog.js";
 import { SqliteMetadataStore } from "../src/storage/index.js";
 
-async function fixture(): Promise<{ directory: string; bootstrapPath: string; statePath: string }> {
+async function fixture(): Promise<{ directory: string; statePath: string }> {
   const directory = await mkdtemp(path.join(os.tmpdir(), "astro-data-catalog-"));
-  const bootstrapPath = path.join(directory, "bootstrap.json");
   const statePath = path.join(directory, "state", "catalog.json");
-  const now = "2026-07-24T00:00:00.000Z";
-  const builtin: DataAssetRecord[] = [{
-    id: "builtin-catalog",
-    name: "Built-in catalog",
-    description: "Fixture",
-    product: "Sources",
-    kind: "catalog",
-    modalities: ["catalog"],
-    access: { connector: "metadata", uri: "catalog://fixture", format: "table" },
-    status: "metadata_only",
-    projectState: "public_reference",
-    footprintIds: [],
-    origin: "builtin",
-    createdAt: now,
-    updatedAt: now,
-  }];
-  await writeFile(bootstrapPath, JSON.stringify(builtin), "utf8");
-  return { directory, bootstrapPath, statePath };
+  return { directory, statePath };
 }
 
-async function catalogRegistry(bootstrapPath: string, statePath: string): Promise<DataCatalogRegistry> {
+async function catalogRegistry(statePath: string): Promise<DataCatalogRegistry> {
   const store = new SqliteMetadataStore(`${statePath}.sqlite`);
   await store.initialize();
-  const registry = new DataCatalogRegistry(bootstrapPath, store);
+  const registry = new DataCatalogRegistry(store);
   await registry.initialize();
   return registry;
 }
@@ -54,10 +36,10 @@ function registrationWithScanSpec(scanSpec: unknown): DataAssetRegistrationInput
   return { name: "CSV catalog", kind: "catalog", scanSpec: scanSpec as DataAssetScanSpec };
 }
 
-test("data catalog merges read-only bootstrap records with persisted user records", async () => {
+test("data catalog stores only persisted user records", async () => {
   const paths = await fixture();
   try {
-    const registry = await catalogRegistry(paths.bootstrapPath, paths.statePath);
+    const registry = await catalogRegistry(paths.statePath);
     const created = await registry.register({
       name: "My FITS table",
       description: "A user-maintained source",
@@ -71,11 +53,11 @@ test("data catalog merges read-only bootstrap records with persisted user record
       status: "ready",
       projectState: "acquired",
     });
-    assert.equal((await registry.list()).length, 2);
+    assert.equal((await registry.list()).length, 1);
     assert.equal(created.origin, "user");
     assert.equal(created.projectState, "acquired");
 
-    const reloaded = await catalogRegistry(paths.bootstrapPath, paths.statePath);
+    const reloaded = await catalogRegistry(paths.statePath);
     assert.equal((await reloaded.get(created.id)).access.uri, "/mnt/data/euclid/q1.fits");
   } finally {
     await rm(paths.directory, { recursive: true, force: true });
@@ -85,8 +67,7 @@ test("data catalog merges read-only bootstrap records with persisted user record
 test("only user records can be updated or removed", async () => {
   const paths = await fixture();
   try {
-    const registry = await catalogRegistry(paths.bootstrapPath, paths.statePath);
-    await assert.rejects(() => registry.remove("builtin-catalog"), /read-only/);
+    const registry = await catalogRegistry(paths.statePath);
     const created = await registry.register({
       name: "Initial",
       kind: "image",
@@ -106,7 +87,7 @@ test("only user records can be updated or removed", async () => {
     assert.equal(updated.name, "Updated");
     assert.equal(updated.access.uri, "https://example.test/image-v2.fits");
     await registry.remove(created.id);
-    assert.deepEqual((await registry.list()).map((entry) => entry.id), ["builtin-catalog"]);
+    assert.deepEqual((await registry.list()).map((entry) => entry.id), []);
   } finally {
     await rm(paths.directory, { recursive: true, force: true });
   }
@@ -115,7 +96,7 @@ test("only user records can be updated or removed", async () => {
 test("data catalog rejects incomplete connector metadata", async () => {
   const paths = await fixture();
   try {
-    const registry = await catalogRegistry(paths.bootstrapPath, paths.statePath);
+    const registry = await catalogRegistry(paths.statePath);
     await assert.rejects(() => registry.register({
       name: "Broken",
       kind: "catalog",
@@ -131,7 +112,7 @@ test("data catalog rejects incomplete connector metadata", async () => {
 test("CSV scan specs are normalized, retained by updates, and survive restart", async () => {
   const paths = await fixture();
   try {
-    const registry = await catalogRegistry(paths.bootstrapPath, paths.statePath);
+    const registry = await catalogRegistry(paths.statePath);
     const created = await registry.register({
       ...registrationWithScanSpec({
         format: " csv ",
@@ -150,7 +131,7 @@ test("CSV scan specs are normalized, retained by updates, and survive restart", 
     const updated = await registry.update(created.id, { name: "Updated CSV catalog", kind: "catalog" });
     assert.deepEqual(updated.scanSpec, normalizedScanSpec);
 
-    const restarted = await catalogRegistry(paths.bootstrapPath, paths.statePath);
+    const restarted = await catalogRegistry(paths.statePath);
     assert.deepEqual((await restarted.get(created.id)).scanSpec, normalizedScanSpec);
   } finally {
     await rm(paths.directory, { recursive: true, force: true });
@@ -160,7 +141,7 @@ test("CSV scan specs are normalized, retained by updates, and survive restart", 
 test("CSV scan specs reject unknown fields, invalid formats, columns, coordinates, and long text", async () => {
   const paths = await fixture();
   try {
-    const registry = await catalogRegistry(paths.bootstrapPath, paths.statePath);
+    const registry = await catalogRegistry(paths.statePath);
     const valid = { ...normalizedScanSpec };
     await assert.rejects(() => registry.register(registrationWithScanSpec({ ...valid, extra: true })), /unknown field/);
     await assert.rejects(() => registry.register(registrationWithScanSpec({ ...valid, format: "fits" })), /format must be csv/);
@@ -181,7 +162,7 @@ test("CSV scan specs reject unknown fields, invalid formats, columns, coordinate
 test("ready remote metadata is not inferred to be a processed project asset", async () => {
   const paths = await fixture();
   try {
-    const registry = await catalogRegistry(paths.bootstrapPath, paths.statePath);
+    const registry = await catalogRegistry(paths.statePath);
     const created = await registry.register({
       name: "Public query metadata",
       kind: "catalog",
@@ -200,7 +181,7 @@ test("ready remote metadata is not inferred to be a processed project asset", as
 test("one logical asset can retain public reference and acquired locations", async () => {
   const paths = await fixture();
   try {
-    const registry = await catalogRegistry(paths.bootstrapPath, paths.statePath);
+    const registry = await catalogRegistry(paths.statePath);
     const created = await registry.register({
       name: "Euclid Q1 local mirror",
       surveyId: "euclid",
@@ -221,20 +202,6 @@ test("one logical asset can retain public reference and acquired locations", asy
     assert.equal(created.accesses?.length, 2);
     assert.equal(created.sources?.[0]?.label, "Official Q1");
 
-    const updated = await registry.update("builtin-catalog", {
-      name: "Built-in catalog",
-      kind: "catalog",
-      connector: "metadata",
-      sourceUri: "catalog://fixture",
-      format: "table",
-      accesses: [
-        { connector: "metadata", uri: "catalog://fixture", format: "table" },
-        { connector: "s3", uri: "s3://bucket/catalog", format: "fits" },
-      ],
-      projectStates: ["public_reference", "acquired"],
-    });
-    assert.equal(updated.origin, "builtin");
-    assert.deepEqual((await registry.get("builtin-catalog")).projectStates, ["public_reference", "acquired"]);
   } finally {
     await rm(paths.directory, { recursive: true, force: true });
   }

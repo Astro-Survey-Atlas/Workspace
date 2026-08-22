@@ -62,20 +62,15 @@ test("JSON state imports all domains transactionally and is idempotent", async (
   }
 });
 
-test("an imported empty connector file suppresses connector bootstrap", async () => {
+test("an imported empty connector file leaves Atlas connector state empty", async () => {
   const directory = await mkdtemp(path.join(os.tmpdir(), "astro-json-empty-"));
   const store = new SqliteMetadataStore(path.join(directory, "workspace.sqlite"));
   try {
     const statePaths = await paths(directory);
     await writeFile(statePaths.connectorStatePath, "[]", "utf8");
-    const bootstrapPath = path.join(directory, "bootstrap.json");
-    await writeFile(bootstrapPath, JSON.stringify([{
-      id: "connector-bootstrap", name: "Bootstrap", kind: "local", config: { rootPath: "/bootstrap" },
-      status: "ready", createdAt: timestamp, updatedAt: timestamp,
-    }]), "utf8");
     await store.initialize();
     await importJsonState(store, statePaths);
-    const registry = new ConnectorRegistry(store, bootstrapPath);
+    const registry = new ConnectorRegistry(store);
     await registry.initialize();
     assert.deepEqual(await registry.list(), []);
   } finally {

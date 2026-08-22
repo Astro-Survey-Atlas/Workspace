@@ -22,12 +22,13 @@
   </head>
   <body>
     <main class="workspace-shell">
+      <div id="workspace-notification-deck" class="workspace-notification-deck" aria-live="polite" aria-atomic="false"></div>
       <header class="topbar">
         <div class="brand-lockup">
           <span class="brand-mark" aria-hidden="true"></span>
           <div>
             <strong>Astro Survey Atlas</strong>
-            <span id="dataset-name">COSMOS multi-survey</span>
+            <span id="dataset-name">用户资产与公开覆盖</span>
           </div>
         </div>
         <div class="mode-control" role="group" aria-label="视图模式">
@@ -47,7 +48,7 @@
         </div>
       </header>
 
-      <aside id="controls-panel" class="controls-panel" aria-label="巡天与联合索引控制">
+      <aside id="controls-panel" class="controls-panel" aria-label="巡天图层与用户资产控制">
         <div id="context-summary">
             <div class="panel-kicker" id="panel-kicker">DATA COVERAGE</div>
             <h1 id="panel-dataset-name">数据覆盖</h1>
@@ -100,50 +101,6 @@
               <button type="button" class="representation-button" data-layer-layout="layers" aria-pressed="false" title="仅沿球面法线分开数据来源，不代表物理距离">径向展开</button>
             </div>
             <div id="sky-layer-list" class="survey-list sky-layer-list" aria-label="可排序数据图层"></div>
-          </section>
-        </div>
-
-        <div id="volume-controls" hidden>
-          <section class="control-section">
-            <div class="section-heading"><span>Representation</span><output id="representation-output">SPARSE CELLS</output></div>
-            <div class="representation-control" role="group" aria-label="联合体积表达方式">
-              <button type="button" class="representation-button active" data-representation="cells">体积块</button>
-              <button type="button" class="representation-button" data-representation="points">星系点</button>
-            </div>
-          </section>
-          <section class="control-section">
-            <div class="section-heading"><span>Angular level</span><output id="joint-nside-output">NSIDE 32</output></div>
-            <div class="level-control five" role="group" aria-label="联合索引 HEALPix 分辨率">
-              <button type="button" class="level-button" data-joint-nside="8">8</button>
-              <button type="button" class="level-button" data-joint-nside="16">16</button>
-              <button type="button" class="level-button active" data-joint-nside="32">32</button>
-              <button type="button" class="level-button" data-joint-nside="64">64</button>
-              <button type="button" class="level-button" data-joint-nside="128">128</button>
-            </div>
-          </section>
-          <section class="control-section">
-            <div class="section-heading"><span>Radial level</span><output id="radial-bins-output">8 BINS</output></div>
-            <div class="level-control" role="group" aria-label="联合索引径向分箱">
-              <button type="button" class="level-button" data-radial-bins="4">4</button>
-              <button type="button" class="level-button active" data-radial-bins="8">8</button>
-              <button type="button" class="level-button" data-radial-bins="16">16</button>
-              <button type="button" class="level-button" data-radial-bins="32">32</button>
-            </div>
-          </section>
-          <section class="control-section radial-section">
-            <div class="section-heading"><span>Radial window</span><span>PLANCK18</span></div>
-            <label for="radial-min-input"><span>Near</span><output id="radial-min-output">0 Mpc</output></label>
-            <input id="radial-min-input" type="range" min="0" max="6000" step="50" value="0" />
-            <label for="radial-max-input"><span>Far</span><output id="radial-max-output">6000 Mpc</output></label>
-            <input id="radial-max-input" type="range" min="0" max="6000" step="50" value="6000" />
-          </section>
-          <section class="control-section query-section">
-            <div class="section-heading"><span>Query result</span><span id="query-time">-- MS</span></div>
-            <dl>
-              <div><dt>Cells</dt><dd id="query-cell-count">--</dd></div>
-              <div><dt>Objects</dt><dd id="query-object-count">--</dd></div>
-              <div><dt>Examined</dt><dd id="query-examined-count">--</dd></div>
-            </dl>
           </section>
         </div>
 
@@ -208,7 +165,6 @@
           <button id="resource-package-settings" class="icon-button compact-icon-command" type="button" aria-label="配置公开巡天目录" title="配置公开巡天目录"><i data-lucide="settings-2"></i></button>
           <button id="resource-package-apply" class="primary-command compact-command" type="button" disabled><span>应用到天球</span></button>
          </div>
-          <output id="resource-package-feedback" class="resource-package-feedback" aria-live="polite"></output>
           <div class="resource-package-columns"><span></span><span>巡天</span><span>已收录覆盖 <button class="status-help" type="button" aria-label="已收录覆盖说明"><i data-lucide="info" aria-hidden="true"></i><span class="sr-only">已收录覆盖说明</span><span class="status-help-tooltip" role="tooltip"><span><strong>真实覆盖：</strong>已有验证过的像素几何，可以加载到 3D 天球。</span><span><strong>官方概览：</strong>只有大致范围说明，不能当作精确覆盖。</span><span><strong>待补充几何：</strong>已有官方资料，但还没有可验证的像素几何。</span><span><strong>未收录：</strong>当前没有可用的公开覆盖制品。</span></span></button></span><span>服务器状态 <button class="status-help" type="button" aria-label="服务器状态说明"><i data-lucide="info" aria-hidden="true"></i><span class="sr-only">服务器状态说明</span><span class="status-help-tooltip" role="tooltip"><span><strong>未下载：</strong>当前服务器还没有覆盖包。</span><span><strong>下载中：</strong>正在把覆盖包保存到当前服务器。</span><span><strong>已下载：</strong>覆盖包已保存，但还没有显示到天球。</span><span><strong>已应用：</strong>覆盖正在“数据覆盖”天球中显示。</span><span><strong>可更新：</strong>目录有比本地更近的覆盖包版本。</span><span><strong>失败：</strong>下载或校验没有完成，可以再次点击“应用到天球”。</span></span></button></span></div>
         <div id="resource-package-list" class="resource-package-list"></div>
         <div id="resource-package-empty" class="catalog-empty" hidden>暂无符合当前条件的公开覆盖资源。</div>
@@ -259,8 +215,8 @@
         </section>
       </section>
 
-      <section id="scene-stage" class="volume-stage" aria-label="数据覆盖天球与数据空间" hidden>
-        <canvas id="volume-canvas"></canvas>
+      <section id="scene-stage" class="scene-stage" aria-label="数据覆盖天球" hidden>
+        <canvas id="scene-canvas"></canvas>
         <div id="aladin-explorer" class="aladin-explorer-host" hidden aria-label="Aladin 天区对象探索"></div>
         <div id="aladin-controls" class="aladin-controls" hidden>
           <div class="aladin-vignette" aria-hidden="true"></div>
@@ -272,11 +228,10 @@
             <div id="aladin-asset-nav" class="aladin-asset-nav" role="group" aria-label="对象资产导航"></div>
             <div class="aladin-rail-summary"><span>VIEWPORT LOAD</span><output id="aladin-loaded-summary">--</output></div>
           </aside>
-          <div class="aladin-telemetry" aria-live="polite"><span>ALT/AZ · OBJECTS</span><output id="aladin-object-telemetry">--</output><output id="aladin-status">等待 Aladin</output><small>LINK STABLE · TRACKING ACTIVE</small></div>
+          <div class="aladin-telemetry"><span>ALT/AZ · OBJECTS</span><output id="aladin-object-telemetry">--</output><small>LINK STABLE · TRACKING ACTIVE</small></div>
           <div class="aladin-action-rail" aria-label="Aladin 应用操作">
             <button id="aladin-inspector-toggle" class="aladin-action-button" type="button" aria-label="显示对象详情" title="显示对象详情"><i data-lucide="info"></i></button>
           </div>
-          <div id="aladin-status-deck" class="aladin-status-deck" aria-live="polite"></div>
         </div>
         <div class="scene-hud-top">
           <div class="scene-readout">
@@ -331,7 +286,6 @@
           </div>
           <div class="stage-primary-actions"><button id="workflow-new" class="primary-command compact-command" type="button"><i data-lucide="plus"></i><span>新建任务</span></button><span id="workflow-status-badge" class="run-status" data-status="idle">IDLE</span></div>
         </header>
-        <div id="workflow-error" class="workflow-error" hidden></div>
         <section class="production-track" aria-label="astro-code 生产动作">
           <div class="section-heading"><span>生产动作</span><span>ASTRO-CODE</span></div>
           <div class="production-actions" role="group" aria-label="选择数据生产动作">
@@ -402,7 +356,6 @@
              <label class="field-label" for="catalog-source-file">文件</label><select id="catalog-source-file" class="field-input"></select>
              <button id="catalog-inspect-file" class="command-button secondary" type="button">读取表头</button>
              <div class="catalog-scan-columns"><label><span>对象 ID</span><select id="catalog-object-id-column" class="field-input"></select></label><label><span>RA</span><select id="catalog-ra-column" class="field-input"></select></label><label><span>Dec</span><select id="catalog-dec-column" class="field-input"></select></label></div>
-             <output id="catalog-scan-feedback" class="catalog-scan-feedback" aria-live="polite">选择文件后读取表头</output>
            </fieldset>
           <label class="field-label" for="catalog-description">说明（可选）</label><input id="catalog-description" class="field-input" maxlength="500" />
           <footer><button id="catalog-form-cancel" class="command-button secondary" type="button">取消</button><button id="catalog-form-submit" class="command-button" type="submit">登记数据</button></footer>
@@ -418,7 +371,7 @@
           <div id="connector-config-s3" data-config="s3" class="connector-config-grid"><label><span class="field-label">Endpoint</span><input id="connector-s3-endpoint" name="endpoint" class="field-input" /></label><label><span class="field-label">Bucket</span><input id="connector-s3-bucket" name="bucket" class="field-input" required /></label><label><span class="field-label">Prefix</span><input id="connector-s3-prefix" name="prefix" class="field-input" /></label><label><span class="field-label">Region</span><input id="connector-s3-region" name="region" class="field-input" value="us-east-1" /></label><label><span class="field-label">Access Key</span><input name="accessKeyId" class="field-input" autocomplete="off" required /></label><label><span class="field-label">Secret Key</span><input name="secretAccessKey" class="field-input" type="password" autocomplete="new-password" required /></label></div>
           <div id="connector-config-local" data-config="local" class="connector-config-grid" hidden><label><span class="field-label">根路径</span><input id="connector-local-root" name="rootPath" class="field-input" /></label></div>
           <div id="connector-config-jdbc" data-config="jdbc" class="connector-config-grid" hidden><label><span class="field-label">JDBC URL</span><input id="connector-jdbc-url" name="url" class="field-input" /></label><label><span class="field-label">Database</span><input id="connector-jdbc-database" name="database" class="field-input" /></label><label><span class="field-label">Schema</span><input id="connector-jdbc-schema" name="schema" class="field-input" value="public" /></label></div>
-          <div class="connector-registration-actions"><button id="connector-check-form" class="command-button secondary" type="button">检测此配置</button><output id="connector-form-message" class="connector-check-feedback" aria-live="polite"><strong>尚未检测</strong></output></div>
+          <div class="connector-registration-actions"><button id="connector-check-form" class="command-button secondary" type="button">检测此配置</button></div>
           <footer><button id="connector-form-cancel" class="command-button secondary" type="button">取消</button><button id="connector-form-submit" class="command-button" type="submit">登记 Connector</button></footer>
         </form>
       </dialog>
@@ -429,8 +382,7 @@
           <div class="catalog-form-grid"><label><span class="field-label">巡天 ID</span><input name="id" class="field-input" placeholder="csst" pattern="[a-z0-9][a-z0-9._-]*" required /></label><label><span class="field-label">名称</span><input name="name" class="field-input" placeholder="CSST" maxlength="160" required /></label><label><span class="field-label">任务 / 项目</span><input name="mission" class="field-input" placeholder="Chinese Space Station Telescope" maxlength="160" /></label><label><span class="field-label">来源 URL</span><input name="sourceUrl" class="field-input" type="url" placeholder="https://..." required /></label></div>
           <label class="field-label" for="survey-registration-description">说明</label><input id="survey-registration-description" name="description" class="field-input" maxlength="1000" />
           <label class="field-label" for="survey-registration-modalities">模态</label><select id="survey-registration-modalities" name="modalities" class="field-input" multiple required><option value="imaging">图像</option><option value="spectroscopy">光谱</option><option value="photometry">测光</option><option value="time-domain">时域</option><option value="integral-field">积分场</option><option value="ultraviolet">紫外</option><option value="infrared">红外</option><option value="catalog">目录</option><option value="simulation">仿真</option></select>
-          <fieldset class="survey-release-field"><legend class="field-label">首个发布</legend><div class="catalog-form-grid"><label><span class="field-label">发布 ID</span><input name="releaseId" class="field-input" placeholder="cosmos-custom-v1" pattern="[a-z0-9][a-z0-9._-]*" required /></label><label><span class="field-label">发布名称</span><input name="releaseLabel" class="field-input" placeholder="COSMOS custom v1" maxlength="160" required /></label><label><span class="field-label">产品</span><input name="product" class="field-input" placeholder="Photometric catalog" maxlength="160" required /></label><label><span class="field-label">产品模态</span><select name="productModality" class="field-input"><option value="photometry">测光</option><option value="imaging">图像</option><option value="spectroscopy">光谱</option><option value="catalog">目录</option></select></label></div><label class="field-label" for="survey-registration-product-description">产品说明</label><input id="survey-registration-product-description" name="productDescription" class="field-input" maxlength="500" required /><p class="control-note">登记后，在 Connector 中绑定此巡天和发布。本地文件由 Atlas 扫描，S3/JDBC 可由已安装的 data-warehouse 插件扫描；凭据不会保存在巡天记录中。</p></fieldset>
-          <output id="survey-registration-feedback" class="connector-check-feedback" aria-live="polite">尚未保存</output>
+          <fieldset class="survey-release-field"><legend class="field-label">首个发布</legend><div class="catalog-form-grid"><label><span class="field-label">发布 ID</span><input name="releaseId" class="field-input" placeholder="cosmos-custom-v1" pattern="[a-z0-9][a-z0-9._-]*" required /></label><label><span class="field-label">发布名称</span><input name="releaseLabel" class="field-input" placeholder="COSMOS custom v1" maxlength="160" required /></label><label><span class="field-label">产品</span><input name="product" class="field-input" placeholder="Photometric catalog" maxlength="160" required /></label><label><span class="field-label">产品模态</span><select name="productModality" class="field-input"><option value="photometry">测光</option><option value="imaging">图像</option><option value="spectroscopy">光谱</option><option value="catalog">目录</option></select></label></div><label class="field-label" for="survey-registration-product-description">产品说明</label><input id="survey-registration-product-description" name="productDescription" class="field-input" maxlength="500" required /><p class="control-note">这是 Atlas 的本地巡天标签和发布标签，不要求存在于当前 Assets 资源包。Atlas 只在安装公共资源包后显示其公共记录；本地文件由 Atlas 扫描，S3/JDBC 可由已安装的 data-warehouse 插件扫描。</p></fieldset>
           <footer><button id="survey-registration-cancel" class="command-button secondary" type="button">取消</button><button class="command-button" type="submit">登记巡天</button></footer>
         </form>
       </dialog>
@@ -442,7 +394,6 @@
           <input id="resource-catalog-url" class="field-input" type="url" required />
           <label class="field-label" for="resource-catalog-admin-token">资源管理员 token</label>
           <input id="resource-catalog-admin-token" class="field-input" type="password" autocomplete="off" placeholder="仅保存在当前页面内存" required />
-          <output id="resource-catalog-settings-status" class="connector-check-feedback" aria-live="polite">尚未保存</output>
           <footer><button id="resource-catalog-settings-cancel" class="command-button secondary" type="button">取消</button><button id="resource-catalog-settings-save" class="command-button" type="submit">保存配置</button><button id="resource-catalog-settings-sync" class="primary-command" type="button"><i data-lucide="refresh-cw"></i><span>保存并同步</span></button></footer>
         </form>
       </dialog>

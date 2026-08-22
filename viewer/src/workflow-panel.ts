@@ -1,5 +1,6 @@
 import { workspaceApi } from "./api";
 import type { ToolDescriptor, WorkflowDefinition, WorkflowRun } from "../../src/workflow";
+import { notifyWorkspace } from "./notifications";
 
 function byId<T extends HTMLElement>(id: string): T {
   const element = document.getElementById(id);
@@ -38,6 +39,7 @@ export class WorkflowPanel {
   private initialized = false;
   private active = false;
   private productionAction: "crossmatch" | "cutout" | "package" = "crossmatch";
+  private lastNotifiedRunStatus: WorkflowRun["status"] | null = null;
 
   constructor(private readonly onError: (error: unknown) => void) {
     const dialog = byId<HTMLDialogElement>("workflow-create-dialog");
@@ -117,6 +119,8 @@ export class WorkflowPanel {
     this.clearError();
     const workflowId = byId<HTMLSelectElement>("workflow-select").value;
     this.currentRun = await workspaceApi.createWorkflowRun(workflowId, this.formInput());
+    this.lastNotifiedRunStatus = null;
+    notifyWorkspace("数据生产任务已提交", `Workflow ${workflowId}`, { tone: "success" });
     byId<HTMLDialogElement>("workflow-create-dialog").close();
     this.renderRun();
     this.schedulePoll(100);
@@ -219,6 +223,12 @@ export class WorkflowPanel {
     const badge = byId("workflow-status-badge");
     badge.dataset.status = run.status;
     badge.textContent = STATUS_LABELS[run.status] ?? run.status.toUpperCase();
+    if (this.lastNotifiedRunStatus !== run.status) {
+      this.lastNotifiedRunStatus = run.status;
+      if (run.status === "succeeded") notifyWorkspace("数据生产任务已完成", `${run.summary.matchRows} 个匹配结果`, { tone: "success" });
+      else if (run.status === "failed") notifyWorkspace("数据生产任务失败", run.error ?? "Workflow 执行失败", { tone: "error" });
+      else if (run.status === "waiting_for_input") notifyWorkspace("数据生产任务等待输入", run.waiting?.message ?? "请在工作流面板完成下一步", { tone: "info" });
+    }
     byId("workflow-run-state").textContent = badge.textContent;
     byId("workflow-run-id").textContent = shortId(run.id);
     byId("workflow-run-id").title = run.id;
@@ -311,19 +321,19 @@ export class WorkflowPanel {
     });
   }
 
-  private navigate(mode: "layers" | "volume"): void {
+  private navigate(mode: "layers"): void {
     window.dispatchEvent(new CustomEvent("astro:navigate", { detail: { mode, input: this.currentRun?.input } }));
   }
 
   private showError(error: unknown, report = true): void {
-    const element = byId("workflow-error");
-    element.textContent = error instanceof Error ? error.message : String(error);
-    element.hidden = false;
-    if (report) this.onError(error);
+    const message = error instanceof Error ? error.message : String(error);
+    if (report) {
+      notifyWorkspace("Workflow 操作失败", message, { tone: "error" });
+      this.onError(error);
+    }
   }
 
   private clearError(): void {
-    byId("workflow-error").hidden = true;
-    byId("workflow-error").textContent = "";
+    // Workflow errors are transient notifications; the run badge and history remain persistent.
   }
 }

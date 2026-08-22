@@ -164,7 +164,7 @@ async function openFresh(page: Page, beforeGoto?: () => Promise<void>): Promise<
   if (!await layersMode.evaluate((button) => button.classList.contains("active"))) await layersMode.click();
   await expect(page.locator('button[data-mode="layers"]')).toHaveClass(/active/);
   await expect(page.locator("#loading-indicator")).not.toHaveClass(/visible/);
-  await expect(page.locator("#volume-canvas")).toBeVisible();
+  await expect(page.locator("#scene-canvas")).toBeVisible();
   await page.waitForTimeout(900);
 }
 
@@ -172,13 +172,13 @@ async function waitForVisibleAssetCoverage(page: Page): Promise<void> {
   const assetToggle = page.locator("#sky-layer-list .workspace-asset-card input[type='checkbox']").first();
   await expect(assetToggle).toBeVisible({ timeout: 15_000 });
   if (!await assetToggle.isChecked()) await assetToggle.check();
-  await expect.poll(async () => page.locator("#volume-canvas").getAttribute("data-visible-asset-ids"), {
+  await expect.poll(async () => page.locator("#scene-canvas").getAttribute("data-visible-asset-ids"), {
     timeout: 15_000,
   }).toMatch(/.+/);
 }
 
 test("unified sky layer stack lists each user asset with its own visibility control", async ({ page }) => {
-  const { assets } = await apiJson<{ assets: Array<{ id: string; name: string }> }>("/api/data-assets?origin=user");
+  const { assets } = await apiJson<{ assets: Array<{ id: string; name: string }> }>("/api/data-assets");
   await page.setViewportSize({ width: 1440, height: 900 });
   await openFresh(page);
 
@@ -219,10 +219,10 @@ test("sky layers default to semantic overlap and expose radial depth as display-
 
   await radial.click();
   await expect(radial).toHaveClass(/active/);
-  await expect(page.locator("#volume-canvas")).toHaveAttribute("data-layout-mode", "layers");
+  await expect(page.locator("#scene-canvas")).toHaveAttribute("data-layout-mode", "layers");
   await overlap.click();
   await expect(overlap).toHaveClass(/active/);
-  await expect(page.locator("#volume-canvas")).toHaveAttribute("data-layout-mode", "overlap");
+  await expect(page.locator("#scene-canvas")).toHaveAttribute("data-layout-mode", "overlap");
 });
 
 test("sky layer order persists and drives the Three display depth", async ({ page }) => {
@@ -242,171 +242,11 @@ test("sky layer order persists and drives the Three display depth", async ({ pag
   await page.keyboard.press("Alt+ArrowDown");
   await expect(cards.nth(0)).toHaveAttribute("data-layer-key", secondKey!);
   await expect(cards.nth(1)).toHaveAttribute("data-layer-key", firstKey!);
-  await expect(page.locator("#volume-canvas")).toHaveAttribute("data-layer-order", new RegExp(`^${secondKey},${firstKey}`));
+  await expect(page.locator("#scene-canvas")).toHaveAttribute("data-layer-order", new RegExp(`^${secondKey},${firstKey}`));
 
   await page.reload();
   await expect(page.locator("#service-status")).toHaveText("SERVICE ONLINE");
   await expect(page.locator("#sky-layer-list .survey-card").nth(0)).toHaveAttribute("data-layer-key", secondKey!);
-});
-
-test("public resource package installs and applies all releases atomically", async ({ page }) => {
-  const { releases } = await apiJson<{ releases: Array<{ surveyId: string; releaseId: string; products: Array<{ coverageStatus: string }> }> }>("/api/public-release-details");
-  const euclidQ1 = releases.find((release) => release.surveyId === "euclid" && release.releaseId === "euclid-q1");
-  if (!euclidQ1) throw new Error("Missing Euclid Q1 public release detail");
-  const euclidQ1Statuses = euclidQ1.products.map((product) => product.coverageStatus);
-  await page.setViewportSize({ width: 1440, height: 900 });
-  await page.addInitScript(() => localStorage.clear());
-  await proxyApi(page);
-  await page.goto("/");
-  await expect(page.locator("#service-status")).toHaveText("SERVICE ONLINE");
-  await expect(page.locator("#loading-indicator")).not.toHaveClass(/visible/);
-
-  const packageButton = page.locator('[data-mode="packages"]');
-  await expect(packageButton).toHaveCount(1);
-  await expect(packageButton).toHaveText("公开资源集");
-  await expect(packageButton.evaluate((button) => button.nextElementSibling?.getAttribute("data-mode"))).resolves.toBe("connectors");
-  await packageButton.click();
-  await expect(packageButton).toHaveClass(/active/);
-  await expect(page.locator("#resource-package-stage")).toBeVisible();
-  const row = page.locator(".resource-package-row", { hasText: "Euclid" });
-  const toggle = row.locator('input[type="checkbox"]');
-  await expect(row.locator(".resource-package-tag")).not.toHaveCount(0);
-  await expect(row.locator(".resource-package-tag").first()).not.toHaveCSS("background-color", "rgba(0, 0, 0, 0)");
-  await expect(row.locator(".item-progress")).toHaveCount(1);
-  await expect(row.locator(".resource-package-version")).toHaveText("0 / 4 产品有真实覆盖");
-  await expect(row.locator(".resource-package-version")).not.toHaveAttribute("role", "button");
-  await expect(row).not.toContainText("2.0.0");
-   const resourceTitleStyle = await page.locator("#resource-package-stage .catalog-stage-header h2").evaluate((element) => {
-     const style = getComputedStyle(element);
-     return { fontSize: style.fontSize, fontWeight: style.fontWeight, marginTop: style.marginTop, marginBottom: style.marginBottom, color: style.color };
-   });
-  await row.click();
-  await expect(page.locator("#public-survey-overview-stage")).toBeVisible();
-  await expect(page.locator("#public-survey-overview-title")).toHaveText("Euclid");
-   const overviewTitleStyle = await page.locator("#public-survey-overview-title").evaluate((element) => {
-     const style = getComputedStyle(element);
-     return { fontSize: style.fontSize, fontWeight: style.fontWeight, marginTop: style.marginTop, marginBottom: style.marginBottom, color: style.color };
-   });
-  expect(overviewTitleStyle).toEqual(resourceTitleStyle);
-   await expect(page.locator("#public-survey-overview-stage > .public-survey-overview-header")).toBeVisible();
-   await expect(page.locator("#public-survey-overview-stage > .public-release-detail-header")).toHaveCount(0);
-   const overviewHeaderLayout = await page.locator("#public-survey-overview-stage > .public-survey-overview-header").evaluate((header) => {
-     const back = header.querySelector<HTMLElement>("#public-survey-overview-back")!.getBoundingClientRect();
-     const title = header.querySelector<HTMLElement>("#public-survey-overview-title")!.getBoundingClientRect();
-      return { backRight: back.right, titleLeft: title.left, backTop: back.top, titleTop: title.top };
-    });
-    expect(overviewHeaderLayout.backRight).toBeLessThanOrEqual(overviewHeaderLayout.titleLeft);
-    expect(overviewHeaderLayout.backTop).toBeLessThanOrEqual(overviewHeaderLayout.titleTop + 4);
-   await expect(page.locator(".public-survey-overview-releases-section > .section-heading")).toHaveCount(0);
-  await expect(page.locator(".public-survey-overview-columns > span")).toHaveCount(2);
-  await expect(page.locator(".public-survey-overview-columns")).toContainText("公开版本");
-  await expect(page.locator(".public-survey-overview-columns")).toContainText("覆盖状态");
-  await expect(page.locator("#public-survey-overview-releases .public-survey-overview-release")).toHaveCount(3);
-  await expect.poll(() => new URL(page.url()).searchParams.get("survey")).toBe("euclid");
-  await expect.poll(() => new URL(page.url()).searchParams.get("release")).toBeNull();
-  await page.locator("#public-survey-overview-releases .public-survey-overview-release", { hasText: "Q1" }).click();
-  await expect(page.locator("#public-release-detail-stage")).toBeVisible();
-  await expect(page.locator("#public-release-detail-title")).toHaveText("Q1");
-  await expect(page.locator("#public-release-detail-source")).toHaveText(/数据发布页/);
-  await expect(page.locator("#public-release-detail-source")).toHaveCSS("font-size", "10px");
-  await expect(page.locator("#public-release-product-count")).toHaveText("0 / 2 已收录");
-  await expect(page.locator(".public-release-product[data-coverage-status='acquired']")).toHaveCount(euclidQ1Statuses.filter((status) => status === "acquired").length);
-  await expect(page.locator(".public-release-product[data-coverage-status='overview_only']")).toHaveCount(euclidQ1Statuses.filter((status) => status === "overview_only").length);
-  await expect(page.locator(".public-release-product[data-coverage-status='awaiting_geometry']")).toHaveCount(euclidQ1Statuses.filter((status) => status === "awaiting_geometry").length);
-  if (euclidQ1Statuses.includes("overview_only")) {
-    await expect(page.locator(".public-release-product[data-coverage-status='overview_only']", { hasText: "仅有官方概览" })).not.toHaveCount(0);
-  }
-  await expect(page.locator(".public-release-product-links").getByRole("link", { name: /覆盖来源/ })).toHaveCount(2);
-  await expect(page.locator(".public-release-product").getByRole("button", { name: /填写覆盖范围|维护覆盖范围/ })).toHaveCount(0);
-  await expect.poll(() => new URL(page.url()).searchParams.get("release")).toBe("euclid-q1");
-  await packageButton.click();
-  await expect(page.locator("#resource-package-stage")).toBeVisible();
-  await expect(page.locator("#public-survey-overview-stage")).toBeHidden();
-  await expect(page.locator("#public-release-detail-stage")).toBeHidden();
-  await expect.poll(() => new URL(page.url()).searchParams.get("release")).toBeNull();
-  await expect(toggle).toBeDisabled();
-  await expect(row).toHaveAttribute("data-loadable", "false");
-  await expect(toggle).toHaveAttribute("title", /不能应用到天球/);
-
-  const loadableRow = page.locator(".resource-package-row", { hasText: "Pan-STARRS1" });
-  const loadableToggle = loadableRow.locator('input[type="checkbox"]');
-  await expect(loadableRow).toHaveAttribute("data-loadable", "true");
-  const activeBefore = await page.locator("#resource-package-active-count").textContent();
-  await expect(loadableToggle).not.toBeChecked();
-  await loadableToggle.check();
-  await expect(page.locator("#resource-package-active-count")).toHaveText(activeBefore ?? "0");
-  await expect(packageButton).toHaveClass(/active/);
-
-  const apply = page.locator("#resource-package-apply");
-  await expect(apply).toBeVisible();
-  await expect(page.locator("#resource-package-pending, #resource-package-download, #resource-package-download-dialog")).toHaveCount(0);
-  await expect(page.locator("#inspector-content").getByRole("button", { name: /应用|重置/ })).toHaveCount(0);
-  await apply.click();
-  await expect(apply).toBeDisabled();
-  await expect(loadableRow.locator(".resource-package-status")).toHaveText("已应用");
-  await expect(page.locator("#resource-package-feedback")).toHaveAttribute("data-status", "success");
-  await expect(page.locator("#resource-package-feedback")).toContainText("数据覆盖天球已刷新");
-  await expect(packageButton).toHaveClass(/active/);
-
-  await loadableToggle.uncheck();
-  await expect(apply).toBeVisible();
-  await apply.click();
-  await expect(apply).toBeDisabled();
-  await expect(loadableRow.locator(".resource-package-status")).toHaveText("已下载");
-  await page.locator('button[data-mode="layers"]').click();
-  const canvas = page.locator("#volume-canvas");
-  await expect(canvas).toBeVisible();
-  const visibleSurveys = new Set((await canvas.getAttribute("data-visible-survey-ids"))?.split(",") ?? []);
-  expect(visibleSurveys.has("euclid")).toBe(false);
-  expect(visibleSurveys.has("panstarrs")).toBe(false);
-});
-
-test("a release deep link opens its detail page directly", async ({ page }) => {
-  await page.addInitScript(() => localStorage.setItem("astro-workspace:theme:v1", "dark"));
-  await proxyApi(page);
-  await page.goto("/?mode=packages&survey=sdss&release=sdss-dr01");
-  await expect(page.locator("#service-status")).toHaveText("SERVICE ONLINE");
-  await expect(page.locator("#public-release-detail-stage")).toBeVisible();
-  await expect(page.locator("#public-release-detail-title")).not.toHaveText("");
-  await expect(page.locator("#public-release-product-list .public-release-product")).not.toHaveCount(0);
-  await expect.poll(() => new URL(page.url()).searchParams.get("release")).toBe("sdss-dr01");
-});
-
-test("public survey overview header remains aligned in light mobile layout", async ({ page }) => {
-  await page.setViewportSize({ width: 390, height: 844 });
-  await page.addInitScript(() => localStorage.setItem("astro-workspace:theme:v1", "light"));
-  await proxyApi(page);
-  await page.goto("/?mode=packages&survey=euclid");
-  await expect(page.locator("html")).toHaveAttribute("data-theme", "light");
-  await expect(page.locator("#public-survey-overview-stage")).toBeVisible();
-  await expect(page.locator("#public-survey-overview-title")).toBeVisible();
-  await expect(page.locator(".public-survey-overview-columns > span")).toHaveCount(2);
-  await expect(page.locator("#public-survey-overview-back")).toBeVisible();
-   const layout = await page.locator("#public-survey-overview-stage").evaluate((stage) => {
-    const title = stage.querySelector<HTMLElement>("#public-survey-overview-title")!;
-    const back = stage.querySelector<HTMLElement>("#public-survey-overview-back")!;
-    const columns = stage.querySelector<HTMLElement>(".public-survey-overview-columns")!;
-    const stageRect = stage.getBoundingClientRect();
-    const titleRect = title.getBoundingClientRect();
-    const backRect = back.getBoundingClientRect();
-     const columnsRect = columns.getBoundingClientRect();
-    return {
-      titleInside: titleRect.left >= stageRect.left && titleRect.right <= stageRect.right,
-      backInside: backRect.left >= stageRect.left && backRect.right <= stageRect.right,
-       columnsInside: columnsRect.left >= stageRect.left && columnsRect.right <= stageRect.right,
-       backBeforeTitle: backRect.right <= titleRect.left,
-       backAtTop: backRect.top <= titleRect.top + 4,
-      titleColor: getComputedStyle(title).color,
-       stageBackground: getComputedStyle(stage).backgroundColor,
-     };
-   });
-  expect(layout.titleInside).toBe(true);
-  expect(layout.backInside).toBe(true);
-    expect(layout.columnsInside).toBe(true);
-    expect(layout.backBeforeTitle).toBe(true);
-    expect(layout.backAtTop).toBe(true);
-  expect(layout.titleColor).not.toBe("rgb(255, 255, 255)");
-  expect(layout.stageBackground).not.toBe("rgb(7, 11, 15)");
 });
 
 test("light theme switches the 3D sky to a soft observation canvas", async ({ page }) => {
@@ -419,7 +259,7 @@ test("light theme switches the 3D sky to a soft observation canvas", async ({ pa
   await page.goto("/");
   await expect(page.locator("#service-status")).toHaveText("SERVICE ONLINE");
   await page.locator('button[data-mode="layers"]').click();
-  const canvas = page.locator("#volume-canvas");
+  const canvas = page.locator("#scene-canvas");
   await expect(canvas).toBeVisible();
   await page.waitForTimeout(500);
   const darkBrightness = averagePixelBrightness(await canvas.screenshot());
@@ -433,7 +273,7 @@ test("light theme switches the 3D sky to a soft observation canvas", async ({ pa
 
 async function findCanvasPoint(page: Page, predicate: (state: { pixel: number; covered: boolean; selectable: boolean; assetIds: string[] }) => boolean): Promise<{ x: number; y: number; pixel: number }> {
   const hits = await page.evaluate(() => {
-    const canvas = document.querySelector<HTMLCanvasElement>("#volume-canvas");
+    const canvas = document.querySelector<HTMLCanvasElement>("#scene-canvas");
     if (!canvas) return [];
     const rect = canvas.getBoundingClientRect();
     const results: Array<{ x: number; y: number; pixel: number; covered: boolean; selectable: boolean; assetIds: string[] }> = [];
@@ -469,26 +309,15 @@ async function findCanvasPoint(page: Page, predicate: (state: { pixel: number; c
   throw new Error("No matching HEALPix point found on the visible hemisphere");
 }
 
-test("project status remains available when joint volume resources fail", async ({ page }) => {
+test("project status remains available without legacy scene resources", async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
   await page.addInitScript(() => localStorage.clear());
   await proxyApi(page);
-  await page.route("**/api/atlases", async (route) => route.fulfill({
-    status: 503,
-    contentType: "application/json",
-    body: JSON.stringify({ error: "joint atlas unavailable" }),
-  }));
-  await page.route("**/api/volumes", async (route) => route.fulfill({
-    status: 503,
-    contentType: "application/json",
-    body: JSON.stringify({ error: "radial volume unavailable" }),
-  }));
-
   await page.goto("/");
   await expect(page.locator("#service-status")).toHaveText("SERVICE ONLINE");
   await page.locator('button[data-mode="layers"]').click();
   await expect(page.locator('button[data-mode="layers"]')).toHaveClass(/active/);
-  await expect(page.locator("#volume-canvas")).toBeVisible();
+  await expect(page.locator("#scene-canvas")).toBeVisible();
   await expect(page.locator("#loading-indicator")).not.toHaveClass(/visible/);
 });
 
@@ -524,7 +353,7 @@ test("sphere selection enters Aladin with an exact region snapshot", async ({ pa
       });
     });
   });
-  const canvas = page.locator("#volume-canvas");
+  const canvas = page.locator("#scene-canvas");
   await expect(page.locator("#coverage-context-menu")).toHaveCount(1);
   await expect(page.locator("#coverage-lock-button")).toHaveCount(0);
   await expect(page.locator("#refinement-controls")).toHaveCount(0);
@@ -636,7 +465,7 @@ test("sphere selection enters Aladin with an exact region snapshot", async ({ pa
 test("Escape exits Aladin even when a layer control has focus", async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
   await openFresh(page);
-  const canvas = page.locator("#volume-canvas");
+  const canvas = page.locator("#scene-canvas");
   const point = await findCanvasPoint(page, (state) => state.covered && state.selectable);
   await canvas.click({ position: point });
   await canvas.click({ button: "right", position: point });
@@ -655,7 +484,7 @@ test("Escape exits Aladin even when a layer control has focus", async ({ page })
 test("main sky supports Ctrl selection across density cells", async ({ page }, testInfo) => {
   await page.setViewportSize({ width: 1440, height: 900 });
   await openFresh(page);
-  const canvas = page.locator("#volume-canvas");
+  const canvas = page.locator("#scene-canvas");
   const first = await findCanvasPoint(page, (state) => state.covered && state.selectable);
   await canvas.click({ position: first });
   await expect(page.locator("#layer-selection-count")).toHaveText("1 CELLS");
@@ -711,7 +540,7 @@ test("Aladin queries the current RA/Dec viewport for lightweight objects", async
       });
     });
   });
-  const canvas = page.locator("#volume-canvas");
+  const canvas = page.locator("#scene-canvas");
   await waitForVisibleAssetCoverage(page);
   const point = await findCanvasPoint(page, (state) => state.covered && state.selectable && state.assetIds.length > 0);
   await canvas.click({ position: point, modifiers: ["Control"] });
@@ -722,7 +551,7 @@ test("Aladin queries the current RA/Dec viewport for lightweight objects", async
   await expect(page.locator("#aladin-asset-nav .aladin-asset-button")).toHaveCount(1);
   await page.locator("#aladin-asset-drawer-toggle").click();
   await expect(page.locator("#aladin-explorer")).toHaveAttribute("data-object-returned", "2000", { timeout: 15_000 });
-  await expect(page.locator("#aladin-status")).toContainText("2,000 个对象");
+  await expect(page.locator("#workspace-notification-deck .workspace-notification").filter({ hasText: "2,000 个对象已载入" })).toBeVisible();
   expect(requests[0]!.region?.ordering).toBe("NESTED");
   expect(requests[0]!.region?.coordinateFrame).toBe("ICRS");
   expect(requests[0]!.includeAttributes).toBe(false);
@@ -739,7 +568,7 @@ test("Aladin queries the current RA/Dec viewport for lightweight objects", async
 test("Aladin entry returns to the sphere with Escape", async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
   await openFresh(page);
-  const canvas = page.locator("#volume-canvas");
+  const canvas = page.locator("#scene-canvas");
   await waitForVisibleAssetCoverage(page);
   const point = await findCanvasPoint(page, (state) => state.covered && state.selectable && state.assetIds.length > 0);
   await canvas.click({ position: point });

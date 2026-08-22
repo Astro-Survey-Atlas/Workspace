@@ -8,6 +8,7 @@ import { hasCurrentSuccessfulConnectorCheck, type ConnectorRecord, type Connecto
 import type { DataAssetRecord, DataCatalogRegistry } from "./data-catalog.js";
 import type { LocalConnectorRootsPolicy } from "./local-connector-roots.js";
 import { scanLocalCsv, type LocalCsvScanLimits, type LocalScanDocument } from "./local-scan.js";
+import { defaultMocCoreAdapter, type MocCoreAdapter } from "./moc-core-adapter.js";
 
 export const LOCAL_CSV_SCAN_EXECUTOR = "local-csv";
 
@@ -37,6 +38,7 @@ export interface LocalCsvScanExecutorOptions {
   indexService: LocalCsvScanIndexService;
   maxRows?: number;
   maxFileBytes?: number;
+  mocCore?: MocCoreAdapter;
 }
 
 export class LocalScanDisabledError extends Error {
@@ -184,6 +186,7 @@ export class LocalCsvScanExecutor {
   readonly #indexService: LocalCsvScanIndexService;
   readonly #maxRows?: number;
   readonly #maxFileBytes?: number;
+  readonly #mocCore: MocCoreAdapter;
   readonly #tasks = new Map<string, Promise<ConnectorIngestRunRecord>>();
 
   constructor(options: LocalCsvScanExecutorOptions) {
@@ -197,6 +200,7 @@ export class LocalCsvScanExecutor {
     this.#indexService = options.indexService;
     this.#maxRows = optionalLimit(options.maxRows, "maxRows");
     this.#maxFileBytes = optionalLimit(options.maxFileBytes, "maxFileBytes");
+    this.#mocCore = options.mocCore ?? defaultMocCoreAdapter;
   }
 
   async submit(connectorId: string, input?: LocalCsvScanInput, idempotencyKey?: string): Promise<ConnectorIngestRunRecord> {
@@ -252,6 +256,7 @@ export class LocalCsvScanExecutor {
       connectorName: connector.name,
       connectorKind: connector.kind,
       executor: LOCAL_CSV_SCAN_EXECUTOR,
+      taskKind: "user_scan",
       target: { uri: file.containerPath },
       assetIds: [asset.id],
       assetId: asset.id,
@@ -393,6 +398,7 @@ export class LocalCsvScanExecutor {
         objectIndex: ASTRO_OBJECT_INDEX,
         limits,
         collectObjects: false,
+        mocCore: this.#mocCore,
       } as const;
 
       // Validate the complete stream before the first irreversible bulk write.

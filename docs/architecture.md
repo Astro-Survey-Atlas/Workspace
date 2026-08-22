@@ -1,252 +1,172 @@
 # Architecture
 
+> 本仓库本轮边界和实施顺序以
+> [`atlas-boundary-plan.md`](atlas-boundary-plan.md) 为准。本文的架构背景若
+> 与冻结计划冲突，按冻结计划解释。
+
 ## Product boundary
 
-Astro Data Workspace is a project-facing astronomy workspace, not a general
-data platform or a general-purpose code agent. It has two deliberate entry
-points:
+Atlas is the user-facing workspace. It owns:
 
-- the 3D sky is a project-status view for public coverage, acquired assets,
-  processed results, deliverables, and known gaps;
-- the data workspace is the production view for registered paths, provenance,
-  and reproducible astro-code tasks.
+- user assets, local survey/release labels, connectors, and access metadata;
+- local scanning and optional remote user scans through the data-warehouse plugin;
+- scan/task history, search indexes, sky coverage queries, and the viewer;
+- deterministic Agent/MCP and workflow runs over user data.
 
-The product owns the astronomy-specific layer between registered data and an
-analysis workspace:
+Atlas does not own public survey jobs, public connectors, MOC publication, or a
+public release catalog. It consumes only the immutable Resource Package v3
+published by Astro Survey Atlas Assets. Atlas never registers a user asset with
+Assets and never publishes a user record back to Assets.
 
 ```text
-connector -> deterministic scan -> astronomy profile -> exploration API
-                                                   -> MCP tools
-                                                   -> sky / radial volume
-                                                   -> workflow runs / Agent
+Assets Resource Package v3
+  -> Atlas download, validation, and local snapshot
+  -> public coverage/release display and read-only downloads
+
+Atlas local scanner
+  -> MOC Core
+  -> user asset, coverage index, and task history
+
+Atlas + optional data-warehouse plugin
+  -> standard AstroDataSource / AstroMetadataScanTask
+  -> MOC Core/scanner result
+  -> user asset, coverage index, and Atlas task history
 ```
 
-The public catalog records what a survey/release covers and where a product can
-be obtained. It does not mirror every public archive. Generic connector
-scheduling, secrets, and enterprise metadata can be integrated later; they are
-not reimplemented in this service.
+`surveyId` and `releaseId` on user assets and Connectors are Atlas-local labels.
+They may refer to Euclid, CSST W2-W4, or any other source that is not present
+in the currently installed public package. A matching public package record is
+never required for a user registration.
 
-The workspace is authoritative for its catalog, coverage evidence, ownership
-associations, and user-visible query state. `data-warehouse` is an optional,
-replaceable execution provider: Flink task submission and status polling must
-never gate workspace startup, catalog queries, official coverage rendering, or
-inspection of previously recorded local state. When the executor or its
-derived Elasticsearch index is unavailable, the workspace reports that local
-verification is unavailable or stale; it does not reinterpret official
-coverage as absent and does not make unrelated views fail.
-
-Each logical data asset may have several project-stage facets and access
-locations. For example, a public Euclid release can be both `public_reference`
-and `acquired` when a local or S3 mirror is registered. Public release metadata
-and geometry come from the trusted Assets snapshot; user assets and their
-ownership bindings remain Atlas state. Official source URLs, connector
-locations, and project-side metadata are editable from the asset detail view.
-Connector registration stores only S3/OSS, local-path, and JDBC configuration
-plus a credential reference. Its normalized scan path is the business identity,
-so registration upserts an existing path. The UI can perform a non-enumerating
-endpoint/path check, while scan history is kept separately and associated with
-that path. Raw secrets remain outside this service.
+The HTTP surface keeps these namespaces separate: `/api/surveys` and its
+registration routes address Atlas-local labels, while `/api/public-surveys`
+only reads metadata from the installed Resource Package v3 catalog for the
+public viewer. That display data never becomes a user record and never changes
+an existing asset, Connector, run, artifact, or hash.
 
 ## Deterministic data plane
 
-The data plane is testable without an LLM:
+The data path is testable without an LLM:
 
-- path authorization and canonicalization;
-- CSV parsing and type inference;
-- circular RA coverage and Dec validation;
-- nested HEALPix indexing;
-- density-cell geometry and source pagination;
-- FITS `SPECZ` filtering and Planck18 comoving-distance conversion;
-- versioned radial-volume manifests and a tested binary point format;
-- content-addressed scan runs and transitive artifact lineage;
-- cached HEALPix-by-radius object lookup with count reconciliation against the sparse index;
-- JSON registry persistence.
+- connector path authorization and canonicalization;
+- CSV parsing, type inference, and circular RA/Dec validation;
+- nested HEALPix indexing and object/coverage search;
+- MOC Core invocation through the stable Assets adapter/CLI contract;
+- Resource Package v3 archive, manifest, FITS MOC, and hash validation;
+- JSON/SQLite metadata persistence and immutable task snapshots.
 
-MCP is an adapter over this plane. Agent reasoning may select tools and interpret
-results, but it does not calculate catalog coordinates or indexes.
+MCP and the Agent are adapters over this plane. They can select tools and
+interpret results, but they do not implement a second WCS, HEALPix, or MOC
+geometry algorithm.
 
 ### Assets Core coverage contract
 
-Every scanned file is eligible for the project sky only when the scanner can
-explain its position from the file content or explicitly declared catalog
-fields. Geometry is produced by `astro_survey_moc_core` in the scanner image;
-Atlas transports the normalized context and indexes only its projections.
+Atlas passes a normalized coverage specification to `astro_survey_moc_core`.
+The Core owns geometry and authoritative MOC generation. Atlas stores the
+returned manifest, hash, and projections in its user indexes.
 
-- CSV/TSV/TXT catalogs with ICRS RA/Dec columns in degrees, radians, or
-  hour-angle units;
-- CSV/TSV/TXT catalogs with NESTED HEALPix pixels at the configured order,
-  including the standard `hpix` and `healpix_pixel` aliases in automatic mode;
-- FITS image headers with a linear or TAN WCS that can be sampled into ICRS
-  NESTED HEALPix cells.
+- `fits-wcs` reads image headers and produces `image_extent` coverage;
+- `catalog-radec` reads ICRS RA/Dec and produces `object_presence` coverage;
+- `nested-healpix` reads declared NESTED pixels and their input order;
+- `regions` and `tile-table` use the corresponding Core input adapters;
+- empty or invalid inputs remain metadata-only or failed and never receive a
+  footprint inferred from a filename, path, or survey label.
 
-These records are written to the search indices with `coverageRole`,
-`dataOrigin`, `sourceTier`, frame, authority order, query order, preview order,
-and derived HEALPix/MOC cells. Files without valid coverage remain searchable metadata with
-`spatial_status=unknown` or `failed`; they are never assigned a footprint from
-their filename, path, survey label, or asset name.
+The normal Core contract is ICRS, NESTED, IVOA FITS MOC, `maxOrder=10`, with
+query order 8 and preview order 4 derived from the authoritative output.
+`coverageRole`, `dataOrigin`, `sourceTier`, version, and SHA-256 remain attached
+to the stored coverage record. Public publication is outside Atlas.
 
-## Workflow control plane
+## Resource Package boundary
 
-`ToolRegistry` contains both local deterministic functions and bounded MCP
-adapters. `WorkflowDefinition` validates a versioned acyclic graph before it is
-registered. A `WorkflowRun` records step state, duration, tool summaries,
-explicit human decisions, and artifact hashes independently from `ScanRun`.
-The two run types join through SHA-256 lineage rather than mutable paths.
+The public resource path is deliberately narrow:
 
-The first production action, `euclid-desi-crossmatch@1`, queries the real
-`euclid-q1-mer-final` and `desi-dr10-tractor` catalogs, normalizes ICRS fields,
-performs nearest-neighbor spherical matching, pauses for filtering, and exports
-at most 1,000 rows. A failed MCP request or incomplete catalog schema is a
-terminal failure; production execution has no synthetic-coordinate fallback.
-The Agent entry point uses a deterministic Chinese/English rule interpreter.
-LLM capability remains disabled until a namespace-local secret is configured.
+1. fetch and validate the Assets v3 catalog;
+2. keep the verified catalog in `assets-snapshots/<hash>/` and atomically expose
+   `assets-current`;
+3. download packages on demand, verify archive size and SHA-256, and validate
+   every v3 manifest file and FITS MOC;
+4. activate selected release layers for the read-only public sky view.
 
-## Persistence and service boundaries
+If Assets is unavailable, a previously verified local snapshot remains usable.
+With no successful snapshot, public resource endpoints return `503`; user
+assets, local scans, indexes, and task history continue to work.
 
-The JSON files on the runtime PVC are prototype persistence. They are useful
-for a single replica and deterministic tests, but they are not the long-term
-source of truth for a multi-user workspace. The production boundary is:
+Atlas does not scan bootstrap catalogs, parse v1/v2 packages, or keep a second
+public footprint generator. Old packages and rollback materials may remain in
+an external archive, but they are not startup inputs.
+
+## User scans and task history
+
+Local files use the controlled read-only connector root. An optional
+data-warehouse plugin executes standard S3/JDBC scans and reports status back to
+Atlas. Both paths retain the Connector, normalized scan specification, Core
+result, coverage projection, errors, and history in Atlas. Credentials remain
+in the configured secret store and are never written to asset metadata.
+
+Every Atlas standard task carries only Kubernetes metadata labels:
+`app.kubernetes.io/managed-by=astro-atlas`,
+`astro.zhejianglab.org/atlas-task=true`,
+`astro.zhejianglab.org/atlas-task-kind=user_scan|user_coverage`, plus asset,
+connector, and batch identifiers. `ConnectorIngestRun.taskKind` is local Atlas
+metadata and is never sent as a CRD field. The HTTP history API has no external
+run-ingest endpoint; records are created by Atlas submission paths only.
+
+The Connector history API is the task-history surface for scans. Workflow runs
+and Agent sessions have their own persistent records and artifact lineage. No
+legacy redshift-volume or static survey-atlas run format is part of the runtime.
+
+## Persistence and indexes
+
+The workspace API is the only component that mutates Atlas metadata. SQLite is
+the default local store; PostgreSQL is supported by the Helm deployment. Search
+indexes are derived from scan records and can be rebuilt. Resource Package bytes
+and user artifacts are kept in their configured state/package stores.
 
 ```text
-workspace API
-  |-- PostgreSQL: assets, public sources, connectors, access locations,
-  |               tags, lineage edges, scan/task records, audit timestamps
-  |-- MinIO/S3:   MOC/HEALPix artifacts, scan manifests, cutouts, exports,
-  |               package bundles, Agent task artifacts
-  |-- Elasticsearch: searchable FITS/header/object metadata produced by scans
-  |-- data-warehouse: AstroMetadataScanTask operator and scan execution
-  `-- Agent worker: cross-match/cutout/package orchestration and status updates
+Atlas API
+  |-- metadata store: user assets, Connectors, survey labels, task history
+  |-- search index: file/object/coverage projections
+  |-- package store: verified Assets v3 downloads and active snapshots
+  |-- optional data-warehouse: remote S3/JDBC execution
+  `-- Agent/workflow store: decisions, runs, and bounded artifacts
 ```
 
-PostgreSQL is the authoritative metadata store. Elasticsearch is a derived
-search index and must be rebuildable from scan manifests; it must not own
-Connector or data-card identity. MinIO stores bytes, not mutable card metadata.
-Assets owns the public package catalog and release metadata; Atlas stores user
-cards and overrides as ordinary rows. A normalized Connector path remains
-unique, so an upsert cannot create duplicate scan targets.
+The optional remote executor is observational and asynchronous. Its outage
+does not prevent Atlas from starting, displaying the last local state, or
+serving user assets and public coverage from a verified snapshot.
 
-Metadata scan execution status is observational workspace data, not a dependency
-health gate. Polling is best-effort and asynchronous. An unreachable Kubernetes
-API preserves the last recorded task state, and a failed task affects only its
-own scan record. Core asset and coverage APIs continue to use workspace-owned
-metadata; optional joint-atlas and radial-volume artifacts likewise cannot
-block the project-sky view.
+## Workflows and Agent/MCP
 
-Connector credentials remain Kubernetes Secrets and are referenced by an
-internal identifier only. When a scan is submitted, the workspace service
-creates or synchronizes an `AstroDataSource` and submits an
-`AstroMetadataScanTask` with `backend: job`; the UI never needs to know the
-Secret name. The task record stores the Connector path, requested prefix/MOC,
-scan backend identity, and status, but never stores raw keys. A task explicitly
-using `backend: flink` is compiled by the operator's adapter and is not a
-legacy `FlinkIngestTask` submission.
-
-### Survey coverage jobs
-
-A registered survey can submit an explicit private coverage job through
-`POST /api/surveys/:surveyId/coverage-jobs`. It is a management workflow,
-not a public-site API: the browser names an already registered Connector,
-asset, release and product, while the Workspace obtains credentials from its
-secret store and the metadata operator reads OSS/S3.
-
-The request must choose one evidence mode rather than implying that all data
-products have the same kind of footprint:
-
-- `catalog-radec` requires ICRS RA/Dec columns and produces
-  `object_presence` occupancy;
-- `nested-healpix` requires a declared NESTED pixel column and order, and also
-  produces `object_presence` occupancy;
-- `fits-wcs` reads image headers and produces an `image_extent` candidate.
-
-The Core contract uses `maxOrder=10`; query and preview projections are derived
-at order 8 and order 4. Before a task is created, the API verifies that the selected connector is bound to the named
-survey/release, the asset is linked to that connector, and the asset/product is
-registered for that release. The immutable evidence specification is retained
-on the scan history record. This produces a private candidate only; publishing
-to `Astro-Survey-Atlas-Assets` remains a separate reviewed release that writes
-versioned MOC/HEALPix artifacts, input manifests and provenance hashes.
-
-The existing PostgreSQL instance in the `database` namespace belongs to an
-unrelated application and uses its own `n8n` database. It should not be reused
-without an explicit owner-approved database and role. The first production
-step is therefore a dedicated workspace database (or a separate schema and
-role provisioned by its owner), followed by a dual-write migration from the
-JSON registry. The workspace API remains the only component allowed to mutate
-metadata; Agent, Flink, and indexers report through bounded APIs/events.
-
-The next production actions are intentionally narrow and ordered: `cutout`
-reads registered image paths and emits object-centered crops, then `package`
-combines the cross-match table, image products, and quality metadata into a
-downstream training/evaluation bundle. They are product contracts first and are
-not exposed as fake generic workflow steps until the astro-code adapters exist.
+`ToolRegistry` and `WorkflowRegistry` validate deterministic tool contracts and
+versioned DAGs. The current Euclid x DESI cross-match workflow is an Atlas
+workflow over the configured catalog MCP client; it is not a public coverage
+builder and does not publish results to Assets. Agent intent parsing remains
+rule-based until an explicitly configured LLM integration is enabled.
 
 ## Sky representations
 
-The viewers use one spherical coordinate contract in ICRS:
+The viewer uses one ICRS sky contract:
 
-| Representation | Purpose | Current source |
+| Representation | Purpose | Source |
 | --- | --- | --- |
-| Coverage | Find where a dataset exists | Circular RA/Dec bounds |
+| Coverage | Show where public or user data exists | Assets package or user scan projection |
 | Density | Compare occupied regions | Nested HEALPix counts |
-| Objects | Inspect individual rows | Valid RA/Dec source rows |
-| Radial volume | Inspect 3D large-scale structure | RA/Dec plus Planck18 comoving distance |
-| Survey layers | Compare registered surveys and modalities | HEALPix occupancy on artificial display radii |
-| Joint cells | Drill into angular and radial structure | Sparse NESTED HEALPix x radial intervals |
+| Objects | Inspect rows | Valid user-source coordinates |
+| Survey layers | Compare public packages and user assets | Display-only shell offsets |
 
-The default Three.js viewer uses a perspective camera outside the largest shell.
-Orbit controls cannot cross the 1.15-radius boundary. Concentric shells expose a
-72-degree cutaway around the COSMOS direction, while all 161,518 galaxies are
-drawn by one `BufferGeometry` and shader material. The original internal sky
-viewer remains available in source but is not the default route.
+Shell offsets are visual layout only and never represent distance, depth,
+wavelength, magnitude, or completeness. Region selection and Aladin exploration
+operate on the same public/user layer set.
 
-The default multi-survey shell view uses radii that are semantic display
-offsets and never enter scientific distance calculations. The physical mode
-uses spherical frustum cells whose volume is `solid_angle / 3 * (r1^3-r0^3)`.
-Direction and radius refine independently; child counts must equal the parent
-before a replacement is accepted.
-
-## Provenance contract
-
-Offline preprocessors write a `scan-run.json` beside each derived artifact. A
-run records SHA-256 source identities, byte sizes and modification times, the
-deterministic filter/configuration, producer version and code hash, output
-checksums, and explicit `derived_from` edges. Atlas inputs include the redshift
-volume manifest and binary hashes, so lineage traversal reaches the original
-FITS source without relying on mutable file paths.
-
-Before the Assets hard cutover, migrate active JSON run snapshots with the
-one-shot command below. It archives the original bytes, a SHA-256 manifest, and
-a read-only rollback tree before atomically writing the v3 coverage fields:
-
-```bash
-npm run migrate:coverage-history -- --root /state
-```
-
-The service does not invoke this utility at startup and contains no legacy
-`evidenceRole` parser.
-
-## Isolation
+## Deployment isolation
 
 - Namespace: `astro-data-workspace`
-- Workload node: `eva7028`
-- Metadata storage: JSON prototype on a dedicated NFS PVC; PostgreSQL is the planned production store
-- Source policy: original FITS/images remain external; runtime stores only compact profiles and indexes
-- Runtime state: dedicated NFS PVC
-- Public route: dedicated Ingress host
-- No dependency on the `dev` namespace or old viewer database
+- Runtime state: dedicated PVC or Compose state volume
+- Local data: one controlled read-only mount when enabled
+- Public package source: configured Assets v3 catalog URL
+- Remote scans: optional data-warehouse service account and secret references
 
-## Next stages
-
-1. Provision an owner-approved workspace PostgreSQL database and migration role.
-2. Add repository interfaces and dual-write/read-back for assets, connectors, access locations, and lineage.
-3. Connect selected HEALPix/MOC masks to data-warehouse scan and download jobs.
-4. Implement the astro-code `cutout` adapter against registered image paths.
-5. Implement the astro-code `package` adapter and persist derived asset lineage.
-6. Index scan outputs into Elasticsearch and retain rebuildable manifests in MinIO.
-7. Complete source fingerprints for the legacy multi-survey atlas.
-8. Add selection functions and completeness maps before interpreting occupancy as physical density.
-9. Enable optional LLM intent enhancement with a namespace-local secret while retaining the rule interpreter.
-
-The fine HEALPix refinement view remains an advanced retrieval control. It is
-useful when a selected region would produce too much data, but it is not the
-main project narrative and does not add another visual highlight layer.
+Atlas has no runtime dependency on Assets management APIs, public scan jobs, or
+public release mutation endpoints. The only cross-product contract is the
+verified Resource Package v3 and the MOC Core adapter used for user scans.

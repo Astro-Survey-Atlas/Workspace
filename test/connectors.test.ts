@@ -9,10 +9,10 @@ import { ConnectorRegistry, connectorLocationKey, hasCurrentSuccessfulConnectorC
 import { LocalConnectorRootsPolicy } from "../src/local-connector-roots.js";
 import { SqliteMetadataStore } from "../src/storage/index.js";
 
-async function connectorRegistry(statePath: string, bootstrapPath?: string, localRoots = new LocalConnectorRootsPolicy([{ containerPath: "/", hostPath: "/" }])): Promise<ConnectorRegistry> {
+async function connectorRegistry(statePath: string, localRoots = new LocalConnectorRootsPolicy([{ containerPath: "/", hostPath: "/" }])): Promise<ConnectorRegistry> {
   const store = new SqliteMetadataStore(`${statePath}.sqlite`);
   await store.initialize();
-  const registry = new ConnectorRegistry(store, bootstrapPath, localRoots);
+  const registry = new ConnectorRegistry(store, localRoots);
   await registry.initialize();
   return registry;
 }
@@ -40,7 +40,7 @@ test("local connector registration and checking are explicitly unavailable witho
   const store = new SqliteMetadataStore(path.join(directory, "workspace.sqlite"));
   try {
     await store.initialize();
-    const registry = new ConnectorRegistry(store, undefined, new LocalConnectorRootsPolicy());
+    const registry = new ConnectorRegistry(store, new LocalConnectorRootsPolicy());
     await registry.initialize();
     await assert.rejects(
       () => registry.register({ name: "Unconfigured local", kind: "local", config: { rootPath: "/data/local/catalogs" } }),
@@ -61,36 +61,14 @@ test("local connector registration and checking are explicitly unavailable witho
   }
 });
 
-test("connector survey ownership round-trips and requires a survey for releases", async () => {
+test("connector survey labels round-trip and require a survey for releases", async () => {
   const directory = await mkdtemp(path.join(os.tmpdir(), "astro-connectors-"));
   try {
     const registry = await connectorRegistry(path.join(directory, "connectors.json"));
     const record = await registry.register({ name: "Euclid owned", kind: "s3", config: { bucket: "euclid" }, surveyId: "euclid", releaseId: "euclid-q1" });
     assert.equal(record.surveyId, "euclid");
     assert.equal(record.releaseId, "euclid-q1");
-    await assert.rejects(() => registry.register({ name: "Invalid ownership", kind: "s3", config: { bucket: "invalid" }, releaseId: "euclid-q1" }), /releaseId requires surveyId/);
-  } finally {
-    await rm(directory, { recursive: true, force: true });
-  }
-});
-
-test("connector registry seeds a new state file from the bundled bootstrap", async () => {
-  const directory = await mkdtemp(path.join(os.tmpdir(), "astro-connectors-"));
-  try {
-    const bootstrapPath = path.join(directory, "connectors-bootstrap.json");
-    await writeFile(bootstrapPath, JSON.stringify([{
-      id: "connector-fixture",
-      name: "Fixture S3",
-      description: "Seeded connector",
-      kind: "s3",
-      config: { bucket: "fixture" },
-      status: "ready",
-      createdAt: "2026-07-26T00:00:00.000Z",
-      updatedAt: "2026-07-26T00:00:00.000Z",
-      origin: "user",
-    }]), "utf8");
-    const registry = await connectorRegistry(path.join(directory, "state", "connectors.json"), bootstrapPath);
-    assert.equal((await registry.get("connector-fixture")).config.bucket, "fixture");
+    await assert.rejects(() => registry.register({ name: "Invalid label", kind: "s3", config: { bucket: "invalid" }, releaseId: "euclid-q1" }), /releaseId requires surveyId/);
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
@@ -154,7 +132,7 @@ test("JDBC SQLite paths use the same authorized local roots policy", async () =>
     const databasePath = path.join(directory, "catalog.sqlite");
     await writeFile(databasePath, "SQLite fixture", "utf8");
     const policy = new LocalConnectorRootsPolicy([{ containerPath: "/data/local", hostPath: directory }]);
-    const registry = await connectorRegistry(path.join(directory, "connectors.json"), undefined, policy);
+    const registry = await connectorRegistry(path.join(directory, "connectors.json"), policy);
     const record = await registry.register({ name: "SQLite", kind: "jdbc", config: { url: "jdbc:sqlite:/data/local/catalog.sqlite" } });
     assert.equal((await registry.check(record.id)).lastCheck?.status, "ok");
     await assert.rejects(
@@ -194,24 +172,6 @@ test("path, type, and credential edits invalidate a successful connector check",
     await registry.check(record.id);
     const typeEdited = await registry.update(record.id, { name: "Renamed", kind: "jdbc", config: { url: "jdbc:postgresql://db/catalog" } });
     assert.equal(typeEdited.lastCheck, undefined);
-  } finally {
-    await rm(directory, { recursive: true, force: true });
-  }
-});
-
-test("bootstrap connector ids remain aliases after a path-based state migration", async () => {
-  const directory = await mkdtemp(path.join(os.tmpdir(), "astro-connectors-"));
-  try {
-    const statePath = path.join(directory, "connectors.json");
-    const bootstrapPath = path.join(directory, "bootstrap.json");
-    await writeFile(bootstrapPath, JSON.stringify([{ id: "connector-legacy", name: "Legacy", kind: "local", config: { rootPath: "/catalogs" }, status: "ready", createdAt: "2026-01-01T00:00:00.000Z", updatedAt: "2026-01-01T00:00:00.000Z" }]), "utf8");
-    await writeFile(statePath, JSON.stringify([{ id: "connector-current", name: "Current", kind: "local", config: { rootPath: "/catalogs/../catalogs" }, status: "ready", createdAt: "2026-01-02T00:00:00.000Z", updatedAt: "2026-01-02T00:00:00.000Z" }]), "utf8");
-    const store = new SqliteMetadataStore(`${statePath}.sqlite`);
-    await store.initialize();
-    await store.putConnector({ id: "connector-current", name: "Current", description: "", kind: "local", config: { rootPath: "/catalogs/../catalogs" }, locationKey: "local:///catalogs", displayPath: "/catalogs", status: "ready", createdAt: "2026-01-02T00:00:00.000Z", updatedAt: "2026-01-02T00:00:00.000Z", origin: "user" });
-    const registry = new ConnectorRegistry(store, bootstrapPath);
-    await registry.initialize();
-    assert.equal((await registry.get("connector-legacy")).id, "connector-current");
   } finally {
     await rm(directory, { recursive: true, force: true });
   }

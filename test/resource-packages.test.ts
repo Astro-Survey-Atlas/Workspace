@@ -9,7 +9,7 @@ import { pathToFileURL } from "node:url";
 
 import yazl from "yazl";
 
-import { ResourceCatalogUnavailableError, ResourcePackageManager, type ResourcePackageJob } from "../src/resource-packages.js";
+import { ResourceCatalogUnavailableError, ResourcePackageManager, resourcePackageSurveyRecords, type ResourcePackageJob } from "../src/resource-packages.js";
 import type { SurveyFootprintManifest } from "../src/survey-footprints.js";
 
 const now = "2026-07-24T00:00:00.000Z";
@@ -66,7 +66,7 @@ async function createPackage(directory: string, id: string, surveyId: string, op
       { path: "footprints/survey-footprints.json", sizeBytes: footprintBytes.length, sha256: createHash("sha256").update(footprintBytes).digest("hex") },
       { path: "provenance.json", sizeBytes: provenanceBytes.length, sha256: createHash("sha256").update(provenanceBytes).digest("hex") },
     ],
-    layers: [{ layerId: `${surveyId}-coverage`, surveyId, coverageRole: "image_extent", dataOrigin: "observed", sourceTier: "survey_authoritative", modality: "imaging", releaseId: releases[0]!, path: `mocs/${surveyId}-coverage.moc.fits`, sizeBytes: mocBytes.length, sha256: createHash("sha256").update(mocBytes).digest("hex") }],
+    layers: [{ layerId: `${surveyId}-coverage`, surveyId, coverageRole: "image_extent", dataOrigin: "observed", sourceTier: "official_geometry", modality: "imaging", releaseId: releases[0]!, path: `mocs/${surveyId}-coverage.moc.fits`, sizeBytes: mocBytes.length, sha256: createHash("sha256").update(mocBytes).digest("hex") }],
   };
   const zip = new yazl.ZipFile();
   zip.addBuffer(Buffer.from(`${JSON.stringify(packageManifest, null, 2)}\n`), "resource-package.json");
@@ -227,6 +227,84 @@ test("resource packages list lifecycle status and survive a registry restart", a
     await restarted.initialize();
     assert.equal(restarted.get("public-legacy-surveys-footprints").status, "not_installed");
     assert.equal(restarted.get("public-galex-footprints").status, "active");
+  } finally {
+    await rm(paths.directory, { recursive: true, force: true });
+  }
+});
+
+test("public survey metadata stays a read-only package projection", async () => {
+  const paths = await fixture();
+  try {
+    const packages = paths.manager.list();
+    const records = resourcePackageSurveyRecords(packages);
+    assert.deepEqual(records.map((record) => record.id).sort(), ["galex", "legacy-surveys"]);
+    assert.ok(records.every((record) => record.origin === "public"));
+    assert.equal(records.find((record) => record.id === "legacy-surveys")?.releases[0]?.label, "RELEASE-A");
+  } finally {
+    await rm(paths.directory, { recursive: true, force: true });
+  }
+});
+
+test("Assets survey metadata exposes pending releases without making them loadable", async () => {
+  const paths = await fixture();
+  try {
+    const surveyPath = path.join(paths.directory, "surveys.json");
+    await writeFile(surveyPath, `${JSON.stringify({
+      schemaVersion: 1,
+      generatedAt: now,
+      surveys: [{
+        id: "legacy-surveys",
+        name: "Legacy Surveys",
+        mission: "Fixture mission",
+        color: "#123456",
+        description: "Fixture survey metadata",
+        modalities: ["imaging"],
+        releases: [
+          {
+            id: "release-a",
+            label: "Release A",
+            kind: "early_release",
+            releasedYear: 2025,
+            modalities: ["imaging"],
+            products: [{ name: "Fixture image", modality: "imaging", description: "Acquired geometry", status: "acquired", sourceUrl: "https://example.test/a" }],
+          },
+          {
+            id: "release-b",
+            label: "Release B",
+            kind: "early_release",
+            modalities: ["imaging"],
+            products: [{ name: "Fixture pending image", modality: "imaging", description: "Geometry is pending", status: "awaiting_geometry", sourceUrl: "https://example.test/b" }],
+          },
+        ],
+      }],
+    }, null, 2)}\n`, "utf8");
+    const snapshotRoot = path.join(paths.directory, "snapshot-state");
+    const manager = new ResourcePackageManager({
+      catalogUrl: paths.catalogUrl,
+      surveyCatalogUrl: pathToFileURL(surveyPath).href,
+      root: paths.root,
+      statePath: paths.statePath,
+      snapshotRoot,
+    });
+    await manager.initialize();
+    const packageRecord = manager.get("public-legacy-surveys-footprints");
+    assert.deepEqual(packageRecord.releases, ["release-a", "release-b"]);
+    assert.deepEqual(packageRecord.publicReleases?.map((release) => release.id), ["release-a", "release-b"]);
+    const record = resourcePackageSurveyRecords([packageRecord])[0]!;
+    assert.deepEqual(record.releases.map((release) => [release.id, release.availability, release.coverage.status]), [
+      ["release-a", "available", "verified"],
+      ["release-b", "metadata_only", "pending"],
+    ]);
+    assert.ok((await readFile(path.join(snapshotRoot, "assets-current", "surveys.json"), "utf8")).includes("Release B"));
+
+    const offline = new ResourcePackageManager({
+      catalogUrl: pathToFileURL(path.join(paths.directory, "missing-catalog.json")).href,
+      root: paths.root,
+      statePath: paths.statePath,
+      snapshotRoot,
+    });
+    await offline.initialize();
+    assert.deepEqual(offline.get("public-legacy-surveys-footprints").publicReleases?.map((release) => release.id), ["release-a", "release-b"]);
   } finally {
     await rm(paths.directory, { recursive: true, force: true });
   }

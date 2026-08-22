@@ -59,3 +59,22 @@ test("connector scan history snapshots identity and handles idempotent retries",
     await rm(directory, { recursive: true, force: true });
   }
 });
+
+test("Atlas connector history normalizes task kinds and filters only its own kinds", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "astro-connector-task-kind-"));
+  const store = new SqliteMetadataStore(path.join(directory, "workspace.sqlite"));
+  try {
+    await store.initialize();
+    const catalog = new ConnectorIngestRunCatalog(store);
+    const scan = await catalog.add("s3://atlas/scan", { status: "queued", jobId: "astro-scan-asset-token" });
+    const coverage = await catalog.add("s3://atlas/coverage", { status: "queued", executor: "flink-coverage", batchId: "workspace-coverage-token" });
+    assert.equal(scan.taskKind, "user_scan");
+    assert.equal(coverage.taskKind, "user_coverage");
+    assert.deepEqual((await catalog.list({ taskKind: "user_scan" })).map((run) => run.id), [scan.id]);
+    assert.deepEqual((await catalog.list({ taskKind: "user_coverage" })).map((run) => run.id), [coverage.id]);
+    assert.equal((await catalog.list({ taskKind: "user_scan" })).some((run) => run.id === coverage.id), false);
+  } finally {
+    await store.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});

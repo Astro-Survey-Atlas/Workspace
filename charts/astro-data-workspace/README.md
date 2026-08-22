@@ -2,9 +2,9 @@
 
 The chart deploys the core workspace API with persistent application metadata.
 The default is embedded SQLite on a `ReadWriteOnce` PVC. The data warehouse is
-disabled by default, so the core application, public coverage, manual
-footprints, connector metadata, and user assets do not require Flink or a
-warehouse service.
+disabled by default, so the core application, installed Assets Resource
+Package coverage, Connector metadata, and user assets do not require Flink or
+a warehouse service.
 
 ## Metadata stores
 

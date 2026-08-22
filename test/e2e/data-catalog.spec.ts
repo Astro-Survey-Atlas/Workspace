@@ -127,7 +127,7 @@ test("status explanations are available where records are evaluated", async ({ p
 });
 
 test("user assets remain reachable from the workspace navigation", async ({ page }) => {
-  const { assets } = await apiJson<{ assets: Array<{ name: string; origin: string; status: string }> }>("/api/data-assets?origin=user");
+  const { assets } = await apiJson<{ assets: Array<{ name: string; origin: string; status: string }> }>("/api/data-assets");
   const catalogRequests: string[] = [];
   page.on("request", (request) => {
     const url = new URL(request.url());
@@ -143,7 +143,7 @@ test("user assets remain reachable from the workspace navigation", async ({ page
   await expect(page.locator("#catalog-stage")).toBeVisible();
   await expect(page.locator("#scene-stage")).toBeHidden();
   await expect(page.locator("#catalog-asset-list .catalog-row")).toHaveCount(assets.length);
-  expect(catalogRequests).toContain("?origin=user");
+  expect(catalogRequests).toContain("");
   await expect(page.locator("#catalog-user-count")).toHaveText(String(assets.length));
   await expect(page.locator("#catalog-ready-count")).toHaveText(String(assets.filter((asset) => asset.status === "ready").length));
   await expect(page.locator("#catalog-asset-list")).not.toContainText("Euclid Q1 MER final catalog");
@@ -179,17 +179,12 @@ test("user assets remain reachable from the workspace navigation", async ({ page
   await expect(page.locator("#catalog-empty")).toBeVisible();
 });
 
-test("data asset origin query filters records and rejects invalid values", async () => {
+test("data asset API exposes only Atlas user records", async () => {
   const all = await apiJson<{ assets: Array<{ id: string; origin: string }> }>("/api/data-assets");
-  const users = await apiJson<{ assets: Array<{ id: string; origin: string }> }>("/api/data-assets?origin=user");
-  const builtin = await apiJson<{ assets: Array<{ id: string; origin: string }> }>("/api/data-assets?origin=builtin");
-
-  expect(users.assets.every((asset) => asset.origin === "user")).toBe(true);
-  expect(builtin.assets.every((asset) => asset.origin === "builtin")).toBe(true);
-  expect([...users.assets, ...builtin.assets].map((asset) => asset.id).sort()).toEqual(all.assets.map((asset) => asset.id).sort());
-  const invalid = await apiResponse("/api/data-assets?origin=other");
-  expect(invalid.status).toBe(400);
-  await expect(invalid.json()).resolves.toEqual({ error: "origin must be user or builtin" });
+  expect(all.assets.every((asset) => asset.origin === "user")).toBe(true);
+  const filtered = await apiResponse("/api/data-assets?origin=user");
+  expect(filtered.status).toBe(400);
+  await expect(filtered.json()).resolves.toEqual({ error: "data asset origin filters are not supported" });
 });
 
 test("mobile catalog keeps creation modal and details reachable", async ({ page }) => {
@@ -287,16 +282,96 @@ test("local asset registration inspects CSV columns before creating a scan spec"
   const scanFieldset = page.locator("#catalog-scan-fieldset");
   await expect(scanFieldset).toBeVisible();
   await expect(page.locator("#catalog-source-file")).toHaveValue("catalog.csv");
-  await expect(page.locator("#catalog-scan-feedback")).toHaveText("选择文件后读取表头");
+  await expect(page.locator("#catalog-scan-feedback")).toHaveCount(0);
 
   await page.locator("#catalog-inspect-file").click();
   await expect.poll(() => inspectBody).toEqual({ sourceRelativePath: "catalog.csv" });
   await expect(page.locator("#catalog-object-id-column")).toHaveValue("object_id");
   await expect(page.locator("#catalog-ra-column")).toHaveValue("ra_deg");
   await expect(page.locator("#catalog-dec-column")).toHaveValue("dec_deg");
-  await expect(page.locator("#catalog-scan-feedback")).toContainText("已读取 4 个字段");
-  await expect(page.locator("#catalog-scan-feedback")).toContainText("96%");
+  await expect(page.locator("#workspace-notification-deck .workspace-notification").last()).toContainText("本地文件表头已读取");
+  await expect(page.locator("#workspace-notification-deck .workspace-notification").last()).toContainText("4 个字段");
+  await expect(page.locator("#workspace-notification-deck .workspace-notification").last()).toContainText("96%");
   await page.locator("#catalog-dialog-close").click();
+});
+
+test("workspace notifications share one mobile deck with dedupe, cap, and expiry", async ({ page }) => {
+  test.setTimeout(45_000);
+  const localConnector = {
+    id: "e2e-notification-local",
+    locationKey: "local:///data/e2e-notifications",
+    displayPath: "/data/e2e-notifications",
+    name: "E2E notification CSV",
+    description: "Notification fixture",
+    kind: "local",
+    config: { rootPath: "/data/e2e-notifications" },
+    status: "ready",
+    createdAt: "2026-08-14T00:00:00.000Z",
+    updatedAt: "2026-08-14T00:00:00.000Z",
+    origin: "user",
+    credentials: { accessKeyId: "", secretConfigured: false },
+  };
+  await page.route("**/api/connectors", async (route) => {
+    await route.fulfill({ json: { connectors: [localConnector] } });
+  });
+  const files = Array.from({ length: 6 }, (_, index) => ({
+    relativePath: `catalog-${index + 1}.csv`,
+    byteSize: 1024 + index,
+    modifiedAt: "2026-08-14T00:00:00.000Z",
+  }));
+  await page.route("**/api/connectors/e2e-notification-local/local-files", async (route) => {
+    await route.fulfill({ json: { files } });
+  });
+  await page.route("**/api/connectors/e2e-notification-local/local-files/inspect", async (route) => {
+    const body = route.request().postDataJSON() as { sourceRelativePath?: string };
+    const fileIndex = Number(body.sourceRelativePath?.match(/(\d+)/)?.[1] ?? 1);
+    await route.fulfill({ json: {
+      inspection: {
+        sourceRelativePath: body.sourceRelativePath,
+        columns: [
+          { name: "object_id", type: "string" },
+          { name: "ra_deg", type: "number" },
+          { name: "dec_deg", type: "number" },
+          ...Array.from({ length: fileIndex }, (_, index) => ({ name: `value_${index + 1}`, type: "number" })),
+        ],
+        inferred: { objectIdColumn: "object_id", raColumn: "ra_deg", decColumn: "dec_deg", confidence: 0.9 },
+      },
+    } });
+  });
+
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto("/");
+  await waitForWorkspace(page);
+  await openCatalog(page);
+  await page.locator("#catalog-new").click();
+  await page.locator('#catalog-connector-list input[type="radio"][value="local:///data/e2e-notifications"]').check();
+  await expect(page.locator("#catalog-source-file option")).toHaveCount(files.length);
+  await page.locator("#workspace-notification-deck").evaluate((element) => element.replaceChildren());
+
+  const inspect = page.locator("#catalog-inspect-file");
+  await page.locator("#catalog-source-file").selectOption("catalog-1.csv");
+  await inspect.click();
+  const firstNotification = page.locator("#workspace-notification-deck .workspace-notification").last();
+  await expect(firstNotification).toContainText("本地文件表头已读取");
+  await expect(firstNotification.locator("strong")).toHaveCount(1);
+  await expect(firstNotification.locator("small")).toHaveCount(1);
+  await expect(firstNotification.evaluate((element) => [...element.children].map((child) => child.tagName))).resolves.toEqual(["STRONG", "SMALL"]);
+  const mobileDeck = await page.locator("#workspace-notification-deck").boundingBox();
+  expect(mobileDeck).not.toBeNull();
+  expect(mobileDeck!.width).toBeLessThanOrEqual(374);
+
+  // Two identical inspections are emitted inside the short dedupe window.
+  await Promise.all([inspect.click(), inspect.click()]);
+  await expect.poll(() => page.locator("#workspace-notification-deck .workspace-notification").count()).toBeLessThanOrEqual(2);
+
+  for (const file of files.slice(1)) {
+    await page.locator("#catalog-source-file").selectOption(file.relativePath);
+    await inspect.click();
+    await expect(page.locator("#workspace-notification-deck .workspace-notification").last()).toContainText("本地文件表头已读取");
+  }
+  await expect(page.locator("#workspace-notification-deck .workspace-notification")).toHaveCount(5);
+  await expect(page.locator("#catalog-dialog-close")).toBeVisible();
+  await expect(page.locator("#workspace-notification-deck .workspace-notification")).toHaveCount(0, { timeout: 12_000 });
 });
 
 test("data production keeps cross-match runnable and exposes cutout/package contracts", async ({ page }) => {
@@ -341,16 +416,8 @@ test("connector view exposes S3, local path, and JDBC registration without scan 
   await page.locator('#connector-registration-form [name="accessKeyId"]').fill("fixture-access");
   await page.locator('#connector-registration-form [name="secretAccessKey"]').fill("fixture-secret");
   await expect(page.locator("#connector-check-form")).toBeEnabled();
-  await expect(page.locator("#connector-form-message")).toContainText("尚未检测");
-  await expect(page.locator("#connector-form-message")).toContainText("填写后可先检测连接，也可以直接登记");
-  const registrationActionsShareLine = await page.locator(".connector-registration-actions").evaluate((element) => {
-    const button = element.querySelector<HTMLElement>("#connector-check-form")!;
-    const feedback = element.querySelector<HTMLElement>("#connector-form-message")!;
-    const buttonRect = button.getBoundingClientRect();
-    const feedbackRect = feedback.getBoundingClientRect();
-    return Math.abs(buttonRect.top - feedbackRect.top) < 2 && feedbackRect.left >= buttonRect.right;
-  });
-  expect(registrationActionsShareLine).toBe(true);
+  await expect(page.locator("#connector-form-message")).toHaveCount(0);
+  await expect(page.locator("#workspace-notification-deck")).toHaveCount(1);
   await page.locator("#connector-kind").selectOption("local");
   await expect(page.locator("#connector-local-root")).toBeVisible();
   await page.locator("#connector-kind").selectOption("jdbc");
@@ -464,7 +531,7 @@ test("connector actions and unified scan history expose only supported execution
   await expect(execute).toBeEnabled();
   await expect(execute).toHaveClass(/primary-command/);
   await execute.click();
-  await expect(inspector).toContainText("扫描任务已提交");
+  await expect(page.locator("#workspace-notification-deck .workspace-notification").filter({ hasText: "普通扫描任务已提交" })).toBeVisible();
   expect(submittedBody).toEqual({});
 
   await page.getByRole("tab", { name: "扫描记录" }).click();

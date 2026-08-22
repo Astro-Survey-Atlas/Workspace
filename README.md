@@ -5,40 +5,26 @@ catalog parsing, coordinate validation, HEALPix indexing, and rendering data are
 computed by tested TypeScript. MCP exposes those capabilities to agents; an LLM
 is not part of the data-processing path.
 
-The current vertical slice can:
+Atlas is the user-facing workspace. It can:
 
-1. Register a local CSV below an explicitly allowed data root.
-2. Profile schema, scalar types, nulls, row count, and circular RA/Dec coverage.
-3. Build cached nested HEALPix summaries at NSIDE 8, 32, 128, and 512.
-4. Build a deterministic DESI-COSMOS redshift volume from a FITS `SPECZ` HDU.
-5. Expose catalog and volume artifacts through MCP and a read-only REST API.
-6. Explore the full redshift sample in an exterior Three.js cutaway sphere.
-7. Maintain a curated telescope/survey/release registry for Euclid, DESI, SDSS, GALEX, Legacy Surveys, HSC-SSP, HST, and user-registered sources.
-8. Drill through sparse NESTED HEALPix-by-radius cells with conserving refinement.
-9. Record reproducible scan runs, content fingerprints, artifact checksums, and transitive lineage.
-10. Register deterministic tools and versioned workflow DAGs with persistent run state.
-11. Execute `euclid-desi-crossmatch@1` through a rule-based Agent and an explicit human filter gate.
-12. Maintain a deployment-bundled data catalog plus persistent user data registrations for future connectors.
-13. Present project status on the 3D sky through five asset stages: public reference, acquired, processed, deliverable, and planned.
-14. Select connected eight-neighbour sky regions, refine exact NESTED HEALPix masks, and filter registered assets by survey, release, and modality.
-15. Expose the first astro-code production action, cross-match, with cutout and package contracts ready for adapter work.
-16. Maintain editable data-asset detail pages with public sources, multiple access locations, project-stage facets, and lineage placeholders.
-17. Register S3/OSS, local-path, and JDBC connectors with path-based upsert identity, non-enumerating connection checks, and `AstroMetadataScanTask` run history.
-
-The viewer and API do not depend on `cosmos-data-linkage`, its PostgreSQL
-database, or its Aladin viewer. The old service is only a read-only acceptance
-reference for the COSMOS catalog.
-
-The `AstroMetadataScanTask` execution module lives in the sibling
-`data-warehouse` checkout at
-`/home/aaron/Repo/data-warehouse/astro-file-scanner`. Its deployable artifact
-is `astro-file-scanner-0.1.0-SNAPSHOT-all.jar`; the default Job backend uses the
-standalone `AstroMetadataScanJobMain` entry point, while `backend: flink` uses
-the existing `MetadataExtractorJob` adapter.
+1. Register user assets with local, S3/OSS, JDBC, or other access metadata.
+2. Scan local files in Atlas and optionally submit remote user scans to the
+   data-warehouse plugin.
+3. Compute user coverage through the pinned Assets MOC Core adapter.
+4. Display and download public coverage only from verified Assets Resource
+   Package v3 snapshots.
+5. Keep user survey/release labels, assets, connectors, scan history, indexes,
+   workflows, and Agent/MCP state local to Atlas.
+6. Select sky regions and inspect public package layers alongside user assets.
 
 The shared operator/workspace invocation and troubleshooting runbook is in the
 sibling checkout at
 `/home/aaron/Repo/data-warehouse/docs/astro-metadata-scan-runbook.md`.
+
+The current Atlas boundary, task-isolation, and notification implementation plan
+is frozen in [`docs/atlas-boundary-plan.md`](docs/atlas-boundary-plan.md). It
+overrides older Atlas-side descriptions when they differ; this repository does
+not modify the data-warehouse checkout or the shared scan CRD schema.
 
 ## Development
 
@@ -112,26 +98,9 @@ require recreating the service so the bind source is replaced, for example:
 ASTRO_LOCAL_DATA_ROOT=/new/astro-data docker compose -f compose.yaml -f compose.local.yaml up -d --force-recreate
 ```
 
-Local connectors currently support registration and non-enumerating existence/
-readability checks. They do not scan or enumerate the local parent directory;
-an explicit scan workflow is not implied by mounting it.
-
-## Redshift volume
-
-The FITS preprocessing step runs offline. It filters high-quality galaxies,
-converts `BEST_Z` to Planck18 comoving distance, and writes a versioned
-`manifest.json` plus little-endian `points.bin` artifact:
-
-```bash
-python3 scripts/build_redshift_volume.py \
-  --input /path/to/DESI-COSMOS-v2.0.fits \
-  --output /path/to/derived/desi-cosmos-v2
-```
-
-Set `ASTRO_VOLUME_ROOT` to the parent derived-data directory. The server only
-reads the compact artifacts; it never opens the 1.45 GB FITS file at startup.
-Each successful preprocessing run also writes `scan-run.json`. Source identities
-use `urn:sha256:` values, so the public API does not disclose absolute server paths.
+Local connectors support registration, non-enumerating existence/readability
+checks, explicit CSV scans, and scan history. The mounted parent remains
+read-only; Atlas writes only metadata and derived indexes to its state store.
 
 ## Data catalog
 
@@ -143,16 +112,20 @@ create, update, and delete without copying source rows into this service.
 
 Each record identifies an optional survey and release, a product, modality,
 format, connector kind, logical or physical URI, availability state, and zero
-or more footprint references. A future data-warehouse connector can consume
-this access description together with a refined MOC selection; credentials
-remain outside catalog records. Connector associations use normalized location
-keys so a path upsert does not orphan an asset.
+or more footprint references. These survey/release values are Atlas-local user
+metadata and may not exist in the installed Assets package. An optional
+data-warehouse connector can consume this access description together with a
+refined MOC selection; credentials remain outside catalog records. Connector
+associations use normalized location keys so a path upsert does not orphan an
+asset.
 
 ## Survey registry and release footprints
 
-The survey explorer is a low-frequency coverage registry, not a live data scan.
-Each survey card aggregates its releases (for example, SDSS DR1 through DR19),
-and each release records modalities, products, availability, and a footprint
+The survey explorer consumes public survey/release metadata from the installed
+Assets Resource Package v3 records through a read-only public view. The Atlas
+SurveyRegistry remains a separate local namespace for user labels and releases;
+an Euclid or CSST label does not need a matching public package.
+Each release records modalities, products, availability, and a footprint
 provenance status. HST is represented as a MAST archive snapshot rather than a
 fictional DR sequence.
 
@@ -179,41 +152,14 @@ imaging or local COSMOS data for it.
 
 The public-footprint release is owned by the sibling `Astro-Survey-Atlas-Assets`
 repository. Atlas runtime reads only a verified Assets Resource Package v3
-catalog and its local `assets-current` snapshot. Old generated packages and
+catalog and its local `assets-current` snapshot. Atlas does not retain a second
+public footprint ledger or a fallback package set. Old generated packages and
 rollback material are not startup inputs, are not scanned, and are not part of
 the active catalog.
-`sources.json` is the product-level acquisition ledger for every available
-release in `src/survey-registry.ts`: `acquired` identifies an existing manifest
-identity, `overview_only` identifies a bounded but non-product-exact overview,
-and `awaiting_geometry` identifies a product for which no exact geometry has
-been ingested. An incomplete product never receives fabricated pixels. These
-are release and product coverage artifacts, not catalog rows, image pixels, or
-a claim that every product in a release shares one footprint.
 
 Public package generation, geometry extraction, trust validation, and release
 publication are performed in `Astro-Survey-Atlas-Assets`. Atlas only downloads,
 verifies, installs, and displays the resulting v3 packages.
-
-The existing atlas remains a local COSMOS reference and the DESI radial-index
-input for the joint-volume prototype. It is not a global survey-footprint
-registry.
-
-The legacy atlas preprocessor creates a local COSMOS angular reference plus a
-DESI redshift volume index. It is retained for the joint-volume prototype and
-must not be used to infer release-level global coverage:
-
-```bash
-npm run build:atlas -- \
-  --output /path/to/derived/cosmos-multisurvey-v1 \
-  --membership-csv /path/to/hst_acs_selected.csv \
-  --desi-csv /path/to/desi_cosmos_ra_dec_id.csv \
-  --volume-manifest /path/to/desi-cosmos-v2/manifest.json \
-  --volume-points /path/to/desi-cosmos-v2/points.bin
-```
-
-Run the reproducible point-scan versus sparse-index benchmark with
-`npm run benchmark:atlas`. Set `ASTRO_ATLAS_ROOT` to the derived-data parent;
-it may be the same directory as `ASTRO_VOLUME_ROOT`.
 
 ## Interfaces
 
@@ -223,13 +169,11 @@ route implementation and tests whenever an API changes.
 
 MCP tools:
 
-- `register_local_csv`
-- `list_datasets`
-- `get_dataset_profile`
+- `list_user_assets`
+- `get_user_asset`
 
 REST endpoints:
 
-- `GET /api/datasets`
 - `GET /api/data-assets`
 - `GET /api/data-assets/:id`
 - `POST /api/data-assets`
@@ -237,26 +181,15 @@ REST endpoints:
 - `DELETE /api/data-assets/:id`
 - `GET /api/surveys`
 - `GET /api/surveys/:id`
+- `GET /api/public-surveys`
+- `GET /api/public-surveys/:id`
 - `GET /api/survey-footprints`
 - `GET /api/sky/overview?survey=euclid&release=euclid-q1&nside=16&cells=...`
 - `POST /api/sky/query`
 - `GET /api/sky/coverage?nside=16&assetIds=...` (generic scanned-asset coverage)
 - `POST /api/surveys/registrations`
-- `GET /api/datasets/:id/sky/summary`
-- `GET /api/datasets/:id/sky/cells?nside=128`
-- `GET /api/datasets/:id/sky/objects?offset=0&limit=50000`
-- `GET /api/volumes`
-- `GET /api/volumes/:id`
-- `GET /api/volumes/:id/points.bin`
-- `GET /api/atlases`
-- `GET /api/atlases/:id`
-- `GET /api/atlases/:id/angular-cells.bin`
-- `GET /api/atlases/:id/joint?survey=desi&nside=32&radialBins=8`
-- `GET /api/atlases/:id/refinement?survey=desi&nside=32&radialBins=8&pixel=6814&radialBin=1`
-- `GET /api/atlases/:id/objects?survey=desi&nside=32&pixel=6814&radialBins=8&radialBin=1&offset=0&limit=500`
-- `GET /api/scan-runs`
-- `GET /api/scan-runs/:id`
-- `GET /api/lineage/:artifactId`
+- `GET /api/connectors/:id/scan-runs`
+- `GET /api/connectors/scan-runs`
 - `GET /api/tools`
 - `GET /api/workflows`
 - `GET /api/workflows/:id`
@@ -267,10 +200,11 @@ REST endpoints:
 - `POST /api/agent/sessions`
 - `POST /api/agent/sessions/:id/messages`
 
-Connector scans submit an `AstroMetadataScanTask` to the metadata operator. The
-request can point at a connector prefix or a child path and declare catalog
-coordinates without exposing credentials. The operator creates the managed
-`AstroDataSource` objects and runs the default `backend: job` scanner:
+Local scans run in Atlas and use the pinned Assets MOC Core adapter for
+authoritative coverage. An optional data-warehouse plugin handles remote S3/JDBC
+reads; it remains a user-asset execution path and never publishes public
+coverage. Remote requests can point at a connector prefix or child path and
+declare catalog coordinates without exposing credentials:
 
 ```json
 {
@@ -288,9 +222,8 @@ coordinates without exposing credentials. The operator creates the managed
 ```
 
 The scanner records files without valid coordinates as metadata-only; it does
-not invent a footprint from the path or filename. `backend: flink` is available
-only as the new task's migration adapter; workspace submissions do not create
-or update a legacy `FlinkIngestTask`.
+not invent a footprint from the path or filename. `backend: flink` is an
+optional data-warehouse execution detail and is not a public coverage API.
 
 Catalogs that already carry NESTED HEALPix pixels can instead use
 `"mode": "healpix"` with `"healpixColumn": "hpix"`. The resulting document
@@ -299,16 +232,15 @@ project-sky coverage layer. `"mode": "auto"` tries RA/Dec first and then
 falls back to `hpix` / `healpix_pixel` aliases when those coordinates are not
 present.
 
-The cell-object endpoint lazily builds and reuses a server-side index for the
-requested angular/radial level. The REST representation never exposes a source
-filesystem path.
+The user-asset coverage endpoints return only indexed Atlas data and never
+expose a source filesystem path.
 
 ## k3s deployment
 
 `deploy/k3s.yaml` deploys the current image tag into the isolated
 `astro-data-workspace` namespace. The Pod is pinned to `eva7028`; compact catalog
 metadata and derived indexes live in a 128 MiB `nfs-data` PVC backed by
-`/mnt/data`, mounted read-only by the service. Registry state uses a separate
+`/mnt/data`, mounted read-only by the service. Workspace state uses a separate
 256 MiB NFS PVC. Workflow metadata, 20-row previews, and exports capped at
 1,000 rows use the same state PVC. Runtime operation does not require an
 OSS/rclone mount.

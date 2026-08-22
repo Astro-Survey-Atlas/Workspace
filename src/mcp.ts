@@ -1,7 +1,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import * as z from "zod/v4";
 
-import { JsonDatasetRegistry } from "./registry.js";
+import type { DataCatalogRegistry } from "./data-catalog.js";
 
 function asToolResult(value: unknown) {
   return {
@@ -18,47 +18,29 @@ function asToolError(error: unknown) {
   };
 }
 
-export function createAstroMcpServer(registry: JsonDatasetRegistry): McpServer {
-  const server = new McpServer({ name: "astro-data-workspace", version: "0.6.0" });
+/** Read-only MCP surface for Atlas-owned user assets. */
+export function createAstroMcpServer(dataCatalog: DataCatalogRegistry): McpServer {
+  const server = new McpServer({ name: "astro-data-workspace", version: "0.10.38" });
 
   server.registerTool(
-    "register_local_csv",
+    "list_user_assets",
     {
-      title: "Register local astronomy CSV",
-      description: "Register and deterministically profile a CSV catalog under an allowed data root.",
-      inputSchema: {
-        path: z.string().min(1).describe("Absolute path visible to the MCP service"),
-        name: z.string().min(1).optional().describe("Human-readable dataset name"),
-      },
+      title: "List Atlas user assets",
+      description: "List user assets registered in Atlas. Public Assets packages are not included.",
     },
-    async ({ path, name }) => {
-      try {
-        return asToolResult(await registry.registerLocalCsv(path, name));
-      } catch (error) {
-        return asToolError(error);
-      }
-    },
+    async () => asToolResult({ assets: await dataCatalog.list() }),
   );
 
   server.registerTool(
-    "list_datasets",
+    "get_user_asset",
     {
-      title: "List registered datasets",
-      description: "List all datasets and their generated profiles.",
-    },
-    async () => asToolResult({ datasets: await registry.list() }),
-  );
-
-  server.registerTool(
-    "get_dataset_profile",
-    {
-      title: "Get dataset profile",
-      description: "Get a registered dataset and its deterministic profile by ID.",
+      title: "Get an Atlas user asset",
+      description: "Read one Atlas-owned user asset by ID.",
       inputSchema: { id: z.string().min(1) },
     },
     async ({ id }) => {
       try {
-        return asToolResult(await registry.get(id));
+        return asToolResult({ asset: await dataCatalog.get(id) });
       } catch (error) {
         return asToolError(error);
       }

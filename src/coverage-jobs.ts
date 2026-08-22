@@ -1,12 +1,12 @@
 /**
- * Private coverage-job contract. Assets Core is the authority for geometry;
- * Atlas only validates and transports the normalized scan context.
+ * Private contract for an Atlas-owned user's optional remote scan. Assets Core
+ * is the geometry authority; public coverage tasks do not enter this service.
  */
+import { COVERAGE_ROLES, DATA_ORIGINS, SOURCE_TIERS, type CoverageDataOrigin, type CoverageRole, type CoverageSourceTier } from "./assets-core.js";
+
 export const COVERAGE_JOB_MODES = ["catalog-radec", "nested-healpix", "fits-wcs"] as const;
 export type CoverageJobMode = typeof COVERAGE_JOB_MODES[number];
-export type CoverageRole = "image_extent" | "object_presence" | "footprint_extent";
-export type CoverageDataOrigin = "observed" | "simulated" | "derived" | "unknown";
-export type CoverageSourceTier = "user_file_derived" | "survey_authoritative" | "catalog_derived" | "unknown";
+export type { CoverageDataOrigin, CoverageRole, CoverageSourceTier } from "./assets-core.js";
 export type CoverageCoordinateUnits = "deg" | "rad" | "hourangle";
 export interface CoverageCenterAliases { centerRaAliases?: string[]; centerDecAliases?: string[]; centerUnits?: CoverageCoordinateUnits; centerFrame?: "ICRS"; }
 
@@ -150,20 +150,20 @@ function normalizedOrder(value: unknown, required: boolean): number | undefined 
 
 function normalizedRole(value: unknown, fallback: CoverageRole): CoverageRole {
   const role = value === undefined ? fallback : value;
-  if (role !== "image_extent" && role !== "object_presence" && role !== "footprint_extent") throw new RangeError("coverage.coverageRole is unsupported");
-  return role;
+  if (!(COVERAGE_ROLES as readonly unknown[]).includes(role)) throw new RangeError("coverage.coverageRole is unsupported");
+  return role as CoverageRole;
 }
 
 function normalizedOrigin(value: unknown): CoverageDataOrigin {
   const origin = value === undefined ? "observed" : value;
-  if (origin !== "observed" && origin !== "simulated" && origin !== "derived" && origin !== "unknown") throw new RangeError("coverage.dataOrigin is unsupported");
-  return origin;
+  if (!(DATA_ORIGINS as readonly unknown[]).includes(origin)) throw new RangeError("coverage.dataOrigin is unsupported");
+  return origin as CoverageDataOrigin;
 }
 
 function normalizedTier(value: unknown): CoverageSourceTier {
   const tier = value === undefined ? "user_file_derived" : value;
-  if (tier !== "user_file_derived" && tier !== "survey_authoritative" && tier !== "catalog_derived" && tier !== "unknown") throw new RangeError("coverage.sourceTier is unsupported");
-  return tier;
+  if (!(SOURCE_TIERS as readonly unknown[]).includes(tier)) throw new RangeError("coverage.sourceTier is unsupported");
+  return tier as CoverageSourceTier;
 }
 
 function normalizedAuthorityOrder(value: unknown, origin: CoverageDataOrigin, tier: CoverageSourceTier, role: CoverageRole): number {

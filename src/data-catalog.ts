@@ -1,5 +1,4 @@
 import { randomUUID } from "node:crypto";
-import { readFile } from "node:fs/promises";
 
 import { normalizeLocalSourceRelativePath } from "./local-source-inspection.js";
 import type { MetadataStore } from "./storage/types.js";
@@ -9,16 +8,12 @@ export type DataConnectorKind = "metadata" | "local" | "http" | "mcp" | "tap" | 
 export type DataAssetStatus = "ready" | "metadata_only" | "unavailable";
 /** Project-facing lifecycle state. Engineering availability remains in `status`. */
 export type DataAssetProjectState = "public_reference" | "acquired" | "processed" | "deliverable" | "planned";
+/**
+ * Asset origin is intentionally user-only at runtime. The legacy values are
+ * accepted while reading old metadata so a cutover never rewrites historical
+ * rows, but they are never returned by the Atlas data catalog.
+ */
 export type DataAssetOrigin = "builtin" | "user" | "override";
-
-export interface DataAssetSurveyBinding {
-  source: "connector" | "asset" | "unassigned" | "conflict";
-  surveyId?: string;
-  releaseId?: string;
-  connectorIds: string[];
-  connectorLocationKeys: string[];
-  message?: string;
-}
 
 export interface DataAssetSource {
   label: string;
@@ -57,7 +52,6 @@ export interface DataAssetRecord {
   description: string;
   surveyId?: string;
   releaseId?: string;
-  ownershipSnapshotVersion?: 1;
   sourceRelativePath?: string;
   product: string;
   kind: DataAssetKind;
@@ -78,8 +72,6 @@ export interface DataAssetRecord {
   origin: DataAssetOrigin;
   createdAt: string;
   updatedAt: string;
-  /** Response-only effective ownership; not persisted by the registry. */
-  surveyBinding?: DataAssetSurveyBinding;
 }
 
 export interface DataAssetRegistrationInput {
@@ -87,7 +79,6 @@ export interface DataAssetRegistrationInput {
   description?: string;
   surveyId?: string;
   releaseId?: string;
-  ownershipSnapshotVersion?: 1;
   sourceRelativePath?: string;
   product?: string;
   kind: DataAssetKind;
@@ -302,9 +293,6 @@ function validateInput(input: DataAssetRegistrationInput): DataAssetRegistration
   const surveyId = textValue(value.surveyId, "surveyId", 120, false) || undefined;
   const releaseId = textValue(value.releaseId, "releaseId", 120, false) || undefined;
   if (releaseId && !surveyId) throw new RangeError("releaseId requires surveyId");
-  if (value.ownershipSnapshotVersion !== undefined && value.ownershipSnapshotVersion !== 1) {
-    throw new RangeError("ownershipSnapshotVersion must be 1");
-  }
   const sourceRelativePath = value.sourceRelativePath === undefined
     ? undefined
     : normalizeLocalSourceRelativePath(value.sourceRelativePath, "sourceRelativePath");
@@ -313,7 +301,6 @@ function validateInput(input: DataAssetRegistrationInput): DataAssetRegistration
     description: textValue(value.description, "description", 500, false) || undefined,
     surveyId,
     releaseId,
-    ...(value.ownershipSnapshotVersion === 1 ? { ownershipSnapshotVersion: 1 } : {}),
     ...(sourceRelativePath === undefined ? {} : { sourceRelativePath }),
     product: textValue(value.product, "product", 160, false) || undefined,
     kind: value.kind as DataAssetKind,
@@ -336,9 +323,6 @@ function validateInput(input: DataAssetRegistrationInput): DataAssetRegistration
 }
 
 export function normalizeDataAssetRecord(entry: DataAssetRecord, origin: DataAssetOrigin): DataAssetRecord {
-  if (entry.ownershipSnapshotVersion !== undefined && entry.ownershipSnapshotVersion !== 1) {
-    throw new RangeError("ownershipSnapshotVersion must be 1");
-  }
   const sourceRelativePath = entry.sourceRelativePath === undefined
     ? undefined
     : normalizeLocalSourceRelativePath(entry.sourceRelativePath, "sourceRelativePath");
@@ -358,7 +342,6 @@ export function normalizeDataAssetRecord(entry: DataAssetRecord, origin: DataAss
     sources: Array.isArray(entry.sources) ? entry.sources : [],
     connectorIds: Array.isArray(entry.connectorIds) ? [...new Set(entry.connectorIds)] : [],
     connectorLocationKeys: Array.isArray(entry.connectorLocationKeys) ? [...new Set(entry.connectorLocationKeys)] : [],
-    ...(entry.ownershipSnapshotVersion === 1 ? { ownershipSnapshotVersion: 1 } : {}),
     ...(sourceRelativePath === undefined ? {} : { sourceRelativePath }),
     ...(scanSpec === undefined ? {} : { scanSpec }),
     projectStates: projectStates.length ? projectStates : ["planned"],
@@ -371,8 +354,8 @@ export function normalizeDataAssetRecord(entry: DataAssetRecord, origin: DataAss
 export function normalizePersistedDataAsset(entry: unknown): DataAssetRecord | undefined {
   if (!entry || typeof entry !== "object") throw new Error("data catalog state contains an invalid record");
   const record = entry as DataAssetRecord;
-  if (record.origin === "builtin") return undefined;
-  if (record.origin !== "user" && record.origin !== "override") throw new Error("data catalog state contains an invalid origin");
+  if (record.origin === "builtin" || record.origin === "override") return undefined;
+  if (record.origin !== "user") throw new Error("data catalog state contains an invalid origin");
   if (typeof record.id !== "string" || !record.id || typeof record.createdAt !== "string" || typeof record.updatedAt !== "string") {
     throw new Error("data catalog state contains an invalid record");
   }
@@ -386,36 +369,19 @@ export function normalizePersistedDataAsset(entry: unknown): DataAssetRecord | u
 }
 
 export class DataCatalogRegistry {
-  readonly #bootstrapPath: string;
   readonly #store: MetadataStore;
-  #builtin: DataAssetRecord[] = [];
 
-  constructor(bootstrapPath: string, store: MetadataStore) {
-    this.#bootstrapPath = bootstrapPath;
+  constructor(store: MetadataStore) {
     this.#store = store;
   }
 
-  async initialize(): Promise<void> {
-    let builtin: unknown = [];
-    try {
-      builtin = JSON.parse(await readFile(this.#bootstrapPath, "utf8")) as unknown;
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-    }
-    if (!Array.isArray(builtin)) throw new Error("data catalog bootstrap must be an array");
-    this.#builtin = builtin.map((entry) => normalizeDataAssetRecord(entry as DataAssetRecord, "builtin"));
-  }
+  async initialize(): Promise<void> {}
 
   async list(): Promise<DataAssetRecord[]> {
     const persisted = (await this.#store.listDataAssets())
       .map(normalizePersistedDataAsset)
-      .filter((entry): entry is DataAssetRecord => entry !== undefined);
-    const overrides = new Map(persisted.filter((entry) => entry.origin === "override").map((entry) => [entry.id, entry]));
-    const builtin = this.#builtin.map((entry) => {
-      const override = overrides.get(entry.id);
-      return override ? { ...entry, ...override, origin: "builtin" as const } : entry;
-    });
-    return [...builtin, ...persisted.filter((entry) => entry.origin === "user")].map((entry) => structuredClone(entry));
+      .filter((entry): entry is DataAssetRecord => entry?.origin === "user");
+    return persisted.map((entry) => structuredClone(entry));
   }
 
   async get(id: string): Promise<DataAssetRecord> {
@@ -433,7 +399,6 @@ export class DataCatalogRegistry {
       description: value.description ?? "User-registered data asset. Metadata is stored here; source rows remain at the registered connector URI.",
       surveyId: value.surveyId,
       releaseId: value.releaseId,
-      ...(value.ownershipSnapshotVersion === 1 ? { ownershipSnapshotVersion: 1 } : {}),
       ...(value.sourceRelativePath === undefined ? {} : { sourceRelativePath: value.sourceRelativePath }),
       product: value.product ?? value.name,
       kind: value.kind,
@@ -468,18 +433,16 @@ export class DataCatalogRegistry {
 
   async update(id: string, input: DataAssetRegistrationInput): Promise<DataAssetRecord> {
     const value = validateInput(input);
-    const builtin = this.#builtin.find((entry) => entry.id === id);
     const persistedEntry = await this.#store.getDataAsset(id);
     const persisted = persistedEntry ? normalizePersistedDataAsset(persistedEntry) : undefined;
-    if (!persisted && !builtin) throw new Error(`Data asset not found: ${id}`);
-    const current = persisted?.origin === "user" ? persisted : await this.get(id);
+    if (!persisted || persisted.origin !== "user") throw new Error(`Data asset not found: ${id}`);
+    const current = persisted;
     const updated: DataAssetRecord = {
       ...current,
       name: value.name,
       description: value.description ?? current.description,
       surveyId: value.surveyId,
       releaseId: value.releaseId,
-      ...(value.ownershipSnapshotVersion === 1 || current.ownershipSnapshotVersion === 1 ? { ownershipSnapshotVersion: 1 } : {}),
       ...(value.sourceRelativePath === undefined
         ? (current.sourceRelativePath === undefined ? {} : { sourceRelativePath: current.sourceRelativePath })
         : { sourceRelativePath: value.sourceRelativePath }),
@@ -502,16 +465,13 @@ export class DataCatalogRegistry {
       footprintIds: value.footprintIds ?? [],
       updatedAt: new Date().toISOString(),
     };
-    await this.#store.putDataAsset({ ...updated, origin: persisted?.origin === "user" ? "user" : "override" });
-    return structuredClone(persisted?.origin === "user" ? updated : { ...updated, origin: "builtin" as const });
+    await this.#store.putDataAsset({ ...updated, origin: "user" });
+    return structuredClone(updated);
   }
 
   async remove(id: string): Promise<void> {
     const record = await this.#store.getDataAsset(id);
-    if (!record || record.origin !== "user") {
-      if (this.#builtin.some((entry) => entry.id === id)) throw new RangeError("built-in data assets are read-only");
-      throw new Error(`Data asset not found: ${id}`);
-    }
+    if (!record || record.origin !== "user") throw new Error(`Data asset not found: ${id}`);
     await this.#store.deleteDataAsset(id);
   }
 }

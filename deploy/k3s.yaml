@@ -151,7 +151,7 @@ spec:
         fsGroupChangePolicy: OnRootMismatch
       containers:
         - name: mcp
-          image: crpi-wixjy6gci86ms14e.cn-hongkong.personal.cr.aliyuncs.com/ay-dev/astro-data-workspace-mcp:0.10.38-20260821-atlas-cleanup4
+          image: crpi-wixjy6gci86ms14e.cn-hongkong.personal.cr.aliyuncs.com/ay-dev/astro-data-workspace-mcp:0.10.38-20260821-public-release-layer-fix2
           imagePullPolicy: Always
           ports:
             - name: http
@@ -163,8 +163,8 @@ spec:
                   fieldPath: metadata.namespace
             - name: NODE_EXTRA_CA_CERTS
               value: /var/run/secrets/kubernetes.io/serviceaccount/ca.crt
-            - name: ASTRO_WORKSPACE_STATE
-              value: /state/registry.json
+            - name: ASTRO_STATE_ROOT
+              value: /state
             - name: ASTRO_DATA_WAREHOUSE_ENABLED
               value: "true"
             - name: ASTRO_LOCAL_SCAN_ENABLED
@@ -179,14 +179,8 @@ spec:
               value: /state/connectors.json
             - name: ASTRO_CONNECTOR_RUN_STATE
               value: /state/connector-ingest-runs.json
-            - name: ASTRO_ALLOWED_ROOTS
-              value: /catalogs:/data/local
             - name: ASTRO_LOCAL_CONNECTOR_ROOTS
               value: /data/local:/catalogs
-            - name: ASTRO_VOLUME_ROOT
-              value: /volumes
-            - name: ASTRO_ATLAS_ROOT
-              value: /volumes
             - name: ASTRO_WORKFLOW_ROOT
               value: /state/workflow-runs
             - name: ASTRO_RESOURCE_CATALOG_URL
@@ -204,8 +198,6 @@ spec:
               value: /resource-packages
             - name: ASTRO_RESOURCE_PACKAGE_STATE
               value: /state/resource-package-state.json
-            - name: ASTRO_CONNECTOR_BOOTSTRAP
-              value: /app/bootstrap/connectors.json
             - name: ASTRO_CATALOG_MCP_URL
               value: http://eva24002-entrance.lab.zverse.space:30082/mcp
             - name: ASTRO_CATALOG_MCP_TIMEOUT_MS
@@ -276,14 +268,6 @@ spec:
               mountPath: /resource-packages
             - name: tmp
               mountPath: /tmp
-            - name: cosmos-clean-v2
-              mountPath: /catalogs/cosmos-clean-v2
-              subPath: catalogs/cosmos-clean-v2
-              readOnly: true
-            - name: redshift-volumes
-              mountPath: /volumes
-              subPath: volumes
-              readOnly: true
             - name: local-data
               mountPath: /data/local
               readOnly: true
@@ -296,12 +280,6 @@ spec:
             claimName: resource-packages
         - name: tmp
           emptyDir: {}
-        - name: cosmos-clean-v2
-          persistentVolumeClaim:
-            claimName: workspace-metadata
-        - name: redshift-volumes
-          persistentVolumeClaim:
-            claimName: workspace-metadata
         - name: local-data
           nfs:
             server: 10.15.49.212

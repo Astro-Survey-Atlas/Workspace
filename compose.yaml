@@ -17,13 +17,11 @@ services:
       ASTRO_LOCAL_SCAN_ENABLED: "false"
       ASTRO_METADATA_STORE: sqlite
       ASTRO_SQLITE_PATH: /state/workspace.sqlite
-      ASTRO_WORKSPACE_STATE: /state/registry.json
+      ASTRO_STATE_ROOT: /state
       ASTRO_DATA_CATALOG_STATE: /state/data-catalog.json
       ASTRO_SURVEY_REGISTRY_STATE: /state/survey-registrations.json
       ASTRO_CONNECTOR_STATE: /state/connectors.json
       ASTRO_CONNECTOR_RUN_STATE: /state/connector-ingest-runs.json
-      ASTRO_CONNECTOR_BOOTSTRAP: /app/bootstrap/connectors.json
-      ASTRO_ALLOWED_ROOTS: /state
       ASTRO_WORKFLOW_ROOT: /state/workflow-runs
       ASTRO_RESOURCE_PACKAGE_ROOT: /state/resource-packages
       ASTRO_RESOURCE_PACKAGE_STATE: /state/resource-package-state.json

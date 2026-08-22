@@ -3,6 +3,7 @@ import {
   LOCAL_OBJECT_INDEX,
   type LocalScanDocument,
 } from "./local-scan.js";
+import { COVERAGE_ROLES, DATA_ORIGINS, SOURCE_TIERS, type CoverageDataOrigin, type CoverageRole, type CoverageSourceTier } from "./assets-core.js";
 
 export const ASTRO_OBJECT_INDEX = LOCAL_OBJECT_INDEX;
 export const ASTRO_COVERAGE_INDEX = LOCAL_COVERAGE_INDEX;
@@ -95,9 +96,9 @@ export interface AstroCoverageFact {
   asset_id: string;
   source_file_id?: string;
   scan_run_id?: string;
-  coverage_role?: "image_extent" | "object_presence" | "footprint_extent";
-  data_origin?: "observed" | "simulated" | "derived" | "unknown";
-  source_tier?: "user_file_derived" | "survey_authoritative" | "catalog_derived" | "unknown";
+  coverage_role?: CoverageRole;
+  data_origin?: CoverageDataOrigin;
+  source_tier?: CoverageSourceTier;
   max_order?: number;
   query_order?: number;
   preview_order?: number;
@@ -643,14 +644,14 @@ function coverageFactFromHit(hit: ElasticsearchSearchHit, targetNside: number): 
   const product = text("product");
   const modality = text("modality");
   if (!assetId || !survey || !release || !product || !modality) return undefined;
-  const coverageRole = source.coverage_role === "image_extent" || source.coverage_role === "object_presence" || source.coverage_role === "footprint_extent"
-    ? source.coverage_role
+  const coverageRole = (COVERAGE_ROLES as readonly unknown[]).includes(source.coverage_role)
+    ? source.coverage_role as CoverageRole
     : undefined;
-  const dataOrigin = source.data_origin === "observed" || source.data_origin === "simulated" || source.data_origin === "derived" || source.data_origin === "unknown"
-    ? source.data_origin
+  const dataOrigin = (DATA_ORIGINS as readonly unknown[]).includes(source.data_origin)
+    ? source.data_origin as CoverageDataOrigin
     : undefined;
-  const sourceTier = source.source_tier === "user_file_derived" || source.source_tier === "survey_authoritative" || source.source_tier === "catalog_derived" || source.source_tier === "unknown"
-    ? source.source_tier
+  const sourceTier = (SOURCE_TIERS as readonly unknown[]).includes(source.source_tier)
+    ? source.source_tier as CoverageSourceTier
     : undefined;
   const maxOrder = typeof source.max_order === "number" && Number.isSafeInteger(source.max_order) ? source.max_order : undefined;
   const queryOrder = typeof source.query_order === "number" && Number.isSafeInteger(source.query_order) ? source.query_order : undefined;

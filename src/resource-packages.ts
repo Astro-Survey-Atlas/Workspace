@@ -6,7 +6,9 @@ import { pipeline } from "node:stream/promises";
 
 import yauzl from "yauzl";
 
+import { COVERAGE_ROLES, DATA_ORIGINS, SOURCE_TIERS } from "./assets-core.js";
 import { normalizeSurveyFootprintManifest, type SurveyFootprintManifest } from "./survey-footprints.js";
+import type { ReleaseKind, SurveyModality, SurveyRecord, SurveyRelease } from "./survey-registry.js";
 
 const CATALOG_SCHEMA_VERSION = 3;
 const PACKAGE_SCHEMA_VERSION = 3;
@@ -100,19 +102,191 @@ export interface PublicResourcePackage extends ResourcePackageCatalogEntry {
   availableReleaseIds: string[];
   active: boolean;
   status: ResourcePackageStatus;
+  /** Read-only Assets survey registry projection; does not imply a package layer exists. */
+  publicReleases?: AssetsSurveyRelease[];
+}
+
+export type AssetsProductStatus = "acquired" | "overview_only" | "awaiting_geometry" | "not_applicable";
+
+export interface AssetsSurveyProduct {
+  name: string;
+  modality: SurveyModality;
+  description: string;
+  status: AssetsProductStatus;
+  sourceUrl?: string;
+  geometrySourceUrl?: string;
+  reason?: string;
+  manualStep?: string;
+}
+
+export interface AssetsSurveyRelease {
+  id: string;
+  label: string;
+  kind: ReleaseKind;
+  releasedYear?: number;
+  modalities: SurveyModality[];
+  products: AssetsSurveyProduct[];
+}
+
+export interface AssetsSurveyRecord {
+  id: string;
+  name: string;
+  mission: string;
+  color: string;
+  description: string;
+  modalities: SurveyModality[];
+  releases: AssetsSurveyRelease[];
+}
+
+const RESOURCE_SURVEY_COLORS = ["#45d7c6", "#e4b44c", "#d96b67", "#6ca6d9", "#78b96c", "#b77bd1", "#cf8a4c", "#5fb0a8"] as const;
+const RESOURCE_SURVEY_MODALITIES: readonly SurveyModality[] = ["imaging", "spectroscopy", "photometry", "time-domain", "integral-field", "ultraviolet", "infrared", "catalog", "simulation"];
+
+function resourceSurveyColor(id: string): string {
+  const hash = [...id].reduce((value, character) => ((value * 31) + character.charCodeAt(0)) | 0, 7);
+  return RESOURCE_SURVEY_COLORS[Math.abs(hash) % RESOURCE_SURVEY_COLORS.length]!;
+}
+
+function resourceSurveyModalities(values: readonly string[]): SurveyModality[] {
+  const result = [...new Set(values.filter((value): value is SurveyModality => RESOURCE_SURVEY_MODALITIES.includes(value as SurveyModality)))];
+  return result.length ? result : ["catalog"];
+}
+
+const ASSETS_PRODUCT_STATUSES: readonly AssetsProductStatus[] = ["acquired", "overview_only", "awaiting_geometry", "not_applicable"];
+const SURVEY_RELEASE_KINDS: readonly ReleaseKind[] = ["public_release", "quick_release", "early_release", "science_results", "archive_snapshot", "planned"];
+
+function assetsSurveyModalities(value: unknown, label: string): SurveyModality[] {
+  if (!Array.isArray(value)) throw new Error(`${label} is invalid`);
+  const result = [...new Set(value.filter((entry): entry is SurveyModality => RESOURCE_SURVEY_MODALITIES.includes(entry as SurveyModality)))];
+  if (!result.length) throw new Error(`${label} is invalid`);
+  return result;
+}
+
+function optionalHttpText(value: unknown, label: string): string | undefined {
+  if (value === undefined) return undefined;
+  const result = text(value, label);
+  const parsed = new URL(result);
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") throw new Error(`${label} must use HTTP or HTTPS`);
+  return result;
+}
+
+function parseAssetsSurveyCatalog(value: unknown): AssetsSurveyRecord[] {
+  const document = object(value, "Assets survey catalog");
+  if (document.schemaVersion !== 1 || !Array.isArray(document.surveys)) throw new Error("Assets survey catalog has an unsupported schema");
+  return document.surveys.map((entry, surveyIndex) => {
+    const survey = object(entry, `Assets survey ${surveyIndex}`);
+    const releases = Array.isArray(survey.releases) ? survey.releases.map((releaseValue, releaseIndex) => {
+      const release = object(releaseValue, `Assets survey ${surveyIndex} release ${releaseIndex}`);
+      const products = Array.isArray(release.products) ? release.products.map((productValue, productIndex) => {
+        const product = object(productValue, `Assets survey ${surveyIndex} release ${releaseIndex} product ${productIndex}`);
+        const status = text(product.status, "Assets survey product status", 40) as AssetsProductStatus;
+        if (!ASSETS_PRODUCT_STATUSES.includes(status)) throw new Error("Assets survey product status is invalid");
+        const sourceUrl = optionalHttpText(product.sourceUrl, "Assets survey product source URL");
+        const geometrySourceUrl = optionalHttpText(product.geometrySourceUrl, "Assets survey product geometry URL");
+        return {
+          name: text(product.name, "Assets survey product name", 200),
+          modality: assetsSurveyModalities([product.modality], "Assets survey product modality")[0]!,
+          description: text(product.description, "Assets survey product description", 4000),
+          status,
+          ...(sourceUrl === undefined ? {} : { sourceUrl }),
+          ...(geometrySourceUrl === undefined ? {} : { geometrySourceUrl }),
+          ...(product.reason === undefined ? {} : { reason: text(product.reason, "Assets survey product reason", 2000) }),
+          ...(product.manualStep === undefined ? {} : { manualStep: text(product.manualStep, "Assets survey product manual step", 2000) }),
+        } satisfies AssetsSurveyProduct;
+      }) : [];
+      if (!products.length) throw new Error(`Assets survey ${surveyIndex} release ${releaseIndex} has no products`);
+      const kindValue = text(release.kind, "Assets survey release kind", 40);
+      const kind = SURVEY_RELEASE_KINDS.includes(kindValue as ReleaseKind) ? kindValue as ReleaseKind : "planned";
+      const releasedYear = release.releasedYear === undefined ? undefined : Number(release.releasedYear);
+      if (releasedYear !== undefined && (!Number.isSafeInteger(releasedYear) || releasedYear < 1900 || releasedYear > 3000)) throw new Error("Assets survey release year is invalid");
+      return {
+        id: text(release.id, "Assets survey release id", 160),
+        label: text(release.label, "Assets survey release label", 240),
+        kind,
+        ...(releasedYear === undefined ? {} : { releasedYear }),
+        modalities: assetsSurveyModalities(release.modalities, "Assets survey release modalities"),
+        products,
+      } satisfies AssetsSurveyRelease;
+    }) : [];
+    if (!releases.length) throw new Error(`Assets survey ${surveyIndex} has no releases`);
+    return {
+      id: text(survey.id, "Assets survey id", 120),
+      name: text(survey.name, "Assets survey name", 200),
+      mission: text(survey.mission, "Assets survey mission", 300),
+      color: text(survey.color, "Assets survey color", 32),
+      description: text(survey.description, "Assets survey description", 5000),
+      modalities: assetsSurveyModalities(survey.modalities, "Assets survey modalities"),
+      releases,
+    } satisfies AssetsSurveyRecord;
+  });
+}
+
+function resourceSurveyRelease(id: string, label: string, record: PublicResourcePackage, sourceUrl: string): SurveyRelease {
+  const modalities = resourceSurveyModalities(record.modalities);
+  return {
+    id,
+    label,
+    kind: "public_release",
+    availability: "available",
+    modalities,
+    products: record.productTypes.map((name) => ({ name, modality: modalities[0]!, description: record.description })),
+    coverage: { status: "verified", summary: record.description, sourceUrl },
+  };
+}
+
+function assetsReleaseToSurveyRelease(release: AssetsSurveyRelease, fallbackSourceUrl: string): SurveyRelease {
+  const statuses = new Set(release.products.map((product) => product.status));
+  const acquired = statuses.has("acquired") && !statuses.has("awaiting_geometry");
+  const overview = statuses.has("overview_only") && !acquired && !statuses.has("awaiting_geometry");
+  const sourceUrl = release.products.find((product) => product.sourceUrl)?.sourceUrl
+    ?? release.products.find((product) => product.geometrySourceUrl)?.geometrySourceUrl
+    ?? fallbackSourceUrl;
+  return {
+    id: release.id,
+    label: release.label,
+    kind: release.kind,
+    availability: acquired ? "available" : "metadata_only",
+    ...(release.releasedYear === undefined ? {} : { releasedYear: release.releasedYear }),
+    modalities: release.modalities,
+    products: release.products.map(({ name, modality, description }) => ({ name, modality, description })),
+    coverage: {
+      status: acquired ? "verified" : overview ? "summary_only" : "pending",
+      summary: release.products.map((product) => product.description).join(" "),
+      sourceUrl,
+    },
+  };
+}
+
+/** Read-only display metadata for public layers shipped in Assets v3 packages. */
+export function resourcePackageSurveyRecords(packages: readonly PublicResourcePackage[]): SurveyRecord[] {
+  const groups = new Map<string, PublicResourcePackage[]>();
+  for (const record of packages) groups.set(record.surveyId, [...(groups.get(record.surveyId) ?? []), record]);
+  return [...groups].map(([surveyId, records]) => {
+    const first = records[0]!;
+    const releases = new Map<string, SurveyRelease>();
+    for (const record of records) {
+      const metadata = new Map((record.publicReleases ?? []).map((release) => [release.id, release]));
+      for (const release of metadata.values()) releases.set(release.id, assetsReleaseToSurveyRelease(release, record.archiveUrl));
+      for (const releaseId of record.releases) if (!releases.has(releaseId)) {
+        const source = record.sources.find((entry) => entry.releaseId === releaseId);
+        releases.set(releaseId, resourceSurveyRelease(releaseId, record.releaseLabels[releaseId] ?? releaseId, record, source?.url ?? record.archiveUrl));
+      }
+    }
+    return {
+      id: surveyId,
+      name: first.name,
+      mission: [...new Set(records.flatMap((record) => record.facilities))].join(" / ") || first.name,
+      color: resourceSurveyColor(surveyId),
+      description: records.map((record) => record.description).filter((value, index, all) => all.indexOf(value) === index).join(" "),
+      modalities: resourceSurveyModalities(records.flatMap((record) => record.modalities)),
+      origin: "public",
+      releases: [...releases.values()],
+    };
+  });
 }
 
 export interface ResourcePackageLoad {
   packageId: string;
   releaseIds: string[];
-}
-
-export interface LocalResourcePackage {
-  id: string;
-  version: string;
-  surveyId: string;
-  userAssetId: string;
-  footprints: SurveyFootprintManifest;
 }
 
 export interface ResourcePackageJob {
@@ -134,6 +308,8 @@ export interface ResourcePackageManagerOptions {
   statePath: string;
   /** Parent of assets-snapshots/ and assets-current/. */
   snapshotRoot?: string;
+  /** Optional Assets survey metadata endpoint; otherwise derived from an HTTP catalog URL. */
+  surveyCatalogUrl?: string;
   /** Optional allow-list for remote catalog origins. An empty list allows any HTTP(S) origin. */
   allowedOrigins?: readonly string[];
   maxArchiveBytes?: number;
@@ -170,6 +346,13 @@ function normalizeAllowedOrigins(origins: readonly string[] | undefined): Set<st
     if (parsed.protocol !== "http:" && parsed.protocol !== "https:") throw new Error(`Unsupported resource catalog origin: ${origin}`);
     return parsed.origin;
   }));
+}
+
+function deriveSurveyCatalogUrl(catalogUrl: URL): URL | undefined {
+  if (catalogUrl.protocol === "file:") return undefined;
+  const marker = "/resource-packages/catalog.json";
+  const basePath = catalogUrl.pathname.endsWith(marker) ? catalogUrl.pathname.slice(0, -marker.length) : "/api/v1";
+  return new URL(`${basePath}/surveys`, catalogUrl.origin);
 }
 
 export function validateResourceCatalogUrl(value: string, allowedOrigins: readonly string[] = [], allowFile = true): URL {
@@ -297,6 +480,9 @@ function parseManifest(value: unknown): ResourcePackageManifest {
     const sha256 = text(layer.sha256, `Resource package layer ${index} SHA-256`, 64).toLowerCase();
     if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(layerId) || layerPath !== `mocs/${layerId}.moc.fits` || !Number.isSafeInteger(sizeBytes) || Number(sizeBytes) <= 0 || !/^[a-f0-9]{64}$/.test(sha256)) throw new Error(`Resource package layer ${index} is invalid`);
     for (const field of ["surveyId", "coverageRole", "dataOrigin", "sourceTier", "modality", "releaseId"]) text(layer[field], `Resource package layer ${index} ${field}`, 160);
+    if (!(COVERAGE_ROLES as readonly unknown[]).includes(layer.coverageRole)) throw new Error(`Resource package layer ${index} has an invalid coverageRole`);
+    if (!(DATA_ORIGINS as readonly unknown[]).includes(layer.dataOrigin)) throw new Error(`Resource package layer ${index} has an invalid dataOrigin`);
+    if (!(SOURCE_TIERS as readonly unknown[]).includes(layer.sourceTier)) throw new Error(`Resource package layer ${index} has an invalid sourceTier`);
     return {
       layerId,
       surveyId: text(layer.surveyId, `Resource package layer ${index} survey id`, 80),
@@ -311,7 +497,9 @@ function parseManifest(value: unknown): ResourcePackageManifest {
     };
   }) : [];
   if (layers.length === 0 || layers.length > MAX_ZIP_ENTRIES || new Set(layers.map((layer) => layer.layerId)).size !== layers.length || new Set(layers.map((layer) => layer.path)).size !== layers.length) throw new Error("Resource package layers are invalid");
-  return { schemaVersion: PACKAGE_SCHEMA_VERSION, version, id, surveyId: text(manifest.surveyId, "Resource package survey id", 80), files, layers };
+  const surveyId = text(manifest.surveyId, "Resource package survey id", 80);
+  if (layers.some((layer) => layer.surveyId !== surveyId)) throw new Error("Resource package layers do not match the declared survey");
+  return { schemaVersion: PACKAGE_SCHEMA_VERSION, version, id, surveyId, files, layers };
 }
 
 function parseState(value: unknown): ResourcePackageState {
@@ -461,6 +649,8 @@ async function validateManifestFiles(stagingPath: string, manifest: ResourcePack
 
 export class ResourcePackageManager {
   #catalogUrl: URL;
+  #surveyCatalogUrl?: URL;
+  readonly #surveyCatalogUrlExplicit: boolean;
   readonly #root: string;
   readonly #statePath: string;
   readonly #maxArchiveBytes: number;
@@ -477,10 +667,16 @@ export class ResourcePackageManager {
   #catalogError?: Error;
   #catalogSha256?: string;
   #catalogSyncedAt?: string;
+  #surveyCatalog: AssetsSurveyRecord[] = [];
+  #surveyCatalogBytes?: Buffer;
 
   constructor(options: ResourcePackageManagerOptions) {
     this.#allowedOrigins = normalizeAllowedOrigins(options.allowedOrigins);
     this.#catalogUrl = validateResourceCatalogUrl(options.catalogUrl, [...this.#allowedOrigins]);
+    this.#surveyCatalogUrlExplicit = options.surveyCatalogUrl !== undefined;
+    this.#surveyCatalogUrl = options.surveyCatalogUrl
+      ? validateResourceCatalogUrl(options.surveyCatalogUrl, [...this.#allowedOrigins])
+      : deriveSurveyCatalogUrl(this.#catalogUrl);
     this.#root = options.root;
     this.#statePath = options.statePath;
     this.#maxArchiveBytes = options.maxArchiveBytes ?? MAX_ARCHIVE_BYTES;
@@ -498,6 +694,7 @@ export class ResourcePackageManager {
       this.#catalogError = undefined;
       this.#catalogSha256 = createHash("sha256").update(catalogBytes).digest("hex");
       this.#catalogSyncedAt = new Date().toISOString();
+      if (!await this.#fetchSurveyMetadata()) await this.#loadSurveySnapshot();
       if (this.#snapshotRoot) await this.#writeSnapshot(catalogBytes);
     } catch (error) {
       this.#catalogError = error instanceof Error ? error : new Error(String(error));
@@ -505,6 +702,7 @@ export class ResourcePackageManager {
         try {
           const snapshotBytes = await readFile(path.join(this.#snapshotRoot, "assets-current", "catalog.json"));
           catalog = parseCatalog(JSON.parse(snapshotBytes.toString("utf8")) as unknown);
+          await this.#loadSurveySnapshot();
           this.#catalogError = undefined;
           this.#catalogSha256 = createHash("sha256").update(snapshotBytes).digest("hex");
           this.#catalogSyncedAt = undefined;
@@ -546,6 +744,7 @@ export class ResourcePackageManager {
 
   setCatalogUrl(value: string): string {
     this.#catalogUrl = validateResourceCatalogUrl(value, [...this.#allowedOrigins], false);
+    if (!this.#surveyCatalogUrlExplicit) this.#surveyCatalogUrl = deriveSurveyCatalogUrl(this.#catalogUrl);
     return this.#catalogUrl.href;
   }
 
@@ -574,6 +773,8 @@ export class ResourcePackageManager {
         }
         await this.#readFootprints(installed);
       }
+      const surveyMetadata = await this.#fetchSurveyMetadata();
+      if (!surveyMetadata && !this.#surveyCatalogBytes) await this.#loadSurveySnapshot();
       if (this.#snapshotRoot) await this.#writeSnapshot(catalogBytes);
     } catch (error) {
       throw new ResourceCatalogSyncError(error instanceof Error ? error.message : String(error));
@@ -583,6 +784,32 @@ export class ResourcePackageManager {
     this.#catalogSha256 = createHash("sha256").update(catalogBytes).digest("hex");
     this.#catalogSyncedAt = new Date().toISOString();
     return this.catalogStatus();
+  }
+
+  async #fetchSurveyMetadata(): Promise<boolean> {
+    if (!this.#surveyCatalogUrl) return false;
+    try {
+      const bytes = await readUrl(this.#surveyCatalogUrl, this.#downloadTimeoutMs);
+      this.#surveyCatalog = parseAssetsSurveyCatalog(JSON.parse(bytes.toString("utf8")) as unknown);
+      this.#surveyCatalogBytes = bytes;
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  async #loadSurveySnapshot(): Promise<boolean> {
+    if (!this.#snapshotRoot) return false;
+    try {
+      const bytes = await readFile(path.join(this.#snapshotRoot, "assets-current", "surveys.json"));
+      this.#surveyCatalog = parseAssetsSurveyCatalog(JSON.parse(bytes.toString("utf8")) as unknown);
+      this.#surveyCatalogBytes = bytes;
+      return true;
+    } catch {
+      this.#surveyCatalog = [];
+      this.#surveyCatalogBytes = undefined;
+      return false;
+    }
   }
 
   async #writeSnapshot(bytes: Buffer): Promise<void> {
@@ -595,6 +822,11 @@ export class ResourcePackageManager {
     await writeFile(path.join(snapshot, "catalog.json"), bytes, { flag: "wx" }).catch((error: unknown) => {
       if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
     });
+    if (this.#surveyCatalogBytes) {
+      await writeFile(path.join(snapshot, "surveys.json"), this.#surveyCatalogBytes, { flag: "wx" }).catch((error: unknown) => {
+        if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+      });
+    }
     const current = path.join(this.#snapshotRoot, "assets-current");
     const temporary = path.join(this.#snapshotRoot, `.assets-current-${process.pid}-${randomUUID()}`);
     await symlink(path.relative(this.#snapshotRoot, snapshot), temporary, "dir");
@@ -636,26 +868,6 @@ export class ResourcePackageManager {
     this.#installing.add(id);
     void this.#runInstall(entry, job);
     return { ...job };
-  }
-
-  /** Validate a v3 package for a user asset without consulting the public catalog. */
-  async importLocal(archivePath: string, userAssetId: string): Promise<LocalResourcePackage> {
-    if (typeof archivePath !== "string" || !archivePath.trim()) throw new RangeError("archivePath is required");
-    if (typeof userAssetId !== "string" || !/^user-[a-zA-Z0-9._-]+$/.test(userAssetId.trim())) throw new RangeError("userAssetId must identify a user asset");
-    const stagingPath = path.join(this.#root, "staging", `local-${randomUUID()}`);
-    await mkdir(stagingPath, { recursive: true });
-    try {
-      const info = await stat(archivePath);
-      if (!info.isFile() || info.size > this.#maxArchiveBytes) throw new RangeError("local resource package archive is invalid");
-      await extractArchive(archivePath, stagingPath, this.#maxExtractedBytes);
-      const manifest = parseManifest(JSON.parse(await readFile(path.join(stagingPath, "resource-package.json"), "utf8")) as unknown);
-      await validateManifestFiles(stagingPath, manifest);
-      const footprints = normalizeSurveyFootprintManifest(JSON.parse(await readFile(path.join(stagingPath, "footprints/survey-footprints.json"), "utf8")) as unknown);
-      if (!footprints.footprints.length || footprints.footprints.some((footprint) => footprint.surveyId !== manifest.surveyId)) throw new Error("Resource package footprints do not match its survey");
-      return { id: manifest.id, version: manifest.version, surveyId: manifest.surveyId, userAssetId: userAssetId.trim(), footprints };
-    } finally {
-      await rm(stagingPath, { recursive: true, force: true });
-    }
   }
 
   job(id: string): ResourcePackageJob {
@@ -850,7 +1062,17 @@ export class ResourcePackageManager {
   #toPublic(entry: ResourcePackageCatalogEntry, installed: InstalledPackage | undefined, update: boolean): PublicResourcePackage {
     const activeReleaseIds = installed ? [...installed.activeReleaseIds] : [];
     const active = activeReleaseIds.length > 0;
-    return { ...entry, installedVersion: installed?.version, installedAt: installed?.installedAt, activeReleaseIds, availableReleaseIds: installed ? this.#availableReleaseIds(installed) : [], active, status: update ? "update_available" : active ? "active" : installed ? "installed" : "not_installed" };
+    const survey = this.#surveyCatalog.find((record) => record.id === entry.surveyId);
+    return {
+      ...entry,
+      installedVersion: installed?.version,
+      installedAt: installed?.installedAt,
+      activeReleaseIds,
+      availableReleaseIds: installed ? this.#availableReleaseIds(installed) : [],
+      active,
+      status: update ? "update_available" : active ? "active" : installed ? "installed" : "not_installed",
+      ...(survey ? { publicReleases: survey.releases } : {}),
+    };
   }
 
   #validateSelection(manifests: SurveyFootprintManifest[]): void {

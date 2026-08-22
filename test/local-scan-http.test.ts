@@ -102,9 +102,6 @@ test("HTTP local CSV scan writes object and coverage documents and serves a mult
     "euclid-1,10.25,-1.5,4.2\n",
     "euclid-2,10.75,-1.25,8.4\n",
   ].join(""), "utf8");
-  const emptyBootstrap = path.join(directory, "empty.json");
-  await writeFile(emptyBootstrap, "[]", "utf8");
-
   const esServer = createServer(async (request, response) => {
     const pathname = request.url ?? "";
     const body = await bodyText(request);
@@ -190,10 +187,8 @@ test("HTTP local CSV scan writes object and coverage documents and serves a mult
       ASTRO_ES_URL: `http://127.0.0.1:${esPort}`,
       ASTRO_METADATA_STORE: "sqlite",
       ASTRO_SQLITE_PATH: path.join(stateRoot, "workspace.sqlite"),
-      ASTRO_WORKSPACE_STATE: path.join(stateRoot, "registry.json"),
-      ASTRO_DATA_CATALOG_BOOTSTRAP: emptyBootstrap,
+      ASTRO_STATE_ROOT: stateRoot,
       ASTRO_DATA_CATALOG_STATE: path.join(stateRoot, "data-catalog.json"),
-      ASTRO_CONNECTOR_BOOTSTRAP: emptyBootstrap,
       ASTRO_CONNECTOR_STATE: path.join(stateRoot, "connectors.json"),
       ASTRO_CONNECTOR_RUN_STATE: path.join(stateRoot, "connector-runs.json"),
       ASTRO_SURVEY_REGISTRY_STATE: path.join(stateRoot, "survey-registrations.json"),
@@ -201,12 +196,9 @@ test("HTTP local CSV scan writes object and coverage documents and serves a mult
       ASTRO_RESOURCE_PACKAGE_STATE: path.join(stateRoot, "resource-package-state.json"),
       ASTRO_RESOURCE_CATALOG_URL: pathToFileURL(path.join(directory, "missing-assets-catalog.json")).href,
       ASTRO_LOCAL_CONNECTOR_ROOTS: sourceRoot,
-      ASTRO_ALLOWED_ROOTS: sourceRoot,
       ASTRO_WORKFLOW_ROOT: path.join(stateRoot, "workflow-runs"),
-      ASTRO_VOLUME_ROOT: path.join(directory, "volumes"),
-      ASTRO_ATLAS_ROOT: path.join(directory, "volumes"),
-      ASTRO_PROVENANCE_ROOT: path.join(directory, "volumes"),
       ASTRO_CATALOG_MCP_URL: "http://127.0.0.1:9/mcp",
+      ASTRO_MOC_CORE_CLI: `${path.resolve("node_modules/.bin/tsx")} ${path.resolve("test/helpers/mock-moc-core-cli.ts")}`,
       NODE_NO_WARNINGS: "1",
     };
     apiProcess = spawn(path.resolve("node_modules/.bin/tsx"), ["src/http-server.ts"], {
@@ -302,6 +294,14 @@ test("HTTP local CSV scan writes object and coverage documents and serves a mult
     assert.equal(completed?.fileCount, 1);
     assert.equal(completed?.documentCount, 2);
 
+    const deleteHistory = await fetch(`${baseUrl}/api/connectors/${encodeURIComponent(connectorId)}/ingest-runs/${encodeURIComponent(submitted.run.id)}`, { method: "DELETE" });
+    assert.equal(deleteHistory.status, 405);
+    const historyAfterDeleteAttempt = await apiJson<{ runs: Array<{ id: string }> }>(
+      baseUrl,
+      `/api/connector-ingest-runs?connectorId=${encodeURIComponent(connectorId)}`,
+    );
+    assert.equal(historyAfterDeleteAttempt.runs.some((run) => run.id === submitted.run.id), true);
+
     const objectDocuments = documents.filter((document) => document.index === "astro_object_index_v1");
     const coverageDocuments = documents.filter((document) => document.index === "astro_coverage_index_v1");
     assert.equal(objectDocuments.length, 2);
@@ -314,7 +314,7 @@ test("HTTP local CSV scan writes object and coverage documents and serves a mult
       method: "POST",
       body: JSON.stringify({
         name: "Second Local HTTP catalog",
-        description: "Second asset for ownership isolation",
+        description: "Second asset for local-label isolation",
         surveyId: "euclid",
         releaseId: "euclid-q1",
         product: "COSMOS prediction catalog",

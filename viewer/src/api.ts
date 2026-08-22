@@ -1,59 +1,7 @@
-export interface RightAscensionInterval {
-  startDeg: number;
-  endDeg: number;
-  wraps: boolean;
-  spanDeg: number;
-}
-
-export interface DatasetSummary {
-  id: string;
-  name: string;
-  profile: {
-    format: "csv";
-    byteSize: number;
-    rowCount: number;
-    columns: Array<{ name: string; type: string; nullCount: number }>;
-    skyCoverage: {
-      raColumn: string;
-      decColumn: string;
-      rightAscension: RightAscensionInterval;
-      decMinDeg: number;
-      decMaxDeg: number;
-      validRows: number;
-      invalidRows: number;
-    } | null;
-  };
-}
-
-export interface SkySummary {
-  coordinateFrame: "ICRS";
-  objectCount: number;
-  invalidRowCount: number;
-  idColumn: string | null;
-  levels: Array<{ nside: number; occupiedCellCount: number; maxCellCount: number }>;
-}
-
-export interface DensityCell {
-  nside: number;
-  pixel: number;
-  count: number;
-  centerRaDeg: number;
-  centerDecDeg: number;
-  vertices: Array<{ raDeg: number; decDeg: number }>;
-}
-
-export interface SkyPoint {
-  id: string;
-  rowIndex: number;
-  raDeg: number;
-  decDeg: number;
-  attributes: Record<string, string>;
-}
-
 import type { AgentSession, ToolDescriptor, WorkflowDefinition, WorkflowRun } from "../../src/workflow";
 import type { DataAssetRecord as CoreDataAssetRecord, DataAssetRegistrationInput as CoreDataAssetRegistrationInput } from "../../src/data-catalog";
 import type { ConnectorCheck, ConnectorCheckInput, ConnectorPublicRecord, ConnectorRegistrationInput } from "../../src/connectors";
-import type { ConnectorIngestRun, ConnectorIngestRunInput } from "../../src/connector-history";
+import type { ConnectorIngestRun } from "../../src/connector-history";
 import type { TagDefinition } from "../../src/tags";
 import type { ReleaseAvailability, ReleaseKind, SurveyCard, SurveyModality, SurveyRecord, SurveyRegistrationInput } from "../../src/survey-registry";
 import type { SurveyFootprintManifest } from "../../src/survey-footprints";
@@ -214,9 +162,8 @@ export const workspaceApi = {
   async capabilities(): Promise<WorkspaceCapabilities> {
     return getJson<WorkspaceCapabilities>("/api/capabilities");
   },
-  async dataAssets(origin?: "user" | "builtin"): Promise<DataAssetRecord[]> {
-    const parameters = origin ? `?${new URLSearchParams({ origin })}` : "";
-    return (await getJson<{ assets: DataAssetRecord[] }>(`/api/data-assets${parameters}`)).assets;
+  async dataAssets(): Promise<DataAssetRecord[]> {
+    return (await getJson<{ assets: DataAssetRecord[] }>("/api/data-assets")).assets;
   },
   async dataAsset(id: string): Promise<DataAssetRecord> {
     return (await getJson<{ asset: DataAssetRecord }>(`/api/data-assets/${encodeURIComponent(id)}`)).asset;
@@ -288,17 +235,17 @@ export const workspaceApi = {
   async executeConnectorScan(id: string): Promise<ConnectorScanRun> {
     return (await postJson<{ run: ConnectorScanRun }>(`/api/connectors/${encodeURIComponent(id)}/scan-runs`, {})).run;
   },
-  async addConnectorRun(id: string, input: ConnectorIngestRunInput): Promise<ConnectorIngestRun> {
-    return (await postJson<{ run: ConnectorIngestRun }>(`/api/connectors/${encodeURIComponent(id)}/ingest-runs`, input)).run;
-  },
-  async datasets(): Promise<DatasetSummary[]> {
-    return (await getJson<{ datasets: DatasetSummary[] }>("/api/datasets")).datasets;
-  },
   async surveys(): Promise<SurveyCard[]> {
     return (await getJson<{ surveys: SurveyCard[] }>("/api/surveys")).surveys;
   },
   async survey(id: string): Promise<SurveyRecord> {
     return (await getJson<{ survey: SurveyRecord }>(`/api/surveys/${encodeURIComponent(id)}`)).survey;
+  },
+  async publicSurveys(): Promise<SurveyCard[]> {
+    return (await getJson<{ surveys: SurveyCard[] }>("/api/public-surveys")).surveys;
+  },
+  async publicSurvey(id: string): Promise<SurveyRecord> {
+    return (await getJson<{ survey: SurveyRecord }>(`/api/public-surveys/${encodeURIComponent(id)}`)).survey;
   },
   async surveyFootprints(): Promise<SurveyFootprintManifest> {
     return getJson<SurveyFootprintManifest>("/api/survey-footprints");
@@ -365,65 +312,6 @@ export const workspaceApi = {
   async addSurveyRelease(surveyId: string, input: SurveyReleaseRegistrationInput): Promise<SurveyRecord> {
     return (await postJson<{ survey: SurveyRecord }>(`/api/surveys/${encodeURIComponent(surveyId)}/releases`, input)).survey;
   },
-  async skySummary(id: string): Promise<{ dataset: DatasetSummary; sky: SkySummary }> {
-    return getJson(`/api/datasets/${encodeURIComponent(id)}/sky/summary`);
-  },
-  async cells(id: string, nside: number): Promise<DensityCell[]> {
-    return (await getJson<{ cells: DensityCell[] }>(`/api/datasets/${encodeURIComponent(id)}/sky/cells?nside=${nside}`)).cells;
-  },
-  async points(id: string): Promise<SkyPoint[]> {
-    return (await getJson<{ points: SkyPoint[] }>(`/api/datasets/${encodeURIComponent(id)}/sky/objects?limit=50000`)).points;
-  },
-  async volumes(): Promise<VolumeManifest[]> {
-    return (await getJson<{ volumes: VolumeManifest[] }>("/api/volumes")).volumes;
-  },
-  async volumePoints(manifest: VolumeManifest): Promise<VolumePointData> {
-    const response = await fetch(manifest.binary.url ?? `/api/volumes/${encodeURIComponent(manifest.id)}/points.bin`, {
-      headers: { Accept: "application/octet-stream" },
-    });
-    if (!response.ok) throw new Error(`Volume point request failed: ${response.status}`);
-    const buffer = await response.arrayBuffer();
-    if (buffer.byteLength !== manifest.binary.byteLength) {
-      throw new Error(`Volume payload is ${buffer.byteLength} bytes; expected ${manifest.binary.byteLength}`);
-    }
-    return decodeVolumePoints(buffer, manifest.pointCount);
-  },
-  async atlases(): Promise<SurveyAtlasManifest[]> {
-    return (await getJson<{ atlases: SurveyAtlasManifest[] }>("/api/atlases")).atlases;
-  },
-  async atlasAngularCells(manifest: SurveyAtlasManifest): Promise<AtlasAngularCellData> {
-    const response = await fetch(manifest.angularBinary.url ?? `/api/atlases/${encodeURIComponent(manifest.id)}/angular-cells.bin`);
-    if (!response.ok) throw new Error(`Atlas angular request failed: ${response.status}`);
-    const buffer = await response.arrayBuffer();
-    if (buffer.byteLength !== manifest.angularBinary.byteLength) throw new Error("Atlas angular payload length mismatch");
-    return decodeAtlasAngularCells(buffer);
-  },
-  async jointCells(
-    atlasId: string,
-    query: {
-      survey: string;
-      nside: number;
-      radialBins: number;
-      radialMinMpc?: number;
-      radialMaxMpc?: number;
-      parentNside?: number;
-      parentPixel?: number;
-    },
-  ): Promise<AtlasJointQueryResponse> {
-    const parameters = new URLSearchParams();
-    Object.entries(query).forEach(([key, value]) => {
-      if (value != null) parameters.set(key, String(value));
-    });
-    return getJson(`/api/atlases/${encodeURIComponent(atlasId)}/joint?${parameters}`);
-  },
-  async refinement(
-    atlasId: string,
-    query: { survey: string; nside: number; radialBins: number; pixel: number; radialBin: number },
-  ): Promise<AtlasRefinementResponse> {
-    return getJson(`/api/atlases/${encodeURIComponent(atlasId)}/refinement?${new URLSearchParams(
-      Object.fromEntries(Object.entries(query).map(([key, value]) => [key, String(value)])),
-    )}`);
-  },
   async tools(): Promise<ToolDescriptor[]> {
     return (await getJson<{ tools: ToolDescriptor[] }>("/api/tools")).tools;
   },
@@ -448,13 +336,6 @@ export const workspaceApi = {
 };
 
 export type {
-  AtlasAngularCellData,
-  AtlasJointCellView,
-  AtlasJointQueryResponse,
-  AtlasRefinementResponse,
-  SurveyAtlasManifest,
-  VolumeManifest,
-  VolumePointData,
   SurveyCard,
   SurveyRecord,
   SurveyRegistrationInput,
@@ -465,12 +346,3 @@ export type {
   ConnectorPublicRecord,
   ConnectorRegistrationInput,
 };
-import {
-  decodeAtlasAngularCells,
-  type AtlasAngularCellData,
-  type AtlasJointCellView,
-  type AtlasJointQueryResponse,
-  type AtlasRefinementResponse,
-  type SurveyAtlasManifest,
-} from "../../src/atlas-format";
-import { decodeVolumePoints, type VolumeManifest, type VolumePointData } from "../../src/volume-format";

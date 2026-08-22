@@ -13,6 +13,7 @@ import {
   stableObjectDocumentId,
   type LocalScanDocument,
 } from "../src/local-scan.js";
+import { mockMocCore } from "./helpers/mock-moc-core.js";
 
 async function withCsv(content: string, callback: (filePath: string) => Promise<void>): Promise<void> {
   const directory = await mkdtemp(path.join(os.tmpdir(), "astro-local-scan-"));
@@ -38,6 +39,7 @@ function options(overrides: Partial<Parameters<typeof scanLocalCsv>[1]> = {}): P
     sourceFileId: "file-a",
     scanRunId: "run-a",
     collectObjects: true,
+    mocCore: mockMocCore,
     ...overrides,
   };
 }

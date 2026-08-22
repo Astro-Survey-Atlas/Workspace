@@ -3,10 +3,6 @@ import { ChevronLeft, ChevronRight, createIcons, Download, Globe2, GripVertical,
 import "./styles.css";
 import {
   workspaceApi,
-  type AtlasAngularCellData,
-  type AtlasJointCellView,
-  type AtlasJointQueryResponse,
-  type AtlasRefinementResponse,
   type AstroOverviewResponse,
   type AstroSpatialSummary,
   type ConnectorScanRun,
@@ -16,9 +12,6 @@ import {
   type DataAssetRecord,
   type WorkspaceAssetCoverageLayer,
   type WorkspaceAssetCoverageResponse,
-  type SurveyAtlasManifest,
-  type VolumeManifest,
-  type VolumePointData,
 } from "./api";
 import { Healpix } from "healpixjs";
 import { cartesianToRaDec, raDecToCartesian } from "./coordinates";
@@ -35,23 +28,17 @@ import {
   type SurveyObjectPoint,
   type WorkspaceCoverageLayer,
 } from "./survey-layer-viewer";
-import type { PublicResourcePackage, ResourceCatalogStatus } from "../../src/resource-packages";
+import type { AssetsSurveyRelease, PublicResourcePackage, ResourceCatalogStatus } from "../../src/resource-packages";
 import type { SurveyModality, SurveyRegistrationInput } from "../../src/survey-registry";
-import {
-  VolumeViewer,
-  type JointCellSelection,
-  type VolumeSelection,
-  type VolumeViewState,
-} from "./volume-viewer";
 import { WorkflowPanel } from "./workflow-panel";
 import { DataCatalogPanel } from "./data-catalog-panel";
 import { ConnectorPanel, type ConnectorMetrics } from "./connector-panel";
 import { ResourcePackagePanel, type ResourcePackageSelectionCallbacks } from "./resource-package-panel";
 import { AladinExplorer, type AladinAssetTarget, type AladinExplorerSnapshot, type AladinExplorerStatus } from "./aladin-explorer";
 import { normalizeLayerOrder } from "./layer-order";
+import { notifyWorkspace, notifyWorkspaceError } from "./notifications";
 
-type ViewMode = "catalog" | "packages" | "connectors" | "layers" | "volume" | "workflow";
-type VolumeRepresentation = "cells" | "points";
+type ViewMode = "catalog" | "packages" | "connectors" | "layers" | "workflow";
 
 function byId<T extends HTMLElement>(id: string): T {
   const element = document.getElementById(id);
@@ -61,10 +48,6 @@ function byId<T extends HTMLElement>(id: string): T {
 
 function formatInteger(value: number): string {
   return new Intl.NumberFormat("en-US").format(value);
-}
-
-function formatMpc(value: number, digits = 0): string {
-  return `${value.toFixed(digits)} Mpc`;
 }
 
 function formatBytes(value: number): string {
@@ -122,9 +105,9 @@ function assetsForSelection(selection: SurveyLayerSelection): DataAssetRecord[] 
   const releaseIds = new Set(selection.releaseIds);
   const assetIds = new Set(selection.assetIds);
   return dataAssets.filter((asset) => {
-    if (asset.origin === "user") return assetIds.has(asset.id);
-    const surveyId = asset.surveyBinding?.surveyId ?? asset.surveyId;
-    const releaseId = asset.surveyBinding?.releaseId ?? asset.releaseId;
+    if (assetIds.has(asset.id)) return true;
+    const surveyId = asset.surveyId;
+    const releaseId = asset.releaseId;
     return Boolean(surveyId) && surveyIds.has(surveyId!) && (!releaseId || releaseIds.has(releaseId));
   });
 }
@@ -171,10 +154,18 @@ function displayLayerFor(input: {
   key?: string;
 }): DisplayLayerDescriptor {
   const asset = input.assetId ? dataAssets.find((candidate) => candidate.id === input.assetId) : undefined;
-  const surveyId = input.surveyId ?? asset?.surveyBinding?.surveyId ?? asset?.surveyId;
-  const releaseId = input.releaseId ?? asset?.surveyBinding?.releaseId ?? asset?.releaseId;
-  const survey = surveyId ? surveyRecordsById.get(surveyId) : undefined;
-  const surveyCard = surveyId ? surveyCards.find((candidate) => candidate.id === surveyId) : undefined;
+  const surveyId = input.surveyId ?? asset?.surveyId;
+  const releaseId = input.releaseId ?? asset?.releaseId;
+  const survey = surveyId
+    ? input.assetId
+      ? localSurveyRecordsById.get(surveyId)
+      : publicSurveyRecordsById.get(surveyId) ?? localSurveyRecordsById.get(surveyId)
+    : undefined;
+  const surveyCard = surveyId
+    ? input.assetId
+      ? surveyCards.find((candidate) => candidate.id === surveyId)
+      : publicSurveyCards.find((candidate) => candidate.id === surveyId) ?? surveyCards.find((candidate) => candidate.id === surveyId)
+    : undefined;
   const release = releaseId ? survey?.releases.find((candidate) => candidate.id === releaseId) : undefined;
   const product = input.product ?? asset?.product;
   const modality = input.modality ?? asset?.modalities?.[0];
@@ -258,20 +249,18 @@ function downloadJson(name: string, value: unknown): void {
   URL.revokeObjectURL(link.href);
 }
 
-let canvas = byId<HTMLCanvasElement>("volume-canvas");
+let canvas = byId<HTMLCanvasElement>("scene-canvas");
 const loadingIndicator = byId("loading-indicator");
 const controlsPanel = byId("controls-panel");
-const radialMinInput = byId<HTMLInputElement>("radial-min-input");
-const radialMaxInput = byId<HTMLInputElement>("radial-max-input");
 
-let atlas: SurveyAtlasManifest | null = null;
-let angularCells: AtlasAngularCellData | null = null;
 let surveyCards: SurveyCard[] = [];
+let publicSurveyCards: SurveyCard[] = [];
 let surveyFootprints: SurveyFootprintManifest | null = null;
 let publicCatalogUnavailable = false;
 let selectedSurvey: SurveyRecord | null = null;
 let selectedLayerAssetId: string | null = null;
-const surveyRecordsById = new Map<string, SurveyRecord>();
+const localSurveyRecordsById = new Map<string, SurveyRecord>();
+const publicSurveyRecordsById = new Map<string, SurveyRecord>();
 let selectedLayerRegion: SurveyLayerSelection | null = null;
 let dataAssets: DataAssetRecord[] = [];
 let visibleSurveyIds = new Set<string>();
@@ -285,10 +274,7 @@ let layerOrder: string[] = [];
 let layerLayoutMode: SurveyLayerLayoutMode = "overlap";
 let layerInteractionMode: SurveyLayerInteractionMode = "inspect";
 let hoverDismissTimer: ReturnType<typeof setTimeout> | null = null;
-let volumeManifest: VolumeManifest | null = null;
-let volumePoints: VolumePointData | null = null;
 let layerViewer: SurveyLayerViewer | null = null;
-let volumeViewer: VolumeViewer | null = null;
 let aladinExplorer: AladinExplorer | null = null;
 let aladinSnapshot: AladinExplorerSnapshot | null = null;
 let latestAladinStatus: AladinExplorerStatus | null = null;
@@ -296,32 +282,18 @@ let aladinFullscreen = false;
 let aladinAssetDrawerOpen = false;
 let aladinAssetDrawerPinned = false;
 let aladinAssetDrawerTimer: ReturnType<typeof setTimeout> | null = null;
-let aladinStatusFadeTimer: ReturnType<typeof setTimeout> | null = null;
-let aladinToastSequence = 0;
-let aladinLastToastKey = "";
-let aladinLastToastAt = 0;
 let aladinEntryGeneration = 0;
 let aladinEntryAbort: AbortController | null = null;
 let mode: ViewMode = "layers";
-let representation: VolumeRepresentation = "cells";
-let jointNside = 32;
-let radialBins = 8;
-let radialMinMpc = 0;
-let radialMaxMpc = 6000;
-let parentFilter: { nside: number; pixel: number } | null = null;
-let selectedJointCell: JointCellSelection | null = null;
-let selectedRefinement: AtlasRefinementResponse | null = null;
 let astroOverview: AstroOverviewResponse | null = null;
 const workspaceCellSummaries = new Map<string, AstroSpatialSummary>();
 const workspaceHoverRequests = new Set<string>();
 let activeWorkspaceHover: SurveyLayerHover | null = null;
 let astroInspectionGeneration = 0;
-let radialTimer: ReturnType<typeof setTimeout> | null = null;
-let activationGeneration = 0;
 
 const workflowPanel = new WorkflowPanel((error) => console.error("Workflow UI request failed", error));
 let connectorSelectionRequest: string | null = null;
-const dataCatalogPanel = new DataCatalogPanel((error) => showFatal(error), (connectorId) => {
+const dataCatalogPanel = new DataCatalogPanel((error) => notifyWorkspaceError(error, "用户资产操作失败"), (connectorId) => {
   connectorSelectionRequest = connectorId;
   void activateMode("connectors").catch(showFatal);
 }, () => {
@@ -342,15 +314,11 @@ function renderConnectorMetrics(metrics: ConnectorMetrics): void {
     byId(valueId).textContent = formatInteger(value);
   });
 }
-const connectorPanel = new ConnectorPanel((error) => showFatal(error), renderConnectorMetrics);
+const connectorPanel = new ConnectorPanel((error) => notifyWorkspaceError(error, "Connector 操作失败"), renderConnectorMetrics);
 
 function surveyRegistrationFeedback(summary: string, detail = ""): void {
-  const output = byId("survey-registration-feedback");
-  const title = document.createElement("strong");
-  title.textContent = summary;
-  const note = document.createElement("small");
-  note.textContent = detail;
-  output.replaceChildren(title, ...(detail ? [note] : []));
+  if (summary === "尚未保存") return;
+  notifyWorkspace(summary, detail, { tone: summary.includes("失败") ? "error" : summary.includes("正在") ? "info" : "warning" });
 }
 
 function selectedModalities(form: HTMLFormElement): SurveyModality[] {
@@ -377,7 +345,7 @@ function surveyRegistrationInput(form: HTMLFormElement): SurveyRegistrationInput
       availability: "metadata_only",
       modalities: releaseModalities,
       products: [{ name: value("product"), modality: productModality, description: value("productDescription") }],
-      coverage: { status: "pending", summary: "等待从已绑定的数据源计算覆盖范围。", sourceUrl: value("sourceUrl") },
+      coverage: { status: "pending", summary: "等待从已登记的数据源计算覆盖范围。", sourceUrl: value("sourceUrl") },
     }],
   };
 }
@@ -402,6 +370,7 @@ function setupSurveyRegistration(): void {
     if (!selectedModalities(form).length) { surveyRegistrationFeedback("请选择至少一种模态"); return; }
     surveyRegistrationFeedback("正在登记巡天…");
     void workspaceApi.registerSurvey(surveyRegistrationInput(form)).then((survey) => {
+      notifyWorkspace("巡天标签已登记", survey.name, { tone: "success" });
       close();
       return activateMode("catalog").then(() => dataCatalogPanel.startNew(survey.id));
     }).catch((error) => surveyRegistrationFeedback("登记失败", error instanceof Error ? error.message : String(error)));
@@ -411,24 +380,22 @@ setupSurveyRegistration();
 const resourcePackagePanel = new ResourcePackagePanel(
   (before, after) => refreshActiveFootprints(before, after),
   (record, draftReleaseIds, callbacks) => renderResourcePackageDetails(record, draftReleaseIds, callbacks),
-  (error) => showFatal(error),
+  (error) => notifyWorkspaceError(error, "资源包操作失败"),
   () => openResourceCatalogSettings(true),
 );
 let resourceAdminToken = "";
 let resourceCatalogSyncPending = false;
 
 function resourceCatalogSettingsFeedback(summary: string, detail = "", status: "" | "error" | "success" = ""): void {
-  const output = byId<HTMLOutputElement>("resource-catalog-settings-status");
-  output.replaceChildren();
-  const title = document.createElement("strong");
-  title.textContent = summary;
-  output.append(title);
-  if (detail) {
-    const note = document.createElement("small");
-    note.textContent = detail;
-    output.append(note);
+  if (summary === "正在保存…") {
+    notifyWorkspace("正在保存公开目录配置", detail, { tone: "info" });
+  } else if (status === "error" || summary.includes("失败") || summary.includes("无法")) {
+    notifyWorkspace(summary, detail, { tone: "error" });
+  } else if (status === "success") {
+    notifyWorkspace(summary, detail, { tone: "success" });
+  } else if (summary) {
+    notifyWorkspace(summary, detail, { tone: "info" });
   }
-  output.dataset.status = status;
 }
 
 async function syncResourceCatalog(): Promise<void> {
@@ -439,18 +406,15 @@ async function syncResourceCatalog(): Promise<void> {
   const syncButton = byId<HTMLButtonElement>("resource-package-sync");
   syncButton.disabled = true;
   syncButton.dataset.busy = "true";
-  byId("resource-package-feedback").textContent = "正在同步公开目录…";
+  notifyWorkspace("正在同步公开目录…", "正在读取 Assets 公共 catalog", { tone: "info" });
   try {
     const result = await workspaceApi.syncResourceCatalog(resourceAdminToken);
     resourcePackagePanel.setCatalogStatus(result.catalog);
     await refreshPublicCatalogData();
     resourceCatalogSettingsFeedback("同步完成", `已载入 ${result.packages.length} 个可下载资源包。`, "success");
-    byId("resource-package-feedback").textContent = `目录已同步 · ${result.catalog.catalogSha256?.slice(0, 12) ?? ""} · 资源包按需下载`;
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     resourceCatalogSettingsFeedback("同步失败", message, "error");
-    byId("resource-package-feedback").textContent = `同步失败：${message}`;
-    byId("resource-package-feedback").setAttribute("data-status", "error");
   } finally {
     syncButton.disabled = false;
     syncButton.dataset.busy = "false";
@@ -465,12 +429,12 @@ function openResourceCatalogSettings(syncAfterSave = false): void {
   resourceCatalogSyncPending = syncAfterSave;
   const dialog = byId<HTMLDialogElement>("resource-catalog-settings-dialog");
   const form = byId<HTMLFormElement>("resource-catalog-settings-form");
-  void workspaceApi.resourceCatalogConfig().then((config) => {
+    void workspaceApi.resourceCatalogConfig().then((config) => {
     byId<HTMLInputElement>("resource-catalog-url").value = config.catalogUrl;
     resourcePackagePanel.setCatalogStatus(config);
     resourceCatalogSettingsFeedback(config.available ? "当前目录可用" : "当前目录不可用", config.unavailableReason ?? "");
-  }).catch((error) => {
-    resourceCatalogSettingsFeedback("无法读取目录状态", error instanceof Error ? error.message : String(error), "error");
+    }).catch((error) => {
+      resourceCatalogSettingsFeedback("无法读取目录状态", error instanceof Error ? error.message : String(error), "error");
   });
   if (!dialog.open) dialog.showModal();
   (form.elements.namedItem("resource-catalog-admin-token") as HTMLInputElement | null)?.focus();
@@ -504,8 +468,8 @@ byId<HTMLButtonElement>("resource-catalog-settings-sync").addEventListener("clic
   void saveResourceCatalogConfig(true).catch((error) => resourceCatalogSettingsFeedback("同步失败", error instanceof Error ? error.message : String(error), "error"));
 });
 byId<HTMLDialogElement>("resource-catalog-settings-dialog").addEventListener("cancel", () => { resourceCatalogSyncPending = false; });
-const LAYER_PREFERENCES_KEY = "astro-workspace:survey-layer-preferences:v3";
-const PREVIOUS_LAYER_PREFERENCES_KEY = "astro-workspace:survey-layer-preferences:v2";
+const LAYER_PREFERENCES_KEY = "astro-workspace:survey-layer-preferences:v4";
+const PREVIOUS_LAYER_PREFERENCES_KEY = "astro-workspace:survey-layer-preferences:v3";
 const LEGACY_LAYER_PREFERENCES_KEY = "astro-workspace:survey-layer-preferences:v1";
 const THEME_PREFERENCE_KEY = "astro-workspace:theme:v1";
 const SCENE_BACKGROUND_PREFERENCE_KEY = "astro-workspace:scene-background:v1";
@@ -537,7 +501,6 @@ function defaultSceneBackground(): string {
 
 function applySceneBackground(color: string | null): void {
   layerViewer?.setBackgroundColor(color);
-  volumeViewer?.setBackgroundColor(color);
   sceneBackgroundColor.value = color ?? defaultSceneBackground();
   sceneBackgroundSettings.dataset.customized = color ? "true" : "false";
 }
@@ -564,7 +527,6 @@ function applyTheme(theme: WorkspaceTheme, source: "initial" | "user" | "system"
   themeToggle.append(icon);
   createIcons({ icons: { Moon, Sun }, attrs: { "aria-hidden": "true" } });
   layerViewer?.setTheme(theme);
-  volumeViewer?.setTheme(theme);
   applySceneBackground(storedSceneBackground());
   window.dispatchEvent(new CustomEvent("astro:theme-change", { detail: { theme, source } }));
 }
@@ -616,10 +578,10 @@ document.addEventListener("pointerdown", (event) => {
 
 function showFatal(error: unknown): void {
   console.error(error);
+  notifyWorkspaceError(error, "Atlas 初始化/API 错误");
   byId("dataset-state").textContent = "载入失败";
   byId("service-status").textContent = "SERVICE ERROR";
-  loadingIndicator.textContent = error instanceof Error ? error.message : String(error);
-  loadingIndicator.classList.add("visible", "error");
+  loadingIndicator.classList.remove("visible", "error");
 }
 
 function freshCanvas(): HTMLCanvasElement {
@@ -643,23 +605,6 @@ function clearAladinAssetDrawerTimer(): void {
   if (aladinAssetDrawerTimer === null) return;
   clearTimeout(aladinAssetDrawerTimer);
   aladinAssetDrawerTimer = null;
-}
-
-function clearAladinStatusFadeTimer(): void {
-  if (aladinStatusFadeTimer === null) return;
-  clearTimeout(aladinStatusFadeTimer);
-  aladinStatusFadeTimer = null;
-}
-
-function scheduleAladinStatusFade(status: AladinExplorerStatus): void {
-  const output = byId<HTMLOutputElement>("aladin-status");
-  clearAladinStatusFadeTimer();
-  output.classList.remove("is-faded");
-  if (status.phase === "initializing" || status.phase === "loading") return;
-  aladinStatusFadeTimer = setTimeout(() => {
-    aladinStatusFadeTimer = null;
-    output.classList.add("is-faded");
-  }, 3_800);
 }
 
 function renderAladinAssetDrawerState(): void {
@@ -707,50 +652,23 @@ function setAladinAssetDrawer(open: boolean, touch = true): void {
 }
 
 function pushAladinToast(message: string, tone: "info" | "success" | "error" = "info"): void {
-  const normalized = message.trim();
-  if (!normalized) return;
-  const now = Date.now();
-  const key = `${tone}:${normalized}`;
-  if (key === aladinLastToastKey && now - aladinLastToastAt < 900) return;
-  aladinLastToastKey = key;
-  aladinLastToastAt = now;
-  const stack = byId("aladin-status-deck");
-  const toast = document.createElement("div");
-  toast.className = `aladin-toast aladin-toast-${tone}`;
-  toast.dataset.toastId = String(++aladinToastSequence);
-  const pulse = document.createElement("i");
-  pulse.className = "aladin-toast-pulse";
-  const text = document.createElement("span");
-  text.textContent = normalized;
-  toast.append(pulse, text);
-  stack.append(toast);
-  while (stack.children.length > 4) stack.firstElementChild?.remove();
-  requestAnimationFrame(() => toast.classList.add("is-visible"));
-  window.setTimeout(() => {
-    toast.classList.add("is-leaving");
-    window.setTimeout(() => toast.remove(), 420);
-  }, 3_800);
+  notifyWorkspace(message, "Aladin 对象探索", { tone: tone === "error" ? "error" : tone === "success" ? "success" : "info" });
 }
 
 function destroyViewer(): void {
   layerViewer?.dispose();
-  volumeViewer?.dispose();
   aladinExplorer?.dispose();
   cancelAladinEntry();
   layerViewer = null;
-  volumeViewer = null;
   aladinExplorer = null;
   aladinSnapshot = null;
   latestAladinStatus = null;
   clearAladinAssetDrawerTimer();
-  clearAladinStatusFadeTimer();
   aladinAssetDrawerOpen = false;
   aladinAssetDrawerPinned = false;
   byId("aladin-explorer").hidden = true;
   byId("aladin-controls").hidden = true;
   byId("aladin-asset-nav").replaceChildren();
-  byId("aladin-status-deck").replaceChildren();
-  byId("aladin-status").classList.remove("is-faded");
   byId("scene-stage").classList.remove("aladin-active");
   byId("scene-coordinate-readout").hidden = true;
   byId("scene-camera-readout").hidden = false;
@@ -761,13 +679,13 @@ function destroyViewer(): void {
   renderSurveyHover(null);
 }
 
-function ownedBindingSurveyIds(assetIds: Iterable<string> = visibleAssetIds): Set<string> {
+function localOnlySurveyIds(assetIds: Iterable<string> = visibleAssetIds): Set<string> {
   const selectedAssets = new Set(assetIds);
   return new Set(
     userDataAssets()
       .filter((asset) => selectedAssets.has(asset.id))
       .flatMap((asset) => {
-        const surveyId = asset.surveyBinding?.surveyId ?? asset.surveyId;
+        const surveyId = asset.surveyId;
         return surveyId ? [surveyId] : [];
       })
       .filter((surveyId) => footprintsForSurvey(surveyId).length === 0),
@@ -775,16 +693,16 @@ function ownedBindingSurveyIds(assetIds: Iterable<string> = visibleAssetIds): Se
 }
 
 function explorationSurveyIds(ids: Iterable<string> = visibleSurveyIds, assetIds: Iterable<string> = visibleAssetIds): string[] {
-  const bindingIds = ownedBindingSurveyIds(assetIds);
+  const localOnlyIds = localOnlySurveyIds(assetIds);
   return [...new Set(ids)]
-    .filter((surveyId) => surveyId !== "__unassigned__" && !bindingIds.has(surveyId) && footprintsForSurvey(surveyId).length > 0)
+    .filter((surveyId) => surveyId !== "__unassigned__" && !localOnlyIds.has(surveyId) && footprintsForSurvey(surveyId).length > 0)
     .sort();
 }
 
 function selectionSurveyIds(selection: SurveyLayerSelection): string[] {
-  const bindingIds = ownedBindingSurveyIds(selection.assetIds);
+  const localOnlyIds = localOnlySurveyIds(selection.assetIds);
   return [...new Set(selection.surveyIds)]
-    .filter((surveyId) => !bindingIds.has(surveyId) && footprintsForSurvey(surveyId).length > 0)
+    .filter((surveyId) => !localOnlyIds.has(surveyId) && footprintsForSurvey(surveyId).length > 0)
     .sort();
 }
 
@@ -995,7 +913,6 @@ async function toggleAladinFullscreen(): Promise<void> {
 
 function renderAladinStatus(status: AladinExplorerStatus): void {
   latestAladinStatus = status;
-  const output = byId<HTMLOutputElement>("aladin-status");
   const host = byId("aladin-explorer");
   const phaseLabel: Record<typeof status.phase, string> = {
     initializing: "初始化 Aladin",
@@ -1006,16 +923,19 @@ function renderAladinStatus(status: AladinExplorerStatus): void {
     empty: "当前视野没有对象",
     error: `对象查询失败：${status.message ?? "未知错误"}`,
   };
-  output.textContent = phaseLabel[status.phase];
-  scheduleAladinStatusFade(status);
+  const selectionEmpty = status.phase === "empty" && status.message?.includes("当前选区没有可探索的用户资产");
+  if (status.phase === "initializing") notifyWorkspace("Aladin 正在初始化", "对象探索视图正在准备", { tone: "info" });
+  else if (status.phase === "loading") notifyWorkspace("Aladin 正在加载对象", phaseLabel.loading, { tone: "info" });
+  else if (status.phase === "error") pushAladinToast(status.message ?? "对象查询失败", "error");
+  else if (status.phase === "ready" && status.complete) pushAladinToast(`${formatInteger(status.returned)} 个对象已载入`, "success");
+  else if (status.phase === "empty" && !selectionEmpty) pushAladinToast(status.message ?? "当前视野暂无对象", "info");
+  else if (status.message && !selectionEmpty) pushAladinToast(status.message, "info");
   host.dataset.queryPhase = status.phase;
   host.dataset.objectReturned = String(status.returned);
   host.dataset.objectTotal = String(status.total);
   host.dataset.objectTruncated = String(status.truncated);
   host.dataset.objectComplete = String(status.complete ?? (status.phase === "ready" || status.phase === "empty" || status.phase === "error"));
   byId("render-status").textContent = "ALADIN LITE";
-  const selectionEmpty = status.phase === "empty" && status.message?.includes("当前选区没有可探索的用户资产");
-  if (status.phase === "empty" && !selectionEmpty) output.textContent = status.message ?? "当前视野没有对象";
   byId("object-status").textContent = status.phase === "loading"
     ? `${formatInteger(status.returned)} / ${formatInteger(status.total)} OBJECTS · LOADING`
     : status.phase === "empty"
@@ -1028,10 +948,6 @@ function renderAladinStatus(status: AladinExplorerStatus): void {
   byId("aladin-object-telemetry").textContent = status.overlapCount
     ? `${formatInteger(status.overlapCount)} OVERLAP MARKERS`
     : `${formatInteger(status.returned)} POINTS IN VIEW`;
-  if (status.phase === "error") pushAladinToast(status.message ?? "对象查询失败", "error");
-  else if (status.phase === "ready" && status.complete) pushAladinToast(`${formatInteger(status.returned)} 个对象已载入`, "success");
-  else if (status.phase === "empty" && !selectionEmpty) pushAladinToast(status.message ?? "当前视野暂无对象", "info");
-  else if (status.message && !selectionEmpty) pushAladinToast(status.message, "info");
   if (aladinSnapshot) renderAladinAssetNavigation(aladinSnapshot.assetTargets, aladinExplorer?.getActiveAssetId() ?? null);
   syncAladinView();
 }
@@ -1049,14 +965,13 @@ async function enterAladinExplorer(menu: SkyRegionMenu): Promise<void> {
   aladinSnapshot = null;
   latestAladinStatus = null;
   clearAladinAssetDrawerTimer();
-  clearAladinStatusFadeTimer();
   aladinAssetDrawerOpen = aladinAssetDrawerPinned;
   layerViewer?.dispose();
   layerViewer = null;
 
   const selectedCandidates = userDataAssets().filter((asset) => menu.assetIds.includes(asset.id));
   const candidates = selectedCandidates.length ? selectedCandidates : userDataAssets();
-  byId<HTMLOutputElement>("aladin-status").textContent = candidates.length ? "读取视野对象" : "暂无用户资产";
+  notifyWorkspace(candidates.length ? "正在读取视野对象" : "当前没有可探索的用户资产", candidates.length ? `${candidates.length} 个用户资产` : "请先登记并扫描用户资产", { tone: candidates.length ? "info" : "warning" });
   const settled = await Promise.allSettled(candidates.map((asset) => queryAladinAssetProfile(asset, { ...menu, pixels }, profileAbort.signal)));
   if (generation !== aladinEntryGeneration || profileAbort.signal.aborted) return;
   const fallbackProfile = (asset: DataAssetRecord): AladinAssetProfile => {
@@ -1134,7 +1049,6 @@ async function enterAladinExplorer(menu: SkyRegionMenu): Promise<void> {
   byId<HTMLButtonElement>("drill-back-button").disabled = false;
   byId<HTMLButtonElement>("drill-back-button").setAttribute("aria-label", "返回天球范围探查");
   byId<HTMLButtonElement>("drill-back-button").title = "返回天球范围探查";
-  byId<HTMLOutputElement>("aladin-status").textContent = "初始化 Aladin";
   renderAladinAssetDrawerState();
   closeSkyContextMenu();
   renderSurveyHover(null);
@@ -1189,7 +1103,6 @@ async function leaveAladinExplorer(): Promise<void> {
   aladinSnapshot = null;
   latestAladinStatus = null;
   clearAladinAssetDrawerTimer();
-  clearAladinStatusFadeTimer();
   aladinAssetDrawerOpen = false;
   aladinAssetDrawerPinned = false;
   byId("aladin-explorer").hidden = true;
@@ -1197,8 +1110,6 @@ async function leaveAladinExplorer(): Promise<void> {
   renderAladinFullscreenState();
   renderAladinAssetDrawerState();
   byId("aladin-asset-nav").replaceChildren();
-  byId("aladin-status-deck").replaceChildren();
-  byId("aladin-status").classList.remove("is-faded");
   byId("aladin-loaded-summary").textContent = "--";
   byId("aladin-cache-state").textContent = "CACHE IDLE";
   byId("aladin-object-telemetry").textContent = "--";
@@ -1349,16 +1260,6 @@ function renderRegionSceneLegend(state: SurveyLayerState): void {
   legend.style.top = `${best.top}px`;
 }
 
-function renderVolumeState(state: VolumeViewState): void {
-  canvas.dataset.cameraDistance = state.cameraDistance.toFixed(6);
-  canvas.dataset.outerRadius = state.outerRadius.toFixed(6);
-  canvas.dataset.mode = "volume";
-  canvas.dataset.representation = state.representation;
-  byId("camera-distance").textContent = `${state.cameraDistance.toFixed(2)} R`;
-  byId("representation-output").textContent = state.representation === "cells" ? "SPARSE CELLS" : "GALAXY POINTS";
-  setActiveButtons("[data-representation]", (button) => button.dataset.representation === state.representation);
-}
-
 function renderSurveySelection(selection: SurveyLayerSelection | null): void {
   selectedLayerRegion = selection;
   byId("inspector-kicker").textContent = "REGION SELECTION";
@@ -1376,7 +1277,7 @@ function renderSurveySelection(selection: SurveyLayerSelection | null): void {
    const assetNames = selection.assetIds.map((id) => displayLayerFor({ assetId: id }).label).join(" / ");
    const assetCoverageSummary = selection.assetCoverageCounts.map(({ assetId, cellCount }) => `${displayLayerFor({ assetId }).label}: ${cellCount}/${selection.pixels.length}`).join(" · ");
   const artifactSummary = selection.artifacts.map((artifact) => {
-    const survey = surveyRecordsById.get(artifact.surveyId);
+    const survey = publicSurveyRecordsById.get(artifact.surveyId);
     const release = survey?.releases.find((entry) => entry.id === artifact.releaseId);
     return `${survey?.name ?? artifact.surveyId} ${release?.label ?? artifact.releaseId}: ${artifact.product} (${release?.modalities.join(", ") ?? "metadata pending"})`;
   }).join(" | ");
@@ -1477,7 +1378,7 @@ function renderSurveyInspection(inspection: SurveyLayerInspection | null): void 
   stack.className = "coverage-stack";
   const inspectionSurveyIds = explorationSurveyIds(inspection.surveyIds, inspection.assetIds);
   inspectionSurveyIds.filter((surveyId) => inspection.artifacts.some((artifact) => artifact.surveyId === surveyId)).forEach((surveyId) => {
-    const survey = surveyRecordsById.get(surveyId);
+    const survey = publicSurveyRecordsById.get(surveyId);
     const artifacts = inspection.artifacts.filter((artifact) => artifact.surveyId === surveyId);
     const displayLayer = displayLayerFor({ surveyId });
     const group = document.createElement("section");
@@ -1526,7 +1427,7 @@ function renderSurveyInspection(inspection: SurveyLayerInspection | null): void 
     groupHeading.append(swatch, name, count);
     const row = document.createElement("article");
     const release = document.createElement("b");
-    release.textContent = [displayLayer.surveyId, displayLayer.releaseId].filter(Boolean).join(" / ") || "未关联巡天";
+    release.textContent = [displayLayer.surveyId, displayLayer.releaseId].filter(Boolean).join(" / ") || "未设置巡天标签";
     const detail = document.createElement("p");
     detail.textContent = layer.message ?? "该用户资产在此 HEALPix 单元有已扫描对象。";
     row.append(release, detail);
@@ -1535,8 +1436,8 @@ function renderSurveyInspection(inspection: SurveyLayerInspection | null): void 
   });
   const inspectionAssetIds = new Set(inspection.assetIds);
   const cellAssets = dataAssets.filter((asset) => {
-    if (asset.origin === "user") return inspectionAssetIds.has(asset.id);
-    const surveyId = asset.surveyBinding?.surveyId ?? asset.surveyId;
+    if (inspectionAssetIds.has(asset.id)) return true;
+    const surveyId = asset.surveyId;
     return Boolean(surveyId && inspectionSurveyIds.includes(surveyId));
   });
   const projectState = document.createElement("section");
@@ -1586,7 +1487,7 @@ function requestWorkspaceHoverSummary(hover: SurveyLayerHover): void {
       workspaceCellSummaries.set(key, summary);
       if (activeWorkspaceHover && workspaceSummaryKey(activeWorkspaceHover.pixel, activeWorkspaceHover.assetIds) === key) renderSurveyHover(activeWorkspaceHover);
     })
-    .catch((error) => console.warn("Unable to load workspace hover summary", error))
+    .catch((error) => notifyWorkspace("工作区空间索引查询失败", error instanceof Error ? error.message : String(error), { tone: "warning", dedupeMs: 5_000 }))
     .finally(() => workspaceHoverRequests.delete(key));
 }
 
@@ -1649,7 +1550,7 @@ async function loadEuclidAstroOverview(): Promise<void> {
 }
 
 function userDataAssets(): DataAssetRecord[] {
-  return dataAssets.filter((asset) => asset.origin === "user");
+  return dataAssets;
 }
 
 function coverageLayerAssetIds(layer: WorkspaceAssetCoverageLayer): string[] {
@@ -1667,7 +1568,6 @@ function normalizedAssetCoverage(asset: DataAssetRecord, response: WorkspaceAsse
   const layers = response.layers ?? [];
   const layer = layers.find((candidate) => coverageLayerAssetIds(candidate).length === 1 && coverageLayerAssetIds(candidate)[0] === asset.id)
     ?? layers.find((candidate) => coverageLayerAssetIds(candidate).includes(asset.id));
-  const ownership = asset.surveyBinding;
   const pixels = [...new Set((layer?.pixels ?? response.pixels).filter((pixel) => Number.isInteger(pixel) && pixel >= 0))].sort((left, right) => left - right);
   const objectCount = coverageObjectCount(asset.id, response, layer);
   return {
@@ -1676,10 +1576,10 @@ function normalizedAssetCoverage(asset: DataAssetRecord, response: WorkspaceAsse
     assetIds: [asset.id],
     assetName: asset.name,
     status: response.status,
-    surveyId: layer?.surveyId ?? ownership?.surveyId ?? asset.surveyId,
-    releaseId: layer?.releaseId ?? ownership?.releaseId ?? asset.releaseId,
-    source: layer?.source ?? ownership?.source ?? "asset",
-    message: layer?.message ?? response.message ?? ownership?.message,
+    surveyId: layer?.surveyId ?? asset.surveyId,
+    releaseId: layer?.releaseId ?? asset.releaseId,
+    source: layer?.source ?? "asset",
+    message: layer?.message ?? response.message,
     nside: response.nside,
     pixels,
     ...(objectCount === undefined ? {} : { objectCount }),
@@ -1748,7 +1648,9 @@ async function loadWorkspaceAssetCoverage(scannedAssetId?: string): Promise<void
   hasUnassignedWorkspaceCoverage = legacyWorkspaceLayers.some((layer) => layer.pixels.length > 0 && !layer.surveyId);
   const coveredAssetIds = new Set(coverage.layers.filter((layer) => layer.pixels.length > 0).map((layer) => layer.assetId));
   if (!assetVisibilityPreferenceRestored) {
-    visibleAssetIds = coveredAssetIds;
+    // Existing user assets are listed but remain opt-in. A newly completed
+    // scan is the only asset that may be surfaced automatically.
+    visibleAssetIds.clear();
     assetVisibilityPreferenceRestored = true;
   }
   if (scannedAssetId && coveredAssetIds.has(scannedAssetId)) visibleAssetIds.add(scannedAssetId);
@@ -1757,15 +1659,19 @@ async function loadWorkspaceAssetCoverage(scannedAssetId?: string): Promise<void
   // Add newly covered assets to layer order, but don't add all known layers
   const knownKeys = new Set(knownLayerOrderKeys());
   const filteredOrder = layerOrder.filter((key) => knownKeys.has(key));
+  const newPublicKeys = footprintSurveyIds()
+    .map((surveyId) => `public-survey:${surveyId}`)
+    .filter((key) => !filteredOrder.includes(key));
   const newAssetKeys = assets.map((asset) => `asset:${asset.id}`).filter((key) => knownKeys.has(key) && !filteredOrder.includes(key));
   const newUnassignedKey = hasUnassignedWorkspaceCoverage && !filteredOrder.includes("workspace-unassigned") ? ["workspace-unassigned"] : [];
-  layerOrder = [...filteredOrder, ...newAssetKeys, ...newUnassignedKey];
+  layerOrder = [...filteredOrder, ...newPublicKeys, ...newAssetKeys, ...newUnassignedKey];
   applyLayerOrder(false);
   layerViewer?.setVisibleAssets(visibleAssetIds);
   layerViewer?.setVisibleSurveys(new Set([...visibleSurveyIds, ...(unassignedWorkspaceVisible ? ["__unassigned__"] : [])]));
   buildSurveyList();
   persistLayerPreferences();
   coverage.layers.filter((layer) => layer.coverageStatus === "error").forEach((layer) => {
+    notifyWorkspace("用户资产覆盖读取失败", `${layer.assetName ?? layer.assetId} · ${layer.message ?? "空间索引不可用"}`, { tone: "warning", dedupeMs: 5_000 });
     console.warn(`Unable to load workspace coverage for ${layer.assetId}`, layer.message);
   });
 }
@@ -1775,8 +1681,8 @@ async function refreshWorkspaceAssets(scannedAssetId?: string): Promise<void> {
   dataAssets = assets;
   surveyCards = surveys;
   const records = await Promise.all(surveys.map((survey) => workspaceApi.survey(survey.id)));
-  surveyRecordsById.clear();
-  records.forEach((survey) => surveyRecordsById.set(survey.id, survey));
+  localSurveyRecordsById.clear();
+  records.forEach((survey) => localSurveyRecordsById.set(survey.id, survey));
   await loadWorkspaceAssetCoverage(scannedAssetId);
   if (mode === "layers") {
     renderProjectMetrics();
@@ -1806,6 +1712,7 @@ async function loadAstroInspection(inspection: SurveyLayerInspection): Promise<v
     section.replaceWith(renderWorkspaceDataSection(queried));
   } catch (error) {
     if (generation !== astroInspectionGeneration) return;
+    notifyWorkspace("工作区空间索引查询失败", error instanceof Error ? error.message : String(error), { tone: "warning", dedupeMs: 5_000 });
     const section = byId<HTMLElement>("coverage-workspace-data");
     section.replaceWith(renderWorkspaceDataSection({
       ...(summary ?? { status: "error", index: "astro_file_index_v1", nside: inspection.nside, matchedFiles: 0, totalBytes: 0, knownFiles: 0, unknownFiles: 0, spatialStatus: {}, byAsset: [], bySurveyReleaseModality: [] }),
@@ -1850,7 +1757,7 @@ function renderSurveyHover(hover: SurveyLayerHover | null): void {
   const entries = document.createElement("div");
   entries.className = "coverage-hover-list";
   hover.artifacts.forEach((artifact) => {
-    const survey = surveyRecordsById.get(artifact.surveyId);
+    const survey = publicSurveyRecordsById.get(artifact.surveyId);
     const release = survey?.releases.find((entry) => entry.id === artifact.releaseId);
     const entry = document.createElement("article");
     const name = document.createElement("b");
@@ -1881,7 +1788,7 @@ function renderSurveyHover(hover: SurveyLayerHover | null): void {
     const name = document.createElement("b");
     name.textContent = descriptor.label;
     const detail = document.createElement("span");
-    const survey = descriptor.surveyId ? surveyRecordsById.get(descriptor.surveyId) : undefined;
+    const survey = descriptor.surveyId ? localSurveyRecordsById.get(descriptor.surveyId) : undefined;
     const release = survey?.releases.find((entry) => entry.id === descriptor.releaseId);
     detail.textContent = [survey?.name, release?.label, descriptor.product].filter(Boolean).join(" / ") || "用户资产覆盖";
     entry.append(name, detail);
@@ -1924,7 +1831,7 @@ function footprintLabel(status: SurveyCard["coverageStatus"]): string {
 
 function footprintSurveyIds(): string[] {
   const available = new Set(surveyFootprints?.footprints.map((footprint) => footprint.surveyId) ?? []);
-  return surveyCards.filter((survey) => available.has(survey.id)).map((survey) => survey.id);
+  return publicSurveyCards.filter((survey) => available.has(survey.id)).map((survey) => survey.id);
 }
 
 function knownLayerOrderKeys(): string[] {
@@ -1968,8 +1875,13 @@ function restoreLayerPreferences(): void {
     layerLayoutMode = stored?.layoutMode === "layers" ? "layers" : "overlap";
     layerInteractionMode = stored?.interactionMode === "region" ? "region" : "inspect";
     unassignedWorkspaceVisible = stored?.unassignedWorkspaceVisible === true;
-    assetVisibilityPreferenceRestored = preferenceValue !== null && Array.isArray(stored?.visibleAssetIds);
-    visibleAssetIds = new Set((stored?.visibleAssetIds ?? []).filter((assetId) => availableAssets.has(assetId)));
+    const storedSchemaVersion = stored?.schemaVersion ?? 0;
+    // v3 could have persisted every covered user asset as visible by default.
+    // Do not restore that implicit visibility after the layer-selection cutover.
+    assetVisibilityPreferenceRestored = storedSchemaVersion >= 4 && Array.isArray(stored?.visibleAssetIds);
+    visibleAssetIds = new Set(assetVisibilityPreferenceRestored
+      ? (stored?.visibleAssetIds ?? []).filter((assetId) => availableAssets.has(assetId))
+      : []);
     const addMissing = Array.isArray(stored?.layerOrder) && stored.layerOrder.length > 0;
     layerOrder = normalizeCurrentLayerOrder(stored?.layerOrder ?? [], addMissing);
   } catch {
@@ -1986,7 +1898,7 @@ function restoreLayerPreferences(): void {
 function persistLayerPreferences(): void {
   try {
     localStorage.setItem(LAYER_PREFERENCES_KEY, JSON.stringify({
-      schemaVersion: 3,
+      schemaVersion: 4,
       visibleSurveyIds: [...visibleSurveyIds],
       visibleAssetIds: [...visibleAssetIds],
       layerOrder: normalizeCurrentLayerOrder(),
@@ -2030,14 +1942,17 @@ function emptySurveyFootprintManifest(): SurveyFootprintManifest {
 async function refreshPublicCatalogData(): Promise<void> {
   const [footprintsResult, surveysResult] = await Promise.allSettled([
     workspaceApi.surveyFootprints(),
-    workspaceApi.surveys(),
+    workspaceApi.publicSurveys(),
   ]);
   surveyFootprints = footprintsResult.status === "fulfilled" ? footprintsResult.value : emptySurveyFootprintManifest();
   if (surveysResult.status === "fulfilled") {
-    surveyCards = surveysResult.value;
-    const records = await Promise.allSettled(surveyCards.map((survey) => workspaceApi.survey(survey.id)));
-    surveyRecordsById.clear();
-    records.forEach((result) => { if (result.status === "fulfilled") surveyRecordsById.set(result.value.id, result.value); });
+    publicSurveyCards = surveysResult.value;
+    const records = await Promise.allSettled(publicSurveyCards.map((survey) => workspaceApi.publicSurvey(survey.id)));
+    publicSurveyRecordsById.clear();
+    records.forEach((result) => { if (result.status === "fulfilled") publicSurveyRecordsById.set(result.value.id, result.value); });
+  } else {
+    publicSurveyCards = [];
+    publicSurveyRecordsById.clear();
   }
   if (mode === "packages") await resourcePackagePanel.reload();
 }
@@ -2047,19 +1962,18 @@ function renderResourcePackageDetails(
   draftReleaseIds: ReadonlySet<string>,
   callbacks: ResourcePackageSelectionCallbacks,
 ): void {
-  const survey = surveyRecordsById.get(record.surveyId);
   const empty = byId("inspector-empty");
   const content = byId("inspector-content");
   empty.hidden = true;
   content.hidden = false;
   const heading = document.createElement("h2");
-  heading.textContent = survey?.name ?? record.name;
+  heading.textContent = record.name;
   const summary = document.createElement("p");
   summary.className = "inspector-summary";
-  summary.textContent = survey?.description ?? record.description;
+  summary.textContent = record.description;
   const metadata = document.createElement("dl");
   const rows: Array<[string, string]> = [
-    ["巡天 / 望远镜", survey?.mission ?? record.facilities.join(" / ")],
+    ["巡天 / 望远镜", record.facilities.join(" / ")],
     ["观测类型", record.modalities.join(" / ")],
     ["波段", record.wavelengths.join(" / ")],
     ["数据产品", record.productTypes.join(" / ")],
@@ -2079,20 +1993,44 @@ function renderResourcePackageDetails(
   const releaseTitle = document.createElement("span");
   releaseTitle.textContent = "公开版本";
   const releaseCount = document.createElement("output");
-  const releaseIds = [...new Set(record.releases)];
-  releaseCount.textContent = `${releaseIds.length} 个已收录`;
+  const loadableReleaseIds = [...new Set(record.releases)];
+  const fallbackModality = (record.modalities[0] as AssetsSurveyRelease["modalities"][number] | undefined) ?? "catalog";
+  const publicReleases: AssetsSurveyRelease[] = record.publicReleases?.length
+    ? [...new Map(record.publicReleases.map((release) => [release.id, release])).values()]
+    : loadableReleaseIds.map((id) => ({
+      id,
+      label: record.releaseLabels[id] ?? id,
+      kind: "public_release",
+      modalities: [fallbackModality],
+      products: [{ name: record.productTypes[0] ?? record.name, modality: fallbackModality, description: record.description, status: "acquired" }],
+    }));
+  releaseCount.textContent = `${publicReleases.length} 个公开版本 · ${loadableReleaseIds.length} 个可应用`;
   releaseHeading.append(releaseTitle, releaseCount);
   const releaseChoices = document.createElement("div");
   releaseChoices.className = "resource-release-choices";
-  for (const releaseId of releaseIds) {
-    const label = record.releaseLabels[releaseId] ?? releaseId;
+  for (const release of publicReleases) {
+    const releaseId = release.id;
+    const loadable = loadableReleaseIds.includes(releaseId);
+    const productStatuses = new Set(release.products.map((product) => product.status));
+    const availabilityLabel = loadable
+      ? "天空覆盖已收录"
+      : productStatuses.has("awaiting_geometry")
+        ? "等待 Assets 几何"
+        : productStatuses.has("overview_only")
+          ? "仅有官方概览"
+          : productStatuses.has("acquired")
+            ? "等待资源包"
+            : "暂无可应用几何";
+    const label = release.label;
     const choice = document.createElement("div");
     choice.className = "resource-release-choice";
-    choice.dataset.coverageAvailable = "true";
+    choice.dataset.coverageAvailable = String(loadable);
     const checkbox = document.createElement("input");
     checkbox.type = "checkbox";
-    checkbox.checked = draftReleaseIds.has(releaseId);
+    checkbox.checked = loadable && draftReleaseIds.has(releaseId);
+    checkbox.disabled = !loadable;
     checkbox.setAttribute("aria-label", `选择 ${label} 天空覆盖`);
+    if (!loadable) checkbox.title = availabilityLabel;
     checkbox.addEventListener("change", () => {
       const next = new Set(draftReleaseIds);
       if (checkbox.checked) next.add(releaseId); else next.delete(releaseId);
@@ -2106,12 +2044,15 @@ function renderResourcePackageDetails(
     title.textContent = label;
     const availability = document.createElement("small");
     availability.className = "resource-release-availability";
-    availability.dataset.available = "true";
-    availability.textContent = "天空覆盖已收录";
+    availability.dataset.available = String(loadable);
+    availability.textContent = availabilityLabel;
     header.append(title, availability);
     const detail = document.createElement("small");
     const source = record.sources.find((entry) => entry.releaseId === releaseId);
-    detail.textContent = source ? `${source.authority} · ${source.label}` : releaseId;
+    const product = release.products[0];
+    detail.textContent = source && loadable
+      ? `${source.authority} · ${source.label}`
+      : product?.description ?? releaseId;
     copy.append(header, detail);
     choice.append(checkbox, copy);
     releaseChoices.append(choice);
@@ -2122,7 +2063,8 @@ function renderResourcePackageDetails(
   selectAll.type = "button";
   selectAll.className = "command-button secondary";
   selectAll.textContent = "选择全部";
-  selectAll.addEventListener("click", () => callbacks.setDraftReleases(releaseIds));
+  selectAll.disabled = loadableReleaseIds.length === 0;
+  selectAll.addEventListener("click", () => callbacks.setDraftReleases(loadableReleaseIds));
   const clearAll = document.createElement("button");
   clearAll.type = "button";
   clearAll.className = "command-button secondary";
@@ -2139,7 +2081,7 @@ function renderResourcePackageDetails(
     remove.className = "command-button danger";
     remove.textContent = "卸载资源";
     remove.title = "从天球移除并删除当前服务器中的公开覆盖文件";
-    remove.addEventListener("click", () => void callbacks.remove().catch(showFatal));
+    remove.addEventListener("click", () => void callbacks.remove().catch((error) => notifyWorkspace("资源包卸载失败", error instanceof Error ? error.message : String(error), { tone: "error" })));
     actions.append(remove);
   }
   content.replaceChildren(heading, summary, metadata, releaseSection, actions);
@@ -2238,68 +2180,6 @@ function renderSurveyDetails(survey: SurveyRecord): void {
   content.replaceChildren(heading, summary, metadata, releases);
 }
 
-function renderObjectSelection(selection: VolumeSelection): void {
-  byId("inspector-kicker").textContent = "OBJECT INSPECTOR";
-  inspectorRows(selection.targetId.toString(), [
-    ["TARGETID", selection.targetId.toString()],
-    ["RA", `${selection.raDeg.toFixed(6)}°`],
-    ["Dec", `${selection.decDeg >= 0 ? "+" : ""}${selection.decDeg.toFixed(6)}°`],
-    ["BEST_Z", selection.bestZ.toFixed(6)],
-    ["ZERR", Number.isFinite(selection.zErr) ? selection.zErr.toExponential(3) : "--"],
-    ["Comoving", formatMpc(selection.comovingDistanceMpc, 2)],
-  ]);
-}
-
-function renderJointSelection(selection: JointCellSelection | null): void {
-  byId("inspector-kicker").textContent = "JOINT CELL";
-  selectedJointCell = selection;
-  selectedRefinement = null;
-  if (!selection || !atlas) {
-    inspectorRows("", []);
-    return;
-  }
-  const key = `${selection.nside}:${selection.radialBins}:${selection.pixel}:${selection.radialBin}`;
-  const rows: Array<[string, string]> = [
-    ["HEALPix", `${selection.nside} / ${selection.pixel}`],
-    ["Radial bin", `${selection.radialBin + 1} / ${selection.radialBins}`],
-    ["Range", `${selection.radialMinMpc.toFixed(0)}–${selection.radialMaxMpc.toFixed(0)} Mpc`],
-    ["Objects", formatInteger(selection.count)],
-    ["Volume", `${selection.volumeMpc3.toExponential(3)} Mpc³`],
-    ["Density", selection.densityPerMpc3.toExponential(3)],
-    ["Refinement", "CALCULATING"],
-  ];
-  inspectorRows(`CELL ${selection.pixel}:${selection.radialBin}`, rows);
-  void workspaceApi.refinement(atlas.id, {
-    survey: "desi",
-    nside: selection.nside,
-    radialBins: selection.radialBins,
-    pixel: selection.pixel,
-    radialBin: selection.radialBin,
-  }).then((refinement) => {
-    if (!selectedJointCell || `${selectedJointCell.nside}:${selectedJointCell.radialBins}:${selectedJointCell.pixel}:${selectedJointCell.radialBin}` !== key) return;
-    selectedRefinement = refinement;
-    const actions: HTMLButtonElement[] = [];
-    if (refinement.angular.available) actions.push(actionButton(`方向 → ${refinement.angular.nextLevel}`, () => void drill("angular")));
-    if (refinement.radial.available) actions.push(actionButton(`径向 → ${refinement.radial.nextLevel}`, () => void drill("radial")));
-    if (refinement.recommendedAxis !== "none") actions.unshift(actionButton(`自动 · ${refinement.recommendedAxis.toUpperCase()}`, () => void drill(refinement.recommendedAxis as "angular" | "radial")));
-    inspectorRows(`CELL ${selection.pixel}:${selection.radialBin}`, [
-      ...rows.slice(0, -1),
-      ["Angular gain", refinement.angular.normalizedVariation.toFixed(4)],
-      ["Radial gain", refinement.radial.normalizedVariation.toFixed(4)],
-      ["Conserved", refinement.angular.conserved && refinement.radial.conserved ? "YES" : "NO"],
-      ["Recommended", refinement.recommendedAxis.toUpperCase()],
-    ], actions);
-  }).catch(showFatal);
-}
-
-function renderVolumeSelection(selection: VolumeSelection | JointCellSelection | null): void {
-  if (!selection) {
-    selectedJointCell = null;
-    inspectorRows("", []);
-  } else if (selection.kind === "object") renderObjectSelection(selection);
-  else renderJointSelection(selection);
-}
-
 function renderLayerAssetDetails(asset: DataAssetRecord): void {
   selectedLayerAssetId = asset.id;
   const layer = workspaceAssetLayers.get(asset.id);
@@ -2308,9 +2188,17 @@ function renderLayerAssetDetails(asset: DataAssetRecord): void {
   if (scan && asset.connectorIds?.length === 1) {
     const scanButton = actionButton("扫描此资产", () => {
       scanButton.disabled = true;
+      notifyWorkspace("正在提交用户资产扫描", asset.name, { tone: "info" });
       void workspaceApi.executeDataAssetLocalScan(asset.id)
-        .then(() => refreshWorkspaceAssets(asset.id))
-        .catch(showFatal)
+        .then((run) => {
+          notifyWorkspace("用户资产扫描已提交", `${asset.name} · ${run.taskKind ?? "user_scan"}`, { tone: "success" });
+          return refreshWorkspaceAssets(asset.id).catch((error) => {
+            notifyWorkspace("用户资产覆盖刷新失败", error instanceof Error ? error.message : String(error), { tone: "warning" });
+          });
+        })
+        .catch((error) => {
+          notifyWorkspace("用户资产扫描失败", error instanceof Error ? error.message : String(error), { tone: "error" });
+        })
         .finally(() => { scanButton.disabled = false; });
     });
     actions.push(scanButton);
@@ -2344,7 +2232,7 @@ function moveLayer(key: string, targetIndex: number): void {
 
 function buildSurveyList(): void {
   const list = byId("sky-layer-list");
-  const publicLayers = new Map(footprintSurveyIds().map((surveyId) => [`public-survey:${surveyId}`, surveyCards.find((survey) => survey.id === surveyId)!]));
+  const publicLayers = new Map(footprintSurveyIds().map((surveyId) => [`public-survey:${surveyId}`, publicSurveyCards.find((survey) => survey.id === surveyId)!]));
   const assetLayers = new Map(userDataAssets().map((asset) => [`asset:${asset.id}`, asset]));
   if (!publicLayers.size && !assetLayers.size && !hasUnassignedWorkspaceCoverage) {
     const empty = document.createElement("p");
@@ -2372,7 +2260,7 @@ function buildSurveyList(): void {
     handle.type = "button";
     handle.className = "layer-drag-handle";
     handle.title = "拖拽排序图层";
-    handle.setAttribute("aria-label", `调整 ${survey?.name ?? asset?.name ?? "未关联巡天"} 图层顺序`);
+    handle.setAttribute("aria-label", `调整 ${survey?.name ?? asset?.name ?? "未设置巡天标签"} 图层顺序`);
     const handleIcon = document.createElement("i");
     handleIcon.dataset.lucide = "grip-vertical";
     handle.append(handleIcon);
@@ -2414,7 +2302,7 @@ function buildSurveyList(): void {
     const checkbox = document.createElement("input");
     checkbox.type = "checkbox";
     checkbox.checked = visible;
-    checkbox.setAttribute("aria-label", `显示 ${survey?.name ?? asset?.name ?? "未关联巡天"}`);
+    checkbox.setAttribute("aria-label", `显示 ${survey?.name ?? asset?.name ?? "未设置巡天标签"}`);
     checkbox.addEventListener("change", () => {
       if (survey) setSurveyVisibility(survey.id, checkbox.checked);
       else if (asset) setAssetVisibility(asset.id, checkbox.checked);
@@ -2428,7 +2316,7 @@ function buildSurveyList(): void {
     body.className = "survey-card-body";
     body.tabIndex = 0;
     const activate = (): void => {
-      if (survey) void selectSurvey(survey.id).catch(showFatal);
+      if (survey) void selectSurvey(survey.id, "public").catch(showFatal);
       else if (asset) { selectedLayerAssetId = asset.id; renderLayerAssetDetails(asset); }
     };
     body.addEventListener("click", activate);
@@ -2436,7 +2324,7 @@ function buildSurveyList(): void {
       if (event.key === "Enter" || event.key === " ") { event.preventDefault(); activate(); }
     });
     const name = document.createElement("span");
-    name.textContent = survey?.name ?? asset?.name ?? "未关联巡天";
+    name.textContent = survey?.name ?? asset?.name ?? "未设置巡天标签";
     const count = document.createElement("b");
     const metadata = document.createElement("small");
     if (survey) {
@@ -2446,10 +2334,10 @@ function buildSurveyList(): void {
     } else if (asset) {
       const layer = workspaceAssetLayers.get(asset.id);
       count.textContent = layer?.pixels.length ? `${formatInteger(layer.objectCount ?? 0)} OBJECTS` : "未建立覆盖";
-      metadata.textContent = `${asset.surveyId ?? "未关联巡天"} · ${asset.releaseId ?? "未关联发布"}`;
+      metadata.textContent = `${asset.surveyId ?? "未设置巡天标签"} · ${asset.releaseId ?? "未设置发布标签"}`;
     } else {
       count.textContent = "WORKSPACE";
-      metadata.textContent = "仅显示未绑定巡天的工作区覆盖";
+      metadata.textContent = "仅显示未设置巡天标签的工作区覆盖";
     }
     body.append(name, count, metadata);
 
@@ -2460,83 +2348,18 @@ function buildSurveyList(): void {
   createIcons({ icons: { GripVertical }, attrs: { "aria-hidden": "true" } });
 }
 
-async function selectSurvey(id: string): Promise<void> {
-  selectedSurvey = await workspaceApi.survey(id);
-  surveyRecordsById.set(id, selectedSurvey);
+async function selectSurvey(id: string, scope: "local" | "public" = "local"): Promise<void> {
+  const cached = scope === "public" ? publicSurveyRecordsById.get(id) : localSurveyRecordsById.get(id);
+  selectedSurvey = cached ? structuredClone(cached) : scope === "public" ? await workspaceApi.publicSurvey(id) : await workspaceApi.survey(id);
+  if (scope === "public") publicSurveyRecordsById.set(id, selectedSurvey);
+  else localSurveyRecordsById.set(id, selectedSurvey);
   buildSurveyList();
   renderSurveyDetails(selectedSurvey);
   if (window.innerWidth <= 1040) byId("inspector-panel").classList.add("mobile-open");
 }
 
-async function loadJointCells(): Promise<void> {
-  if (!atlas || !volumeViewer) return;
-  const generation = activationGeneration;
-  loadingIndicator.textContent = "查询联合体积单元";
-  loadingIndicator.classList.add("visible");
-  const query: Parameters<typeof workspaceApi.jointCells>[1] = {
-    survey: "desi",
-    nside: jointNside,
-    radialBins,
-    radialMinMpc,
-    radialMaxMpc,
-  };
-  if (parentFilter && jointNside >= parentFilter.nside) {
-    query.parentNside = parentFilter.nside;
-    query.parentPixel = parentFilter.pixel;
-  }
-  const result: AtlasJointQueryResponse = await workspaceApi.jointCells(atlas.id, query);
-  if (generation !== activationGeneration || !volumeViewer) return;
-  volumeViewer.setJointCells(result.cells, result.nside, result.radialBins);
-  volumeViewer.setAngularFilter(parentFilter);
-  byId("query-cell-count").textContent = formatInteger(result.metrics.returnedCellCount);
-  byId("query-object-count").textContent = formatInteger(result.representedObjects);
-  byId("query-examined-count").textContent = formatInteger(result.metrics.examinedCellCount);
-  byId("query-time").textContent = `${result.metrics.queryMs.toFixed(2)} MS`;
-  byId("metric-one").textContent = formatInteger(result.metrics.returnedCellCount);
-  byId("metric-three").textContent = formatInteger(result.representedObjects);
-  byId("object-status").textContent = `${formatInteger(result.representedObjects)} GALAXIES`;
-  loadingIndicator.classList.remove("visible");
-}
-
-async function ensurePoints(): Promise<void> {
-  if (!volumeManifest || !volumeViewer) return;
-  if (!volumePoints) {
-    loadingIndicator.textContent = `载入 ${formatInteger(volumeManifest.pointCount)} 个星系`;
-    loadingIndicator.classList.add("visible");
-    volumePoints = await workspaceApi.volumePoints(volumeManifest);
-  }
-  volumeViewer.setData(volumePoints);
-  volumeViewer.setAngularFilter(parentFilter);
-  loadingIndicator.classList.remove("visible");
-}
-
-async function drill(axis: "angular" | "radial"): Promise<void> {
-  if (!selectedJointCell || !selectedRefinement) return;
-  parentFilter = { nside: selectedJointCell.nside, pixel: selectedJointCell.pixel };
-  radialMinMpc = selectedJointCell.radialMinMpc;
-  radialMaxMpc = selectedJointCell.radialMaxMpc;
-  if (axis === "angular" && selectedRefinement.angular.nextLevel) jointNside = selectedRefinement.angular.nextLevel;
-  if (axis === "radial" && selectedRefinement.radial.nextLevel) radialBins = selectedRefinement.radial.nextLevel;
-  radialMinInput.value = String(radialMinMpc);
-  radialMaxInput.value = String(radialMaxMpc);
-  updateJointControls();
-  await loadJointCells();
-}
-
-function updateJointControls(): void {
-  byId("joint-nside-output").textContent = `NSIDE ${jointNside}`;
-  byId("radial-bins-output").textContent = `${radialBins} BINS`;
-  byId("radial-min-output").textContent = formatMpc(radialMinMpc);
-  byId("radial-max-output").textContent = formatMpc(radialMaxMpc);
-  setActiveButtons("[data-joint-nside]", (button) => Number(button.dataset.jointNside) === jointNside);
-  setActiveButtons("[data-radial-bins]", (button) => Number(button.dataset.radialBins) === radialBins);
-}
-
 async function activateMode(nextMode: ViewMode): Promise<void> {
   if (nextMode === "layers" && !surveyFootprints) throw new Error("Survey footprint catalog is not configured");
-  if (nextMode === "volume" && (!atlas || !angularCells || !volumeManifest)) throw new Error("Joint volume is not configured");
-  activationGeneration += 1;
-  const generation = activationGeneration;
   mode = nextMode;
   destroyViewer();
   setActiveButtons("[data-mode]", (button) => button.dataset.mode === mode);
@@ -2544,7 +2367,6 @@ async function activateMode(nextMode: ViewMode): Promise<void> {
   byId("resource-package-controls").hidden = mode !== "packages";
   byId("connector-controls").hidden = mode !== "connectors";
   byId("layer-controls").hidden = mode !== "layers";
-  byId("volume-controls").hidden = mode !== "volume";
   byId("workflow-controls").hidden = mode !== "workflow";
   byId("catalog-stage").hidden = mode !== "catalog";
   byId("resource-package-stage").hidden = mode !== "packages";
@@ -2582,7 +2404,7 @@ async function activateMode(nextMode: ViewMode): Promise<void> {
     byId("render-status").textContent = "USER ASSET REGISTRY";
     byId("object-status").textContent = "NO RAW DATA COPIED";
     loadingIndicator.classList.remove("visible");
-    await dataCatalogPanel.activate(surveyCards, surveyRecordsById);
+    await dataCatalogPanel.activate(surveyCards, localSurveyRecordsById);
     const userAssetCount = (dataCatalogPanel.debugState().catalogAssetCount as number | undefined) ?? 0;
     byId("metric-one").textContent = String(userAssetCount);
     byId("metric-two").textContent = byId("catalog-ready-count").textContent ?? "0";
@@ -2667,7 +2489,7 @@ async function activateMode(nextMode: ViewMode): Promise<void> {
   }
 
   workflowPanel.deactivate();
-  byId("panel-dataset-name").textContent = mode === "layers" ? "巡天图层" : atlas?.name ?? "Joint volume";
+  byId("panel-dataset-name").textContent = "巡天图层";
   const targetCanvas = freshCanvas();
   targetCanvas.hidden = false;
 
@@ -2683,41 +2505,22 @@ async function activateMode(nextMode: ViewMode): Promise<void> {
     byId("legend-min").textContent = "公开覆盖";
     byId("legend-max").textContent = "项目资产";
     byId("object-status").textContent = `${surveyFootprints?.footprints.length ?? 0} COVERAGE SOURCES`;
-     layerViewer = new SurveyLayerViewer(targetCanvas, surveyFootprints!, surveyCards, renderSurveySelection, renderSurveyHover, renderSurveyInspection, renderSurveyContextMenu, renderLayerState, renderSurveyObjectPoint);
+     layerViewer = new SurveyLayerViewer(targetCanvas, surveyFootprints!, publicSurveyCards, renderSurveySelection, renderSurveyHover, renderSurveyInspection, renderSurveyContextMenu, renderLayerState, renderSurveyObjectPoint);
     applySceneBackground(storedSceneBackground());
     layerViewer.setLayoutMode(layerLayoutMode);
     layerViewer.setVisibleSurveys(visibleSurveyIds);
     layerViewer.setInteractionMode(layerInteractionMode);
     applyLayerPreferences();
     void loadEuclidAstroOverview().catch((error) => {
+      notifyWorkspace("公开覆盖索引查询失败", error instanceof Error ? error.message : String(error), { tone: "warning", dedupeMs: 5_000 });
       console.warn("Unable to load Euclid workspace coverage overview", error);
     });
     void loadWorkspaceAssetCoverage().catch((error) => {
+      notifyWorkspace("用户资产覆盖读取失败", error instanceof Error ? error.message : String(error), { tone: "warning", dedupeMs: 5_000 });
       console.warn("Unable to load custom workspace coverage", error);
     });
     byId("render-status").textContent = layerViewer.webglVersion;
     loadingIndicator.classList.remove("visible");
-  } else {
-    byId("inspector-kicker").textContent = "JOINT CELL";
-    byId("panel-kicker").textContent = "JOINT VOLUME";
-    byId("dataset-state").textContent = "稀疏联合索引已就绪";
-    byId("metric-one-label").textContent = "CELLS";
-    byId("metric-three-label").textContent = "OBJECTS";
-    byId("metric-four-label").textContent = "DISTANCE";
-    byId("metric-four").textContent = "INFERRED";
-    byId("scene-mode-label").textContent = "RADIAL";
-    byId("scene-mode-value").textContent = "COMOVING DISTANCE";
-    byId("scene-badge").textContent = "HEALPIX × RADIAL";
-    byId("legend-min").textContent = "0";
-    byId("legend-max").textContent = "6000 MPC";
-    volumeViewer = new VolumeViewer(targetCanvas, volumeManifest!, renderVolumeSelection, renderVolumeState);
-    applySceneBackground(storedSceneBackground());
-    volumeViewer.setRepresentation(representation);
-    byId("render-status").textContent = volumeViewer.webglVersion;
-    updateJointControls();
-    await loadJointCells();
-    if (generation !== activationGeneration || !volumeViewer) return;
-    if (representation === "points") await ensurePoints();
   }
 }
 
@@ -2806,66 +2609,10 @@ document.querySelectorAll<HTMLButtonElement>("[data-layer-layout]").forEach((but
     applyLayerPreferences();
   });
 });
-document.querySelectorAll<HTMLButtonElement>("[data-joint-nside]").forEach((button) => {
-  button.addEventListener("click", () => {
-    jointNside = Number(button.dataset.jointNside);
-    parentFilter = null;
-    updateJointControls();
-    void loadJointCells().catch(showFatal);
-  });
-});
-document.querySelectorAll<HTMLButtonElement>("[data-radial-bins]").forEach((button) => {
-  button.addEventListener("click", () => {
-    radialBins = Number(button.dataset.radialBins);
-    parentFilter = null;
-    updateJointControls();
-    void loadJointCells().catch(showFatal);
-  });
-});
-document.querySelectorAll<HTMLButtonElement>("[data-representation]").forEach((button) => {
-  button.addEventListener("click", () => {
-    representation = button.dataset.representation as VolumeRepresentation;
-    volumeViewer?.setRepresentation(representation);
-    if (representation === "points") void ensurePoints().catch(showFatal);
-  });
-});
-
-function scheduleRadialQuery(changed: "min" | "max"): void {
-  let minimum = Number(radialMinInput.value);
-  let maximum = Number(radialMaxInput.value);
-  if (maximum - minimum < 50) {
-    if (changed === "min") minimum = maximum - 50;
-    else maximum = minimum + 50;
-  }
-  radialMinMpc = Math.max(0, minimum);
-  radialMaxMpc = Math.min(6000, maximum);
-  parentFilter = null;
-  volumeViewer?.setRadialRange(radialMinMpc, radialMaxMpc);
-  updateJointControls();
-  if (radialTimer) clearTimeout(radialTimer);
-  radialTimer = setTimeout(() => void loadJointCells().catch(showFatal), 120);
-}
-
-radialMinInput.addEventListener("input", () => scheduleRadialQuery("min"));
-radialMaxInput.addEventListener("input", () => scheduleRadialQuery("max"));
 byId<HTMLButtonElement>("reset-button").addEventListener("click", () => {
   if (mode === "layers") {
     if (aladinExplorer) aladinExplorer.reset();
     else layerViewer?.reset();
-  }
-  else if (mode === "volume") {
-    jointNside = 32;
-    radialBins = 8;
-    radialMinMpc = 0;
-    radialMaxMpc = 6000;
-    parentFilter = null;
-    radialMinInput.value = "0";
-    radialMaxInput.value = "6000";
-    volumeViewer?.reset();
-    volumeViewer?.setAngularFilter(null);
-    volumeViewer?.setRepresentation(representation);
-    updateJointControls();
-    void loadJointCells().catch(showFatal);
   }
 });
 byId<HTMLButtonElement>("aladin-fullscreen").addEventListener("click", () => void toggleAladinFullscreen());
@@ -2935,7 +2682,7 @@ document.addEventListener("pointerdown", (event) => {
 byId<HTMLButtonElement>("controls-toggle").addEventListener("click", () => controlsPanel.classList.toggle("mobile-open"));
 window.addEventListener("astro:navigate", (event) => {
   const nextMode = (event as CustomEvent<{ mode?: ViewMode }>).detail?.mode;
-  if (nextMode === "layers" || nextMode === "volume") void activateMode(nextMode).catch(showFatal);
+  if (nextMode === "layers") void activateMode(nextMode).catch(showFatal);
 });
 
 const scrollTimers = new WeakMap<HTMLElement, number>();
@@ -2965,52 +2712,41 @@ declare global {
 }
 
 async function start(): Promise<void> {
-  const [surveysResult, footprintsResult, assetsResult, catalogConfigResult] = await Promise.allSettled([
+  const [surveysResult, publicSurveysResult, footprintsResult, assetsResult, catalogConfigResult] = await Promise.allSettled([
     workspaceApi.surveys(),
+    workspaceApi.publicSurveys(),
     workspaceApi.surveyFootprints(),
     workspaceApi.dataAssets(),
     workspaceApi.resourceCatalogConfig(),
   ]);
   const surveys = surveysResult.status === "fulfilled" ? surveysResult.value : [];
+  const publicSurveys = publicSurveysResult.status === "fulfilled" ? publicSurveysResult.value : [];
   const footprints = footprintsResult.status === "fulfilled" ? footprintsResult.value : emptySurveyFootprintManifest();
   const assets = assetsResult.status === "fulfilled" ? assetsResult.value : [];
-  publicCatalogUnavailable = footprintsResult.status === "rejected" || catalogConfigResult.status === "rejected";
-  if (footprintsResult.status === "rejected") console.warn("Public coverage is unavailable until Assets catalog sync", footprintsResult.reason);
+  publicCatalogUnavailable = footprintsResult.status === "rejected" || publicSurveysResult.status === "rejected" || catalogConfigResult.status === "rejected";
+  if (footprintsResult.status === "rejected") {
+    notifyWorkspace("公开覆盖目录读取失败", footprintsResult.reason instanceof Error ? footprintsResult.reason.message : String(footprintsResult.reason), { tone: "warning", dedupeMs: 5_000 });
+    console.warn("Public coverage is unavailable until Assets catalog sync", footprintsResult.reason);
+  }
   surveyCards = surveys;
+  publicSurveyCards = publicSurveys;
   surveyFootprints = footprints;
   dataAssets = assets;
   if (catalogConfigResult.status === "fulfilled") resourcePackagePanel.setCatalogStatus(catalogConfigResult.value);
   const surveyResults = await Promise.allSettled(surveys.map((survey) => workspaceApi.survey(survey.id)));
-  surveyRecordsById.clear();
-  surveyResults.forEach((result) => { if (result.status === "fulfilled") surveyRecordsById.set(result.value.id, result.value); });
+  localSurveyRecordsById.clear();
+  surveyResults.forEach((result) => { if (result.status === "fulfilled") localSurveyRecordsById.set(result.value.id, result.value); });
+  const publicSurveyResults = await Promise.allSettled(publicSurveys.map((survey) => workspaceApi.publicSurvey(survey.id)));
+  publicSurveyRecordsById.clear();
+  publicSurveyResults.forEach((result) => { if (result.status === "fulfilled") publicSurveyRecordsById.set(result.value.id, result.value); });
   restoreLayerPreferences();
 
-  const [atlasResult, volumeResult] = await Promise.allSettled([workspaceApi.atlases(), workspaceApi.volumes()]);
-  const atlases = atlasResult.status === "fulfilled" ? atlasResult.value : [];
-  const volumes = volumeResult.status === "fulfilled" ? volumeResult.value : [];
-  if (atlasResult.status === "rejected") console.warn("Joint atlas is unavailable; project sky remains enabled", atlasResult.reason);
-  if (volumeResult.status === "rejected") console.warn("Radial volumes are unavailable; project sky remains enabled", volumeResult.reason);
-  atlas = atlases[0] ?? null;
-  volumeManifest = volumes.find((candidate) => candidate.id === atlas?.jointIndex.radialCoordinate.sourceVolumeId) ?? volumes[0] ?? null;
-  if (atlas) {
-    try {
-      angularCells = await workspaceApi.atlasAngularCells(atlas);
-    } catch (error) {
-      console.warn("Joint atlas cells are unavailable; project sky remains enabled", error);
-      angularCells = null;
-    }
-  }
-  byId("dataset-name").textContent = "Assets public coverage and user data";
+  byId("dataset-name").textContent = "公开覆盖与用户资产";
   byId("panel-dataset-name").textContent = "Atlas workspace";
   buildSurveyList();
   byId("service-status").textContent = "SERVICE ONLINE";
   window.__ASTRO_WORKSPACE_DEBUG__ = () => ({
     mode,
-    representation,
-    jointNside,
-    radialBins,
-    radialMinMpc,
-    radialMaxMpc,
     cameraDistance: canvas.dataset.cameraDistance,
     outerRadius: canvas.dataset.outerRadius,
     aladinActive: Boolean(aladinExplorer),

@@ -2,8 +2,6 @@ import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 
-import type { PublicResourcePackage } from "./resource-packages.js";
-
 export type SurveyModality = "imaging" | "spectroscopy" | "photometry" | "time-domain" | "integral-field" | "ultraviolet" | "infrared" | "catalog" | "simulation";
 export type ReleaseKind = "public_release" | "quick_release" | "early_release" | "science_results" | "archive_snapshot" | "planned";
 export type ReleaseAvailability = "available" | "metadata_only" | "planned";
@@ -210,58 +208,6 @@ function release(
   options: Omit<SurveyRelease, "id" | "label">,
 ): SurveyRelease {
   return { id, label, ...options };
-}
-
-const PUBLIC_SURVEY_COLORS = ["#45d7c6", "#e4b44c", "#d96b67", "#6ca6d9", "#78b96c", "#b77bd1", "#cf8a4c", "#5fb0a8"] as const;
-
-function publicSurveyColor(id: string): string {
-  const hash = [...id].reduce((value, character) => ((value * 31) + character.charCodeAt(0)) | 0, 7);
-  return PUBLIC_SURVEY_COLORS[Math.abs(hash) % PUBLIC_SURVEY_COLORS.length]!;
-}
-
-function publicModalities(values: readonly string[]): SurveyModality[] {
-  const result = [...new Set(values.filter((value): value is SurveyModality => MODALITIES.includes(value as SurveyModality)))];
-  return result.length ? result : ["catalog"];
-}
-
-/** Project Assets v3 catalog metadata into the existing read-only survey view. */
-export function publicSurveysFromPackages(packages: readonly PublicResourcePackage[]): SurveyRecord[] {
-  const groups = new Map<string, PublicResourcePackage[]>();
-  for (const record of packages) groups.set(record.surveyId, [...(groups.get(record.surveyId) ?? []), record]);
-  return [...groups].map(([surveyId, records]) => {
-    const first = records[0]!;
-    const modalities = publicModalities(records.flatMap((record) => record.modalities));
-    const releases = new Map<string, SurveyRelease>();
-    for (const record of records) for (const releaseId of record.releases) {
-      const source = record.sources.find((entry) => entry.releaseId === releaseId);
-      const releaseModalities = publicModalities(record.modalities);
-      releases.set(releaseId, release(releaseId, record.releaseLabels[releaseId] ?? releaseId, {
-        kind: "public_release",
-        availability: "available",
-        modalities: releaseModalities,
-        products: record.productTypes.map((name) => ({
-          name,
-          modality: releaseModalities[0]!,
-          description: record.description,
-        })),
-        coverage: {
-          status: "verified",
-          summary: record.description,
-          sourceUrl: source?.url ?? record.archiveUrl,
-        },
-      }));
-    }
-    return {
-      id: surveyId,
-      name: first.name,
-      mission: [...new Set(records.flatMap((record) => record.facilities))].join(" / ") || first.name,
-      color: publicSurveyColor(surveyId),
-      description: records.map((record) => record.description).filter((value, index, all) => all.indexOf(value) === index).join(" "),
-      modalities,
-      origin: "public",
-      releases: [...releases.values()],
-    };
-  });
 }
 
 function deriveCoverageStatus(releases: readonly SurveyRelease[]): FootprintStatus {

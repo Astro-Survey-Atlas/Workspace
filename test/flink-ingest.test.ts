@@ -8,7 +8,7 @@ import type { ConnectorCredentialStore } from "../src/connector-credentials.js";
 import { ConnectorIngestRunCatalog } from "../src/connector-history.js";
 import { connectorConfigurationHash, type ConnectorRecord, type ConnectorRegistry } from "../src/connectors.js";
 import type { DataAssetRecord, DataAssetRegistrationInput, DataCatalogRegistry } from "../src/data-catalog.js";
-import { ConnectorScanCapabilityError, ConnectorScanPreconditionError, connectorScanPath, connectorScanTarget, DataWarehouseDisabledError, dataWarehouseEnabled, FlinkScanService, parseLegacyConnectorScanCommand, validateConnectorSelfScanBody, type FlinkResourceClient } from "../src/flink-ingest.js";
+import { ConnectorScanCapabilityError, ConnectorScanPreconditionError, connectorScanPath, connectorScanTarget, DataWarehouseDisabledError, dataWarehouseEnabled, FlinkScanService, validateConnectorSelfScanBody, type FlinkResourceClient } from "../src/flink-ingest.js";
 import { SqliteMetadataStore } from "../src/storage/index.js";
 
 const timestamp = "2026-08-13T12:00:00.000Z";
@@ -237,7 +237,6 @@ test("disabled warehouse neither polls nor submits scans", async () => {
   service.start();
   await service.poll();
   await assert.rejects(service.submitScan("connector", { assetId: "asset" }), DataWarehouseDisabledError);
-  await assert.rejects(service.submitPilot("connector"), DataWarehouseDisabledError);
   service.stop();
   assert.equal(requests, 0);
 });
@@ -250,17 +249,6 @@ test("S3 scan paths remain inside the exact configured bucket and prefix", () =>
   assert.throws(() => connectorScanPath(record, "s3://survey/release-other/catalog.fits"), /connector prefix/);
   assert.throws(() => connectorScanPath(record, "s3://survey.evil/release/catalog.fits"), /connector bucket/);
   assert.throws(() => connectorScanPath(record, "s3://survey/release/%2e%2e/private"), /dot segments/);
-});
-
-test("legacy scan route requires an explicit mode and never defaults to pilot", () => {
-  assert.throws(() => parseLegacyConnectorScanCommand(undefined), /scan mode is required/);
-  assert.throws(() => parseLegacyConnectorScanCommand({}), /scan mode is required/);
-  assert.deepEqual(parseLegacyConnectorScanCommand({ mode: "pilot" }), { mode: "pilot" });
-  assert.throws(() => parseLegacyConnectorScanCommand({ mode: "scan" }), /assetId is required/);
-  assert.deepEqual(parseLegacyConnectorScanCommand({ mode: "scan", assetId: "asset-one" }), {
-    mode: "generic",
-    input: { assetId: "asset-one" },
-  });
 });
 
 test("connector self-scan accepts no business body", () => {
@@ -280,6 +268,7 @@ test("connector self-scan derives its target and snapshots zero, one, or multipl
       assert.equal(run.connectorId, record.id);
       assert.equal(run.connectorKind, "s3");
       assert.equal(run.executor, "flink-ingest");
+      assert.equal(run.taskKind, "user_scan");
       assert.deepEqual(run.target, { uri: "s3://survey/release", bucket: "survey", prefix: "release" });
       assert.deepEqual(run.assetIds, assetIds.length ? [...assetIds].sort() : ["user-auto-2"]);
       const token = run.batchId?.replace("workspace-connector-scan-", "");
@@ -288,7 +277,17 @@ test("connector self-scan derives its target and snapshots zero, one, or multipl
       assert.ok((run.jobId?.length ?? 64) <= 63);
       const task = fixture.requests.find((request) => request.path.endsWith("/astrometadatascantasks"));
       assert.ok(task);
-      const body = task.body as { spec?: { backend?: string; source?: { paths?: string[]; dataSourceRef?: { name?: string } }; handlers?: string[]; userProperties?: Record<string, unknown>; sink?: { dataSourceRef?: { name?: string } }; extraEnv?: Record<string, unknown> } };
+      const body = task.body as { metadata?: { labels?: Record<string, string> }; spec?: { backend?: string; source?: { paths?: string[]; dataSourceRef?: { name?: string } }; handlers?: string[]; userProperties?: Record<string, unknown>; sink?: { dataSourceRef?: { name?: string } }; extraEnv?: Record<string, unknown> } };
+      const expectedLabels: Record<string, string> = {
+        "app.kubernetes.io/managed-by": "astro-atlas",
+        "astro.zhejianglab.org/atlas-task": "true",
+        "astro.zhejianglab.org/atlas-task-kind": "user_scan",
+        "astro.zhejianglab.org/connector": "connector-s3",
+      };
+      if (!run.batchId) throw new Error("scan run did not include a batch id");
+      expectedLabels["astro.zhejianglab.org/batch"] = run.batchId;
+      if (run.assetIds?.length === 1) expectedLabels["astro.zhejianglab.org/asset"] = run.assetIds[0]!;
+      assert.deepEqual(body.metadata?.labels, expectedLabels);
       assert.equal(body.spec?.backend, "job");
       assert.deepEqual(body.spec?.source?.paths, ["s3://survey/release"]);
       assert.equal(body.spec?.source?.dataSourceRef?.name, "connector-s3");
@@ -359,13 +358,12 @@ test("connector self-scan idempotency returns one run and submits one task", asy
   }
 });
 
-test("explicit coverage job binds the survey asset connector and scanner evidence contract", async () => {
-  const record = connector({ surveyId: "csst", releaseId: "csst-sim-w1-20250731" });
+test("explicit remote scan carries local asset metadata without Connector or Assets binding", async () => {
+  const record = connector({ surveyId: "connector-local-label", releaseId: "connector-local-release" });
   const csstAsset = {
     ...asset("csst-sim-w1-phot", record),
     surveyId: "csst",
     releaseId: "csst-sim-w1-20250731",
-    ownershipSnapshotVersion: 1 as const,
     product: "W1 photometric catalog",
   };
   const fixture = await scanFixture(record, [csstAsset]);
@@ -383,10 +381,11 @@ test("explicit coverage job binds the survey asset connector and scanner evidenc
         decColumn: "DEC",
       },
     };
-    const first = await fixture.service.submitCoverageJob("csst", request, "csst-coverage-one");
-    const retry = await fixture.service.submitCoverageJob("csst", request, "csst-coverage-one");
+    const first = await fixture.service.submitRemoteAssetScan("csst", request, "csst-coverage-one");
+    const retry = await fixture.service.submitRemoteAssetScan("csst", request, "csst-coverage-one");
     assert.equal(retry.id, first.id);
     assert.equal(first.executor, "flink-coverage");
+    assert.equal(first.taskKind, "user_coverage");
     assert.deepEqual(first.coverage, {
       surveyId: "csst",
       releaseId: "csst-sim-w1-20250731",
@@ -405,8 +404,16 @@ test("explicit coverage job binds the survey asset connector and scanner evidenc
     });
     const task = fixture.requests.find((entry) => entry.method === "POST" && entry.path.endsWith("/astrometadatascantasks"));
     assert.ok(task);
-    const body = task.body as { metadata?: { name?: string }; spec?: { handlers?: string[]; userProperties?: Record<string, string>; extraEnv?: Record<string, string> } };
+    const body = task.body as { metadata?: { name?: string; labels?: Record<string, string> }; spec?: { handlers?: string[]; userProperties?: Record<string, string>; extraEnv?: Record<string, string> } };
     assert.match(body.metadata?.name ?? "", /^astro-coverage-/);
+    assert.deepEqual(body.metadata?.labels, {
+      "app.kubernetes.io/managed-by": "astro-atlas",
+      "astro.zhejianglab.org/atlas-task": "true",
+      "astro.zhejianglab.org/atlas-task-kind": "user_coverage",
+      "astro.zhejianglab.org/asset": csstAsset.id,
+      "astro.zhejianglab.org/connector": record.id,
+      "astro.zhejianglab.org/batch": first.batchId,
+    });
     assert.deepEqual(body.spec?.handlers, ["default", "fits", "coverage", "object"]);
     assert.deepEqual(body.spec?.userProperties, {
       survey: "csst",
@@ -441,7 +448,7 @@ test("explicit coverage job binds the survey asset connector and scanner evidenc
   }
 });
 
-test("coverage job refuses an unbound or mismatched scientific asset before writing a task", async () => {
+test("remote scan refuses an asset that is not linked to the selected Connector", async () => {
   const record = connector({ surveyId: "csst", releaseId: "csst-sim-w1-20250731" });
   const unrelated = {
     ...asset("other-asset", record),
@@ -453,7 +460,7 @@ test("coverage job refuses an unbound or mismatched scientific asset before writ
   };
   const fixture = await scanFixture(record, [unrelated]);
   try {
-    await assert.rejects(fixture.service.submitCoverageJob("csst", {
+    await assert.rejects(fixture.service.submitRemoteAssetScan("csst", {
       connectorId: record.id,
       assetId: unrelated.id,
       releaseId: "csst-sim-w1-20250731",

@@ -5,6 +5,7 @@ import { validateCoverageJobSnapshot, type CoverageJobSnapshot } from "./coverag
 import type { MetadataStore } from "./storage/types.js";
 
 export type ConnectorIngestRunStatus = "queued" | "running" | "succeeded" | "failed";
+export type AtlasTaskKind = "user_scan" | "user_coverage";
 
 export interface ConnectorScanTargetSnapshot {
   uri: string;
@@ -21,6 +22,8 @@ export interface ConnectorIngestRun {
   connectorName?: string;
   connectorKind?: ConnectorKind;
   executor?: string;
+  /** Atlas-local task identity; never sent as a shared CRD field. */
+  taskKind?: AtlasTaskKind;
   target?: ConnectorScanTargetSnapshot;
   assetIds?: string[];
   jobId?: string;
@@ -37,7 +40,7 @@ export interface ConnectorIngestRun {
   /** Retained as a legacy alias for target.uri. */
   sourcePath?: string;
   esIndex?: string;
-  /** Present only for an explicit survey coverage derivation. */
+  /** Present only for an optional user-asset remote scan with coverage context. */
   coverage?: CoverageJobSnapshot;
   createdAt: string;
   updatedAt?: string;
@@ -54,6 +57,8 @@ export interface ConnectorIngestRunInput {
   connectorName?: string;
   connectorKind?: ConnectorKind;
   executor?: string;
+  /** Atlas-local task kind; never serialized into the shared scan CRD. */
+  taskKind?: AtlasTaskKind;
   target?: ConnectorScanTargetSnapshot;
   assetIds?: string[];
   jobId?: string;
@@ -80,6 +85,7 @@ export interface ConnectorIngestRunFilter {
   connectorId?: string;
   connectorKind?: ConnectorKind;
   status?: ConnectorIngestRunStatus;
+  taskKind?: AtlasTaskKind;
 }
 
 function optionalText(value: unknown, maximum: number): string | undefined {
@@ -130,6 +136,22 @@ function normalizedFilter(value?: string | ConnectorIngestRunFilter): ConnectorI
   return value;
 }
 
+/** Preserve legacy Atlas history while making task ownership explicit. */
+function inferAtlasTaskKind(record: Partial<ConnectorIngestRunRecord>): AtlasTaskKind {
+  if (record.taskKind !== undefined && record.taskKind !== "user_scan" && record.taskKind !== "user_coverage") {
+    throw new RangeError("taskKind is not supported");
+  }
+  if (record.taskKind === "user_coverage" || record.coverage !== undefined || record.executor === "flink-coverage"
+    || record.jobId?.startsWith("astro-coverage-") || record.batchId?.startsWith("workspace-coverage-")) {
+    return "user_coverage";
+  }
+  return "user_scan";
+}
+
+function atlasTaskKindRecord(record: ConnectorIngestRunRecord): ConnectorIngestRunRecord {
+  return { ...record, taskKind: inferAtlasTaskKind(record) };
+}
+
 export class ConnectorIngestRunCatalog {
   readonly #store: MetadataStore;
 
@@ -138,13 +160,17 @@ export class ConnectorIngestRunCatalog {
   async initialize(): Promise<void> {}
 
   async list(filter?: string | ConnectorIngestRunFilter): Promise<ConnectorIngestRunRecord[]> {
-    return (await this.#store.listConnectorIngestRuns(normalizedFilter(filter)))
+    const normalized = normalizedFilter(filter);
+    const records = await this.#store.listConnectorIngestRuns(normalized);
+    return records
+      .map((record) => atlasTaskKindRecord(record))
+      .filter((record) => normalized?.taskKind === undefined || record.taskKind === normalized.taskKind)
       .map((record) => structuredClone(record));
   }
 
   async findIdempotent(connectorId: string, idempotencyKey: string): Promise<ConnectorIngestRunRecord | undefined> {
     const keyHash = idempotencyKeyHash(idempotencyKey);
-    return (await this.#store.listConnectorIngestRuns({ connectorId }))
+    return (await this.list({ connectorId }))
       .find((record) => record.idempotencyKeyHash === keyHash);
   }
 
@@ -166,6 +192,7 @@ export class ConnectorIngestRunCatalog {
       connectorName: optionalText(input.connectorName, 240),
       connectorKind: input.connectorKind,
       executor: optionalText(input.executor, 120),
+      taskKind: inferAtlasTaskKind(input),
       target: optionalTarget(input.target),
       assetIds: optionalAssetIds(input.assetIds),
       jobId: optionalText(input.jobId, 180),
@@ -190,7 +217,7 @@ export class ConnectorIngestRunCatalog {
       throw new RangeError("connectorKind is not supported");
     }
     const result = await this.#store.transaction((transaction) => transaction.createConnectorIngestRun(record));
-    return { run: structuredClone(result.record), created: result.created };
+    return { run: structuredClone(atlasTaskKindRecord(result.record)), created: result.created };
   }
 
   async add(locationKey: string, input: ConnectorIngestRunInternalInput, idempotencyKey?: string): Promise<ConnectorIngestRunRecord> {
@@ -198,13 +225,15 @@ export class ConnectorIngestRunCatalog {
   }
 
   async update(id: string, patch: Partial<ConnectorIngestRunInternalInput>): Promise<ConnectorIngestRunRecord> {
-    const current = await this.#store.getConnectorIngestRun(id);
+    const currentValue = await this.#store.getConnectorIngestRun(id);
+    const current = currentValue ? atlasTaskKindRecord(currentValue) : undefined;
     if (!current) throw new Error(`Connector ingest run not found: ${id}`);
     if (patch.status !== undefined && !["queued", "running", "succeeded", "failed"].includes(patch.status)) {
       throw new RangeError("status is not supported");
     }
     const next: ConnectorIngestRunRecord = {
       ...current,
+      taskKind: inferAtlasTaskKind({ ...current, ...patch }),
       ...(patch.connectorId === undefined ? {} : { connectorId: optionalText(patch.connectorId, 180) }),
       ...(patch.connectorName === undefined ? {} : { connectorName: optionalText(patch.connectorName, 240) }),
       ...(patch.connectorKind === undefined ? {} : { connectorKind: patch.connectorKind }),
@@ -257,6 +286,7 @@ export function normalizeConnectorIngestRuns(entries: unknown[]): ConnectorInges
     if (record.connectorKind !== undefined && !["s3", "local", "jdbc"].includes(record.connectorKind)) {
       throw new Error("connector ingest run state contains an invalid record");
     }
+    record.taskKind = inferAtlasTaskKind(record);
     optionalAssetIds(record.assetIds);
     optionalTarget(record.target);
     optionalCount(record.fileCount, "fileCount");

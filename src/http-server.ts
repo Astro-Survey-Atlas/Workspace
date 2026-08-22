@@ -9,25 +9,18 @@ import express from "express";
 import type { Request, Response } from "express";
 
 import { AgentService } from "./agent.js";
-import { AtlasCatalog, publicAtlasManifest } from "./atlas.js";
 import { AstroIndexService, ASTRO_OVERVIEW_NSIDE, type AstroCoverageLayer, type AstroSkyQueryInput } from "./astro-index.js";
 import { AstroObjectIndexService, type AstroCellsQueryInput, type ObjectRegionQueryInput } from "./astro-object-index.js";
 import { McpCatalogQueryClient } from "./catalog-mcp-client.js";
 import { createConnectorCredentialStore, type StoredConnectorCredentials } from "./connector-credentials.js";
 import { ConnectorRegistry, connectorLocationKey, validateConnectorInput, type ConnectorCheckInput, type ConnectorPublicRecord, type ConnectorRecord, type ConnectorRegistrationInput } from "./connectors.js";
-import { ConnectorIngestRunCatalog, publicConnectorIngestRun, type ConnectorIngestRunFilter, type ConnectorIngestRunInput, type ConnectorIngestRunRecord, type ConnectorIngestRunStatus } from "./connector-history.js";
+import { ConnectorIngestRunCatalog, publicConnectorIngestRun, type ConnectorIngestRunFilter, type ConnectorIngestRunRecord, type ConnectorIngestRunStatus } from "./connector-history.js";
 import { DataCatalogRegistry, type DataAssetAccess, type DataAssetRecord, type DataAssetRegistrationInput } from "./data-catalog.js";
-import { ownershipKey, resolveDataOwnership, type EffectiveDataOwnership } from "./data-ownership.js";
-import { ConnectorScanCapabilityError, ConnectorScanPreconditionError, DataWarehouseDisabledError, dataWarehouseEnabled, FlinkScanService, parseLegacyConnectorScanCommand, validateConnectorSelfScanBody } from "./flink-ingest.js";
+import { ConnectorScanCapabilityError, ConnectorScanPreconditionError, DataWarehouseDisabledError, dataWarehouseEnabled, FlinkScanService, validateConnectorSelfScanBody } from "./flink-ingest.js";
 import { createAstroMcpServer } from "./mcp.js";
-import { ScanRunCatalog } from "./provenance.js";
-import { JsonDatasetRegistry } from "./registry.js";
-import { ResourceCatalogSyncError, ResourceCatalogUnavailableError, ResourcePackageManager, type ResourcePackageLoad } from "./resource-packages.js";
+import { ResourceCatalogSyncError, ResourceCatalogUnavailableError, ResourcePackageManager, resourcePackageSurveyRecords, type ResourcePackageLoad } from "./resource-packages.js";
 import type { SurveyFootprintManifest } from "./survey-footprints.js";
-import { publicSurveysFromPackages, surveyCardFor, SurveyRegistry, type SurveyRecord, type SurveyRegistrationInput, type SurveyReleaseRegistrationInput } from "./survey-registry.js";
-import { CatalogSkyIndexService } from "./sky-index.js";
-import type { DatasetRecord } from "./types.js";
-import { publicVolumeManifest, VolumeCatalog } from "./volume.js";
+import { surveyCardFor, SurveyRegistry, type SurveyRecord, type SurveyRegistrationInput, type SurveyReleaseRegistrationInput } from "./survey-registry.js";
 import { WorkflowEngine } from "./workflow-engine.js";
 import { WorkflowStore } from "./workflow-store.js";
 import { listTags } from "./tags.js";
@@ -39,10 +32,8 @@ import { LocalCsvScanExecutor, LocalScanCapabilityError, LocalScanDisabledError,
 const projectRoot = fileURLToPath(new URL("../", import.meta.url));
 const port = Number(process.env.PORT ?? "3000");
 const host = process.env.HOST ?? "0.0.0.0";
-const statePath = process.env.ASTRO_WORKSPACE_STATE ?? path.join(projectRoot, "data", "registry.json");
-const allowedRoots = (process.env.ASTRO_ALLOWED_ROOTS ?? path.join(projectRoot, "fixtures"))
-  .split(path.delimiter)
-  .filter(Boolean);
+const stateRoot = path.resolve(process.env.ASTRO_STATE_ROOT
+  ?? (process.env.ASTRO_SQLITE_PATH ? path.dirname(process.env.ASTRO_SQLITE_PATH) : path.join(projectRoot, "data")));
 const allowedHosts = (
   process.env.ASTRO_ALLOWED_HOSTS ??
   "localhost,127.0.0.1,astro-data-workspace-mcp,astro-data-workspace-mcp.astro-data-workspace,astro-data-workspace-mcp.astro-data-workspace.svc,astro-data-workspace-mcp.astro-data-workspace.svc.cluster.local"
@@ -51,22 +42,17 @@ const allowedHosts = (
   .map((value) => value.trim())
   .filter(Boolean);
 const viewerRoot = process.env.ASTRO_VIEWER_ROOT ?? path.join(projectRoot, "viewer");
-const volumeRoot = process.env.ASTRO_VOLUME_ROOT ?? path.join(projectRoot, "volumes");
-const atlasRoot = process.env.ASTRO_ATLAS_ROOT ?? volumeRoot;
-const provenanceRoot = process.env.ASTRO_PROVENANCE_ROOT ?? volumeRoot;
-const workflowRoot = process.env.ASTRO_WORKFLOW_ROOT ?? path.join(projectRoot, "data", "workflow-runs");
-const surveyRegistryStatePath = process.env.ASTRO_SURVEY_REGISTRY_STATE ?? path.join(path.dirname(statePath), "survey-registrations.json");
-const dataCatalogBootstrapPath = process.env.ASTRO_DATA_CATALOG_BOOTSTRAP ?? path.join(path.dirname(statePath), "assets-current", "data-catalog.json");
-const dataCatalogStatePath = process.env.ASTRO_DATA_CATALOG_STATE ?? path.join(path.dirname(statePath), "data-catalog.json");
-const connectorStatePath = process.env.ASTRO_CONNECTOR_STATE ?? path.join(path.dirname(statePath), "connectors.json");
-const connectorBootstrapPath = process.env.ASTRO_CONNECTOR_BOOTSTRAP ?? path.join(projectRoot, "bootstrap", "connectors.json");
-const connectorRunStatePath = process.env.ASTRO_CONNECTOR_RUN_STATE ?? path.join(path.dirname(statePath), "connector-ingest-runs.json");
+const workflowRoot = process.env.ASTRO_WORKFLOW_ROOT ?? path.join(stateRoot, "workflow-runs");
+const surveyRegistryStatePath = process.env.ASTRO_SURVEY_REGISTRY_STATE ?? path.join(stateRoot, "survey-registrations.json");
+const dataCatalogStatePath = process.env.ASTRO_DATA_CATALOG_STATE ?? path.join(stateRoot, "data-catalog.json");
+const connectorStatePath = process.env.ASTRO_CONNECTOR_STATE ?? path.join(stateRoot, "connectors.json");
+const connectorRunStatePath = process.env.ASTRO_CONNECTOR_RUN_STATE ?? path.join(stateRoot, "connector-ingest-runs.json");
 const localConnectorRoots = LocalConnectorRootsPolicy.fromEnvironment();
-const resourcePackageRoot = process.env.ASTRO_RESOURCE_PACKAGE_ROOT ?? path.join(projectRoot, "data", "resource-packages");
-const resourcePackageStatePath = process.env.ASTRO_RESOURCE_PACKAGE_STATE ?? path.join(path.dirname(statePath), "resource-package-state.json");
-const resourceCatalogUrl = process.env.ASTRO_RESOURCE_CATALOG_URL ?? pathToFileURL(path.join(path.dirname(statePath), "assets-current", "catalog.json")).href;
-const resourceSnapshotRoot = process.env.ASTRO_RESOURCE_SNAPSHOT_ROOT ?? path.dirname(statePath);
-const resourceCatalogConfigPath = process.env.ASTRO_RESOURCE_CATALOG_CONFIG_STATE ?? path.join(path.dirname(statePath), "resource-catalog-config.json");
+const resourcePackageRoot = process.env.ASTRO_RESOURCE_PACKAGE_ROOT ?? path.join(stateRoot, "resource-packages");
+const resourcePackageStatePath = process.env.ASTRO_RESOURCE_PACKAGE_STATE ?? path.join(stateRoot, "resource-package-state.json");
+const resourceCatalogUrl = process.env.ASTRO_RESOURCE_CATALOG_URL ?? pathToFileURL(path.join(stateRoot, "assets-current", "catalog.json")).href;
+const resourceSnapshotRoot = process.env.ASTRO_RESOURCE_SNAPSHOT_ROOT ?? stateRoot;
+const resourceCatalogConfigPath = process.env.ASTRO_RESOURCE_CATALOG_CONFIG_STATE ?? path.join(stateRoot, "resource-catalog-config.json");
 const resourceCatalogAllowedOrigins = (process.env.ASTRO_RESOURCE_CATALOG_ALLOWED_ORIGINS ?? "")
   .split(",")
   .map((value) => value.trim())
@@ -85,16 +71,11 @@ const warehouseEnabled = dataWarehouseEnabled();
 const localCsvScanEnabled = localScanEnabled();
 const metadataStoreEngine = process.env.ASTRO_METADATA_STORE || "sqlite";
 
-const registry = new JsonDatasetRegistry({ statePath, allowedRoots });
-const skyIndexes = new CatalogSkyIndexService();
-const volumes = new VolumeCatalog(volumeRoot);
-const atlases = new AtlasCatalog(atlasRoot);
-const scanRuns = new ScanRunCatalog(provenanceRoot);
 const workflowStore = new WorkflowStore(workflowRoot);
 const surveys = new SurveyRegistry(surveyRegistryStatePath);
 const metadataStore = createMetadataStore();
-const dataCatalog = new DataCatalogRegistry(dataCatalogBootstrapPath, metadataStore);
-const connectors = new ConnectorRegistry(metadataStore, connectorBootstrapPath, localConnectorRoots);
+const dataCatalog = new DataCatalogRegistry(metadataStore);
+const connectors = new ConnectorRegistry(metadataStore, localConnectorRoots);
 const connectorCredentials = createConnectorCredentialStore();
 const connectorRuns = new ConnectorIngestRunCatalog(metadataStore);
 const astroObjectIndex = new AstroObjectIndexService({ baseUrl: astroEsUrl });
@@ -147,17 +128,6 @@ app.get("/api/capabilities", (_request: Request, response: Response) => {
   });
 });
 
-function publicDataset(record: DatasetRecord) {
-  const { path: _path, ...profile } = record.profile;
-  return {
-    id: record.id,
-    name: record.name,
-    profile,
-    createdAt: record.createdAt,
-    updatedAt: record.updatedAt,
-  };
-}
-
 function publicConnectorRuns(records: ConnectorIngestRunRecord[]) {
   return records.map(publicConnectorIngestRun);
 }
@@ -176,13 +146,16 @@ function connectorRunFilter(request: Request): ConnectorIngestRunFilter {
   };
   const connectorKind = value("connectorKind");
   const status = value("status");
+  const taskKind = value("taskKind");
   if (connectorKind !== undefined && !["s3", "local", "jdbc"].includes(connectorKind)) throw new RangeError("connectorKind is not supported");
   if (status !== undefined && !["queued", "running", "succeeded", "failed"].includes(status)) throw new RangeError("status is not supported");
+  if (taskKind !== undefined && !["user_scan", "user_coverage"].includes(taskKind)) throw new RangeError("taskKind is not supported");
   return {
     locationKey: value("locationKey"),
     connectorId: value("connectorId"),
     connectorKind: connectorKind as ConnectorIngestRunFilter["connectorKind"],
     status: status as ConnectorIngestRunStatus | undefined,
+    taskKind: taskKind as ConnectorIngestRunFilter["taskKind"],
   };
 }
 
@@ -231,96 +204,17 @@ function internalConnectorInput(input: ConnectorRegistrationInput, credentialRef
   return { ...metadata, credentialRef };
 }
 
-function validateConnectorSurveyBinding(input: ConnectorRegistrationInput): void {
-  if (!input.surveyId) {
-    if (input.releaseId) throw new RangeError("releaseId requires surveyId");
-    return;
-  }
-  const survey = surveys.get(input.surveyId);
-  if (input.releaseId && !survey.releases.some((release) => release.id === input.releaseId)) {
-    throw new RangeError(`releaseId ${input.releaseId} does not belong to survey ${input.surveyId}`);
-  }
-}
-
-function optionalOwnershipText(value: unknown, name: string): string | undefined {
+function optionalLocalReference(value: unknown, name: string): string | undefined {
   if (value === undefined) return undefined;
   if (typeof value !== "string") throw new RangeError(`${name} must be a string`);
   const result = value.trim();
   if (result.length > 120) throw new RangeError(`${name} must contain at most 120 characters`);
+  if (result && !/^[a-z0-9](?:[a-z0-9._-]{0,118}[a-z0-9])?$/.test(result)) throw new RangeError(`${name} must be a lowercase stable identifier`);
   return result || undefined;
-}
-
-function validateRegisteredAssetOwnership(surveyId?: string, releaseId?: string): void {
-  if (!surveyId) {
-    if (releaseId) throw new RangeError("releaseId requires surveyId");
-    return;
-  }
-  let survey;
-  try {
-    survey = surveys.get(surveyId);
-  } catch {
-    throw new RangeError(`surveyId is not registered: ${surveyId}`);
-  }
-  if (releaseId && !survey.releases.some((release) => release.id === releaseId)) {
-    throw new RangeError(`releaseId ${releaseId} does not belong to survey ${surveyId}`);
-  }
-}
-
-async function linkedAssetConnectors(input: DataAssetRegistrationInput): Promise<ConnectorRecord[]> {
-  const records = await connectors.list();
-  const ids = new Set([
-    ...(input.connectorIds ?? []),
-    ...(input.accesses ?? []).map((access) => access.connectorId).filter((value): value is string => Boolean(value)),
-  ]);
-  const locationKeys = new Set(input.connectorLocationKeys ?? []);
-  return records.filter((record) => ids.has(record.id) || locationKeys.has(record.locationKey));
-}
-
-async function withOwnershipSnapshot(input: DataAssetRegistrationInput): Promise<DataAssetRegistrationInput> {
-  if (input.ownershipSnapshotVersion !== undefined && input.ownershipSnapshotVersion !== 1) {
-    throw new RangeError("ownershipSnapshotVersion must be 1");
-  }
-  const explicitSurveyId = optionalOwnershipText(input.surveyId, "surveyId");
-  const explicitReleaseId = optionalOwnershipText(input.releaseId, "releaseId");
-  const linked = await linkedAssetConnectors(input);
-  const connector = linked.length === 1 ? linked[0] : undefined;
-  const surveyId = explicitSurveyId ?? connector?.surveyId;
-  const releaseId = explicitReleaseId ?? (explicitSurveyId === undefined || explicitSurveyId === connector?.surveyId
-    ? connector?.releaseId
-    : undefined);
-  validateRegisteredAssetOwnership(surveyId, releaseId);
-  return { ...input, surveyId, releaseId, ownershipSnapshotVersion: 1 };
-}
-
-async function validateAssetConnectorOwnership(input: DataAssetRegistrationInput): Promise<EffectiveDataOwnership> {
-  const access = input.accesses?.[0] ?? {
-    connector: input.connector ?? "metadata",
-    uri: input.sourceUri ?? "asset://validation",
-    format: input.format ?? "metadata",
-  };
-  const ownership = resolveDataOwnership({
-    ...input,
-    id: "asset-validation",
-    name: input.name,
-    description: input.description ?? "",
-    product: input.product ?? input.name,
-    kind: input.kind,
-    modalities: input.modalities ?? input.tags ?? [],
-    access,
-    status: input.status ?? "metadata_only",
-    projectState: input.projectState ?? "planned",
-    footprintIds: input.footprintIds ?? [],
-    origin: "user",
-    createdAt: "",
-    updatedAt: "",
-  } as DataAssetRecord, await connectors.list());
-  if (ownership.source === "conflict") throw new RangeError(ownership.message ?? "关联 Connector 的巡天归属不一致");
-  return ownership;
 }
 
 async function publicDataAsset(asset: DataAssetRecord): Promise<DataAssetRecord> {
   const connectorRecords = await connectors.list();
-  const ownership = resolveDataOwnership(asset, connectorRecords);
   const resolvedRecords = [
     ...(asset.connectorLocationKeys ?? []).flatMap((key) => connectorRecords.filter((record) => record.locationKey === key)),
     ...(asset.connectorIds ?? []).flatMap((id) => {
@@ -329,17 +223,17 @@ async function publicDataAsset(asset: DataAssetRecord): Promise<DataAssetRecord>
   ];
   const uniqueRecords = [...new Map(resolvedRecords.map((record) => [record.locationKey, record])).values()];
   const resolved = uniqueRecords.map(connectorAccess);
-  const effective = {
-    ...asset,
-    surveyId: ownership.surveyId,
-    releaseId: ownership.releaseId,
-    surveyBinding: ownership,
-  };
-  if (!resolved.length) return effective;
+  if (!resolved.length) return structuredClone(asset);
   const configured = asset.accesses?.length ? asset.accesses : [asset.access];
   const connectorIds = new Set(configured.map((access) => access.connectorId).filter(Boolean));
   const accesses = [...configured, ...resolved.filter((access) => !connectorIds.has(access.connectorId))];
-  return { ...effective, connectorIds: uniqueRecords.map((record) => record.id), connectorLocationKeys: uniqueRecords.map((record) => record.locationKey), access: accesses[0]!, accesses };
+  return {
+    ...structuredClone(asset),
+    connectorIds: uniqueRecords.map((record) => record.id),
+    connectorLocationKeys: uniqueRecords.map((record) => record.locationKey),
+    access: accesses[0]!,
+    accesses,
+  };
 }
 
 async function validateConnectorIds(input: DataAssetRegistrationInput): Promise<void> {
@@ -357,8 +251,8 @@ async function validateConnectorIds(input: DataAssetRegistrationInput): Promise<
 
 function sendApiError(response: Response, error: unknown): void {
   const message = error instanceof Error ? error.message : String(error);
-  const notFound = message.startsWith("Dataset not found:") || message.startsWith("Data asset not found:") || message.startsWith("Connector not found:") || message.startsWith("Connector ingest run not found:") || message.startsWith("Coverage job not found:") || message.startsWith("Volume not found:") || message.startsWith("Atlas not found:") || message.startsWith("Survey not found:") || message.startsWith("Resource package not found:") || message.startsWith("Resource package is not installed:") || message.startsWith("Resource package job not found:")
-    || message.startsWith("Scan run not found:") || message.startsWith("Lineage not found:") || message.startsWith("Workflow not found:")
+  const notFound = message.startsWith("Dataset not found:") || message.startsWith("Data asset not found:") || message.startsWith("Connector not found:") || message.startsWith("Connector ingest run not found:") || message.startsWith("Coverage job not found:") || message.startsWith("Survey not found:") || message.startsWith("Public survey not found:") || message.startsWith("Resource package not found:") || message.startsWith("Resource package is not installed:") || message.startsWith("Resource package job not found:")
+    || message.startsWith("Workflow not found:")
     || message.startsWith("Workflow run not found:") || message.startsWith("Workflow artifact not found:") || message.startsWith("Agent session not found:");
   const status = error instanceof LocalConnectorPolicyError ? error.statusCode
     : error instanceof LocalScanDisabledError ? error.statusCode
@@ -420,19 +314,21 @@ async function effectiveFootprints(): Promise<SurveyFootprintManifest> {
 }
 
 function publicSurveyRecords(): SurveyRecord[] {
-  return resourcePackages.available ? publicSurveysFromPackages(resourcePackages.list()) : [];
+  return resourcePackageSurveyRecords(resourcePackages.list());
 }
 
 function surveyRecords(): SurveyRecord[] {
-  const records = new Map(publicSurveyRecords().map((record) => [record.id, record]));
-  for (const card of surveys.list()) records.set(card.id, surveys.get(card.id));
-  return [...records.values()];
+  return surveys.list().map((card) => surveys.get(card.id));
 }
 
 function surveyRecord(id: string): SurveyRecord {
-  if (surveys.list().some((record) => record.id === id)) return surveys.get(id);
+  if (surveys.list().some((candidate) => candidate.id === id)) return surveys.get(id);
+  throw new Error(`Survey not found: ${id}`);
+}
+
+function publicSurveyRecord(id: string): SurveyRecord {
   const record = publicSurveyRecords().find((candidate) => candidate.id === id);
-  if (!record) throw new Error(`Survey not found: ${id}`);
+  if (!record) throw new Error(`Public survey not found: ${id}`);
   return record;
 }
 
@@ -443,22 +339,12 @@ function datasetIdFrom(request: Request): string {
   return id;
 }
 
-app.get("/api/datasets", async (_request: Request, response: Response) => {
-  try {
-    response.json({ datasets: (await registry.list()).map(publicDataset) });
-  } catch (error) {
-    sendApiError(response, error);
-  }
-});
-
 app.get("/api/data-assets", async (request: Request, response: Response) => {
   try {
-    const origin = request.query.origin;
-    if (origin !== undefined && origin !== "user" && origin !== "builtin") {
-      throw new RangeError("origin must be user or builtin");
-    }
-    const assets = (await dataCatalog.list()).filter((asset) => origin === undefined || asset.origin === origin);
-    response.json({ assets: await Promise.all(assets.map(publicDataAsset)) });
+    // Resource Package records never enter the user asset catalog. This
+    // endpoint is deliberately limited to Atlas-owned user records.
+    if (request.query.origin !== undefined) throw new RangeError("data asset origin filters are not supported");
+    response.json({ assets: await Promise.all((await dataCatalog.list()).map(publicDataAsset)) });
   } catch (error) {
     sendApiError(response, error);
   }
@@ -485,12 +371,24 @@ app.post("/api/data-assets/:id/local-scan", async (request: Request, response: R
   }
 });
 
+app.post("/api/data-assets/:id/remote-scan", async (request: Request, response: Response) => {
+  try {
+    const assetId = datasetIdFrom(request);
+    const surveyId = optionalLocalReference(request.body?.surveyId, "surveyId");
+    if (!surveyId) throw new RangeError("surveyId is required for a remote scan");
+    const input = { ...request.body, assetId };
+    delete input.surveyId;
+    response.status(202).json({ run: publicConnectorIngestRun(await flinkScans.submitRemoteAssetScan(surveyId, input, idempotencyKey(request))) });
+  } catch (error) {
+    sendApiError(response, error);
+  }
+});
+
 app.post("/api/data-assets", async (request: Request, response: Response) => {
   try {
     const input = request.body as DataAssetRegistrationInput;
     await validateConnectorIds(input);
-    const prepared = await withOwnershipSnapshot(input);
-    response.status(201).json({ asset: await publicDataAsset(await dataCatalog.register(prepared)) });
+    response.status(201).json({ asset: await publicDataAsset(await dataCatalog.register(input)) });
   } catch (error) {
     sendApiError(response, error);
   }
@@ -501,15 +399,6 @@ app.put("/api/data-assets/:id", async (request: Request, response: Response) => 
     const id = datasetIdFrom(request);
     const input = request.body as DataAssetRegistrationInput;
     await validateConnectorIds(input);
-    validateRegisteredAssetOwnership(optionalOwnershipText(input.surveyId, "surveyId"), optionalOwnershipText(input.releaseId, "releaseId"));
-    const current = await dataCatalog.get(id);
-    await validateAssetConnectorOwnership({
-      ...current,
-      ...input,
-      connectorIds: input.connectorIds ?? current.connectorIds,
-      connectorLocationKeys: input.connectorLocationKeys ?? current.connectorLocationKeys,
-      accesses: input.accesses ?? current.accesses,
-    });
     response.json({ asset: await publicDataAsset(await dataCatalog.update(id, input)) });
   } catch (error) {
     sendApiError(response, error);
@@ -619,38 +508,7 @@ app.post("/api/connectors/:id/check", async (request: Request, response: Respons
 app.post("/api/connectors/check", async (request: Request, response: Response) => {
   try {
     const input = request.body as ConnectorCheckInput;
-    validateConnectorSurveyBinding(input);
     response.json({ check: await connectors.checkInput(input) });
-  } catch (error) {
-    sendApiError(response, error);
-  }
-});
-
-app.post("/api/connectors/:id/ingest-runs", async (request: Request, response: Response) => {
-  try {
-    const connector = await connectors.get(datasetIdFrom(request));
-    const input = request.body as ConnectorIngestRunInput;
-    const run = await connectorRuns.add(connector.locationKey, {
-      connectorId: connector.id,
-      connectorName: connector.name,
-      connectorKind: connector.kind,
-      executor: input.executor,
-      target: input.target,
-      assetIds: input.assetIds,
-      jobId: input.jobId,
-      batchId: input.batchId,
-      assetId: input.assetId,
-      assetName: input.assetName,
-      status: input.status,
-      startedAt: input.startedAt,
-      completedAt: input.completedAt,
-      fileCount: input.fileCount,
-      documentCount: input.documentCount,
-      error: input.error,
-      sourcePath: input.sourcePath,
-      esIndex: input.esIndex,
-    });
-    response.status(201).json({ run: publicConnectorIngestRun(run) });
   } catch (error) {
     sendApiError(response, error);
   }
@@ -679,37 +537,14 @@ app.post("/api/connectors/:id/local-scan", async (request: Request, response: Re
   }
 });
 
-app.post("/api/connectors/:id/scans", async (request: Request, response: Response) => {
-  try {
-    const command = parseLegacyConnectorScanCommand(request.body);
-    if (!warehouseEnabled) throw new DataWarehouseDisabledError();
-    if (command.mode === "pilot") {
-      response.status(202).json({ runs: publicConnectorRuns(await flinkScans.submitPilot(datasetIdFrom(request))) });
-      return;
-    }
-    response.status(202).json({ run: publicConnectorIngestRun(await flinkScans.submitScan(datasetIdFrom(request), command.input)) });
-  } catch (error) {
-    sendApiError(response, error);
-  }
-});
-
-app.delete("/api/connectors/:id/ingest-runs/:runId", async (request: Request, response: Response) => {
-  try {
-    const connector = await connectors.get(datasetIdFrom(request));
-    const runId = Array.isArray(request.params.runId) ? request.params.runId[0] : request.params.runId;
-    if (!runId) throw new RangeError("run id is required");
-    await connectorRuns.remove(connector.locationKey, runId, connector.id);
-    response.status(204).end();
-  } catch (error) {
-    sendApiError(response, error);
-  }
+app.delete("/api/connectors/:id/ingest-runs/:runId", (_request: Request, response: Response) => {
+  response.status(405).json({ error: "Connector ingest run history is read-only" });
 });
 
 app.post("/api/connectors", async (request: Request, response: Response) => {
   try {
     const input = request.body as ConnectorRegistrationInput;
     const value = validateConnectorInput(input);
-    validateConnectorSurveyBinding(value);
     const existing = (await connectors.list()).find((record) => record.locationKey === connectorLocationKey(value.kind, value.config));
     const existingCredentials = existing?.credentialRef ? await connectorCredentials.get(existing.credentialRef) : undefined;
     const credentials = value.kind === "s3" ? resolvedS3Credentials(input, existingCredentials) : undefined;
@@ -743,7 +578,6 @@ app.put("/api/connectors/:id", async (request: Request, response: Response) => {
     const input = request.body as ConnectorRegistrationInput;
     const current = await connectors.get(id);
     const value = validateConnectorInput(input);
-    validateConnectorSurveyBinding(value);
     let credentialRef = value.kind === "s3" ? current.credentialRef : undefined;
     if (value.kind === "s3") {
       const existing = current.credentialRef ? await connectorCredentials.get(current.credentialRef) : undefined;
@@ -783,6 +617,24 @@ app.get("/api/surveys", (_request: Request, response: Response) => {
 app.get("/api/surveys/:id", (request: Request, response: Response) => {
   try {
     response.json({ survey: surveyRecord(datasetIdFrom(request)) });
+  } catch (error) {
+    sendApiError(response, error);
+  }
+});
+
+// Public package metadata is read-only display data from the Assets v3
+// package catalog. It is deliberately separate from Atlas-local labels.
+app.get("/api/public-surveys", (_request: Request, response: Response) => {
+  try {
+    response.json({ surveys: publicSurveyRecords().map(surveyCardFor) });
+  } catch (error) {
+    sendApiError(response, error);
+  }
+});
+
+app.get("/api/public-surveys/:id", (request: Request, response: Response) => {
+  try {
+    response.json({ survey: publicSurveyRecord(datasetIdFrom(request)) });
   } catch (error) {
     sendApiError(response, error);
   }
@@ -906,11 +758,9 @@ app.delete("/api/resource-packages/:id", async (request: Request, response: Resp
 
 app.post("/api/surveys/registrations", async (request: Request, response: Response) => {
   try {
-    const requestedId = typeof request.body?.id === "string" ? request.body.id.trim() : "";
-    if (requestedId && publicSurveyRecords().some((record) => record.id === requestedId || record.releases.some((release) => release.id === requestedId))) {
-      throw new RangeError(`Survey id already exists in the Assets catalog: ${requestedId}`);
-    }
-    response.status(201).json({ survey: await surveys.register(request.body as SurveyRegistrationInput) });
+    // User registrations are Atlas-local and never require a public package.
+    const survey = await surveys.register(request.body as SurveyRegistrationInput);
+    response.status(201).json({ survey });
   } catch (error) {
     sendApiError(response, error);
   }
@@ -1002,106 +852,68 @@ app.get("/api/sky/coverage", async (request: Request, response: Response) => {
       ...(release ? { release } : {}),
     };
 
-    // ES documents written by older FlinkIngest jobs may have blank survey /
-    // release fields. Resolve ownership from the catalog first, then query ES
-    // by asset group so those historical documents still land in the right
-    // survey layer without rewriting the index.
+    // ES documents written by older scanner jobs may have blank survey / release
+    // fields. Use the Atlas asset's own local labels when assembling per-asset
+    // layers; never infer them from a Connector or the Assets package.
     if (assetIds.length) {
-      const groups = new Map<string, {
-        key: string;
-        surveyId?: string;
-        releaseId?: string;
-        source: EffectiveDataOwnership["source"];
-        message?: string;
-        assetIds: string[];
-      }>();
+      const layers: AstroCoverageLayer[] = [];
+      const allPixels = new Set<number>();
+      const allAssets = new Map<string, AstroCoverageLayer["byAsset"][number]>();
+      const statuses: string[] = [];
+      const messages: string[] = [];
       for (const assetId of [...new Set(assetIds)]) {
         let asset: DataAssetRecord;
         try { asset = await dataCatalog.get(assetId); } catch { continue; }
-        const ownership = resolveDataOwnership(asset, await connectors.list());
-        if (survey && ownership.surveyId !== survey) continue;
-        if (release && ownership.releaseId !== release) continue;
-        const key = ownership.source === "conflict" ? `__conflict__:${asset.id}` : ownershipKey(ownership);
-        const group = groups.get(key) ?? {
-          key,
-          surveyId: ownership.surveyId,
-          releaseId: ownership.releaseId,
-          source: ownership.source,
-          message: ownership.message,
-          assetIds: [],
+        if (survey && asset.surveyId !== survey) continue;
+        if (release && asset.releaseId !== release) continue;
+        // Query both indexes by one asset id. The object coverage index is the
+        // authoritative projection for local CSV scans; the file index keeps
+        // historical scanner documents visible without rewriting them.
+        const [legacy, local] = await Promise.all([
+          astroIndex.coverage({ nside, assetIds: [assetId] }),
+          astroObjectIndex.queryCoverageFacts({ nside, assetIds: [assetId] }),
+        ]);
+        const pixels = new Set<number>(legacy.pixels);
+        local.pixels.forEach((pixel) => pixels.add(pixel));
+        const objectCount = local.facts.reduce((sum, fact) => sum + fact.objectCount, 0);
+        const status = legacy.status === "error" || local.status === "error"
+          ? "error"
+          : legacy.status === "unavailable" && local.status === "unavailable"
+            ? "unavailable"
+            : "ready";
+        const message = [
+          legacy.status === "error" ? legacy.message : undefined,
+          local.status !== "ready" ? local.message : undefined,
+        ].filter(Boolean).join("; ") || undefined;
+        const breakdown = {
+          key: asset.id,
+          label: asset.name,
+          files: legacy.byAsset.find((entry) => entry.key === asset.id)?.files ?? 0,
+          bytes: legacy.byAsset.find((entry) => entry.key === asset.id)?.bytes ?? 0,
+          objects: objectCount,
+          objectCount,
         };
-        group.assetIds.push(asset.id);
-        groups.set(key, group);
+        const layer = {
+          key: `asset:${asset.id}`,
+          assetId: asset.id,
+          assetName: asset.name,
+          surveyId: asset.surveyId,
+          releaseId: asset.releaseId,
+          source: asset.surveyId ? "asset" as const : "unassigned" as const,
+          message,
+          status,
+          assetIds: [asset.id],
+          pixels: [...pixels].sort((left, right) => left - right),
+          objectCount,
+          byAsset: [breakdown],
+        } satisfies AstroCoverageLayer;
+        statuses.push(status);
+        if (message) messages.push(message);
+        allAssets.set(asset.id, breakdown);
+        pixels.forEach((pixel) => allPixels.add(pixel));
+        layers.push(layer);
       }
-      if (groups.size) {
-        const layers: AstroCoverageLayer[] = [];
-        const allPixels = new Set<number>();
-        const allAssets = new Map<string, AstroCoverageLayer["byAsset"][number]>();
-        const statuses: string[] = [];
-        const messages: string[] = [];
-        for (const group of groups.values()) {
-          // Keep coverage ownership at asset granularity. A shared ownership
-          // group only describes the display metadata; querying the whole
-          // group would attribute every object's count to its first asset.
-          const assetLayers = await Promise.all(group.assetIds.map(async (assetId) => {
-            const asset = await dataCatalog.get(assetId);
-            // Query both indexes by one asset id. The legacy index may contain
-            // old file-level facts with blank ownership fields; the object
-            // coverage index is authoritative for local CSV scans.
-            const [legacy, local] = await Promise.all([
-              astroIndex.coverage({ nside, assetIds: [assetId] }),
-              astroObjectIndex.queryCoverageFacts({ nside, assetIds: [assetId] }),
-            ]);
-            const pixels = new Set<number>(legacy.pixels);
-            local.pixels.forEach((pixel) => pixels.add(pixel));
-            const objectCount = local.facts.reduce((sum, fact) => sum + fact.objectCount, 0);
-            const status = legacy.status === "error" || local.status === "error"
-              ? "error"
-              : legacy.status === "unavailable" && local.status === "unavailable"
-                ? "unavailable"
-                : "ready";
-            const message = [
-              group.message,
-              legacy.status === "error" ? legacy.message : undefined,
-              local.status !== "ready" ? local.message : undefined,
-            ].filter(Boolean).join("; ") || undefined;
-            const breakdown = {
-              key: asset.id,
-              label: asset.name,
-              files: legacy.byAsset.find((entry) => entry.key === asset.id)?.files ?? 0,
-              bytes: legacy.byAsset.find((entry) => entry.key === asset.id)?.bytes ?? 0,
-              objects: objectCount,
-              objectCount,
-            };
-            return {
-              layer: {
-                key: `asset:${asset.id}`,
-                assetId: asset.id,
-                assetName: asset.name,
-                surveyId: group.surveyId,
-                releaseId: group.releaseId,
-                source: group.source,
-                message,
-                status,
-                assetIds: [asset.id],
-                pixels: [...pixels].sort((left, right) => left - right),
-                objectCount,
-                byAsset: [breakdown],
-              } satisfies AstroCoverageLayer,
-              breakdown,
-              pixels,
-              status,
-              message,
-            };
-          }));
-          for (const entry of assetLayers) {
-            statuses.push(entry.status);
-            if (entry.message) messages.push(entry.message);
-            allAssets.set(entry.layer.assetId!, entry.breakdown);
-            entry.pixels.forEach((pixel) => allPixels.add(pixel));
-            layers.push(entry.layer);
-          }
-        }
+      if (layers.length) {
         const status = statuses.includes("error") ? "error" : statuses.includes("unavailable") ? "unavailable" : "ready";
         response.json({
           status,
@@ -1119,234 +931,6 @@ app.get("/api/sky/coverage", async (request: Request, response: Response) => {
       ...baseInput,
       ...(assetIds.length ? { assetIds } : {}),
     }));
-  } catch (error) {
-    sendApiError(response, error);
-  }
-});
-
-app.get("/api/datasets/:id/sky/summary", async (request: Request, response: Response) => {
-  try {
-    const record = await registry.get(datasetIdFrom(request));
-    response.json({ dataset: publicDataset(record), sky: await skyIndexes.getSummary(record) });
-  } catch (error) {
-    sendApiError(response, error);
-  }
-});
-
-app.get("/api/datasets/:id/sky/cells", async (request: Request, response: Response) => {
-  try {
-    const nside = Number(request.query.nside ?? "128");
-    if (!Number.isInteger(nside)) throw new RangeError("nside must be an integer");
-    const record = await registry.get(datasetIdFrom(request));
-    const cells = await skyIndexes.getCells(record, nside);
-    response.json({ nside, totalObjects: cells.reduce((sum, cell) => sum + cell.count, 0), cells });
-  } catch (error) {
-    sendApiError(response, error);
-  }
-});
-
-app.get("/api/datasets/:id/sky/objects", async (request: Request, response: Response) => {
-  try {
-    const offset = Number(request.query.offset ?? "0");
-    const limit = Number(request.query.limit ?? "50000");
-    if (!Number.isInteger(offset) || offset < 0) throw new RangeError("offset must be a non-negative integer");
-    if (!Number.isInteger(limit) || limit < 1 || limit > 50_000) {
-      throw new RangeError("limit must be an integer between 1 and 50000");
-    }
-    const record = await registry.get(datasetIdFrom(request));
-    const page = await skyIndexes.getPoints(record, offset, limit);
-    response.json({ offset, limit, ...page });
-  } catch (error) {
-    sendApiError(response, error);
-  }
-});
-
-app.get("/api/volumes", async (_request: Request, response: Response) => {
-  try {
-    response.json({ volumes: (await volumes.list()).map(publicVolumeManifest) });
-  } catch (error) {
-    sendApiError(response, error);
-  }
-});
-
-app.get("/api/volumes/:id", async (request: Request, response: Response) => {
-  try {
-    response.json({ volume: publicVolumeManifest(await volumes.get(datasetIdFrom(request))) });
-  } catch (error) {
-    sendApiError(response, error);
-  }
-});
-
-app.get("/api/volumes/:id/points.bin", async (request: Request, response: Response) => {
-  try {
-    const { manifest, filePath } = await volumes.pointsPath(datasetIdFrom(request));
-    response.set({
-      "Content-Type": "application/octet-stream",
-      "Content-Length": String(manifest.binary.byteLength),
-      "Cache-Control": "public, max-age=3600",
-      "X-Content-Type-Options": "nosniff",
-    });
-    response.sendFile(filePath);
-  } catch (error) {
-    sendApiError(response, error);
-  }
-});
-
-app.get("/api/atlases", async (_request: Request, response: Response) => {
-  try {
-    response.json({ atlases: (await atlases.list()).map(publicAtlasManifest) });
-  } catch (error) {
-    sendApiError(response, error);
-  }
-});
-
-app.get("/api/atlases/:id", async (request: Request, response: Response) => {
-  try {
-    response.json({ atlas: publicAtlasManifest(await atlases.get(datasetIdFrom(request))) });
-  } catch (error) {
-    sendApiError(response, error);
-  }
-});
-
-app.get("/api/atlases/:id/angular-cells.bin", async (request: Request, response: Response) => {
-  try {
-    const { manifest, filePath } = await atlases.angularPath(datasetIdFrom(request));
-    response.set({
-      "Content-Type": "application/octet-stream",
-      "Content-Length": String(manifest.angularBinary.byteLength),
-      "Cache-Control": "public, max-age=3600",
-      "X-Content-Type-Options": "nosniff",
-    });
-    response.sendFile(filePath);
-  } catch (error) {
-    sendApiError(response, error);
-  }
-});
-
-app.get("/api/atlases/:id/joint-cells.bin", async (request: Request, response: Response) => {
-  try {
-    const { manifest, filePath } = await atlases.jointPath(datasetIdFrom(request));
-    response.set({
-      "Content-Type": "application/octet-stream",
-      "Content-Length": String(manifest.jointIndex.byteLength),
-      "Cache-Control": "public, max-age=3600",
-      "X-Content-Type-Options": "nosniff",
-    });
-    response.sendFile(filePath);
-  } catch (error) {
-    sendApiError(response, error);
-  }
-});
-
-app.get("/api/atlases/:id/joint", async (request: Request, response: Response) => {
-  try {
-    const optionalNumber = (name: string): number | undefined => {
-      const value = request.query[name];
-      if (value == null || value === "") return undefined;
-      const parsed = Number(value);
-      if (!Number.isFinite(parsed)) throw new RangeError(`${name} must be finite`);
-      return parsed;
-    };
-    const surveyId = String(request.query.survey ?? "desi");
-    const nside = Number(request.query.nside ?? "32");
-    const radialBins = Number(request.query.radialBins ?? "8");
-    if (!Number.isInteger(nside) || !Number.isInteger(radialBins)) throw new RangeError("Joint levels must be integers");
-    const result = await atlases.queryJoint(datasetIdFrom(request), {
-      surveyId,
-      nside,
-      radialBins,
-      radialMinMpc: optionalNumber("radialMinMpc"),
-      radialMaxMpc: optionalNumber("radialMaxMpc"),
-      parentNside: optionalNumber("parentNside"),
-      parentPixel: optionalNumber("parentPixel"),
-    });
-    const body = JSON.stringify(result);
-    response.set({ "Content-Type": "application/json", "X-Response-Bytes": String(Buffer.byteLength(body)) });
-    response.send(body);
-  } catch (error) {
-    sendApiError(response, error);
-  }
-});
-
-app.get("/api/atlases/:id/refinement", async (request: Request, response: Response) => {
-  try {
-    const surveyId = String(request.query.survey ?? "desi");
-    const values = ["nside", "radialBins", "pixel", "radialBin"].map((name) => Number(request.query[name]));
-    if (values.some((value) => !Number.isInteger(value))) throw new RangeError("Refinement coordinates must be integers");
-    response.json(await atlases.refinement(datasetIdFrom(request), surveyId, values[0]!, values[1]!, values[2]!, values[3]!));
-  } catch (error) {
-    sendApiError(response, error);
-  }
-});
-
-app.get("/api/atlases/:id/objects", async (request: Request, response: Response) => {
-  try {
-    const surveyId = String(request.query.survey ?? "desi");
-    const required = ["nside", "pixel", "radialBins", "radialBin"] as const;
-    const values = Object.fromEntries(required.map((name) => [name, Number(request.query[name])]));
-    if (Object.values(values).some((value) => !Number.isInteger(value))) throw new RangeError("Cell coordinates must be integers");
-    const offset = Number(request.query.offset ?? "0");
-    const limit = Number(request.query.limit ?? "500");
-    const atlasId = datasetIdFrom(request);
-    const manifest = await atlases.get(atlasId);
-    const survey = manifest.surveys.find((candidate) => candidate.id === surveyId);
-    if (!survey?.radialCoordinate) throw new RangeError(`Survey has no radial coordinate: ${surveyId}`);
-    if (!manifest.jointIndex.angularLevels.includes(values.nside!) || !manifest.jointIndex.radialLevels.includes(values.radialBins!)) {
-      throw new RangeError("Unsupported joint cell level");
-    }
-    const page = await volumes.queryCellPoints(survey.radialCoordinate.sourceVolumeId, {
-      nside: values.nside!,
-      pixel: values.pixel!,
-      radialBins: values.radialBins!,
-      radialBin: values.radialBin!,
-      offset,
-      limit,
-    });
-    const indexed = await atlases.queryJoint(atlasId, {
-      surveyId,
-      nside: values.nside!,
-      radialBins: values.radialBins!,
-      parentNside: values.nside!,
-      parentPixel: values.pixel!,
-    });
-    const expectedCellCount = indexed.cells.find((cell) => cell.pixel === values.pixel && cell.radialBin === values.radialBin)?.count ?? 0;
-    if (page.total !== expectedCellCount) {
-      throw new Error(`Cell object count does not match the joint index: expected ${expectedCellCount}, received ${page.total}`);
-    }
-    response.json({ atlasId, surveyId, expectedCellCount, ...page });
-  } catch (error) {
-    sendApiError(response, error);
-  }
-});
-
-app.get("/api/scan-runs", async (_request: Request, response: Response) => {
-  try {
-    response.json({ scanRuns: await scanRuns.list() });
-  } catch (error) {
-    sendApiError(response, error);
-  }
-});
-
-app.get("/api/scan-runs/:id", async (request: Request, response: Response) => {
-  try {
-    response.json({ scanRun: await scanRuns.get(datasetIdFrom(request)) });
-  } catch (error) {
-    sendApiError(response, error);
-  }
-});
-
-app.get("/api/lineage/:id", async (request: Request, response: Response) => {
-  try {
-    const id = datasetIdFrom(request);
-    const workflowRun = await workflowStore.get(id).catch((error: unknown) => {
-      if (error instanceof Error && error.message.startsWith("Workflow run not found:")) return null;
-      throw error;
-    });
-    if (workflowRun) {
-      response.json({ id, type: "workflow-run", lineage: workflowRun.lineage });
-      return;
-    }
-    response.json(await scanRuns.lineage(id));
   } catch (error) {
     sendApiError(response, error);
   }
@@ -1432,7 +1016,7 @@ app.post("/api/agent/sessions/:id/messages", async (request: Request, response: 
 });
 
 app.post("/mcp", async (request: Request, response: Response) => {
-  const server = createAstroMcpServer(registry);
+  const server = createAstroMcpServer(dataCatalog);
   const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
 
   try {

@@ -1,21 +1,15 @@
 import { createHash, randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 
-import { connectorConfigurationHash, connectorLocationKey, hasCurrentSuccessfulConnectorCheck, listConnectorObjects, type ConnectorRecord } from "./connectors.js";
+import { connectorConfigurationHash, connectorLocationKey, hasCurrentSuccessfulConnectorCheck, type ConnectorRecord } from "./connectors.js";
 import type { ConnectorCredentialStore, StoredConnectorCredentials } from "./connector-credentials.js";
 import { ConnectorIngestRunCatalog, type ConnectorIngestRunRecord, type ConnectorScanTargetSnapshot } from "./connector-history.js";
 import { coverageJobSnapshot, scannerCoverageProperties, validateCoverageJobSnapshot, validateCoverageJobSubmission, type CoverageJobSnapshot } from "./coverage-jobs.js";
 import type { DataAssetRecord, DataCatalogRegistry } from "./data-catalog.js";
 import type { ConnectorRegistry } from "./connectors.js";
-import { resolveDataOwnership, type EffectiveDataOwnership } from "./data-ownership.js";
 import { assetsCoreContext } from "./assets-core.js";
 
 const TASK_API = "/apis/org.zhejianglab.astro.metadata/v1alpha1";
-const PILOT_ASSETS = [
-  { assetId: "euclid-q1-mer-final", key: "cat", pattern: /EUC_MER_FINAL-CAT_TILE[^/]+\.fits$/i },
-  { assetId: "euclid-q1-mer-cutouts-cat", key: "cutouts", pattern: /EUC_MER_FINAL-CUTOUTS-CAT_TILE[^/]+\.fits$/i },
-  { assetId: "euclid-q1-mer-morph-cat", key: "morph", pattern: /EUC_MER_FINAL-MORPH-CAT_TILE[^/]+\.fits$/i },
-] as const;
 
 interface KubernetesResource {
   metadata?: { name?: string; namespace?: string; labels?: Record<string, string>; resourceVersion?: string };
@@ -51,33 +45,14 @@ export interface GenericScanInput {
     coverageRole?: string;
     healpixOrder?: number;
   };
-  /** Explicit survey coverage evidence; populated only by the coverage-job API. */
+  /** Optional MOC Core scan context for a user-owned remote asset. */
   coverage?: CoverageJobSnapshot;
 }
-
-export type LegacyConnectorScanCommand =
-  | { mode: "pilot" }
-  | { mode: "generic"; input: GenericScanInput };
 
 export function validateConnectorSelfScanBody(body: unknown): void {
   if (body !== undefined && (typeof body !== "object" || body === null || Array.isArray(body) || Object.keys(body).length > 0)) {
     throw new RangeError("Connector scan runs do not accept a request body");
   }
-}
-
-export function parseLegacyConnectorScanCommand(body: unknown): LegacyConnectorScanCommand {
-  if (!body || typeof body !== "object" || Array.isArray(body)) {
-    throw new RangeError("scan mode is required; use POST /api/connectors/:id/scan-runs for a connector self-scan");
-  }
-  const input = body as Partial<GenericScanInput> & { mode?: unknown };
-  if (input.mode === "pilot") return { mode: "pilot" };
-  if (input.mode !== "scan") {
-    if (input.mode === undefined) throw new RangeError("scan mode is required; use POST /api/connectors/:id/scan-runs for a connector self-scan");
-    throw new RangeError("scan mode must be pilot or scan");
-  }
-  if (typeof input.assetId !== "string" || !input.assetId.trim()) throw new RangeError("assetId is required for a legacy generic scan");
-  const { mode: _mode, ...scanInput } = input;
-  return { mode: "generic", input: scanInput as GenericScanInput };
 }
 
 export interface FlinkResourceClient {
@@ -111,10 +86,10 @@ export function dataWarehouseEnabled(value = process.env.ASTRO_DATA_WAREHOUSE_EN
   throw new RangeError("ASTRO_DATA_WAREHOUSE_ENABLED must be true or false");
 }
 
-function coverageIdempotencyKey(connector: ConnectorRecord, submission: ReturnType<typeof validateCoverageJobSubmission>, surveyId: string): string {
+function remoteAssetScanIdempotencyKey(connector: ConnectorRecord, submission: ReturnType<typeof validateCoverageJobSubmission>, surveyId: string): string {
   const normalized = {
-    algorithmVersion: "astro-survey-assets-moc-core-v3",
-    scannerVersion: process.env.ASTRO_SCANNER_VERSION ?? "astro-survey-assets",
+    algorithmVersion: `assets-core-${assetsCoreContext().contractVersion}`,
+    scannerVersion: process.env.ASTRO_SCANNER_VERSION ?? "astro-file-scanner",
     surveyId,
     releaseId: submission.releaseId,
     product: submission.product,
@@ -301,74 +276,6 @@ export class FlinkScanService {
     this.#timer = undefined;
   }
 
-  async submitPilot(connectorId: string): Promise<ConnectorIngestRunRecord[]> {
-    if (!this.#enabled) throw new DataWarehouseDisabledError();
-    if (!this.#client) throw new Error("Flink scan submission is only available inside Kubernetes");
-    const connector = await this.#connectors.get(connectorId);
-    if (connector.kind !== "s3") throw new ConnectorScanCapabilityError(connector.kind);
-    this.#assertScannable(connector);
-    const stored = connector.credentialRef ? await this.#credentials.get(connector.credentialRef) : undefined;
-    if (!stored?.accessKeyId || !stored.secretAccessKey) throw new RangeError("Connector has no saved S3 credentials");
-
-    const prefix = `${(connector.config.prefix ?? "").replace(/\/+$/, "")}/102018211`;
-    const objects = await listConnectorObjects(connector, stored, prefix);
-    const selected = PILOT_ASSETS.map((definition) => {
-      const object = objects.find((candidate) => definition.pattern.test(candidate.key));
-      if (!object) throw new Error(`Pilot object for ${definition.assetId} was not found under ${prefix}`);
-      return { definition, object };
-    });
-
-    const token = randomUUID().replace(/-/g, "").slice(0, 12);
-    const secretName = this.#scanSecretName(connector.id);
-    await this.#createSecret(secretName, stored, connector.config.endpoint ?? stored.endpoint, token);
-    const created: ConnectorIngestRunRecord[] = [];
-    try {
-      for (const entry of selected) {
-        const asset = await this.#dataCatalog.get(entry.definition.assetId);
-        const ownership = await this.#scanOwnership(asset, connector);
-        const taskName = taskNameWithToken("euclid-q1-mer-pilot", entry.definition.key, token);
-        const batchId = `workspace-pilot-${token}-${entry.definition.key}`;
-        const run = await this.#runs.add(connector.locationKey, {
-          connectorId: connector.id,
-          connectorName: connector.name,
-          connectorKind: connector.kind,
-          executor: "flink-ingest",
-          target: { ...connectorScanTarget(connector), uri: s3Uri(connector, entry.object.key) },
-          assetIds: [asset.id],
-          jobId: taskName,
-          batchId,
-          assetId: asset.id,
-          assetName: asset.name,
-          status: "queued",
-          fileCount: 1,
-          sourcePath: s3Uri(connector, entry.object.key),
-          esIndex: this.#esIndex,
-          secretName,
-        });
-        try {
-          await this.#createTask({
-            connector,
-            asset,
-            paths: [s3Uri(connector, entry.object.key)],
-            allowedSuffixes: [".fits"],
-            taskName,
-            batchId,
-            secretName,
-            ownership,
-          });
-          created.push(run);
-        } catch (error) {
-          const message = error instanceof Error ? error.message : String(error);
-          created.push(await this.#runs.update(run.id, { status: "failed", error: message, completedAt: new Date().toISOString() }));
-        }
-      }
-    } finally {
-      await this.#cleanupSecret(secretName);
-    }
-    await this.poll();
-    return created;
-  }
-
   async submitScan(connectorId: string, input: GenericScanInput, idempotencyKey?: string): Promise<ConnectorIngestRunRecord> {
     if (!this.#enabled) throw new DataWarehouseDisabledError();
     if (!this.#client) throw new Error("Flink scan submission is only available inside Kubernetes");
@@ -376,7 +283,6 @@ export class FlinkScanService {
     if (connector.kind !== "s3") throw new ConnectorScanCapabilityError(connector.kind);
     this.#assertScannable(connector);
     const asset = await this.#dataCatalog.get(input.assetId);
-    const ownership = await this.#scanOwnership(asset, connector);
     const coverage = input.coverage ? validateCoverageJobSnapshot(input.coverage) : undefined;
     const coverageSpatial = coverage
       ? coverage.mode === "catalog-radec"
@@ -407,6 +313,7 @@ export class FlinkScanService {
       connectorName: connector.name,
       connectorKind: connector.kind,
       executor: coverage ? "flink-coverage" : "flink-ingest",
+      taskKind: coverage ? "user_coverage" : "user_scan",
       target: { ...connectorScanTarget(connector), uri: path },
       assetIds: [asset.id],
       jobId: taskName,
@@ -435,7 +342,6 @@ export class FlinkScanService {
         taskName,
         batchId,
         secretName,
-        ownership,
       });
     } catch (error) {
       await this.#runs.update(run.id, { status: "failed", error: error instanceof Error ? error.message : String(error), completedAt: new Date().toISOString() });
@@ -445,23 +351,17 @@ export class FlinkScanService {
     return (await this.#runs.list(connector.locationKey)).find((candidate) => candidate.id === run.id) ?? run;
   }
 
-  /** Submit a coverage derivation after the HTTP layer has selected a survey. */
-  async submitCoverageJob(surveyId: string, input: unknown, idempotencyKey?: string): Promise<ConnectorIngestRunRecord> {
+  /** Submit an optional remote scan for a user-owned asset. Public coverage tasks are owned by Assets. */
+  async submitRemoteAssetScan(surveyId: string, input: unknown, idempotencyKey?: string): Promise<ConnectorIngestRunRecord> {
     const submission = validateCoverageJobSubmission(input);
     const connector = await this.#connectors.get(submission.connectorId);
     const asset = await this.#dataCatalog.get(submission.assetId);
+    if (asset.origin !== "user") throw new ConnectorScanPreconditionError("Only user assets can start an optional remote scan");
     const linked = (asset.connectorIds ?? []).includes(connector.id)
       || (asset.connectorLocationKeys ?? []).includes(connector.locationKey)
       || [asset.access, ...(asset.accesses ?? [])].some((access) => access.connectorId === connector.id || access.uri === connector.locationKey);
     if (!linked) throw new ConnectorScanPreconditionError("Coverage asset must be linked to the selected Connector");
-    if (connector.surveyId !== surveyId || connector.releaseId !== submission.releaseId) {
-      throw new ConnectorScanPreconditionError("Connector survey/release binding does not match the coverage request");
-    }
     if (asset.product !== submission.product) throw new ConnectorScanPreconditionError("Coverage product does not match the selected data asset");
-    const ownership = await this.#scanOwnership(asset, connector);
-    if (ownership.surveyId !== surveyId || ownership.releaseId !== submission.releaseId) {
-      throw new ConnectorScanPreconditionError("Coverage asset ownership does not match the requested survey release");
-    }
     const coverage = coverageJobSnapshot(surveyId, submission);
     const allowedSuffixes = submission.allowedSuffixes ?? (coverage.mode === "fits-wcs"
       ? [".fits", ".fit", ".fits.gz"]
@@ -472,7 +372,7 @@ export class FlinkScanService {
       ...(submission.fileNamePattern === undefined ? {} : { fileNamePattern: submission.fileNamePattern }),
       allowedSuffixes,
       coverage,
-    }, idempotencyKey ?? coverageIdempotencyKey(connector, submission, surveyId));
+    }, idempotencyKey ?? remoteAssetScanIdempotencyKey(connector, submission, surveyId));
   }
 
   async submitConnectorScan(connectorId: string, idempotencyKey?: string): Promise<ConnectorIngestRunRecord> {
@@ -501,6 +401,7 @@ export class FlinkScanService {
       connectorName: connector.name,
       connectorKind: connector.kind,
       executor: "flink-ingest",
+      taskKind: "user_scan",
       target,
       assetIds,
       jobId: taskName,
@@ -657,12 +558,11 @@ export class FlinkScanService {
     allowedSuffixes: string[];
     spatial?: GenericScanInput["spatial"];
     coverage?: CoverageJobSnapshot;
-    ownership: EffectiveDataOwnership;
     taskName: string;
     batchId: string;
     secretName: string;
   }): Promise<void> {
-    const { connector, asset, paths, allowedSuffixes, fileNamePattern, spatial, coverage, taskName, batchId, secretName, ownership } = input;
+    const { connector, asset, paths, allowedSuffixes, fileNamePattern, spatial, coverage, taskName, batchId, secretName } = input;
     const astro = spatial ?? {};
     const scannerSpatial = coverage ? scannerCoverageProperties(coverage) : {
       ...(astro.mode ? { spatialMode: astro.mode } : {}),
@@ -682,7 +582,9 @@ export class FlinkScanService {
         name: taskName,
         namespace: this.#namespace,
         labels: {
-          "app.kubernetes.io/managed-by": "astro-data-workspace",
+          "app.kubernetes.io/managed-by": "astro-atlas",
+          "astro.zhejianglab.org/atlas-task": "true",
+          "astro.zhejianglab.org/atlas-task-kind": coverage ? "user_coverage" : "user_scan",
           "astro.zhejianglab.org/connector": connector.id,
           "astro.zhejianglab.org/asset": asset.id,
           "astro.zhejianglab.org/batch": batchId,
@@ -696,7 +598,9 @@ export class FlinkScanService {
         tags: asset.tags ?? asset.modalities,
         userProperties: {
           ...Object.fromEntries(Object.entries({
-            survey: ownership.surveyId ?? "", release: ownership.releaseId ?? "", product: asset.product,
+            survey: coverage?.surveyId ?? asset.surveyId ?? "",
+            release: coverage?.releaseId ?? asset.releaseId ?? "",
+            product: coverage?.product ?? asset.product,
             modality: asset.modalities.join("+"), assetId: asset.id, connector: connector.locationKey,
             connectorConfigHash: connectorConfigurationHash(connector),
             mocCoreDistribution: assetsCoreContext().distribution,
@@ -740,7 +644,9 @@ export class FlinkScanService {
         name: taskName,
         namespace: this.#namespace,
         labels: {
-          "app.kubernetes.io/managed-by": "astro-data-workspace",
+          "app.kubernetes.io/managed-by": "astro-atlas",
+          "astro.zhejianglab.org/atlas-task": "true",
+          "astro.zhejianglab.org/atlas-task-kind": "user_scan",
           "astro.zhejianglab.org/connector": connector.id,
           "astro.zhejianglab.org/batch": batchId,
           ...(assetIds.length === 1 ? { "astro.zhejianglab.org/asset": assetIds[0] } : {}),
@@ -848,22 +754,4 @@ export class FlinkScanService {
     return [registered];
   }
 
-  async #scanOwnership(asset: DataAssetRecord, connector: ConnectorRecord): Promise<EffectiveDataOwnership> {
-    // A scan path is itself an association with an assigned Connector. This
-    // also makes legacy assets (which predate connectorIds) inherit the
-    // Connector's survey/release in newly written ES documents. An unassigned
-    // Connector does not erase an asset's explicit survey metadata when the
-    // asset has no association yet.
-    const alreadyLinked = (asset.connectorIds ?? []).includes(connector.id)
-      || (asset.connectorLocationKeys ?? []).includes(connector.locationKey)
-      || (asset.accesses ?? []).some((access) => access.connectorId === connector.id);
-    const linkedAsset = {
-      ...asset,
-      connectorIds: connector.surveyId || alreadyLinked ? [...new Set([...(asset.connectorIds ?? []), connector.id])] : asset.connectorIds,
-      connectorLocationKeys: connector.surveyId || alreadyLinked ? [...new Set([...(asset.connectorLocationKeys ?? []), connector.locationKey])] : asset.connectorLocationKeys,
-    } as DataAssetRecord;
-    const ownership = resolveDataOwnership(linkedAsset, await this.#connectors.list());
-    if (ownership.source === "conflict") throw new RangeError(ownership.message ?? "关联 Connector 的巡天归属不一致");
-    return ownership;
-  }
 }

@@ -1,6 +1,6 @@
 # 公开巡天覆盖 MOC 的来源与计算方法
 
-本文是 Atlas 历史覆盖制品的来源记录。`src/footprints/survey-footprints.json` 仅作为归档材料保留，Atlas 运行时不读取它，也不再在本仓库生成公共 MOC。它只描述天空覆盖，不包含星表行、图像像素或观测深度模型。
+本文是 Atlas 历史覆盖制品的来源记录。历史生成的 footprint JSON 已从 Atlas 仓库移除，Atlas 运行时不再生成或读取公共 MOC。它只描述天空覆盖，不包含星表行、图像像素或观测深度模型。
 
 ## 证据等级
 

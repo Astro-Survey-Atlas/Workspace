@@ -1,5 +1,5 @@
 import { createServer } from "node:http";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
@@ -48,9 +48,6 @@ async function requestBody(request: import("node:http").IncomingMessage): Promis
 async function main(): Promise<void> {
   const input = argumentsFrom(process.argv.slice(2));
   const temporaryRoot = await mkdtemp(path.join(os.tmpdir(), "astro-local-scan-smoke-"));
-  const bootstrapPath = path.join(temporaryRoot, "data-assets.json");
-  await writeFile(bootstrapPath, "[]", "utf8");
-
   let objectDocuments = 0;
   let coverageDocuments = 0;
   let bulkRequests = 0;
@@ -91,9 +88,9 @@ async function main(): Promise<void> {
     await store.initialize();
     const sourceRoot = path.dirname(input.file);
     const roots = new LocalConnectorRootsPolicy([{ containerPath: sourceRoot, hostPath: sourceRoot }]);
-    const connectors = new ConnectorRegistry(store, undefined, roots);
+    const connectors = new ConnectorRegistry(store, roots);
     await connectors.initialize();
-    const dataCatalog = new DataCatalogRegistry(bootstrapPath, store);
+    const dataCatalog = new DataCatalogRegistry(store);
     await dataCatalog.initialize();
     const runs = new ConnectorIngestRunCatalog(store);
     const registered = await connectors.register({

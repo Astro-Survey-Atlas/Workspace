@@ -1,5 +1,6 @@
 import type { PublicResourcePackage, ResourceCatalogStatus, ResourcePackageJob, ResourcePackageLoad } from "../../src/resource-packages";
 import { workspaceApi } from "./api";
+import { notifyWorkspace } from "./notifications";
 
 function byId<T extends HTMLElement>(id: string): T {
   const element = document.getElementById(id);
@@ -29,6 +30,13 @@ const FILTERS: Array<[keyof Pick<PublicResourcePackage, "modalities" | "waveleng
   ["productTypes", "产品"],
   ["coverageAuthorities", "覆盖来源"],
 ];
+
+class ResourcePackageNotificationError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "ResourcePackageNotificationError";
+  }
+}
 
 export interface ResourcePackageSelectionCallbacks {
   setDraftReleases: (releaseIds: Iterable<string>) => void;
@@ -78,7 +86,10 @@ export class ResourcePackagePanel {
       this.#render();
     });
     byId<HTMLButtonElement>("resource-package-apply").addEventListener("click", () => {
-      void this.#applySelection().catch(this.#onError);
+      void this.#applySelection().catch((error) => {
+        if (error instanceof ResourcePackageNotificationError) return;
+        this.#onError(error);
+      });
     });
     byId<HTMLButtonElement>("resource-package-sync").addEventListener("click", () => this.#onSyncRequested());
   }
@@ -90,6 +101,7 @@ export class ResourcePackagePanel {
     } catch (error) {
       this.#catalogStatus = null;
       this.#catalogUnavailableReason = error instanceof Error ? error.message : String(error);
+      notifyWorkspace("公开目录状态读取失败", this.#catalogUnavailableReason, { tone: "warning" });
     }
     let packages: PublicResourcePackage[] = [];
     try {
@@ -97,6 +109,7 @@ export class ResourcePackagePanel {
       this.#catalogUnavailableReason = "";
     } catch (error) {
       this.#catalogUnavailableReason = error instanceof Error ? error.message : String(error);
+      notifyWorkspace("公开资源目录读取失败", this.#catalogUnavailableReason, { tone: "warning" });
     }
     this.#records = packages;
     this.#baselineReleases = this.#releaseMapFromRecords();
@@ -206,7 +219,8 @@ export class ResourcePackagePanel {
 
   #visibleRecords(): PublicResourcePackage[] {
     return this.#records.filter((record) => {
-      const searchable = [record.name, record.description, record.surveyId, ...record.modalities, ...record.wavelengths, ...record.productTypes, ...record.facilities, ...record.releases].join(" ").toLocaleLowerCase();
+      const publicReleaseSearch = (record.publicReleases ?? []).flatMap((release) => [release.id, release.label, ...release.products.map((product) => product.name)]);
+      const searchable = [record.name, record.description, record.surveyId, ...record.modalities, ...record.wavelengths, ...record.productTypes, ...record.facilities, ...record.releases, ...publicReleaseSearch].join(" ").toLocaleLowerCase();
       if (this.#search && !searchable.includes(this.#search)) return false;
       return FILTERS.every(([field]) => {
         const selected = this.#filters.get(field);
@@ -281,7 +295,11 @@ export class ResourcePackagePanel {
 
       const version = document.createElement("span");
       version.className = "resource-package-version";
-      version.textContent = `${record.releases.length} 个发布 · ${bytes(record.sizeBytes)}`;
+      const publicReleaseCount = record.publicReleases?.length ?? record.releases.length;
+      const releaseSummary = publicReleaseCount === available.length
+        ? `${publicReleaseCount} 个公开版本`
+        : `${publicReleaseCount} 个公开版本 · ${available.length} 个可应用`;
+      version.textContent = `${releaseSummary} · ${bytes(record.sizeBytes)}`;
 
       const status = document.createElement("span");
       status.className = "resource-package-status";
@@ -319,17 +337,6 @@ export class ResourcePackagePanel {
     const apply = byId<HTMLButtonElement>("resource-package-apply");
     apply.disabled = this.#busy || dirtyPackages === 0;
     apply.querySelector("span")!.textContent = this.#busy ? "处理中…" : "应用到天球";
-    const feedback = byId<HTMLOutputElement>("resource-package-feedback");
-    if (this.#catalogUnavailableReason) {
-      feedback.textContent = `公开目录不可用：${this.#catalogUnavailableReason}。同步不会下载资源包。`;
-      feedback.dataset.status = "error";
-    } else if (this.#catalogStatus?.catalogSha256) {
-      feedback.textContent = `目录已同步 · ${this.#catalogStatus.catalogSha256.slice(0, 12)} · 资源包按需下载`;
-      feedback.dataset.status = "success";
-    } else {
-      feedback.textContent = "尚未同步公开目录";
-      feedback.dataset.status = "";
-    }
     byId("resource-package-empty").hidden = visible.length > 0;
   }
 
@@ -373,6 +380,7 @@ export class ResourcePackagePanel {
         try {
           const job = await workspaceApi.installResourcePackage(record.id);
           this.#jobs.set(record.id, job);
+          notifyWorkspace("资源包下载已开始", record.name, { tone: "info" });
           await this.#waitForJob(record.id, job);
         } catch (error) {
           errors.push(error instanceof Error ? error : new Error(String(error)));
@@ -388,12 +396,30 @@ export class ResourcePackagePanel {
       this.#render();
       this.#showSelected();
     }
-    if (errors.length) throw new Error(`${errors.length} 个巡天资源下载失败：${errors[0]?.message ?? "未知错误"}`);
+    if (errors.length) {
+      const message = `${errors.length} 个巡天资源下载或安装失败：${errors[0]?.message ?? "未知错误"}`;
+      notifyWorkspace("资源包下载或安装失败", message, { tone: "error" });
+      throw new ResourcePackageNotificationError(message);
+    }
+    notifyWorkspace("资源包下载、校验和安装完成", `已处理 ${queue.length} 个资源包`, { tone: "success" });
   }
 
   async #waitForJob(packageId: string, initial: ResourcePackageJob): Promise<void> {
     let job = initial;
     while (job.status === "queued" || job.status === "running") {
+      const previous = this.#jobs.get(packageId);
+      if (previous?.phase !== job.phase) {
+        const record = this.#records.find((candidate) => candidate.id === packageId);
+        const phaseSummary: Record<NonNullable<ResourcePackageJob["phase"]>, string> = {
+          queued: "资源包等待下载",
+          downloading: "资源包正在下载",
+          verifying: "资源包正在校验",
+          installing: "资源包正在安装",
+          completed: "资源包已安装",
+          failed: "资源包安装失败",
+        };
+        if (record && job.phase) notifyWorkspace(phaseSummary[job.phase], record.name, { tone: "info" });
+      }
       this.#jobs.set(packageId, job);
       this.#render();
       await new Promise((resolve) => setTimeout(resolve, 250));
@@ -401,7 +427,10 @@ export class ResourcePackagePanel {
     }
     this.#jobs.set(packageId, job);
     this.#render();
-    if (job.status === "failed") throw new Error(job.error ?? "资源包安装失败");
+    const record = this.#records.find((candidate) => candidate.id === packageId);
+    if (job.status === "failed") {
+      throw new Error(job.error ?? "资源包安装失败");
+    }
   }
 
   async #apply(): Promise<void> {
@@ -419,6 +448,7 @@ export class ResourcePackagePanel {
       this.#draftReleases = this.#cloneReleaseMap(this.#baselineReleases);
       await this.#onApplied(before, this.#records);
       this.#renderFilters();
+      notifyWorkspace("资源包已应用", "公共覆盖图层已更新", { tone: "success" });
     } finally {
       this.#busy = false;
       this.#render();

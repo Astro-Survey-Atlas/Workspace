@@ -40,8 +40,8 @@ spec:
               value: 0.0.0.0
             - name: PORT
               value: "3000"
-            - name: ASTRO_WORKSPACE_STATE
-              value: /state/registry.json
+            - name: ASTRO_STATE_ROOT
+              value: /state
             - name: ASTRO_DATA_CATALOG_STATE
               value: /state/data-catalog.json
             - name: ASTRO_SURVEY_REGISTRY_STATE
@@ -50,10 +50,6 @@ spec:
               value: /state/connectors.json
             - name: ASTRO_CONNECTOR_RUN_STATE
               value: /state/connector-ingest-runs.json
-            - name: ASTRO_CONNECTOR_BOOTSTRAP
-              value: /app/bootstrap/connectors.json
-            - name: ASTRO_ALLOWED_ROOTS
-              value: {{ ternary "/state:/data/local" "/state" .Values.localData.enabled | quote }}
             - name: ASTRO_WORKFLOW_ROOT
               value: /state/workflow-runs
             - name: ASTRO_RESOURCE_PACKAGE_ROOT

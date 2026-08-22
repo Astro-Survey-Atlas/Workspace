@@ -19,6 +19,7 @@ import {
   type LocalCsvScanIndexService,
 } from "../src/local-scan-executor.js";
 import type { LocalScanDocument } from "../src/local-scan.js";
+import { mockMocCore } from "./helpers/mock-moc-core.js";
 import { SqliteMetadataStore } from "../src/storage/index.js";
 
 class MockIndexService implements LocalCsvScanIndexService {
@@ -58,16 +59,14 @@ interface Fixture {
 async function fixture(options: { checked?: boolean; enabled?: boolean } = {}): Promise<Fixture> {
   const directory = await mkdtemp(path.join(os.tmpdir(), "astro-local-executor-"));
   const rootPath = path.join(directory, "catalogs");
-  const bootstrapPath = path.join(directory, "data-assets.json");
   await mkdir(rootPath);
-  await writeFile(bootstrapPath, "[]", "utf8");
 
   const store = new SqliteMetadataStore(path.join(directory, "workspace.sqlite"));
   await store.initialize();
   const roots = new LocalConnectorRootsPolicy([{ containerPath: rootPath, hostPath: rootPath }]);
-  const connectors = new ConnectorRegistry(store, undefined, roots);
+  const connectors = new ConnectorRegistry(store, roots);
   await connectors.initialize();
-  const dataCatalog = new DataCatalogRegistry(bootstrapPath, store);
+  const dataCatalog = new DataCatalogRegistry(store);
   await dataCatalog.initialize();
   const runs = new ConnectorIngestRunCatalog(store);
   const registered = await connectors.register({
@@ -87,6 +86,7 @@ async function fixture(options: { checked?: boolean; enabled?: boolean } = {}): 
     indexService,
     maxRows: 100,
     maxFileBytes: 1024 * 1024,
+    mocCore: mockMocCore,
   });
   return { directory, rootPath, store, roots, connectors, dataCatalog, runs, connector, indexService, executor };
 }
@@ -145,6 +145,7 @@ test("executes one top-level CSV into object and coverage bulks and persists suc
     const queued = await value.executor.submit(value.connector.id);
     assert.equal(queued.status, "queued");
     assert.equal(queued.executor, "local-csv");
+    assert.equal(queued.taskKind, "user_scan");
     assert.equal(queued.connectorId, value.connector.id);
     assert.equal(queued.connectorName, value.connector.name);
     assert.equal(queued.connectorKind, "local");

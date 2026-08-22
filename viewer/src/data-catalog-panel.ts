@@ -3,6 +3,7 @@ import type { DataAssetAccess, DataAssetKind, DataAssetLineage, DataAssetProject
 import type { TagDefinition } from "../../src/tags";
 import type { SurveyCard, SurveyRecord } from "../../src/survey-registry";
 import { workspaceApi, type LocalCsvInspection } from "./api";
+import { notifyWorkspace } from "./notifications";
 
 function byId<T extends HTMLElement>(id: string): T {
   const element = document.getElementById(id);
@@ -63,7 +64,7 @@ export class DataCatalogPanel {
     byId<HTMLSelectElement>("catalog-survey").addEventListener("change", () => this.#syncReleaseOptions());
     byId<HTMLFormElement>("catalog-registration-form").addEventListener("submit", (event) => {
       event.preventDefault();
-      void this.#save().catch(this.#onError);
+      void this.#save().catch((error) => notifyWorkspace("用户资产登记失败", error instanceof Error ? error.message : String(error), { tone: "error" }));
     });
     byId<HTMLButtonElement>("catalog-form-cancel").addEventListener("click", () => this.#closeCreateDialog());
     byId<HTMLButtonElement>("catalog-dialog-close").addEventListener("click", () => this.#closeCreateDialog());
@@ -72,7 +73,7 @@ export class DataCatalogPanel {
       this.#closeCreateDialog();
       this.#onNewConnector?.();
     });
-    byId<HTMLButtonElement>("catalog-inspect-file").addEventListener("click", () => void this.#inspectSelectedFile().catch(this.#onError));
+    byId<HTMLButtonElement>("catalog-inspect-file").addEventListener("click", () => void this.#inspectSelectedFile().catch((error) => notifyWorkspace("本地文件检查失败", error instanceof Error ? error.message : String(error), { tone: "error" })));
   }
 
   async activate(surveys: SurveyCard[], records: Map<string, SurveyRecord>): Promise<void> {
@@ -97,7 +98,7 @@ export class DataCatalogPanel {
   }
 
   async #loadUserAssets(): Promise<DataAssetRecord[]> {
-    return (await workspaceApi.dataAssets("user")).filter((asset) => asset.origin === "user");
+    return workspaceApi.dataAssets();
   }
 
   #connectorRecordsFor(asset: DataAssetRecord): ConnectorPublicRecord[] {
@@ -106,8 +107,8 @@ export class DataCatalogPanel {
     return this.#connectors.filter((connector) => keys.has(connector.locationKey) || ids.has(connector.id));
   }
 
-  #effectiveSurveyId(asset: DataAssetRecord): string | undefined { return asset.surveyBinding?.surveyId ?? asset.surveyId; }
-  #effectiveReleaseId(asset: DataAssetRecord): string | undefined { return asset.surveyBinding?.releaseId ?? asset.releaseId; }
+  #effectiveSurveyId(asset: DataAssetRecord): string | undefined { return asset.surveyId; }
+  #effectiveReleaseId(asset: DataAssetRecord): string | undefined { return asset.releaseId; }
 
   #resolvedAccesses(asset: DataAssetRecord): DataAssetAccess[] {
     const references = asset.connectorLocationKeys?.length || asset.connectorIds?.length ? this.#connectorRecordsFor(asset) : [];
@@ -194,7 +195,7 @@ export class DataCatalogPanel {
     const note = document.createElement("p");
     note.className = "catalog-detail-copy";
     note.textContent = asset.description || "暂无说明";
-    const basic = this.#detailEditing === "basic" ? this.#basicEditor(asset) : this.#rows([["资产 ID", asset.id], ["来源", asset.origin === "builtin" ? "系统内置" : "用户登记"], ["巡天 / 发布", `${this.#surveyName(this.#effectiveSurveyId(asset))} / ${this.#effectiveReleaseId(asset) ?? "未关联"}`], ["产品 / 类型", `${asset.product} / ${asset.kind}`], ["Tag", this.#tagText(asset.tags ?? asset.modalities) || "未标注"], ["使用阶段", projectStatesLabel(asset)]]);
+    const basic = this.#detailEditing === "basic" ? this.#basicEditor(asset) : this.#rows([["资产 ID", asset.id], ["来源", "用户登记"], ["巡天 / 发布", `${this.#surveyName(this.#effectiveSurveyId(asset))} / ${this.#effectiveReleaseId(asset) ?? "未设置"}`], ["产品 / 类型", `${asset.product} / ${asset.kind}`], ["Tag", this.#tagText(asset.tags ?? asset.modalities) || "未标注"], ["使用阶段", projectStatesLabel(asset)]]);
     const sourceList = this.#detailEditing === "sources" ? this.#sourceEditor(asset) : document.createElement("ul");
     if (this.#detailEditing !== "sources") { (asset.sources ?? []).forEach((source) => { const item = document.createElement("li"); const link = document.createElement("a"); link.href = source.url; link.target = "_blank"; link.rel = "noreferrer"; link.textContent = `${source.label}: ${source.url}`; item.append(link); source.description && item.append(` · ${source.description}`); sourceList.append(item); }); if (!sourceList.childElementCount) sourceList.textContent = "尚未登记公开来源"; }
     const accessList = this.#detailEditing === "access" ? this.#accessEditor(asset) : document.createElement("ul");
@@ -202,24 +203,22 @@ export class DataCatalogPanel {
     const lineage = this.#detailEditing === "lineage" ? this.#lineageEditor(asset) : document.createElement("div"); lineage.classList.add("lineage-detail-tree");
     if (this.#detailEditing !== "lineage") { (asset.lineage ?? []).forEach((entry) => { const item = document.createElement("div"); item.textContent = `${entry.relation} · ${entry.label}`; lineage.append(item); }); if (!lineage.childElementCount) lineage.textContent = "暂无血缘关系。"; }
     const sections = [this.#detailSection("基本信息", basic, "编辑基本信息", () => { this.#detailEditing = "basic"; this.#renderInspector(); }), this.#detailSection("公开来源", sourceList, "编辑公开来源", () => { this.#detailEditing = "sources"; this.#renderInspector(); }), this.#detailSection("访问位置与 Connector", accessList, "编辑 Connector 关联", () => { this.#detailEditing = "access"; this.#renderInspector(); }), this.#detailSection("数据血缘", lineage, "编辑血缘关系", () => { this.#detailEditing = "lineage"; this.#renderInspector(); })];
-     if (asset.origin !== "builtin") {
-       const actions = document.createElement("div");
-       actions.className = "catalog-inspector-actions";
-       const remove = document.createElement("button");
-       remove.type = "button";
-       remove.className = "command-button danger";
-       remove.textContent = "删除数据资产";
-       remove.addEventListener("click", () => void this.#remove(asset).catch(this.#onError));
-       actions.append(remove);
-       sections.push(actions);
-     }
+    const actions = document.createElement("div");
+    actions.className = "catalog-inspector-actions";
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.className = "command-button danger";
+    remove.textContent = "删除数据资产";
+    remove.addEventListener("click", () => void this.#remove(asset).catch((error) => notifyWorkspace("用户资产删除失败", error instanceof Error ? error.message : String(error), { tone: "error" })));
+    actions.append(remove);
+    sections.push(actions);
     content.replaceChildren(heading, note, ...sections);
   }
 
   #renderSurveyOptions(): void {
     const select = byId<HTMLSelectElement>("catalog-survey");
     const current = select.value;
-    const none = document.createElement("option"); none.value = ""; none.textContent = "不关联巡天";
+    const none = document.createElement("option"); none.value = ""; none.textContent = "不设置巡天标签";
     select.replaceChildren(none, ...this.#surveys.map((survey) => { const option = document.createElement("option"); option.value = survey.id; option.textContent = survey.name; return option; }));
     select.value = this.#surveys.some((survey) => survey.id === current) ? current : "";
     this.#syncReleaseOptions();
@@ -276,22 +275,34 @@ export class DataCatalogPanel {
     const fieldset = byId("catalog-scan-fieldset");
     fieldset.hidden = connector.kind !== "local";
     if (connector.kind !== "local") return;
-    const files = await workspaceApi.localConnectorFiles(connector.id);
-    const select = byId<HTMLSelectElement>("catalog-source-file");
-    select.replaceChildren(...files.map((file) => {
-      const option = document.createElement("option");
-      option.value = file.relativePath;
-      option.textContent = `${file.relativePath}${file.byteSize ? ` · ${file.byteSize} B` : ""}`;
-      return option;
-    }));
-    byId("catalog-scan-feedback").textContent = files.length ? "选择文件后读取表头" : "该 Connector 下没有 CSV 文件";
+    notifyWorkspace("正在检查本地文件", connector.displayPath, { tone: "info" });
+    try {
+      const files = await workspaceApi.localConnectorFiles(connector.id);
+      const select = byId<HTMLSelectElement>("catalog-source-file");
+      select.replaceChildren(...files.map((file) => {
+        const option = document.createElement("option");
+        option.value = file.relativePath;
+        option.textContent = `${file.relativePath}${file.byteSize ? ` · ${file.byteSize} B` : ""}`;
+        return option;
+      }));
+      notifyWorkspace(files.length ? "本地文件检查完成" : "本地文件检查为空", files.length ? `${files.length} 个 CSV 文件可供选择` : "该 Connector 下没有 CSV 文件", { tone: files.length ? "success" : "warning" });
+    } catch (error) {
+      notifyWorkspace("本地文件检查失败", error instanceof Error ? error.message : String(error), { tone: "error" });
+    }
   }
 
   async #inspectSelectedFile(): Promise<void> {
     if (!this.#scanConnectorId) throw new RangeError("请选择本地 Connector");
     const relativePath = byId<HTMLSelectElement>("catalog-source-file").value;
     if (!relativePath) throw new RangeError("请选择 CSV 文件");
-    const inspection = await workspaceApi.inspectLocalConnectorFile(this.#scanConnectorId, relativePath);
+    notifyWorkspace("正在读取本地文件表头", relativePath, { tone: "info" });
+    let inspection: LocalCsvInspection;
+    try {
+      inspection = await workspaceApi.inspectLocalConnectorFile(this.#scanConnectorId, relativePath);
+    } catch (error) {
+      notifyWorkspace("本地文件表头读取失败", error instanceof Error ? error.message : String(error), { tone: "error" });
+      return;
+    }
     this.#scanInspection = inspection;
     const fill = (id: string, value?: string): void => {
       const select = byId<HTMLSelectElement>(id);
@@ -303,7 +314,7 @@ export class DataCatalogPanel {
     fill("catalog-object-id-column", inspection.inferred?.objectIdColumn);
     fill("catalog-ra-column", inspection.inferred?.raColumn);
     fill("catalog-dec-column", inspection.inferred?.decColumn);
-    byId("catalog-scan-feedback").textContent = `已读取 ${inspection.columns.length} 个字段${inspection.inferred ? ` · 识别置信度 ${Math.round((inspection.inferred.confidence ?? 0) * 100)}%` : ""}`;
+    notifyWorkspace("本地文件表头已读取", `${inspection.columns.length} 个字段${inspection.inferred ? ` · 识别置信度 ${Math.round((inspection.inferred.confidence ?? 0) * 100)}%` : ""}`, { tone: "success" });
   }
 
   #createScanFields(): Pick<DataAssetRegistrationInput, "sourceRelativePath" | "scanSpec"> {
@@ -354,7 +365,12 @@ export class DataCatalogPanel {
     this.#selectedId = asset.id;
     this.#closeCreateDialog();
     this.#render();
-    await this.#onAssetChanged?.(asset.id);
+    try {
+      await this.#onAssetChanged?.(asset.id);
+    } catch (error) {
+      notifyWorkspace("用户资产覆盖刷新失败", error instanceof Error ? error.message : String(error), { tone: "warning" });
+    }
+    notifyWorkspace("用户资产已登记", asset.name, { tone: "success" });
   }
 
   #startNew(surveyId?: string): void {
@@ -389,12 +405,12 @@ export class DataCatalogPanel {
   }
 
   async #remove(asset: DataAssetRecord): Promise<void> {
-    if (asset.origin === "builtin") return;
     await workspaceApi.deleteDataAsset(asset.id);
     this.#assets = await this.#loadUserAssets();
     this.#selectedId = null;
     this.#detailEditing = null;
     this.#render();
+    notifyWorkspace("用户资产已删除", asset.name, { tone: "success" });
   }
 
   #detailSection(title: string, content: HTMLElement, action: string, callback: () => void): HTMLElement {
@@ -421,7 +437,7 @@ export class DataCatalogPanel {
 
   #saveDetail(input: DataAssetRegistrationInput): void {
     if (!this.#selectedId) return;
-    void workspaceApi.updateDataAsset(this.#selectedId, input).then(async () => { this.#assets = await this.#loadUserAssets(); this.#detailEditing = null; this.#render(); }).catch(this.#onError);
+    void workspaceApi.updateDataAsset(this.#selectedId, input).then(async (updated) => { this.#assets = await this.#loadUserAssets(); this.#detailEditing = null; this.#render(); notifyWorkspace("用户资产已更新", updated.name, { tone: "success" }); }).catch((error) => { notifyWorkspace("用户资产更新失败", error instanceof Error ? error.message : String(error), { tone: "error" }); });
   }
 
   #basicEditor(asset: DataAssetRecord): HTMLElement {
@@ -450,7 +466,7 @@ export class DataCatalogPanel {
       const connector = this.#connectors.find((candidate) => candidate.locationKey === locationKey);
       if (connector) {
         const note = option.querySelector("small");
-        if (note) note.textContent = `${connector.kind} · ${connector.displayPath} · ${connector.surveyId ?? "未绑定巡天"}${connector.releaseId ? ` / ${connector.releaseId}` : ""}`;
+        if (note) note.textContent = `${connector.kind} · ${connector.displayPath} · ${connector.surveyId ?? "未设置巡天标签"}${connector.releaseId ? ` / ${connector.releaseId}` : ""}`;
       }
     });
     const actions = document.createElement("div"); actions.className = "detail-editor-actions"; actions.innerHTML = `<button class="command-button" type="submit">保存关联</button><button class="text-button" type="button" data-cancel>取消</button>`; form.append(actions);
