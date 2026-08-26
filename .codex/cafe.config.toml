@@ -1,10 +1,11 @@
-model_provider = "hansyai"
+model_provider = "cafe"
 model = "gpt-5.6-luna"
-model_reasoning_effort = "xhigh"
-plan_mode_reasoning_effort = "high"
+review_model = "gpt-5.6-sol"
+model_reasoning_effort = "max"
+plan_mode_reasoning_effort = "xhigh"
 
-[model_providers.hansyai]
-name = "Hansyai OpenAI-compatible API"
+[model_providers.cafe]
+name = "Cafe OpenAI-compatible API"
 base_url = "https://token.72602.space/v1"
 env_key = "OPENAI_API_KEY"
 wire_api = "responses"
@@ -14,11 +15,6 @@ requires_openai_auth = false
 status_line = ["model-with-reasoning", "context-used", "context-window-size", "session-id"]
 
 [tui.model_availability_nux]
-"gpt-5.5" = 4
+"gpt-5.6-luna" = 4
 "gpt-5.6-sol" = 4
 
-[projects."/home/aaron/Repo/astro-data-workspace"]
-trust_level = "trusted"
-
-[projects."/home/aaron/Repo/astro-code"]
-trust_level = "trusted"
