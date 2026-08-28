@@ -8,7 +8,7 @@ global:
 
 image:
   repository: crpi-wixjy6gci86ms14e.cn-hongkong.personal.cr.aliyuncs.com/ay-dev/astro-data-workspace-mcp
-  tag: "0.10.38-20260819-scantask"
+  tag: "0.10.38-20260828-111248"
   pullPolicy: IfNotPresent
 
 imagePullSecrets: []
@@ -65,6 +65,7 @@ search:
     file: astro_file_index_v1
     object: astro_object_index_v1
     coverage: astro_coverage_index_v1
+  timeoutMs: 30000
   external:
     existingSecret: ""
     existingSecretKey: elasticsearch-url
@@ -92,22 +93,37 @@ metadataStore:
     existingSecretKey: database-url
 
 dataWarehouse:
-  enabled: true
-  namespace: warehouse
+  # Optional remote execution/status provider. Workspace search and metadata
+  # remain local when this is false, so Warehouse is never a hard dependency.
+  enabled: false
+  # ScanRequest, its short-lived source Secret, and evidence PVC are all
+  # namespace-local. Keep this equal to the Helm release namespace.
+  namespace: ""
   pollIntervalMs: 5000
   elasticsearch:
-    host: astro-search-elasticsearch.astro-data-workspace.svc.cluster.local
-    port: 9200
-    schema: http
+    url: ""
+    existingSecret: ""
+    existingSecretKey: elasticsearch-url
+    layerIndex: ast_layer_index_v1
+    fileIndex: ast_file_index_v1
+    coverageIndex: ast_coverage_index_v1
+  evidence:
+    existingClaim: ""
+    storageClass: ""
+    accessModes:
+      - ReadWriteMany
+    size: 5Gi
+    mountPath: /var/lib/atlas-evidence
+  scannerImage: astro-atlas-scanner:0.2.0
 
 env: []
 resources:
   requests:
-    cpu: 25m
-    memory: 64Mi
+    cpu: 100m
+    memory: 128Mi
   limits:
-    cpu: 250m
-    memory: 256Mi
+    cpu: "1"
+    memory: 1Gi
 
 postgresql:
   enabled: false

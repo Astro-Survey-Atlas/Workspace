@@ -1,8 +1,10 @@
+import { parseElasticsearchEndpoint } from "./es-endpoint.js";
+
 export const ASTRO_FILE_INDEX = "astro_file_index_v1";
 export const ASTRO_HEALPIX_ORDER = 8;
 export const ASTRO_OVERVIEW_NSIDE = 16;
 
-export type AstroIndexStatus = "ready" | "unavailable" | "error";
+export type AstroIndexStatus = "ready" | "pending" | "unavailable" | "error";
 
 export interface AstroBreakdown {
   key: string;
@@ -69,16 +71,33 @@ export interface AstroCoverageInput {
 /** Coverage returned for one Atlas asset layer. */
 export interface AstroCoverageLayer {
   key: string;
+  /** Projection resolution returned by the coverage endpoint. */
+  nside?: number;
+  layerId?: string;
   assetId?: string;
   surveyId?: string;
   releaseId?: string;
+  productId?: string;
+  modality?: string;
+  coverageRole?: string;
   assetIds: string[];
   assetName?: string;
   pixels: number[];
   byAsset: AstroBreakdown[];
   objectCount?: number;
   status?: AstroIndexStatus;
-  source?: "connector" | "asset" | "unassigned" | "conflict";
+  source?: "connector" | "asset" | "warehouse" | "combined" | "unassigned" | "conflict";
+  nativeOrders?: number[];
+  availableOrders?: number[];
+  maxOrder?: number;
+  precision?: "exact" | "estimated" | "entrypoint-only";
+  mocStatus?: "pending" | "ready" | "failed" | "unavailable";
+  artifactId?: string;
+  /** Latest artifact state, which may differ from the renderable artifact when
+   * a newer scan is pending or failed. */
+  latestMocStatus?: "pending" | "ready" | "failed" | "unavailable";
+  latestArtifactId?: string;
+  state?: string;
   message?: string;
 }
 
@@ -137,10 +156,6 @@ class AstroIndexUnavailableError extends Error {
     super(message);
     this.name = "AstroIndexUnavailableError";
   }
-}
-
-function normalizeBaseUrl(value: string): string {
-  return value.trim().replace(/\/+$/, "");
 }
 
 function isPowerOfTwo(value: number): boolean {
@@ -289,10 +304,13 @@ export class AstroIndexService {
   readonly #index: string;
   readonly #timeoutMs: number;
   readonly #cacheTtlMs: number;
+  readonly #authorization?: string;
   readonly #overviewCache = new Map<string, { expiresAt: number; value: AstroOverviewResponse }>();
 
   constructor(options: AstroIndexOptions = {}) {
-    this.#baseUrl = normalizeBaseUrl(options.baseUrl ?? process.env.ASTRO_ES_URL ?? "");
+    const endpoint = parseElasticsearchEndpoint(options.baseUrl ?? process.env.ASTRO_ES_URL ?? "");
+    this.#baseUrl = endpoint.url ?? "";
+    this.#authorization = endpoint.authorization;
     this.#index = options.index ?? process.env.ASTRO_ES_ASTRO_INDEX ?? ASTRO_FILE_INDEX;
     this.#timeoutMs = options.timeoutMs ?? Number(process.env.ASTRO_ES_TIMEOUT_MS ?? "2500");
     this.#cacheTtlMs = options.cacheTtlMs ?? Number(process.env.ASTRO_ES_OVERVIEW_CACHE_MS ?? "60000");
@@ -475,7 +493,11 @@ export class AstroIndexService {
     try {
       const response = await fetch(`${this.#baseUrl}/${encodeURIComponent(this.#index)}/_search`, {
         method: "POST",
-        headers: { Accept: "application/json", "Content-Type": "application/json" },
+        headers: {
+          Accept: "application/json",
+          "Content-Type": "application/json",
+          ...(this.#authorization ? { Authorization: this.#authorization } : {}),
+        },
         body: JSON.stringify(body),
         signal: controller.signal,
       });

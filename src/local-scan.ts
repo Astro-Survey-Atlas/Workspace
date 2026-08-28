@@ -6,7 +6,7 @@ import path from "node:path";
 import { once } from "node:events";
 
 import { CsvError, parse } from "csv-parse";
-import { Healpix, Pointing } from "healpixjs";
+import { Healpix, Hploc } from "healpixjs";
 
 import type { CoverageDataOrigin, CoverageRole, CoverageSourceTier } from "./assets-core.js";
 import { defaultMocCoreAdapter, MOC_CORE_DEFAULT_MAX_ORDER, MOC_CORE_PREVIEW_ORDER, MOC_CORE_QUERY_ORDER, type MocCoreAdapter } from "./moc-core-adapter.js";
@@ -119,6 +119,8 @@ export type LocalScanSink = LocalCsvDocumentSink;
 export interface LocalCsvFileSummary {
   filePath: string;
   byteSize: number;
+  /** SHA-256 of the exact source bytes consumed by the scan. */
+  sourceSnapshotSha256: string;
   columns: string[];
   survey: string;
   release: string;
@@ -139,6 +141,8 @@ export interface LocalCsvScanResult {
   summary: LocalCsvFileSummary;
   coverageDocuments: LocalCoverageFactDocument[];
   objectDocuments?: LocalObjectIndexDocument[];
+  /** The authoritative MOC Core output used to produce coverageDocuments. */
+  moc?: import("./moc-core-adapter.js").MocCoreCatalogResult;
 }
 
 export class LocalCsvScanConfigurationError extends Error {
@@ -301,8 +305,14 @@ function validateHeaders(rawHeaders: string[], options: NormalizedOptions): stri
   return headers;
 }
 
-function pointingFor(raDeg: number, decDeg: number): Pointing {
-  return new Pointing(null, false, ((90 - decDeg) * Math.PI) / 180, (raDeg * Math.PI) / 180);
+function healpixPixelForIcrs(healpix: Healpix, raDeg: number, decDeg: number): number {
+  // Hploc.loc2pix is the library's NESTED lookup.  Set z explicitly using the
+  // shared theta conversion so its fast polynomial trig approximation does not
+  // move exact ICRS boundary coordinates away from Assets Core's cell.
+  const location = new Hploc();
+  location.setZ(Math.cos((90 - decDeg) * (Math.PI / 180)));
+  location.phi = ((raDeg % 360) + 360) % 360 * (Math.PI / 180);
+  return healpix.loc2pix(location);
 }
 
 function coordinateValue(value: unknown, name: string): number | null {
@@ -366,7 +376,7 @@ function objectDocument(
   const raDeg = coordinateValue(row[options.raColumn], "ra");
   const decDeg = coordinateValue(row[options.decColumn], "dec");
   if (raDeg === null || decDeg === null) return null;
-  const pixel = healpix.ang2pix(pointingFor(raDeg, decDeg));
+  const pixel = healpixPixelForIcrs(healpix, raDeg, decDeg);
   if (!Number.isSafeInteger(pixel) || pixel < 0 || pixel >= healpix.npix) return null;
   const attributes = Object.fromEntries(
     headers
@@ -468,6 +478,8 @@ export async function scanLocalCsv(
   };
 
   const inputStream = createReadStream(filePath);
+  const sourceHash = createHash("sha256");
+  inputStream.on("data", (chunk: string | Buffer) => sourceHash.update(chunk));
   const parser = inputStream.pipe(parse({
     bom: true,
     columns: (rawHeaders: string[]) => {
@@ -555,6 +567,7 @@ export async function scanLocalCsv(
   const summary: LocalCsvFileSummary = {
     filePath: sourcePath,
     byteSize: fileStat.size,
+    sourceSnapshotSha256: sourceHash.digest("hex"),
     columns: [...headers],
     survey: options.surveyId,
     release: options.releaseId,
@@ -574,6 +587,7 @@ export async function scanLocalCsv(
     summary,
     coverageDocuments,
     ...(options.collectObjects ? { objectDocuments } : {}),
+    moc,
   };
   } finally {
     if (!mocInputEnded && !mocInput.destroyed) {

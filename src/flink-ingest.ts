@@ -8,7 +8,36 @@ import { coverageJobSnapshot, scannerCoverageProperties, validateCoverageJobSnap
 import type { DataAssetRecord, DataCatalogRegistry } from "./data-catalog.js";
 import type { ConnectorRegistry } from "./connectors.js";
 import { assetsCoreContext } from "./assets-core.js";
+import {
+  ConnectorScanCapabilityError,
+  ConnectorScanPreconditionError,
+  DataWarehouseDisabledError,
+  connectorScanPath,
+  connectorScanTarget,
+  dataWarehouseEnabled,
+  type GenericScanInput,
+  validateConnectorSelfScanBody,
+} from "./scan-contract.js";
 
+export {
+  ConnectorScanCapabilityError,
+  ConnectorScanPreconditionError,
+  DataWarehouseDisabledError,
+  connectorScanPath,
+  connectorScanTarget,
+  dataWarehouseEnabled,
+  validateConnectorSelfScanBody,
+} from "./scan-contract.js";
+export type { GenericScanInput } from "./scan-contract.js";
+
+/**
+ * Legacy compatibility adapter for the pre-ScanRequest metadata operator.
+ *
+ * The HTTP server uses WarehouseScanService and the ScanPlan v2 contract. This
+ * module remains exported for existing callers that still need to drain old
+ * AstroMetadataScanTask records, but it must receive an explicit output URL;
+ * it never discovers or falls back to a historical Warehouse endpoint.
+ */
 const TASK_API = "/apis/org.zhejianglab.astro.metadata/v1alpha1";
 
 interface KubernetesResource {
@@ -29,61 +58,8 @@ interface KubernetesResource {
 
 interface KubernetesList<T> { items?: T[]; }
 
-export interface GenericScanInput {
-  assetId: string;
-  path?: string;
-  fileNamePattern?: string;
-  allowedSuffixes?: string[];
-  spatial?: {
-    mode?: "none" | "auto" | "catalog" | "healpix";
-    raColumn?: string;
-    decColumn?: string;
-    /** Name of a NESTED HEALPix pixel column for catalogs without RA/Dec. */
-    healpixColumn?: string;
-    frame?: string;
-    units?: string;
-    coverageRole?: string;
-    healpixOrder?: number;
-  };
-  /** Optional MOC Core scan context for a user-owned remote asset. */
-  coverage?: CoverageJobSnapshot;
-}
-
-export function validateConnectorSelfScanBody(body: unknown): void {
-  if (body !== undefined && (typeof body !== "object" || body === null || Array.isArray(body) || Object.keys(body).length > 0)) {
-    throw new RangeError("Connector scan runs do not accept a request body");
-  }
-}
-
 export interface FlinkResourceClient {
   request<T>(method: string, path: string, body?: unknown): Promise<{ status: number; ok: boolean; value?: T; text: string }>;
-}
-
-export class DataWarehouseDisabledError extends Error {
-  constructor() {
-    super("Data warehouse is disabled");
-    this.name = "DataWarehouseDisabledError";
-  }
-}
-
-export class ConnectorScanCapabilityError extends Error {
-  constructor(kind: ConnectorRecord["kind"]) {
-    super(`Connector scan executor is not implemented for ${kind} connectors`);
-    this.name = "ConnectorScanCapabilityError";
-  }
-}
-
-export class ConnectorScanPreconditionError extends Error {
-  constructor(message: string) {
-    super(message);
-    this.name = "ConnectorScanPreconditionError";
-  }
-}
-
-export function dataWarehouseEnabled(value = process.env.ASTRO_DATA_WAREHOUSE_ENABLED): boolean {
-  if (value === undefined || value === "false") return false;
-  if (value === "true") return true;
-  throw new RangeError("ASTRO_DATA_WAREHOUSE_ENABLED must be true or false");
 }
 
 function remoteAssetScanIdempotencyKey(connector: ConnectorRecord, submission: ReturnType<typeof validateCoverageJobSubmission>, surveyId: string): string {
@@ -148,56 +124,6 @@ function taskNameWithToken(prefix: string, identity: string, token: string): str
   return `${base}${suffix}`;
 }
 
-function s3Uri(connector: ConnectorRecord, key: string): string {
-  return `s3://${connector.config.bucket}/${key}`;
-}
-
-function cleanS3Value(value: string | undefined): string {
-  return (value ?? "").trim().replace(/^\/+|\/+$/g, "").replace(/\/{2,}/g, "/");
-}
-
-export function connectorScanTarget(connector: ConnectorRecord): ConnectorScanTargetSnapshot {
-  if (connector.kind !== "s3") throw new ConnectorScanCapabilityError(connector.kind);
-  const bucket = cleanS3Value(connector.config.bucket).toLowerCase();
-  const prefix = cleanS3Value(connector.config.prefix);
-  if (!bucket || bucket.includes("/")) throw new RangeError("S3 connector bucket is invalid");
-  if (prefix.split("/").some((segment) => segment === "." || segment === "..")) throw new RangeError("S3 connector prefix cannot contain dot segments");
-  return { uri: connectorLocationKey("s3", { bucket, prefix }), bucket, prefix };
-}
-
-export function connectorScanPath(connector: ConnectorRecord, requested?: string): string {
-  const base = cleanS3Value(connector.config.prefix);
-  const raw = (requested ?? base).trim();
-  if (!raw) throw new RangeError("scan path is required");
-  if (/^s3a?:\/\//i.test(raw)) {
-    const rawPath = raw.replace(/^s3a?:\/\/[^/]+/i, "").split(/[?#]/, 1)[0] ?? "";
-    let decodedRawPath: string;
-    try { decodedRawPath = decodeURIComponent(rawPath); } catch { throw new RangeError("scan path contains invalid escaping"); }
-    if (decodedRawPath.split("/").some((segment) => segment === ".." || segment === ".")) {
-      throw new RangeError("scan path cannot contain dot segments");
-    }
-    let parsed: URL;
-    try { parsed = new URL(raw); } catch { throw new RangeError("scan path must be a valid S3 URI"); }
-    if (parsed.search || parsed.hash || parsed.hostname.toLowerCase() !== cleanS3Value(connector.config.bucket).toLowerCase()) {
-      throw new RangeError("scan path must stay inside the connector bucket");
-    }
-    const key = decodedRawPath.replace(/^\/+/, "");
-    if (base && key !== base && !key.startsWith(`${base}/`)) throw new RangeError("scan path must stay inside the connector prefix");
-    return s3Uri(connector, key);
-  }
-  const requestedKey = raw.replace(/^\/+/, "");
-  if (requestedKey.split("/").some((segment) => segment === ".." || segment === ".")) {
-    throw new RangeError("scan path cannot contain dot segments");
-  }
-  // Accept both a bucket-relative key and a path relative to the registered
-  // connector prefix while keeping the scan inside that prefix.
-  const key = base && requestedKey !== base && !requestedKey.startsWith(`${base}/`)
-    ? `${base}/${requestedKey}`
-    : requestedKey;
-  if (base && key !== base && !key.startsWith(`${base}/`)) throw new RangeError("scan path must stay inside the connector prefix");
-  return s3Uri(connector, key);
-}
-
 function statusFromTask(task: KubernetesResource): "queued" | "running" | "succeeded" | "failed" {
   const phase = task.status?.phase?.toLowerCase();
   if (phase === "succeeded") return "succeeded";
@@ -232,9 +158,6 @@ export class FlinkScanService {
   readonly #secretNamespace: string;
   readonly #esUrl: string;
   readonly #esIndex: string;
-  readonly #esHost: string;
-  readonly #esPort: number;
-  readonly #esSchema: string;
   readonly #esObjectIndex: string;
   readonly #esCoverageIndex: string;
   readonly #client: FlinkResourceClient | undefined;
@@ -252,11 +175,6 @@ export class FlinkScanService {
     this.#secretNamespace = options.secretNamespace;
     this.#esUrl = options.esUrl.replace(/\/+$/, "");
     this.#esIndex = options.esIndex;
-    let parsedEsUrl: URL | undefined;
-    try { parsedEsUrl = this.#esUrl ? new URL(this.#esUrl) : undefined; } catch { parsedEsUrl = undefined; }
-    this.#esHost = process.env.ASTRO_FLINK_ES_HOST ?? parsedEsUrl?.hostname ?? "astro-search-elasticsearch.astro-data-workspace.svc.cluster.local";
-    this.#esPort = Number(process.env.ASTRO_FLINK_ES_PORT ?? parsedEsUrl?.port ?? (parsedEsUrl?.protocol === "https:" ? 443 : 9200));
-    this.#esSchema = process.env.ASTRO_FLINK_ES_SCHEMA ?? parsedEsUrl?.protocol.replace(":", "") ?? "http";
     this.#esObjectIndex = options.esObjectIndex ?? process.env.ASTRO_ES_OBJECT_INDEX ?? "astro_object_index_v1";
     this.#esCoverageIndex = options.esCoverageIndex ?? process.env.ASTRO_ES_COVERAGE_INDEX ?? "astro_coverage_index_v1";
     this.#pollMs = Math.max(1000, options.pollMs);

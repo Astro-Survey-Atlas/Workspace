@@ -6,6 +6,8 @@ import type { MetadataStore } from "./storage/types.js";
 
 export type ConnectorIngestRunStatus = "queued" | "running" | "succeeded" | "failed";
 export type AtlasTaskKind = "user_scan" | "user_coverage";
+export type ScanBackend = "local" | "warehouse" | "legacy-warehouse";
+export type ScanPrecision = "exact" | "estimated" | "entrypoint-only";
 
 export interface ConnectorScanTargetSnapshot {
   uri: string;
@@ -22,6 +24,7 @@ export interface ConnectorIngestRun {
   connectorName?: string;
   connectorKind?: ConnectorKind;
   executor?: string;
+  backend?: ScanBackend;
   /** Atlas-local task identity; never sent as a shared CRD field. */
   taskKind?: AtlasTaskKind;
   target?: ConnectorScanTargetSnapshot;
@@ -39,7 +42,17 @@ export interface ConnectorIngestRun {
   error?: string;
   /** Retained as a legacy alias for target.uri. */
   sourcePath?: string;
+  /** SHA-256 of the immutable source snapshot consumed by the run. */
+  sourceSnapshotSha256?: string;
   esIndex?: string;
+  warehouseLayerId?: string;
+  artifactId?: string;
+  mocStatus?: "pending" | "ready" | "failed" | "unavailable";
+  availableOrders?: number[];
+  maxOrder?: number;
+  precision?: ScanPrecision;
+  coverageRole?: string;
+  evidencePath?: string;
   /** Present only for an optional user-asset remote scan with coverage context. */
   coverage?: CoverageJobSnapshot;
   createdAt: string;
@@ -57,6 +70,7 @@ export interface ConnectorIngestRunInput {
   connectorName?: string;
   connectorKind?: ConnectorKind;
   executor?: string;
+  backend?: ScanBackend;
   /** Atlas-local task kind; never serialized into the shared scan CRD. */
   taskKind?: AtlasTaskKind;
   target?: ConnectorScanTargetSnapshot;
@@ -72,7 +86,16 @@ export interface ConnectorIngestRunInput {
   documentCount?: number;
   error?: string;
   sourcePath?: string;
+  sourceSnapshotSha256?: string;
   esIndex?: string;
+  warehouseLayerId?: string;
+  artifactId?: string;
+  mocStatus?: "pending" | "ready" | "failed" | "unavailable";
+  availableOrders?: number[];
+  maxOrder?: number;
+  precision?: ScanPrecision;
+  coverageRole?: string;
+  evidencePath?: string;
   coverage?: CoverageJobSnapshot;
 }
 
@@ -95,6 +118,14 @@ function optionalText(value: unknown, maximum: number): string | undefined {
   return result || undefined;
 }
 
+function optionalSha256(value: unknown, name = "sourceSnapshotSha256"): string | undefined {
+  if (value === undefined || value === null || value === "") return undefined;
+  if (typeof value !== "string" || !/^[a-f0-9]{64}$/i.test(value.trim())) {
+    throw new RangeError(`${name} must be a hexadecimal SHA-256`);
+  }
+  return value.trim().toLowerCase();
+}
+
 function optionalCount(value: unknown, name: string): number | undefined {
   if (value == null || value === "") return undefined;
   const result = Number(value);
@@ -108,6 +139,38 @@ function optionalAssetIds(value: unknown): string[] | undefined {
     throw new RangeError("assetIds must be an array of non-empty strings");
   }
   return [...new Set(value.map((entry) => entry.trim()))].sort();
+}
+
+function optionalOrders(value: unknown): number[] | undefined {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value) || value.some((entry) => !Number.isSafeInteger(entry) || (entry as number) < 0 || (entry as number) > 29)) {
+    throw new RangeError("availableOrders must contain HEALPix orders between 0 and 29");
+  }
+  return [...new Set(value as number[])].sort((a, b) => a - b);
+}
+
+function optionalOrder(value: unknown, name: string): number | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (!Number.isSafeInteger(value) || (value as number) < 0 || (value as number) > 29) throw new RangeError(`${name} must be an integer between 0 and 29`);
+  return value as number;
+}
+
+function optionalBackend(value: unknown): ScanBackend | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (!["local", "warehouse", "legacy-warehouse"].includes(value as string)) throw new RangeError("backend is not supported");
+  return value as ScanBackend;
+}
+
+function optionalPrecision(value: unknown): ScanPrecision | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (!["exact", "estimated", "entrypoint-only"].includes(value as string)) throw new RangeError("precision is not supported");
+  return value as ScanPrecision;
+}
+
+function optionalMocStatus(value: unknown): ConnectorIngestRun["mocStatus"] {
+  if (value === undefined || value === null) return undefined;
+  if (!["pending", "ready", "failed", "unavailable"].includes(value as string)) throw new RangeError("mocStatus is not supported");
+  return value as ConnectorIngestRun["mocStatus"];
 }
 
 function optionalTarget(value: unknown): ConnectorScanTargetSnapshot | undefined {
@@ -192,6 +255,7 @@ export class ConnectorIngestRunCatalog {
       connectorName: optionalText(input.connectorName, 240),
       connectorKind: input.connectorKind,
       executor: optionalText(input.executor, 120),
+      backend: optionalBackend(input.backend),
       taskKind: inferAtlasTaskKind(input),
       target: optionalTarget(input.target),
       assetIds: optionalAssetIds(input.assetIds),
@@ -206,7 +270,16 @@ export class ConnectorIngestRunCatalog {
       documentCount: optionalCount(input.documentCount, "documentCount"),
       error: optionalText(input.error, 2000),
       sourcePath: optionalText(input.sourcePath, 2048),
+      ...(input.sourceSnapshotSha256 === undefined ? {} : { sourceSnapshotSha256: optionalSha256(input.sourceSnapshotSha256) }),
       esIndex: optionalText(input.esIndex, 160),
+      ...(input.warehouseLayerId === undefined ? {} : { warehouseLayerId: optionalText(input.warehouseLayerId, 180) }),
+      ...(input.artifactId === undefined ? {} : { artifactId: optionalText(input.artifactId, 360) }),
+      ...(input.mocStatus === undefined ? {} : { mocStatus: optionalMocStatus(input.mocStatus) }),
+      ...(input.availableOrders === undefined ? {} : { availableOrders: optionalOrders(input.availableOrders) }),
+      ...(input.maxOrder === undefined ? {} : { maxOrder: optionalOrder(input.maxOrder, "maxOrder") }),
+      ...(input.precision === undefined ? {} : { precision: optionalPrecision(input.precision) }),
+      ...(input.coverageRole === undefined ? {} : { coverageRole: optionalText(input.coverageRole, 80) }),
+      ...(input.evidencePath === undefined ? {} : { evidencePath: optionalText(input.evidencePath, 2048) }),
       ...(input.coverage === undefined ? {} : { coverage: validateCoverageJobSnapshot(input.coverage) }),
       secretName: optionalText(input.secretName, 63),
       idempotencyKeyHash: keyHash,
@@ -238,6 +311,7 @@ export class ConnectorIngestRunCatalog {
       ...(patch.connectorName === undefined ? {} : { connectorName: optionalText(patch.connectorName, 240) }),
       ...(patch.connectorKind === undefined ? {} : { connectorKind: patch.connectorKind }),
       ...(patch.executor === undefined ? {} : { executor: optionalText(patch.executor, 120) }),
+      ...(patch.backend === undefined ? {} : { backend: optionalBackend(patch.backend) }),
       ...(patch.target === undefined ? {} : { target: optionalTarget(patch.target) }),
       ...(patch.assetIds === undefined ? {} : { assetIds: optionalAssetIds(patch.assetIds) }),
       ...(patch.jobId === undefined ? {} : { jobId: optionalText(patch.jobId, 180) }),
@@ -251,7 +325,16 @@ export class ConnectorIngestRunCatalog {
       ...(patch.documentCount === undefined ? {} : { documentCount: optionalCount(patch.documentCount, "documentCount") }),
       ...(patch.error === undefined ? {} : { error: optionalText(patch.error, 2000) }),
       ...(patch.sourcePath === undefined ? {} : { sourcePath: optionalText(patch.sourcePath, 2048) }),
+      ...(patch.sourceSnapshotSha256 === undefined ? {} : { sourceSnapshotSha256: optionalSha256(patch.sourceSnapshotSha256) }),
       ...(patch.esIndex === undefined ? {} : { esIndex: optionalText(patch.esIndex, 160) }),
+      ...(patch.warehouseLayerId === undefined ? {} : { warehouseLayerId: optionalText(patch.warehouseLayerId, 180) }),
+      ...(patch.artifactId === undefined ? {} : { artifactId: optionalText(patch.artifactId, 360) }),
+      ...(patch.mocStatus === undefined ? {} : { mocStatus: optionalMocStatus(patch.mocStatus) }),
+      ...(patch.availableOrders === undefined ? {} : { availableOrders: optionalOrders(patch.availableOrders) }),
+      ...(patch.maxOrder === undefined ? {} : { maxOrder: optionalOrder(patch.maxOrder, "maxOrder") }),
+      ...(patch.precision === undefined ? {} : { precision: optionalPrecision(patch.precision) }),
+      ...(patch.coverageRole === undefined ? {} : { coverageRole: optionalText(patch.coverageRole, 80) }),
+      ...(patch.evidencePath === undefined ? {} : { evidencePath: optionalText(patch.evidencePath, 2048) }),
       ...(patch.coverage === undefined ? {} : { coverage: validateCoverageJobSnapshot(patch.coverage) }),
       ...(patch.secretName === undefined ? {} : { secretName: optionalText(patch.secretName, 63) }),
       updatedAt: new Date().toISOString(),
@@ -286,9 +369,15 @@ export function normalizeConnectorIngestRuns(entries: unknown[]): ConnectorInges
     if (record.connectorKind !== undefined && !["s3", "local", "jdbc"].includes(record.connectorKind)) {
       throw new Error("connector ingest run state contains an invalid record");
     }
+    if (record.backend !== undefined && !["local", "warehouse", "legacy-warehouse"].includes(record.backend)) throw new Error("connector ingest run state contains an invalid backend");
+    optionalOrders(record.availableOrders);
+    optionalOrder(record.maxOrder, "maxOrder");
+    if (record.precision !== undefined && !["exact", "estimated", "entrypoint-only"].includes(record.precision)) throw new Error("connector ingest run state contains an invalid precision");
+    if (record.mocStatus !== undefined && !["pending", "ready", "failed", "unavailable"].includes(record.mocStatus)) throw new Error("connector ingest run state contains an invalid MOC status");
     record.taskKind = inferAtlasTaskKind(record);
     optionalAssetIds(record.assetIds);
     optionalTarget(record.target);
+    optionalSha256(record.sourceSnapshotSha256);
     optionalCount(record.fileCount, "fileCount");
     optionalCount(record.documentCount, "documentCount");
     if (record.coverage !== undefined) validateCoverageJobSnapshot(record.coverage);

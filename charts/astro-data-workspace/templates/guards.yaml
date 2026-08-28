@@ -14,6 +14,37 @@
 {{- if and (eq .Values.search.mode "bundled") .Values.search.external.existingSecret }}{{ fail "search.external.existingSecret is only valid with search.mode=external" }}{{- end }}
 {{- if and (eq .Values.search.mode "external") (empty .Values.search.external.existingSecret) }}{{ fail "search.external.existingSecret is required for search.mode=external" }}{{- end }}
 {{- if and (eq .Values.search.mode "external") (empty .Values.search.external.existingSecretKey) }}{{ fail "search.external.existingSecretKey is required for search.mode=external" }}{{- end }}
+{{- if not (kindIs "bool" .Values.dataWarehouse.enabled) }}{{ fail "dataWarehouse.enabled must be a boolean" }}{{- end }}
+{{- if not (kindIs "string" .Values.dataWarehouse.namespace) }}{{ fail "dataWarehouse.namespace must be a string" }}{{- end }}
+{{- $warehouseNamespace := default .Release.Namespace .Values.dataWarehouse.namespace -}}
+{{- if and .Values.dataWarehouse.enabled (ne $warehouseNamespace .Release.Namespace) }}{{ fail "dataWarehouse.namespace must equal the Workspace release namespace" }}{{- end }}
+{{- if or (lt (int .Values.dataWarehouse.pollIntervalMs) 1000) (gt (int .Values.dataWarehouse.pollIntervalMs) 300000) }}{{ fail "dataWarehouse.pollIntervalMs must be between 1000 and 300000 milliseconds" }}{{- end }}
+{{- if not (kindIs "map" .Values.dataWarehouse.elasticsearch) }}{{ fail "dataWarehouse.elasticsearch must be an object" }}{{- end }}
+{{- $warehouseUrl := default "" .Values.dataWarehouse.elasticsearch.url -}}
+{{- $warehouseSecret := default "" .Values.dataWarehouse.elasticsearch.existingSecret -}}
+{{- if not (kindIs "string" $warehouseUrl) }}{{ fail "dataWarehouse.elasticsearch.url must be a string" }}{{- end }}
+{{- if not (kindIs "string" $warehouseSecret) }}{{ fail "dataWarehouse.elasticsearch.existingSecret must be a string" }}{{- end }}
+{{- if not .Values.dataWarehouse.enabled }}
+{{- if or $warehouseUrl $warehouseSecret }}{{ fail "dataWarehouse Elasticsearch settings require dataWarehouse.enabled=true" }}{{- end }}
+{{- else }}
+{{- if and $warehouseUrl $warehouseSecret }}{{ fail "dataWarehouse Elasticsearch url and existingSecret are mutually exclusive" }}{{- end }}
+{{- if and (not $warehouseUrl) (not $warehouseSecret) }}{{ fail "dataWarehouse Elasticsearch url or existingSecret is required when enabled" }}{{- end }}
+{{- if and $warehouseUrl (not (regexMatch `^https?://[^[:space:]]+$` $warehouseUrl)) }}{{ fail "dataWarehouse.elasticsearch.url must be an absolute HTTP(S) URL" }}{{- end }}
+{{- if and $warehouseSecret (empty .Values.dataWarehouse.elasticsearch.existingSecretKey) }}{{ fail "dataWarehouse.elasticsearch.existingSecretKey is required with an existingSecret" }}{{- end }}
+{{- end }}
+{{- range $name, $index := .Values.dataWarehouse.elasticsearch }}
+{{- if and (has $name (list "layerIndex" "fileIndex" "coverageIndex")) (or (not (kindIs "string" $index)) (empty $index) (gt (len $index) 255) (not (regexMatch "^[a-z0-9][a-z0-9._-]*$" $index))) }}{{ fail (printf "dataWarehouse.elasticsearch.%s must be a valid lowercase Elasticsearch index name" $name) }}{{- end }}
+{{- end }}
+{{- if or (eq .Values.dataWarehouse.elasticsearch.layerIndex .Values.dataWarehouse.elasticsearch.fileIndex) (eq .Values.dataWarehouse.elasticsearch.layerIndex .Values.dataWarehouse.elasticsearch.coverageIndex) (eq .Values.dataWarehouse.elasticsearch.fileIndex .Values.dataWarehouse.elasticsearch.coverageIndex) }}{{ fail "dataWarehouse Elasticsearch indices must be distinct" }}{{- end }}
+{{- if not (kindIs "map" .Values.dataWarehouse.evidence) }}{{ fail "dataWarehouse.evidence must be an object" }}{{- end }}
+{{- $evidenceClaim := default "" .Values.dataWarehouse.evidence.existingClaim -}}
+{{- $evidenceMount := default "/var/lib/atlas-evidence" .Values.dataWarehouse.evidence.mountPath -}}
+{{- if and $evidenceClaim (or (gt (len $evidenceClaim) 253) (not (regexMatch "^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$" $evidenceClaim))) }}{{ fail "dataWarehouse.evidence.existingClaim must be a DNS-1123 subdomain name" }}{{- end }}
+{{- if not (hasPrefix "/" $evidenceMount) }}{{ fail "dataWarehouse.evidence.mountPath must be absolute" }}{{- end }}
+{{- if eq (trimSuffix "/" $evidenceMount) "" }}{{ fail "dataWarehouse.evidence.mountPath must not be root" }}{{- end }}
+{{- if .Values.dataWarehouse.enabled }}
+{{- if not (has "ReadWriteMany" .Values.dataWarehouse.evidence.accessModes) }}{{ fail "dataWarehouse.evidence.accessModes must include ReadWriteMany so API and scanner share the PVC" }}{{- end }}
+{{- end }}
 {{- range $name, $index := .Values.search.index }}
 {{- if not (kindIs "string" $index) }}{{ fail (printf "search.index.%s must be a string" $name) }}{{- end }}
 {{- if or (empty $index) (gt (len $index) 255) (not (regexMatch "^[a-z0-9][a-z0-9._-]*$" $index)) }}{{ fail (printf "search.index.%s must be a valid lowercase Elasticsearch index name" $name) }}{{- end }}

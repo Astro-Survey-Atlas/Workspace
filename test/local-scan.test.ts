@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -141,6 +142,14 @@ test("enforces configured row limits", async () => {
       () => scanLocalCsv(filePath, options({ limits: { maxRows: 1 } })),
       /row limit exceeded/,
     );
+  });
+});
+
+test("records the SHA-256 of the exact local CSV bytes consumed by the scan", async () => {
+  const content = "object_id,ra,dec\nsource,12.5,-4.25\n";
+  await withCsv(content, async (filePath) => {
+    const result = await scanLocalCsv(filePath, options());
+    assert.equal(result.summary.sourceSnapshotSha256, createHash("sha256").update(Buffer.from(content, "utf8")).digest("hex"));
   });
 });
 

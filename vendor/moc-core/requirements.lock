@@ -1,0 +1,10 @@
+# Scientific dependencies pinned for scanner image builds.
+astropy==7.2.0
+astropy-healpix==1.1.2
+astropy-iers-data==0.2026.8.18.14.22.31
+mocpy==0.20.0
+numpy==2.4.6
+packaging==26.3
+pyerfa==2.0.1.5
+PyYAML==6.0.3
+regions==0.11

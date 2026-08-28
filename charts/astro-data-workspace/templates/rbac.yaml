@@ -3,22 +3,25 @@ apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
   name: {{ include "astro-data-workspace.fullname" . }}
-  namespace: {{ .Values.dataWarehouse.namespace }}
+  namespace: {{ .Release.Namespace }}
   labels:
     {{- include "astro-data-workspace.labels" . | nindent 4 }}
 rules:
   - apiGroups: [""]
     resources: ["secrets"]
-    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
-  - apiGroups: ["org.zhejianglab.astro.metadata"]
-    resources: ["astrodatasources", "astrodatasources/status", "astrometadatascantasks", "astrometadatascantasks/status"]
-    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+    verbs: ["get", "create", "update", "patch", "delete"]
+  - apiGroups: ["atlas.zhejianglab.org"]
+    resources: ["scanrequests"]
+    verbs: ["get", "list", "watch", "create", "patch", "update"]
+  - apiGroups: ["atlas.zhejianglab.org"]
+    resources: ["scanrequests/status"]
+    verbs: ["get", "patch", "update"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
   name: {{ include "astro-data-workspace.fullname" . }}
-  namespace: {{ .Values.dataWarehouse.namespace }}
+  namespace: {{ .Release.Namespace }}
   labels:
     {{- include "astro-data-workspace.labels" . | nindent 4 }}
 subjects:

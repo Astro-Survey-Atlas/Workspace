@@ -82,13 +82,26 @@ export interface SurveyLayerContextMenu {
 
 export interface WorkspaceCoverageLayer {
   key?: string;
+  layerId?: string;
   assetId?: string;
   assetIds?: string[];
   assetName?: string;
   status?: string;
   surveyId?: string;
   releaseId?: string;
-  source?: "connector" | "asset" | "unassigned" | "conflict";
+  productId?: string;
+  modality?: string;
+  coverageRole?: string;
+  source?: "connector" | "asset" | "warehouse" | "combined" | "unassigned" | "conflict";
+  nativeOrders?: number[];
+  availableOrders?: number[];
+  maxOrder?: number;
+  precision?: "exact" | "estimated" | "entrypoint-only";
+  mocStatus?: "pending" | "ready" | "failed" | "unavailable";
+  artifactId?: string;
+  latestMocStatus?: "pending" | "ready" | "failed" | "unavailable";
+  latestArtifactId?: string;
+  state?: string;
   message?: string;
   color?: string;
   nside: number;
@@ -103,6 +116,8 @@ export interface WorkspaceCoverageMembership {
   status?: string;
   surveyId?: string;
   releaseId?: string;
+  productId?: string;
+  modality?: string;
   source?: WorkspaceCoverageLayer["source"];
   message?: string;
 }
@@ -168,6 +183,7 @@ export interface SurveyLayerState {
   } | null;
   visibleSurveyIds: string[];
   visibleAssetIds: string[];
+  visibleWorkspaceLayerKeys: string[];
   layerOrder: string[];
   layerDepths: LayerDepth[];
   layoutMode: SurveyLayerLayoutMode;
@@ -402,6 +418,7 @@ export class SurveyLayerViewer {
   readonly #selectedPixels = new Set<number>();
   readonly #visibleSurveyIds = new Set<string>();
   readonly #visibleAssetIds = new Set<string>();
+  readonly #visibleWorkspaceLayerKeys = new Set<string>();
   readonly #layerMeshes: LayerMesh[] = [];
   readonly #coverageEdgeMaterials: THREE.LineBasicMaterial[] = [];
   readonly #meshBySurvey = new Map<string, LayerMesh>();
@@ -535,6 +552,7 @@ export class SurveyLayerViewer {
       selectionAnchor: this.#selectionAnchor(),
       visibleSurveyIds: [...this.#visibleSurveyIds],
       visibleAssetIds: [...this.#visibleAssetIds],
+      visibleWorkspaceLayerKeys: [...this.#visibleWorkspaceLayerKeys],
       layerOrder: this.#normalizedLayerOrder(),
       layerDepths: this.#displayDepths(),
       layoutMode: this.#layoutMode,
@@ -748,6 +766,15 @@ export class SurveyLayerViewer {
     this.#rebuildVisible(true);
   }
 
+  setVisibleWorkspaceLayerKeys(keys: Iterable<string>): void {
+    const next = new Set([...keys].filter((key) => typeof key === "string" && key.length > 0));
+    if (next.size === this.#visibleWorkspaceLayerKeys.size && [...next].every((key) => this.#visibleWorkspaceLayerKeys.has(key))) return;
+    this.#visibleWorkspaceLayerKeys.clear();
+    next.forEach((key) => this.#visibleWorkspaceLayerKeys.add(key));
+    this.#pruneSelection();
+    this.#rebuildVisible(true);
+  }
+
   setLayerOrder(keys: Iterable<string>): void {
     const next = normalizeLayerOrder(this.#knownLayerKeys(), keys, []);
     if (next.length === this.#layerOrder.length && next.every((key, index) => key === this.#layerOrder[index])) return;
@@ -758,7 +785,7 @@ export class SurveyLayerViewer {
   setWorkspaceCoverage(layer: WorkspaceCoverageLayer | null): void {
     this.#workspaceLayers.clear();
     if (layer && layer.nside === this.#manifest.nside) {
-      const key = layer.key ?? (layer.surveyId ?? "__unassigned__");
+      const key = this.#workspaceLayerKey(layer);
       const pixels = layer.pixels.filter((pixel) => Number.isInteger(pixel) && pixel >= 0 && pixel < 12 * this.#manifest.nside ** 2);
       this.#workspaceLayers.set(key, { ...layer, key, pixels: [...new Set(pixels)].sort((left, right) => left - right) });
     }
@@ -770,7 +797,7 @@ export class SurveyLayerViewer {
     this.#workspaceLayers.clear();
     if (nside === this.#manifest.nside) {
       layers.forEach((layer, index) => {
-        const key = layer.key ?? `${layer.surveyId ?? "__unassigned__"}:${layer.releaseId ?? ""}:${index}`;
+        const key = this.#workspaceLayerKey({ ...layer, key: layer.key ?? `${layer.layerId ?? layer.surveyId ?? "workspace"}:${layer.releaseId ?? ""}:${index}` });
         const pixels = layer.pixels.filter((pixel) => Number.isInteger(pixel) && pixel >= 0 && pixel < 12 * this.#manifest.nside ** 2);
         this.#workspaceLayers.set(key, { ...layer, key, nside, pixels: [...new Set(pixels)].sort((left, right) => left - right) });
       });
@@ -982,6 +1009,10 @@ export class SurveyLayerViewer {
   #workspaceLayerVisible(layer: WorkspaceCoverageLayer): boolean {
     const assetIds = this.#workspaceLayerAssetIds(layer);
     if (assetIds.length) return assetIds.some((assetId) => this.#visibleAssetIds.has(assetId));
+    const key = this.#workspaceLayerKey(layer);
+    if (layer.source === "warehouse" || key.startsWith("warehouse:") || key.startsWith("moc:")) {
+      return this.#visibleWorkspaceLayerKeys.has(key);
+    }
     return this.#visibleSurveyIds.has(layer.surveyId ?? "__unassigned__");
   }
 
@@ -992,14 +1023,19 @@ export class SurveyLayerViewer {
   #workspaceLayerKey(layer: WorkspaceCoverageLayer): string {
     const assetId = this.#workspaceLayerAssetIds(layer)[0];
     if (assetId) return `asset:${assetId}`;
-    if (layer.surveyId) return `public-survey:${layer.surveyId}`;
+    if (layer.key?.startsWith("warehouse:") || layer.key?.startsWith("moc:")) return layer.key;
+    if (layer.source === "warehouse") return `warehouse:${layer.layerId ?? layer.key ?? "layer"}`;
+    if (layer.artifactId) return `moc:${layer.artifactId}`;
+    if (layer.key) return layer.key;
+    if (layer.layerId) return `workspace:${layer.layerId}`;
+    if (layer.surveyId) return `workspace:${layer.surveyId}`;
     return "workspace-unassigned";
   }
 
   #knownLayerKeys(): string[] {
     return [
       ...this.#model.slots.filter((slot) => slot.hasFootprint).map((slot) => `public-survey:${slot.surveyId}`),
-      ...[...this.#workspaceLayers.values()].map((layer) => this.#workspaceLayerKey(layer)),
+      ...new Set([...this.#workspaceLayers.values()].map((layer) => this.#workspaceLayerKey(layer))),
     ];
   }
 
@@ -1086,6 +1122,8 @@ export class SurveyLayerViewer {
           status: layer.status,
           surveyId: layer.surveyId,
           releaseId: layer.releaseId,
+          productId: layer.productId,
+          modality: layer.modality,
           source: layer.source,
           message: layer.message,
         };

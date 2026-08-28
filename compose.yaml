@@ -1,9 +1,36 @@
 services:
+  workspace-elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.18.0
+    environment:
+      discovery.type: single-node
+      xpack.security.enabled: "false"
+      ES_JAVA_OPTS: -Xms512m -Xmx512m
+    volumes:
+      - type: volume
+        source: search
+        target: /usr/share/elasticsearch/data
+    ports:
+      - "${ASTRO_ES_PORT:-9200}:9200"
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          curl --silent --fail
+          'http://127.0.0.1:9200/_cluster/health?wait_for_status=yellow&timeout=1s'
+          >/dev/null
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 30s
+
   workspace:
     build:
       context: .
       dockerfile: Dockerfile
     image: astro-data-workspace:local
+    depends_on:
+      workspace-elasticsearch:
+        condition: service_healthy
     user: "10001:10001"
     read_only: true
     cap_drop:
@@ -15,6 +42,16 @@ services:
       PORT: "3000"
       ASTRO_DATA_WAREHOUSE_ENABLED: "false"
       ASTRO_LOCAL_SCAN_ENABLED: "false"
+      # Workspace always owns this search service. Warehouse, when enabled,
+      # uses the separate ASTRO_WAREHOUSE_ES_URL endpoint below.
+      ASTRO_ES_URL: http://workspace-elasticsearch:9200
+      ASTRO_ES_ASTRO_INDEX: astro_file_index_v1
+      ASTRO_ES_OBJECT_INDEX: astro_object_index_v1
+      ASTRO_ES_COVERAGE_INDEX: astro_coverage_index_v1
+      ASTRO_WAREHOUSE_ES_URL: ""
+      ASTRO_WAREHOUSE_LAYER_INDEX: ast_layer_index_v1
+      ASTRO_WAREHOUSE_FILE_INDEX: ast_file_index_v1
+      ASTRO_WAREHOUSE_COVERAGE_INDEX: ast_coverage_index_v1
       ASTRO_METADATA_STORE: sqlite
       ASTRO_SQLITE_PATH: /state/workspace.sqlite
       ASTRO_STATE_ROOT: /state
@@ -49,3 +86,5 @@ services:
 volumes:
   state:
     name: astro-data-workspace-state
+  search:
+    name: astro-data-workspace-search

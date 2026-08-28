@@ -428,7 +428,7 @@ export function normalizeConnectorRecords(entries: unknown[]): ConnectorRecord[]
 
 async function checkS3(record: ConnectorRecord, credentials?: ResolvedConnectorCredentials, requireCredentials = false): Promise<ConnectorCheck> {
   const endpoint = cleanEndpoint(record.config.endpoint);
-  if (!endpoint) return { status: "ok", checkedAt: new Date().toISOString(), summary: "S3 路径配置有效", detail: "未配置 Endpoint，FlinkIngest 将使用默认 S3 Endpoint。" };
+  if (!endpoint) return { status: "ok", checkedAt: new Date().toISOString(), summary: "S3 路径配置有效", detail: "未配置 Endpoint，Warehouse scanner 将使用默认 S3 Endpoint。" };
   const checkedAt = new Date().toISOString();
   const bucket = record.config.bucket ?? "";
   if (requireCredentials && !credentials) {
@@ -606,7 +606,7 @@ async function checkAlibabaOss(record: ConnectorRecord, credentials: ResolvedCon
     });
     // GetBucketInfo is a separate privileged OSS action and is commonly
     // denied even when the connector can scan its configured prefix. A
-    // single-key prefix probe validates the permission FlinkIngest needs
+    // A single-key prefix probe validates the permission the Warehouse scanner needs
     // without enumerating or scanning the directory.
     await client.list({ ...(prefix ? { prefix } : {}), "max-keys": 1 });
     return { status: "ok", checkedAt, summary: "Alibaba OSS 连接正常，凭据与 Bucket 均已验证", detail: "已验证目标 Prefix 的最小读取权限，未扫描目录。" };

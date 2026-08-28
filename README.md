@@ -1,305 +1,182 @@
-# Astro Data Workspace
+# Astro Survey Atlas (Workspace)
 
-An astronomy-focused data workspace built around a deterministic-first rule:
-catalog parsing, coordinate validation, HEALPix indexing, and rendering data are
-computed by tested TypeScript. MCP exposes those capabilities to agents; an LLM
-is not part of the data-processing path.
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Node: >=22.13](https://img.shields.io/badge/Node->=22.13-brightgreen.svg)](package.json)
+[![Vite: ^8.1.5](https://img.shields.io/badge/Vite-^8.1.5-blueviolet.svg)](package.json)
 
-Atlas is the user-facing workspace. It can:
+> **Atlas** is the user-facing interactive data exploration workspace in the Astro Survey Atlas ecosystem. It provides the central sky-mapping dashboard, local asset registration, credential management, file connectors, and task orchestration.
 
-1. Register user assets with local, S3/OSS, JDBC, or other access metadata.
-2. Scan local files in Atlas and optionally submit remote user scans to the
-   data-warehouse plugin.
-3. Compute user coverage through the pinned Assets MOC Core adapter.
-4. Display and download public coverage only from verified Assets Resource
-   Package v3 snapshots.
-5. Keep user survey/release labels, assets, connectors, scan history, indexes,
-   workflows, and Agent/MCP state local to Atlas.
-6. Select sky regions and inspect public package layers alongside user assets.
+---
 
-The shared operator/workspace invocation and troubleshooting runbook is in the
-sibling checkout at
-`/home/aaron/Repo/data-warehouse/docs/astro-metadata-scan-runbook.md`.
+## 🗺️ System Integration & Boundaries
 
-The current Atlas boundary, task-isolation, and notification implementation plan
-is frozen in [`docs/atlas-boundary-plan.md`](docs/atlas-boundary-plan.md). It
-overrides older Atlas-side descriptions when they differ; this repository does
-not modify the data-warehouse checkout or the shared scan CRD schema.
+The Astro Survey Atlas ecosystem consists of three sibling repositories designed around a **deterministic-first** rule. Scientific calculations (catalog parsing, coordinate validation, HEALPix cell rasterization, and MOC generation) are handled entirely in tested TypeScript/Python code, completely decoupled from LLMs.
 
-## Development
+```
+       +-----------------------------------------------+
+       |          Astro-Survey-Atlas-Assets            |
+       |  (Public Survey metadata & coverage packages) |
+       +-----------------------------------------------+
+                               |
+                               |  1. Synchronizes Resource Package v3
+                               |     (manifests, hash verifications, MOCs)
+                               v
++--------------------------------------------------------------+
+|                  Astro-Survey-Atlas-Workspace                |
+|                    (Atlas - This Repository)                 |
++--------------------------------------------------------------+
+|  - React/TS & Aladin Lite v3 Sky Dashboard                   |
+|  - Local Catalog registry, Connectors (S3/Local/JDBC)        |
+|  - Local scan engine & Workspace-owned Elasticsearch (ES)    |
+|  - Task history tracker & SQLite/Postgres metadata store     |
++--------------------------------------------------------------+
+            ^                                      |
+            |                                      | 2. Submits K8s ScanRequest
+            | 4. Imports Evidence                  |    (ScanPlan v2)
+            |    (MOC, pixel counts, run logs)      |
+            |                                      v
+       +-----------------------------------------------+
+       |          Astro-Survey-Atlas-Warehouse         |
+       |  (K8s Operator & high-throughput S3 scanner)  |
+       +-----------------------------------------------+
+```
 
-The authoritative checkout is:
+### Component Responsibility Matrix
+
+| Feature / Responsibility | **Assets** 📦 | **Warehouse** ⚙️ | **Workspace (Atlas)** 🖥️ |
+|:---|:---:|:---:|:---:|
+| **Public Survey Coverage & Metadata** | **Authoritative Owner** | ❌ None | Read-only Sync (v3 Packages) |
+| **User Asset Registry & Metadata** | ❌ None | ❌ None | **Authoritative Owner** |
+| **Local Scanning & local ES indexing** | ❌ None | ❌ None | **Authoritative Owner** |
+| **Remote S3/OSS High-throughput Scan** | ❌ None | **Execution & Operator** | Task Submission & Evidence Import |
+| **天球 UI (Aladin Lite v3 Explorer)** | ❌ None | ❌ None | **Authoritative Owner** |
+| **Credentials & Secrets Management** | ❌ None | Short-term token consumer | Secure secret store & delegation |
+| **Agent / MCP Server Integration** | ❌ None | ❌ None | **Authoritative Owner** |
+
+---
+
+## ✨ Features
+
+* **🌌 interactive Celestial Explorer**: Integrates **Aladin Lite v3** for viewing celestial coordinates (ICRS), overlaying HEALPix grids, and visualizing MOC (Multi-Order Coverage) layers from both public catalogs and user assets.
+* **📂 User Asset Registry**: Add, inspect, filter, edit, and delete private data assets (星表, 图像, 光谱, Cube, 时序) with normalized survey/release labels.
+* **🔌 Flexible Connectors**: Register data sources (Local filesystem, Amazon S3, Ali OSS, JDBC) and run structural sanity/connection checks.
+* **🔍 Deterministic Local Scanner**: Parse CSV files locally, validate RA/Dec coordinates, build nesting HEALPix indexes, and generate IVOA FITS MOC files via a pinned Python MOC Core wrapper.
+* **⚡ Optional Warehouse Remote Scan**: Delegate massive S3/OSS catalog scans to Warehouse via a custom `ScanRequest` CRD, importing file evidences and MOC projections upon completion.
+* **🤖 Agent & MCP Support**: Exposes workspace APIs as Model Context Protocol (MCP) tools, allowing LLM agents to inspect data assets and query coordinate boundaries.
+* **🔔 Unified Toast Notifications**: A global notification deck (`#workspace-notification-deck`) that provides real-time progress for package sync, connector validation, scans, and system errors.
+
+---
+
+## 📂 Project Structure
 
 ```text
-zjlab-ubuntu:/home/aaron/Repo/astro-data-workspace
+/home/aaron/Repo/Astro-Survey-Atlas-Workspace/
+├── docs/                   # System architecture and frozen design boundaries
+├── src/                    # Backend server (Express.js, TS)
+│   ├── agent.ts            # Agent logic & Model Context Protocol tools
+│   ├── astro-index.ts      # Workspace ES index creation & index mapping
+│   ├── connectors.ts       # Connector schemas and connection test endpoints
+│   ├── coverage-jobs.ts    # MOC compilation and geometry tasks
+│   ├── http-server.ts      # Main Express application entry point
+│   ├── local-scan.ts       # Local file scanner (CSV parsing, coordinate validation)
+│   └── storage/            # Metadata persistence (SQLite / Postgres)
+├── test/                   # Comprehensive unit, integration, and e2e tests
+├── vendor/moc-core/        # Pinned Python moc-core adapter distribution
+└── viewer/                 # Frontend client (Vite, TS, Aladin Lite v3)
+    ├── index.html          # Main HTML frame
+    └── src/
+        ├── aladin-explorer.ts  # Aladin Lite wrapper & Sky representation layers
+        ├── main.ts             # Shell coordinator, tab switching & toast deck
+        └── styles.css          # Core workspace CSS stylesheet
 ```
 
-Run the complete deterministic validation on Linux:
+---
 
+## 🚀 Quick Start
+
+### 1. Prerequisites
+Ensure you have the following installed on your Linux machine:
+* **Node.js**: `>= 22.13` (API server uses modern ESM features)
+* **Python**: `3.10+` with `pip` (required by the scientific MOC Core CLI wheel)
+* **Elasticsearch**: `8.x` (Workspace-owned search plane)
+* **SQLite / PostgreSQL** (SQLite is configured by default)
+
+### 2. Installation & Build
+Clone the repository and install dependencies:
 ```bash
+# Install dependencies using npmmirror to avoid network issues
 npm ci --registry=https://registry.npmmirror.com
-npm run validate
+
+# Build the TypeScript Express backend and Vite frontend
+npm run build
 ```
 
-For separate server and viewer development:
+### 3. Local Development
+Start the Express backend and the Vite development server in watch mode:
 
 ```bash
+# In Terminal 1: Run the backend API server (listens on 127.0.0.1:3000)
 npm run dev
+
+# In Terminal 2: Run the Vite frontend server (proxies /api to port 3000)
 npm run dev:viewer
 ```
+Open `http://localhost:5173` in your browser.
 
-The Vite development server proxies `/api` to `http://127.0.0.1:3000`.
+---
 
-## Local deployment
+## 🐳 Docker Compose Deployment
 
-The official Compose configuration runs SQLite with the warehouse disabled.
-Application state, workflow runs, and installed resource packages are kept in
-the named `state` volume. The container runs as UID/GID `10001`, has a read-only
-root filesystem, drops all capabilities, disallows privilege escalation, and
-uses a tmpfs for `/tmp`.
+The Compose stack spins up the Express server (SQLite) along with a dedicated, isolated Workspace Elasticsearch.
 
-The local data contract is one controlled parent directory mounted read-only at
-`/data/local`. To enable it, copy the example override and set the host
-directory before starting Compose:
-
+### 1. Configure Local Data Bind
+Copy the local compose override and set the absolute path to your local scientific datasets:
 ```bash
 cp compose.local.example.yaml compose.local.yaml
-ASTRO_LOCAL_DATA_ROOT=/srv/astro-data docker compose -f compose.yaml -f compose.local.yaml up -d
+
+# Set host directory containing your CSVs/FITS
+export ASTRO_LOCAL_DATA_ROOT=/srv/astro-data
 ```
 
-The parent directory must already exist. With Docker on Linux, UID/GID `10001`
-needs search (`x`) permission on every parent directory and read/search (`r-x`)
-permission on the mounted tree. The application does not write to this mount;
-state writes go to the named volume. `create_host_path: false` intentionally
-makes a missing host directory a configuration error.
+### 2. Launch Services
+```bash
+docker compose -f compose.yaml -f compose.local.yaml up -d
+```
+*The container runs as UID/GID `10001` with a read-only root filesystem and drops all Linux capabilities for maximum security.*
 
-On SELinux-enabled Linux hosts, a bind mount can also require an SELinux label.
-Use the Compose `:z` option for a directory shared by containers, or `:Z` for a
-private directory, according to the host policy; do not disable SELinux to make
-the mount work. The host directory still needs normal Unix permissions.
+---
 
-Docker Desktop on macOS and Windows runs Linux containers in a VM. The selected
-host directory must be allowed in Docker Desktop file sharing, and the path
-must use the syntax supported by the local Docker client (for example an
-absolute macOS path or `C:/data/astro` on Windows). Desktop-managed sharing and
-the VM's UID mapping can differ from native Linux, so verify the container's
-read-only access with the health and connector checks.
+## ☸️ Kubernetes (k3s) Deployment
 
-When the Docker daemon is remote, bind sources are resolved on the daemon host,
-not on the machine running the Compose command. Set `ASTRO_LOCAL_DATA_ROOT` to
-a path on that host, or use a storage export mounted there. The directory must
-exist on the daemon host because automatic creation is disabled.
-
-Adding or removing a child directory below the mounted parent does not require
-an image rebuild or container recreation. Changing the parent directory does
-require recreating the service so the bind source is replaced, for example:
+The production deployment manifest targets k3s under the `astro-data-workspace` namespace.
 
 ```bash
-ASTRO_LOCAL_DATA_ROOT=/new/astro-data docker compose -f compose.yaml -f compose.local.yaml up -d --force-recreate
-```
+# 1. Build the Docker image
+docker build -t ay-dev/astro-data-workspace-mcp:latest .
 
-Local connectors support registration, non-enumerating existence/readability
-checks, explicit CSV scans, and scan history. The mounted parent remains
-read-only; Atlas writes only metadata and derived indexes to its state store.
-
-## Data catalog
-
-The default tab is the data foundation. Public coverage and release metadata
-come from the synchronized Assets Resource Package v3 catalog; Atlas no longer
-ships a second public catalog. User records are stored at
-`ASTRO_DATA_CATALOG_STATE` (default `/state/data-catalog.json`) and support
-create, update, and delete without copying source rows into this service.
-
-Each record identifies an optional survey and release, a product, modality,
-format, connector kind, logical or physical URI, availability state, and zero
-or more footprint references. These survey/release values are Atlas-local user
-metadata and may not exist in the installed Assets package. An optional
-data-warehouse connector can consume this access description together with a
-refined MOC selection; credentials remain outside catalog records. Connector
-associations use normalized location keys so a path upsert does not orphan an
-asset.
-
-## Survey registry and release footprints
-
-The survey explorer consumes public survey/release metadata from the installed
-Assets Resource Package v3 records through a read-only public view. The Atlas
-SurveyRegistry remains a separate local namespace for user labels and releases;
-an Euclid or CSST label does not need a matching public package.
-Each release records modalities, products, availability, and a footprint
-provenance status. HST is represented as a MAST archive snapshot rather than a
-fictional DR sequence.
-
-Each MOC is attached to one release and product. The explorer renders each
-survey union in a separate display-only shell; the shell radius is not a proxy
-for redshift, distance, survey depth, photometric limit, magnitude, or
-wavelength. A connected selection of `NSIDE 16` cells can be expanded into a
-local, per-survey stack for visual comparison. The stack preserves coverage
-membership and provenance only; it is not a radial data cube. Hovering a cell
-shows its survey, release, product, modalities, geometry quality, and source.
-The active package list is whatever the trusted Assets catalog advertises. It
-contains geometry artifacts and provenance, never catalog rows or image pixels.
-The exact source and processing rules are documented in
-[`docs/public-footprint-moc-method.md`](docs/public-footprint-moc-method.md).
-
-Only a MOC/HEALPix footprint may drive regional release discovery. Entries
-marked `summary_only` retain an official area or field summary, while `pending`
-explicitly means that no spatial geometry has been claimed yet. In particular,
-the DESI DR1 spectroscopic footprint remains pending until its official
-tile/product artifact is ingested; the application does not substitute Legacy
-imaging or local COSMOS data for it.
-
-### Public footprint artifacts
-
-The public-footprint release is owned by the sibling `Astro-Survey-Atlas-Assets`
-repository. Atlas runtime reads only a verified Assets Resource Package v3
-catalog and its local `assets-current` snapshot. Atlas does not retain a second
-public footprint ledger or a fallback package set. Old generated packages and
-rollback material are not startup inputs, are not scanned, and are not part of
-the active catalog.
-
-Public package generation, geometry extraction, trust validation, and release
-publication are performed in `Astro-Survey-Atlas-Assets`. Atlas only downloads,
-verifies, installs, and displays the resulting v3 packages.
-
-## Interfaces
-
-The maintained request and response contract is in
-[`docs/api-reference.md`](docs/api-reference.md). Update it together with the
-route implementation and tests whenever an API changes.
-
-MCP tools:
-
-- `list_user_assets`
-- `get_user_asset`
-
-REST endpoints:
-
-- `GET /api/data-assets`
-- `GET /api/data-assets/:id`
-- `POST /api/data-assets`
-- `PUT /api/data-assets/:id`
-- `DELETE /api/data-assets/:id`
-- `GET /api/surveys`
-- `GET /api/surveys/:id`
-- `GET /api/public-surveys`
-- `GET /api/public-surveys/:id`
-- `GET /api/survey-footprints`
-- `GET /api/sky/overview?survey=euclid&release=euclid-q1&nside=16&cells=...`
-- `POST /api/sky/query`
-- `GET /api/sky/coverage?nside=16&assetIds=...` (generic scanned-asset coverage)
-- `POST /api/surveys/registrations`
-- `GET /api/connectors/:id/scan-runs`
-- `GET /api/connectors/scan-runs`
-- `GET /api/tools`
-- `GET /api/workflows`
-- `GET /api/workflows/:id`
-- `POST /api/workflow-runs`
-- `GET /api/workflow-runs/:id`
-- `POST /api/workflow-runs/:id/decisions`
-- `GET /api/workflow-runs/:id/artifacts/:name`
-- `POST /api/agent/sessions`
-- `POST /api/agent/sessions/:id/messages`
-
-Local scans run in Atlas and use the pinned Assets MOC Core adapter for
-authoritative coverage. An optional data-warehouse plugin handles remote S3/JDBC
-reads; it remains a user-asset execution path and never publishes public
-coverage. Remote requests can point at a connector prefix or child path and
-declare catalog coordinates without exposing credentials:
-
-```json
-{
-  "assetId": "my-user-catalog",
-  "path": "projects/astro/catalogs/sample.csv",
-  "allowedSuffixes": [".csv"],
-  "spatial": {
-    "mode": "catalog",
-    "raColumn": "ra",
-    "decColumn": "dec",
-    "frame": "ICRS",
-    "units": "deg"
-  }
-}
-```
-
-The scanner records files without valid coordinates as metadata-only; it does
-not invent a footprint from the path or filename. `backend: flink` is an
-optional data-warehouse execution detail and is not a public coverage API.
-
-Catalogs that already carry NESTED HEALPix pixels can instead use
-`"mode": "healpix"` with `"healpixColumn": "hpix"`. The resulting document
-uses `coverage_method=catalog_healpix_nested` and is eligible for the generic
-project-sky coverage layer. `"mode": "auto"` tries RA/Dec first and then
-falls back to `hpix` / `healpix_pixel` aliases when those coordinates are not
-present.
-
-The user-asset coverage endpoints return only indexed Atlas data and never
-expose a source filesystem path.
-
-## k3s deployment
-
-`deploy/k3s.yaml` deploys the current image tag into the isolated
-`astro-data-workspace` namespace. The Pod is pinned to `eva7028`; compact catalog
-metadata and derived indexes live in a 128 MiB `nfs-data` PVC backed by
-`/mnt/data`, mounted read-only by the service. Workspace state uses a separate
-256 MiB NFS PVC. Workflow metadata, 20-row previews, and exports capped at
-1,000 rows use the same state PVC. Runtime operation does not require an
-OSS/rclone mount.
-
-The Ingress host is:
-
-```text
-astro.workspace.dev.72602.space
-```
-
-The cluster ingress controller is currently exposed through NodePort `32080`, so
-the LAN URL is:
-
-```text
-http://astro.workspace.dev.72602.space:32080/
-```
-
-The application Service is also exposed directly through NodePort `32082` for
-VSCode port forwarding or direct node access. It maps node port `32082` to the
-container's HTTP port `3000`:
-
-```bash
-kubectl -n astro-data-workspace get svc astro-data-workspace-mcp
-kubectl -n astro-data-workspace port-forward svc/astro-data-workspace-mcp 32082:3000
-```
-
-When forwarding from a remote VSCode session, forward local port `32082` to
-`astro-data-workspace-mcp` in namespace `astro-data-workspace` on service port
-`3000`. The Ingress NodePort `32080` remains available separately.
-
-The Ingress rule is configured for the new host. The DNS record for
-`astro.workspace.dev.72602.space` must point at the reachable node address;
-this deployment does not modify the `dev` namespace, its services, or the
-cluster Ingress controller.
-
-Build and apply:
-
-```bash
-docker build \
-  --build-arg NPM_REGISTRY=https://registry.npmmirror.com \
-  -t crpi-wixjy6gci86ms14e.cn-hongkong.personal.cr.aliyuncs.com/ay-dev/astro-data-workspace-mcp:0.10.38-20260821-atlas-cleanup4 .
-
-podman push \
-  crpi-wixjy6gci86ms14e.cn-hongkong.personal.cr.aliyuncs.com/ay-dev/astro-data-workspace-mcp:0.10.38-20260821-atlas-cleanup4
-
+# 2. Apply the manifest
 kubectl apply -f deploy/k3s.yaml
+
+# 3. Wait for the roll-out to complete
 kubectl -n astro-data-workspace rollout status deployment/astro-data-workspace-mcp
 ```
+* **Ingress endpoint**: `http://astro.workspace.dev.72602.space:32080/`
+* **Direct NodePort access**: Port `32082` (maps directly to container port `3000`)
 
-Run a real-catalog acceptance check when the catalog MCP and its Elasticsearch
-backend are healthy:
+---
+
+## 🧪 Testing & Validation
+
+Workspace features a strict deterministic test suite covering coordinate validation, file scanning, mapping, and API endpoints.
 
 ```bash
-npm run smoke:workflow-real
+# Run unit & integration tests
+npm test
+
+# Run Playwright end-to-end tests
+npx playwright install
+npm run test:e2e
+
+# Run the complete validation cycle (Lint, Build, Test)
+npm run validate
 ```
-
-The check discovers coordinates from the real Euclid index unless
-`ASTRO_SMOKE_RA` and `ASTRO_SMOKE_DEC` are supplied. It fails explicitly on
-zero matches or external service errors and never inserts fixture coordinates.
-
-See [docs/architecture.md](docs/architecture.md) for boundaries and the next
-implementation stages.

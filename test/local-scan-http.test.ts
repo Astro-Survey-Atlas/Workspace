@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { spawn, type ChildProcess } from "node:child_process";
 import { createServer, type Server } from "node:http";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
@@ -8,6 +9,32 @@ import test from "node:test";
 import { pathToFileURL } from "node:url";
 
 import { ASTRO_FILE_INDEX } from "../src/astro-index.js";
+import { UserMocArtifactStore } from "../src/user-moc-artifacts.js";
+
+const FITS_BLOCK_BYTES = 2_880;
+const FITS_CARD_BYTES = 80;
+
+function mocCard(key: string, value: string | number): Buffer {
+  const rendered = typeof value === "number" ? String(value).padStart(20, " ") : `'${value}'`.padEnd(20, " ");
+  return Buffer.from(`${key.padEnd(8, " ")}= ${rendered}`.padEnd(FITS_CARD_BYTES, " "), "ascii");
+}
+
+function mocHeader(cards: Buffer[]): Buffer {
+  const bytes = Buffer.concat([...cards, Buffer.from("END".padEnd(FITS_CARD_BYTES, " "), "ascii")]);
+  return Buffer.concat([bytes, Buffer.alloc(Math.ceil(bytes.length / FITS_BLOCK_BYTES) * FITS_BLOCK_BYTES - bytes.length, 32)]);
+}
+
+function testMocFits(): Buffer {
+  const primary = mocHeader([mocCard("SIMPLE", "T"), mocCard("BITPIX", 8), mocCard("NAXIS", 0), mocCard("EXTEND", "T")]);
+  const extension = mocHeader([
+    mocCard("XTENSION", "BINTABLE"), mocCard("BITPIX", 8), mocCard("NAXIS", 2), mocCard("NAXIS1", 8), mocCard("NAXIS2", 1),
+    mocCard("PCOUNT", 0), mocCard("GCOUNT", 1), mocCard("TFIELDS", 1), mocCard("TTYPE1", "UNIQ"), mocCard("TFORM1", "1K"),
+    mocCard("ORDERING", "NUNIQ"), mocCard("COORDSYS", "C"), mocCard("MOCVERS", "2.0"), mocCard("MOCDIM", "SPACE"), mocCard("THEAP", 0),
+  ]);
+  const rows = Buffer.alloc(8);
+  rows.writeBigInt64BE(4n * (4n ** 8n) + 256n, 0);
+  return Buffer.concat([primary, extension, rows, Buffer.alloc(FITS_BLOCK_BYTES - rows.length)]);
+}
 
 interface StoredDocument {
   id: string;
@@ -92,6 +119,8 @@ test("HTTP local CSV scan writes object and coverage documents and serves a mult
   const coverageSearchBodies: Record<string, unknown>[] = [];
   let apiProcess: ChildProcess | undefined;
   let apiLogs = "";
+  let warehouseRequestCount = 0;
+  let ownEsUnavailable = false;
 
   await import("node:fs/promises").then(({ mkdir }) => Promise.all([
     mkdir(sourceRoot, { recursive: true }),
@@ -102,10 +131,38 @@ test("HTTP local CSV scan writes object and coverage documents and serves a mult
     "euclid-1,10.25,-1.5,4.2\n",
     "euclid-2,10.75,-1.25,8.4\n",
   ].join(""), "utf8");
+  const seededMoc = testMocFits();
+  const seededArtifactStore = new UserMocArtifactStore({ root: path.join(stateRoot, "user-mocs") });
+  const seededArtifact = await seededArtifactStore.persist({
+    layerId: "workspace-http-moc",
+    maxOrder: 10,
+    queryOrder: 8,
+    previewOrder: 4,
+    queryPixels: [256],
+    previewPixels: [1],
+    mocSha256: createHash("sha256").update(seededMoc).digest("hex"),
+    artifacts: {
+      moc: seededMoc,
+      query: Buffer.from(JSON.stringify({ schemaVersion: 1, order: 8, ordering: "NESTED", pixels: [256] })),
+      preview: Buffer.from(JSON.stringify({ schemaVersion: 1, order: 4, ordering: "NESTED", pixels: [1] })),
+    },
+  }, {
+    layerId: "workspace-http-moc",
+    scanRunId: "http-run-001",
+    availableOrders: [8],
+    maxOrder: 10,
+    precision: "exact",
+    coverageRole: "object_presence",
+  });
   const esServer = createServer(async (request, response) => {
     const pathname = request.url ?? "";
     const body = await bodyText(request);
     response.setHeader("Content-Type", "application/json");
+    if (ownEsUnavailable && request.method === "POST" && pathname.endsWith("/_search")) {
+      response.statusCode = 503;
+      response.end(JSON.stringify({ error: "workspace Elasticsearch unavailable" }));
+      return;
+    }
     if (request.method === "HEAD" && (pathname === "/astro_object_index_v1" || pathname === "/astro_coverage_index_v1")) {
       response.statusCode = 200;
       response.end();
@@ -173,6 +230,14 @@ test("HTTP local CSV scan writes object and coverage documents and serves a mult
     response.end(JSON.stringify({ error: "not found" }));
   });
   const esPort = await listen(esServer);
+  const staleWarehouseServer = createServer(async (request, response) => {
+    warehouseRequestCount += 1;
+    await bodyText(request);
+    response.statusCode = 503;
+    response.setHeader("Content-Type", "application/json");
+    response.end(JSON.stringify({ error: "stale Warehouse endpoint" }));
+  });
+  const staleWarehousePort = await listen(staleWarehouseServer);
 
   try {
     const apiPort = await availablePort();
@@ -185,6 +250,9 @@ test("HTTP local CSV scan writes object and coverage documents and serves a mult
       ASTRO_DATA_WAREHOUSE_ENABLED: "false",
       ASTRO_LOCAL_SCAN_ENABLED: "true",
       ASTRO_ES_URL: `http://127.0.0.1:${esPort}`,
+      // A stale endpoint must not be consulted while the optional integration
+      // is disabled. Workspace still serves its own ES below.
+      ASTRO_WAREHOUSE_ES_URL: `http://127.0.0.1:${staleWarehousePort}`,
       ASTRO_METADATA_STORE: "sqlite",
       ASTRO_SQLITE_PATH: path.join(stateRoot, "workspace.sqlite"),
       ASTRO_STATE_ROOT: stateRoot,
@@ -211,10 +279,11 @@ test("HTTP local CSV scan writes object and coverage documents and serves a mult
     await waitForHealth(baseUrl, apiProcess, () => apiLogs);
 
     const capabilities = await apiJson<{
-      dataWarehouse: { enabled: boolean };
+      dataWarehouse: { enabled: boolean; configured?: boolean };
       localScan: { enabled: boolean; configured: boolean; executor: string; objectIndex: string; coverageIndex: string };
     }>(baseUrl, "/api/capabilities");
     assert.equal(capabilities.dataWarehouse.enabled, false);
+    assert.equal(capabilities.dataWarehouse.configured, false);
     assert.deepEqual(capabilities.localScan, {
       enabled: true,
       configured: true,
@@ -222,6 +291,48 @@ test("HTTP local CSV scan writes object and coverage documents and serves a mult
       objectIndex: "astro_object_index_v1",
       coverageIndex: "astro_coverage_index_v1",
     });
+
+    const coverageWithoutWarehouse = await apiJson<{ status: string; index: string }>(baseUrl, "/api/sky/coverage?nside=16");
+    assert.equal(coverageWithoutWarehouse.status, "ready");
+    assert.equal(coverageWithoutWarehouse.index, ASTRO_FILE_INDEX);
+    assert.equal(warehouseRequestCount, 0);
+
+    const listedMocs = await apiJson<{ artifacts: Array<{ id: string; layerId: string; scanRunId: string; status: string; files: Array<{ name: string; sha256: string }> }> }>(baseUrl, "/api/user-mocs");
+    const listedSeed = listedMocs.artifacts.find((artifact) => artifact.id === seededArtifact.id);
+    assert.ok(listedSeed);
+    assert.equal(listedSeed.status, "ready");
+    assert.ok(listedSeed.files.some((file) => file.name === "moc.fits"));
+    const mocResponse = await fetch(`${baseUrl}/api/user-mocs/${encodeURIComponent(seededArtifact.layerId)}/${encodeURIComponent(seededArtifact.scanRunId)}/moc.fits`);
+    assert.equal(mocResponse.status, 200);
+    assert.equal(mocResponse.headers.get("content-type"), "application/fits");
+    assert.equal((await mocResponse.arrayBuffer()).byteLength, seededMoc.length);
+
+    // A replacement scan may be pending while the prior ready MOC remains
+    // the only trustworthy display artifact for this layer.
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    const pendingArtifact = await seededArtifactStore.createPending({
+      layerId: seededArtifact.layerId,
+      scanRunId: "http-run-002",
+      availableOrders: [8],
+      maxOrder: 10,
+      precision: "exact",
+      coverageRole: "object_presence",
+    });
+
+    ownEsUnavailable = true;
+    const coverageFromMoc = await apiJson<{ status: string; index: string; pixels: number[]; layers: Array<{ layerId?: string; key: string; status?: string; pixels: number[]; source?: string; mocStatus?: string; artifactId?: string; latestMocStatus?: string; latestArtifactId?: string }> }>(baseUrl, "/api/sky/coverage?nside=16");
+    assert.equal(coverageFromMoc.status, "ready");
+    assert.equal(coverageFromMoc.index, ASTRO_FILE_INDEX);
+    const mocLayer = coverageFromMoc.layers.find((layer) => layer.layerId === seededArtifact.layerId);
+    assert.ok(mocLayer);
+    assert.equal(mocLayer.status, "ready");
+    assert.equal(mocLayer.mocStatus, "ready");
+    assert.equal(mocLayer.artifactId, seededArtifact.id);
+    assert.equal(mocLayer.latestMocStatus, "pending");
+    assert.equal(mocLayer.latestArtifactId, pendingArtifact.id);
+    assert.deepEqual(mocLayer.pixels, [1]);
+    assert.deepEqual(coverageFromMoc.pixels.includes(1), true);
+    ownEsUnavailable = false;
 
     const connectorResponse = await apiJson<{ connector: { id: string; locationKey: string } }>(baseUrl, "/api/connectors", {
       method: "POST",
@@ -369,6 +480,51 @@ test("HTTP local CSV scan writes object and coverage documents and serves a mult
         },
       },
     );
+
+    const thirdAssetResponse = await apiJson<{ asset: { id: string } }>(baseUrl, "/api/data-assets", {
+      method: "POST",
+      body: JSON.stringify({
+        name: "Mismatched-label catalog",
+        description: "Asset used to verify MOC survey/release filtering",
+        surveyId: "other-survey",
+        releaseId: "other-release",
+        product: "Other catalog",
+        kind: "catalog",
+        modalities: ["photometry"],
+        connector: "local",
+        sourceUri: csvPath,
+        format: "csv",
+        connectorIds: [connectorId],
+        connectorLocationKeys: [connectorKey],
+        status: "ready",
+        projectStates: ["deliverable"],
+      }),
+    });
+    const artifactStore = new UserMocArtifactStore({ root: path.join(stateRoot, "user-mocs") });
+    await artifactStore.createPending({
+      layerId: `workspace-${thirdAssetResponse.asset.id}`,
+      scanRunId: "mismatched-label-run",
+      coverageRole: "object_presence",
+      availableOrders: [4, 8],
+      maxOrder: 8,
+    });
+    await artifactStore.createPending({
+      layerId: "workspace-unassociated-asset",
+      scanRunId: "unassociated-run",
+      coverageRole: "object_presence",
+      availableOrders: [4, 8],
+      maxOrder: 8,
+    });
+    const matchingMoc = (await artifactStore.list()).find((artifact) => artifact.layerId === `workspace-${assetResponse.asset.id}`);
+    assert.ok(matchingMoc);
+    const filteredMocs = await apiJson<{
+      layers: Array<{ layerId?: string; assetId?: string; assetIds: string[] }>;
+    }>(baseUrl, "/api/sky/coverage?nside=16&survey=euclid&release=euclid-q1");
+    const filteredLayerIds = filteredMocs.layers.map((layer) => layer.layerId);
+    assert.ok(filteredLayerIds.includes(matchingMoc.layerId));
+    assert.equal(filteredLayerIds.includes(`workspace-${thirdAssetResponse.asset.id}`), false);
+    assert.equal(filteredLayerIds.includes("workspace-unassociated-asset"), false);
+    assert.equal(filteredMocs.layers.every((layer) => layer.assetId === assetResponse.asset.id || layer.assetIds.includes(assetResponse.asset.id)), true);
     const coverage = await apiJson<{
       status: string;
       layers: Array<{ key: string; assetId?: string; assetIds: string[]; pixels: number[]; objectCount?: number }>;
@@ -494,6 +650,7 @@ test("HTTP local CSV scan writes object and coverage documents and serves a mult
       });
     }
     await new Promise<void>((resolve) => esServer.close(() => resolve()));
+    await new Promise<void>((resolve) => staleWarehouseServer.close(() => resolve()));
     await rm(directory, { recursive: true, force: true });
   }
 });

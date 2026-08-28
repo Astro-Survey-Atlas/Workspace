@@ -10,6 +10,7 @@ import { DataCatalogRegistry } from "../src/data-catalog.js";
 import { LocalConnectorRootsPolicy } from "../src/local-connector-roots.js";
 import { LocalCsvScanExecutor } from "../src/local-scan-executor.js";
 import { SqliteMetadataStore } from "../src/storage/index.js";
+import { UserMocArtifactStore } from "../src/user-moc-artifacts.js";
 
 interface Arguments {
   file: string;
@@ -48,6 +49,7 @@ async function requestBody(request: import("node:http").IncomingMessage): Promis
 async function main(): Promise<void> {
   const input = argumentsFrom(process.argv.slice(2));
   const temporaryRoot = await mkdtemp(path.join(os.tmpdir(), "astro-local-scan-smoke-"));
+  const artifactStore = new UserMocArtifactStore({ root: path.join(temporaryRoot, "user-mocs") });
   let objectDocuments = 0;
   let coverageDocuments = 0;
   let bulkRequests = 0;
@@ -123,7 +125,7 @@ async function main(): Promise<void> {
       },
     });
     const indexService = new AstroObjectIndexService({ baseUrl: `http://127.0.0.1:${address.port}`, timeoutMs: 30_000 });
-    const executor = new LocalCsvScanExecutor({ enabled: true, connectors, dataCatalog, runs, roots, indexService });
+    const executor = new LocalCsvScanExecutor({ enabled: true, connectors, dataCatalog, runs, roots, indexService, artifacts: artifactStore });
 
     const startedAt = Date.now();
     const queued = await executor.submit(connector.id, { relativePath: path.basename(input.file) }, "full-local-smoke");
@@ -133,6 +135,16 @@ async function main(): Promise<void> {
     if (completed.documentCount !== objectDocuments) {
       throw new Error(`Run count ${completed.documentCount} does not match bulk count ${objectDocuments}`);
     }
+    if (!completed.artifactId || completed.mocStatus !== "ready") {
+      throw new Error(`Local scan did not produce a ready user MOC artifact (${completed.mocStatus ?? "missing"})`);
+    }
+    const artifact = await artifactStore.get(`workspace-${asset.id}`, completed.id);
+    const artifactFiles = artifact.files.map((file) => file.name).sort();
+    const requiredArtifactFiles = ["moc.fits", "preview-order4.json", "provenance.json", "query-order8.json", "statistics.json"];
+    if (JSON.stringify(artifactFiles) !== JSON.stringify(requiredArtifactFiles)) {
+      throw new Error(`Unexpected local MOC artifact files: ${artifactFiles.join(", ")}`);
+    }
+    for (const name of requiredArtifactFiles) await artifactStore.filePath(artifact.layerId, artifact.scanRunId, name);
     process.stdout.write(`${JSON.stringify({
       status: completed.status,
       assetId: asset.id,
@@ -140,6 +152,9 @@ async function main(): Promise<void> {
       objectDocuments,
       coverageDocuments,
       bulkRequests,
+      artifactId: artifact.id,
+      mocSha256: artifact.files.find((file) => file.name === "moc.fits")?.sha256,
+      artifactFiles,
       elapsedMs,
     }, null, 2)}\n`);
   } finally {

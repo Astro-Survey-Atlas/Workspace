@@ -10,6 +10,7 @@ import { ConnectorRegistry, type ConnectorRecord } from "../src/connectors.js";
 import { DataCatalogRegistry, type DataAssetRecord, type DataAssetRegistrationInput } from "../src/data-catalog.js";
 import { LocalConnectorRootsPolicy } from "../src/local-connector-roots.js";
 import {
+  LOCAL_CSV_SCAN_EXECUTOR,
   LocalCsvScanExecutor,
   LocalScanCapabilityError,
   LocalScanDisabledError,
@@ -186,6 +187,64 @@ test("executes one top-level CSV into object and coverage bulks and persists suc
     assert.equal(history[0]?.id, queued.id);
     assert.equal(history[0]?.status, "succeeded");
     assert.equal(history[0]?.documentCount, 2);
+  } finally {
+    await cleanup(value);
+  }
+});
+
+test("asset-level scans default to sourceRelativePath when the connector has multiple CSV files", async () => {
+  const value = await fixture();
+  try {
+    const selectedPath = path.join(value.rootPath, "selected.csv");
+    const otherPath = path.join(value.rootPath, "other.csv");
+    await writeFile(selectedPath, "object_id,ra,dec\nselected,11,22\n", "utf8");
+    await writeFile(otherPath, "object_id,ra,dec\nother,33,44\n", "utf8");
+    const asset = await registerAsset(value, { sourceRelativePath: "selected.csv" });
+
+    const queued = await value.executor.submitAsset(asset.id);
+    assert.equal(queued.status, "queued");
+    assert.equal(queued.target?.uri, selectedPath);
+    assert.equal(queued.sourcePath, selectedPath);
+
+    const completed = await value.executor.awaitCompletion(queued.id);
+    assert.equal(completed.status, "succeeded");
+    assert.equal(completed.documentCount, 1);
+    const objects = value.indexService.documents.filter((document) => "object_id" in document);
+    assert.deepEqual(objects.map((document) => "object_id" in document ? document.object_id : undefined), ["selected"]);
+
+    const explicit = await value.executor.submitAsset(asset.id, { relativePath: "other.csv" });
+    assert.equal(explicit.target?.uri, otherPath);
+    const explicitCompleted = await value.executor.awaitCompletion(explicit.id);
+    assert.equal(explicitCompleted.status, "succeeded");
+    assert.deepEqual(
+      value.indexService.documents.filter((document) => "object_id" in document).map((document) => "object_id" in document ? document.object_id : undefined),
+      ["selected", "other"],
+    );
+  } finally {
+    await cleanup(value);
+  }
+});
+
+test("recovers queued or running local scans after a service restart", async () => {
+  const value = await fixture();
+  try {
+    const created = await value.runs.create(value.connector.locationKey, {
+      connectorId: value.connector.id,
+      connectorName: value.connector.name,
+      connectorKind: value.connector.kind,
+      executor: LOCAL_CSV_SCAN_EXECUTOR,
+      taskKind: "user_scan",
+      target: { uri: path.join(value.rootPath, "catalog.csv") },
+      assetIds: ["user-recovered"],
+      assetId: "user-recovered",
+      status: "running",
+    });
+
+    assert.equal(await value.executor.recoverInterruptedRuns(), 1);
+    const recovered = (await value.runs.list({ connectorId: value.connector.id })).find((run) => run.id === created.run.id);
+    assert.equal(recovered?.status, "failed");
+    assert.match(recovered?.error ?? "", /restarted/);
+    assert.ok(recovered?.completedAt);
   } finally {
     await cleanup(value);
   }

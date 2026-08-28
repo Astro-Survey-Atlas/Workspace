@@ -534,3 +534,24 @@ test("unconfigured service reports query unavailable and bulk configuration erro
   assert.match(result.message ?? "", /ASTRO_ES_URL/);
   await assert.rejects(() => service.bulk([]), /ASTRO_ES_URL/);
 });
+
+test("object index extracts URL credentials for queries and index initialization", async () => {
+  const authorizations: string[] = [];
+  await withServer(async (request, response) => {
+    authorizations.push(String(request.headers.authorization ?? ""));
+    if (request.method === "HEAD") {
+      response.statusCode = 200;
+      response.end();
+      return;
+    }
+    response.setHeader("Content-Type", "application/json");
+    response.end(JSON.stringify({ hits: { total: { value: 0 }, hits: [] } }));
+  }, async (baseUrl) => {
+    const endpoint = baseUrl.replace("http://", "http://atlas-user:p%40ss@");
+    const service = new AstroObjectIndexService({ baseUrl: endpoint });
+    await service.queryObjects(validQuery());
+    await service.ensureIndices();
+  });
+  assert.ok(authorizations.length >= 3);
+  assert.ok(authorizations.every((value) => value === `Basic ${Buffer.from("atlas-user:p@ss", "utf8").toString("base64")}`));
+});

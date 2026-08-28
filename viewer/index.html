@@ -141,7 +141,7 @@
             <div class="catalog-columns"><span>数据资产</span><span>巡天</span><span>类型</span><span>使用阶段 <button class="status-help" type="button" aria-label="使用阶段说明"><i data-lucide="info" aria-hidden="true"></i><span class="sr-only">使用阶段说明</span><span class="status-help-tooltip" role="tooltip">计划中：已登记但尚未准备使用。已获取：已获得数据或访问权。已处理：已完成项目处理。可用：可作为项目交付或分析输入。公开参考：仅作为公开说明参考。</span></button></span></div>
         <div id="catalog-asset-list" class="catalog-asset-list"></div>
         <div id="catalog-empty" class="catalog-empty" hidden>没有符合当前筛选条件的用户资产。</div>
-        <footer class="catalog-stage-footer">后续 data-warehouse connector 将读取这里登记的访问描述，并接收经过 MOC 精筛后的空间约束。</footer>
+        <footer class="catalog-stage-footer">可选 Warehouse 会读取这里登记的用户访问描述；Workspace 也可以在本地扫描并生成用户 MOC。</footer>
       </section>
 
       <section id="resource-package-stage" class="catalog-stage resource-package-stage" aria-label="公开资源集" hidden>
@@ -362,6 +362,41 @@
         </form>
       </dialog>
 
+      <dialog id="remote-coverage-dialog" class="workspace-dialog wide-dialog">
+        <form id="remote-coverage-form" class="dialog-form remote-coverage-form">
+          <header>
+            <div><span class="panel-kicker">WAREHOUSE USER COVERAGE</span><h2>提交远程覆盖扫描</h2></div>
+            <button id="remote-coverage-dialog-close" class="icon-button" type="button" aria-label="关闭"><i data-lucide="x"></i></button>
+          </header>
+          <p class="control-note">扫描任务由可选的 Warehouse 执行，Workspace 仍在自己的 Elasticsearch 中保存本地结果。凭据只在服务端创建临时 Secret。</p>
+          <div class="catalog-form-grid">
+            <label><span class="field-label">巡天 ID</span><select id="remote-coverage-survey" class="field-input" required></select></label>
+            <label><span class="field-label">发布 ID</span><select id="remote-coverage-release" class="field-input" required></select></label>
+            <label><span class="field-label">Connector</span><select id="remote-coverage-connector" class="field-input" required></select></label>
+            <label><span class="field-label">产品</span><input id="remote-coverage-product" class="field-input" readonly required /></label>
+            <label><span class="field-label">相对路径（可选）</span><input id="remote-coverage-path" class="field-input" maxlength="4096" placeholder="留空使用 Connector 根目录" /></label>
+            <label><span class="field-label">覆盖模式</span><select id="remote-coverage-mode" class="field-input" required><option value="catalog-radec">目录 RA / Dec</option><option value="nested-healpix">NESTED HEALPix 列</option><option value="fits-wcs">FITS WCS 图像范围</option></select></label>
+          </div>
+          <fieldset id="remote-coverage-catalog-fields" class="remote-coverage-fields">
+            <legend class="field-label">目录坐标列（ICRS）</legend>
+            <div class="catalog-form-grid">
+              <label><span class="field-label">RA 列</span><input id="remote-coverage-ra-column" class="field-input" pattern="[A-Za-z_][A-Za-z0-9_.-]*" required /></label>
+              <label><span class="field-label">Dec 列</span><input id="remote-coverage-dec-column" class="field-input" pattern="[A-Za-z_][A-Za-z0-9_.-]*" required /></label>
+              <label><span class="field-label">单位</span><select id="remote-coverage-coordinate-units" class="field-input"><option value="deg">度（deg）</option><option value="rad">弧度（rad）</option><option value="hourangle">时角（hourangle）</option></select></label>
+            </div>
+          </fieldset>
+          <fieldset id="remote-coverage-healpix-fields" class="remote-coverage-fields" hidden>
+            <legend class="field-label">NESTED HEALPix 列</legend>
+            <div class="catalog-form-grid">
+              <label><span class="field-label">像素列</span><input id="remote-coverage-healpix-column" class="field-input" pattern="[A-Za-z_][A-Za-z0-9_.-]*" /></label>
+              <label><span class="field-label">输入 order</span><input id="remote-coverage-healpix-order" class="field-input" type="number" min="0" max="29" step="1" value="8" /></label>
+            </div>
+          </fieldset>
+          <p id="remote-coverage-mode-note" class="control-note">Assets Core 会以 ICRS、NESTED order 10 生成用户 MOC；查询投影固定为 order 8，预览固定为 order 4。</p>
+          <footer><button id="remote-coverage-form-cancel" class="command-button secondary" type="button">取消</button><button id="remote-coverage-form-submit" class="command-button" type="submit">提交覆盖扫描</button></footer>
+        </form>
+      </dialog>
+
       <dialog id="connector-create-dialog" class="workspace-dialog wide-dialog">
         <form id="connector-registration-form" class="dialog-form connector-registration">
           <header><div><span class="panel-kicker">NEW CONNECTOR</span><h2 id="connector-form-title">登记 Connector</h2></div><button id="connector-dialog-close" class="icon-button" type="button" aria-label="关闭"><span aria-hidden="true">×</span></button></header>
@@ -382,7 +417,7 @@
           <div class="catalog-form-grid"><label><span class="field-label">巡天 ID</span><input name="id" class="field-input" placeholder="csst" pattern="[a-z0-9][a-z0-9._-]*" required /></label><label><span class="field-label">名称</span><input name="name" class="field-input" placeholder="CSST" maxlength="160" required /></label><label><span class="field-label">任务 / 项目</span><input name="mission" class="field-input" placeholder="Chinese Space Station Telescope" maxlength="160" /></label><label><span class="field-label">来源 URL</span><input name="sourceUrl" class="field-input" type="url" placeholder="https://..." required /></label></div>
           <label class="field-label" for="survey-registration-description">说明</label><input id="survey-registration-description" name="description" class="field-input" maxlength="1000" />
           <label class="field-label" for="survey-registration-modalities">模态</label><select id="survey-registration-modalities" name="modalities" class="field-input" multiple required><option value="imaging">图像</option><option value="spectroscopy">光谱</option><option value="photometry">测光</option><option value="time-domain">时域</option><option value="integral-field">积分场</option><option value="ultraviolet">紫外</option><option value="infrared">红外</option><option value="catalog">目录</option><option value="simulation">仿真</option></select>
-          <fieldset class="survey-release-field"><legend class="field-label">首个发布</legend><div class="catalog-form-grid"><label><span class="field-label">发布 ID</span><input name="releaseId" class="field-input" placeholder="cosmos-custom-v1" pattern="[a-z0-9][a-z0-9._-]*" required /></label><label><span class="field-label">发布名称</span><input name="releaseLabel" class="field-input" placeholder="COSMOS custom v1" maxlength="160" required /></label><label><span class="field-label">产品</span><input name="product" class="field-input" placeholder="Photometric catalog" maxlength="160" required /></label><label><span class="field-label">产品模态</span><select name="productModality" class="field-input"><option value="photometry">测光</option><option value="imaging">图像</option><option value="spectroscopy">光谱</option><option value="catalog">目录</option></select></label></div><label class="field-label" for="survey-registration-product-description">产品说明</label><input id="survey-registration-product-description" name="productDescription" class="field-input" maxlength="500" required /><p class="control-note">这是 Atlas 的本地巡天标签和发布标签，不要求存在于当前 Assets 资源包。Atlas 只在安装公共资源包后显示其公共记录；本地文件由 Atlas 扫描，S3/JDBC 可由已安装的 data-warehouse 插件扫描。</p></fieldset>
+          <fieldset class="survey-release-field"><legend class="field-label">首个发布</legend><div class="catalog-form-grid"><label><span class="field-label">发布 ID</span><input name="releaseId" class="field-input" placeholder="cosmos-custom-v1" pattern="[a-z0-9][a-z0-9._-]*" required /></label><label><span class="field-label">发布名称</span><input name="releaseLabel" class="field-input" placeholder="COSMOS custom v1" maxlength="160" required /></label><label><span class="field-label">产品</span><input name="product" class="field-input" placeholder="Photometric catalog" maxlength="160" required /></label><label><span class="field-label">产品模态</span><select name="productModality" class="field-input"><option value="photometry">测光</option><option value="imaging">图像</option><option value="spectroscopy">光谱</option><option value="catalog">目录</option></select></label></div><label class="field-label" for="survey-registration-product-description">产品说明</label><input id="survey-registration-product-description" name="productDescription" class="field-input" maxlength="500" required /><p class="control-note">这是 Workspace 的本地巡天标签和发布标签，不要求存在于当前 Assets 资源包。Workspace 只在安装公共资源包后显示公共记录；本地文件由 Workspace 扫描，S3/OSS 远程扫描由可选 Warehouse 执行。</p></fieldset>
           <footer><button id="survey-registration-cancel" class="command-button secondary" type="button">取消</button><button class="command-button" type="submit">登记巡天</button></footer>
         </form>
       </dialog>

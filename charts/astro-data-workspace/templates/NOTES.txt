@@ -3,7 +3,12 @@ Astro Data Workspace is available at:
   kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "astro-data-workspace.fullname" . }} {{ .Values.service.port }}:{{ .Values.service.port }}
 
 Metadata store: {{ .Values.metadataStore.mode }}
+Workspace search: {{ .Values.search.mode }} ({{ .Values.search.index.file }}, {{ .Values.search.index.object }}, {{ .Values.search.index.coverage }})
 Warehouse integration: {{ ternary "enabled" "disabled" .Values.dataWarehouse.enabled }}
+{{- if .Values.dataWarehouse.enabled }}
+Warehouse namespace: {{ .Release.Namespace }}
+Evidence claim: {{ include "astro-data-workspace.warehouseEvidenceClaim" . }}
+{{- end }}
 {{- if .Values.ingress.enabled }}
 Ingress hosts:{{ range .Values.ingress.hosts }}
   {{ .host }}{{ end }}

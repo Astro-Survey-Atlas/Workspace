@@ -201,7 +201,7 @@ export class ConnectorPanel {
   }
 
   #runExecutor(run: ConnectorScanRun): string {
-    return run.executor ?? (run.jobId ? "Flink" : "未注明");
+    return run.executor ?? (run.jobId ? "Warehouse" : "未注明");
   }
 
   #filteredRuns(): ConnectorScanRun[] {

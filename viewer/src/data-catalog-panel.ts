@@ -295,7 +295,8 @@ export class DataCatalogPanel {
     if (!this.#scanConnectorId) throw new RangeError("请选择本地 Connector");
     const relativePath = byId<HTMLSelectElement>("catalog-source-file").value;
     if (!relativePath) throw new RangeError("请选择 CSV 文件");
-    notifyWorkspace("正在读取本地文件表头", relativePath, { tone: "info" });
+    const inspectDedupeMs = 3_000;
+    notifyWorkspace("正在读取本地文件表头", relativePath, { tone: "info", dedupeMs: inspectDedupeMs });
     let inspection: LocalCsvInspection;
     try {
       inspection = await workspaceApi.inspectLocalConnectorFile(this.#scanConnectorId, relativePath);
@@ -314,7 +315,7 @@ export class DataCatalogPanel {
     fill("catalog-object-id-column", inspection.inferred?.objectIdColumn);
     fill("catalog-ra-column", inspection.inferred?.raColumn);
     fill("catalog-dec-column", inspection.inferred?.decColumn);
-    notifyWorkspace("本地文件表头已读取", `${inspection.columns.length} 个字段${inspection.inferred ? ` · 识别置信度 ${Math.round((inspection.inferred.confidence ?? 0) * 100)}%` : ""}`, { tone: "success" });
+    notifyWorkspace("本地文件表头已读取", `${inspection.columns.length} 个字段${inspection.inferred ? ` · 识别置信度 ${Math.round((inspection.inferred.confidence ?? 0) * 100)}%` : ""}`, { tone: "success", dedupeMs: inspectDedupeMs });
   }
 
   #createScanFields(): Pick<DataAssetRegistrationInput, "sourceRelativePath" | "scanSpec"> {

@@ -18,6 +18,12 @@ rules:
   - apiGroups: [""]
     resources: ["secrets"]
     verbs: ["get", "create", "patch", "update", "delete"]
+  - apiGroups: ["atlas.zhejianglab.org"]
+    resources: ["scanrequests"]
+    verbs: ["get", "list", "watch", "create", "patch", "update"]
+  - apiGroups: ["atlas.zhejianglab.org"]
+    resources: ["scanrequests/status"]
+    verbs: ["get", "patch", "update"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
@@ -28,58 +34,6 @@ roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role
   name: connector-credential-manager
-subjects:
-  - kind: ServiceAccount
-    name: astro-data-workspace-mcp
-    namespace: astro-data-workspace
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: Role
-metadata:
-  name: astro-workspace-connector-credential-reader
-  namespace: warehouse
-rules:
-  - apiGroups: [""]
-    resources: ["secrets"]
-    resourceNames: ["warehouse-s3-credential", "metadata-minio-secret"]
-    verbs: ["get"]
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: RoleBinding
-metadata:
-  name: astro-workspace-connector-credential-reader
-  namespace: warehouse
-roleRef:
-  apiGroup: rbac.authorization.k8s.io
-  kind: Role
-  name: astro-workspace-connector-credential-reader
-subjects:
-  - kind: ServiceAccount
-    name: astro-data-workspace-mcp
-    namespace: astro-data-workspace
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: Role
-metadata:
-  name: astro-workspace-metadata-scan-bridge
-  namespace: warehouse
-rules:
-  - apiGroups: ["org.zhejianglab.astro.metadata"]
-    resources: ["astrodatasources", "astrodatasources/status", "astrometadatascantasks", "astrometadatascantasks/status"]
-    verbs: ["get", "list", "watch", "create", "patch", "update"]
-  - apiGroups: [""]
-    resources: ["secrets"]
-    verbs: ["get", "create", "patch", "update", "delete"]
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: RoleBinding
-metadata:
-  name: astro-workspace-metadata-scan-bridge
-  namespace: warehouse
-roleRef:
-  apiGroup: rbac.authorization.k8s.io
-  kind: Role
-  name: astro-workspace-metadata-scan-bridge
 subjects:
   - kind: ServiceAccount
     name: astro-data-workspace-mcp
@@ -124,6 +78,286 @@ spec:
     requests:
       storage: 1Gi
 ---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: workspace-evidence
+  namespace: astro-data-workspace
+  labels:
+    atlas.zhejianglab.org/evidence: "true"
+spec:
+  accessModes:
+    - ReadWriteMany
+  storageClassName: nfs-data
+  resources:
+    requests:
+      storage: 5Gi
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: workspace-search-data
+  namespace: astro-data-workspace
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: nfs-data
+  resources:
+    requests:
+      storage: 20Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: astro-data-workspace-elasticsearch
+  namespace: astro-data-workspace
+  labels:
+    app.kubernetes.io/name: astro-data-workspace-elasticsearch
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: astro-data-workspace-elasticsearch
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: astro-data-workspace-elasticsearch
+    spec:
+      securityContext:
+        fsGroup: 1001
+        fsGroupChangePolicy: Always
+      containers:
+        - name: elasticsearch
+          image: container-image-mirror.eva24002.lab.zverse.space:32443/docker.io/bitnamilegacy/elasticsearch:8.12.2-debian-12-r0
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: ELASTICSEARCH_IS_DEDICATED_NODE
+              value: "no"
+            - name: ELASTICSEARCH_NODE_ROLES
+              value: master
+            - name: ELASTICSEARCH_TRANSPORT_PORT_NUMBER
+              value: "9300"
+            - name: ELASTICSEARCH_HTTP_PORT_NUMBER
+              value: "9200"
+            - name: ELASTICSEARCH_CLUSTER_NAME
+              value: astro-workspace
+            - name: ELASTICSEARCH_HEAP_SIZE
+              value: 512m
+          ports:
+            - name: http
+              containerPort: 9200
+            - name: transport
+              containerPort: 9300
+          readinessProbe:
+            exec:
+              command:
+                - /opt/bitnami/scripts/elasticsearch/healthcheck.sh
+            initialDelaySeconds: 90
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 5
+          livenessProbe:
+            tcpSocket:
+              port: http
+            initialDelaySeconds: 180
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 5
+          resources:
+            requests:
+              cpu: 250m
+              memory: 1Gi
+            limits:
+              cpu: "1"
+              memory: 2Gi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+            runAsNonRoot: true
+            runAsUser: 1001
+            runAsGroup: 0
+            seccompProfile:
+              type: RuntimeDefault
+          volumeMounts:
+            - name: data
+              mountPath: /bitnami/elasticsearch/data
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: workspace-search-data
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: astro-data-workspace-elasticsearch
+  namespace: astro-data-workspace
+  labels:
+    app.kubernetes.io/name: astro-data-workspace-elasticsearch
+spec:
+  selector:
+    app.kubernetes.io/name: astro-data-workspace-elasticsearch
+  ports:
+    - name: http
+      port: 9200
+      targetPort: http
+    - name: transport
+      port: 9300
+      targetPort: transport
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: astro-data-workspace-search-init
+  namespace: astro-data-workspace
+  labels:
+    app.kubernetes.io/name: astro-data-workspace-search-init
+spec:
+  backoffLimit: 3
+  activeDeadlineSeconds: 900
+  ttlSecondsAfterFinished: 86400
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: astro-data-workspace-search-init
+    spec:
+      automountServiceAccountToken: false
+      restartPolicy: OnFailure
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: initialize-search
+          image: curlimages/curl:8.14.1
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: ASTRO_ES_URL
+              value: http://astro-data-workspace-elasticsearch.astro-data-workspace.svc.cluster.local:9200
+            - name: FILE_INDEX
+              value: astro_file_index_v1
+            - name: OBJECT_INDEX
+              value: astro_object_index_v1
+            - name: COVERAGE_INDEX
+              value: astro_coverage_index_v1
+          command:
+            - /bin/sh
+            - -ec
+          args:
+            - |
+              base_url="${ASTRO_ES_URL%/}"
+              response_file=/tmp/elasticsearch-response
+
+              request_status() {
+                method="$1"
+                path="$2"
+                payload="${3-}"
+                : > "$response_file"
+                if [ -n "$payload" ]; then
+                  curl --silent --show-error --output "$response_file" --write-out '%{http_code}' \
+                    --request "$method" --header 'Content-Type: application/json' \
+                    --data "$payload" "${base_url}${path}"
+                else
+                  curl --silent --show-error --output "$response_file" --write-out '%{http_code}' \
+                    --request "$method" "${base_url}${path}"
+                fi
+              }
+
+              wait_for_search() {
+                attempt=1
+                while [ "$attempt" -le 60 ]; do
+                  if status="$(request_status GET '/_cluster/health?wait_for_status=yellow&timeout=3s')"; then
+                    case "$status" in
+                      2??) return 0 ;;
+                    esac
+                  fi
+                  if [ "$attempt" -eq 60 ]; then
+                    echo "Elasticsearch did not become ready" >&2
+                    cat "$response_file" >&2 || true
+                    return 1
+                  fi
+                  echo "Waiting for Workspace Elasticsearch ($attempt/60)..."
+                  attempt=$((attempt + 1))
+                  sleep 5
+                done
+              }
+
+              ensure_index() {
+                index="$1"
+                mapping="$2"
+                if ! status="$(request_status GET "/$index")"; then
+                  echo "Unable to inspect Elasticsearch index: $index" >&2
+                  return 1
+                fi
+                case "$status" in
+                  200)
+                    if ! status="$(request_status PUT "/$index/_mapping" "$mapping")"; then
+                      echo "Unable to reconcile Elasticsearch mapping: $index" >&2
+                      return 1
+                    fi
+                    case "$status" in
+                      2??) ;;
+                      *) echo "Elasticsearch returned HTTP $status while reconciling $index" >&2; cat "$response_file" >&2 || true; return 1 ;;
+                    esac
+                    ;;
+                  404)
+                    if ! status="$(request_status PUT "/$index" "{\"mappings\":$mapping}")"; then
+                      echo "Unable to create Elasticsearch index: $index" >&2
+                      return 1
+                    fi
+                    case "$status" in
+                      2??) ;;
+                      400)
+                        if ! grep -q 'resource_already_exists_exception' "$response_file"; then
+                          echo "Elasticsearch returned HTTP 400 while creating $index" >&2
+                          cat "$response_file" >&2 || true
+                          return 1
+                        fi
+                        ;;
+                      *) echo "Elasticsearch returned HTTP $status while creating $index" >&2; cat "$response_file" >&2 || true; return 1 ;;
+                    esac
+                    ;;
+                  *) echo "Elasticsearch returned HTTP $status while inspecting $index" >&2; cat "$response_file" >&2 || true; return 1 ;;
+                esac
+              }
+
+              file_mapping='{"dynamic":true,"properties":{"file_id":{"type":"keyword"},"source_document_id":{"type":"keyword"},"urn":{"type":"keyword"},"connector_location_key":{"type":"keyword"},"asset_id":{"type":"keyword"},"scan_run_id":{"type":"keyword"},"name":{"type":"keyword"},"parent_path":{"type":"keyword"},"file_type":{"type":"keyword"},"size_bytes":{"type":"long"},"last_modified":{"type":"date"},"survey":{"type":"keyword"},"release":{"type":"keyword"},"product":{"type":"keyword"},"modality":{"type":"keyword"},"band":{"type":"keyword"},"spatial_status":{"type":"keyword"},"spatial_error":{"type":"text"},"healpix_order":{"type":"byte"},"coverage_order":{"type":"byte"},"coverage_cells":{"type":"integer"},"coverage_method":{"type":"keyword"},"coverage_role":{"type":"keyword"},"data_origin":{"type":"keyword"},"source_tier":{"type":"keyword"},"max_order":{"type":"byte"},"query_order":{"type":"byte"},"preview_order":{"type":"byte"},"coverage_quality":{"type":"keyword"},"coverage_frame":{"type":"keyword"},"coverage_moc_uri":{"type":"keyword"},"coverage_moc_sha256":{"type":"keyword"},"wcs_summary":{"type":"object","enabled":true},"parse_error":{"type":"text"}}}'
+              object_mapping='{"dynamic":"strict","properties":{"object_id":{"type":"keyword"},"ra_deg":{"type":"double"},"dec_deg":{"type":"double"},"sky_position":{"type":"geo_point"},"healpix_order":{"type":"byte"},"healpix_pixel":{"type":"integer"},"survey":{"type":"keyword"},"release":{"type":"keyword"},"product":{"type":"keyword"},"modality":{"type":"keyword"},"asset_id":{"type":"keyword"},"source_file_id":{"type":"keyword"},"scan_run_id":{"type":"keyword"},"attributes":{"type":"flattened"}}}'
+              coverage_mapping='{"dynamic":"strict","properties":{"healpix_order":{"type":"byte"},"healpix_pixel":{"type":"integer"},"objectCount":{"type":"long"},"survey":{"type":"keyword"},"release":{"type":"keyword"},"product":{"type":"keyword"},"modality":{"type":"keyword"},"asset_id":{"type":"keyword"},"source_file_id":{"type":"keyword"},"scan_run_id":{"type":"keyword"},"coverage_role":{"type":"keyword"},"data_origin":{"type":"keyword"},"source_tier":{"type":"keyword"},"max_order":{"type":"byte"},"query_order":{"type":"byte"},"preview_order":{"type":"byte"}}}'
+
+              wait_for_search
+              ensure_index "$FILE_INDEX" "$file_mapping"
+              ensure_index "$OBJECT_INDEX" "$object_mapping"
+              ensure_index "$COVERAGE_INDEX" "$coverage_mapping"
+              echo "Workspace Elasticsearch indices are ready."
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              cpu: 100m
+              memory: 64Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 1000
+            seccompProfile:
+              type: RuntimeDefault
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -151,7 +385,7 @@ spec:
         fsGroupChangePolicy: OnRootMismatch
       containers:
         - name: mcp
-          image: crpi-wixjy6gci86ms14e.cn-hongkong.personal.cr.aliyuncs.com/ay-dev/astro-data-workspace-mcp:0.10.38-20260821-public-release-layer-fix2
+          image: crpi-wixjy6gci86ms14e.cn-hongkong.personal.cr.aliyuncs.com/ay-dev/astro-data-workspace-mcp:0.10.38-20260828-111248
           imagePullPolicy: Always
           ports:
             - name: http
@@ -183,6 +417,8 @@ spec:
               value: /data/local:/catalogs
             - name: ASTRO_WORKFLOW_ROOT
               value: /state/workflow-runs
+            - name: ASTRO_USER_MOC_ROOT
+              value: /state/user-mocs
             - name: ASTRO_RESOURCE_CATALOG_URL
               value: http://astro-survey-atlas-assets.astro-survey-atlas-assets.svc.cluster.local/api/v1/resource-packages/catalog.json
             - name: ASTRO_RESOURCE_CATALOG_ALLOWED_ORIGINS
@@ -205,27 +441,35 @@ spec:
             # Independent search service for local object and coverage indices.
             # Keep this inside the cluster; the public NodePort is for the workspace API only.
             - name: ASTRO_ES_URL
-              value: http://astro-search-elasticsearch.astro-data-workspace.svc.cluster.local:9200
+              value: http://astro-data-workspace-elasticsearch.astro-data-workspace.svc.cluster.local:9200
             - name: ASTRO_ES_ASTRO_INDEX
               value: astro_file_index_v1
             - name: ASTRO_ES_OBJECT_INDEX
               value: astro_object_index_v1
             - name: ASTRO_ES_COVERAGE_INDEX
               value: astro_coverage_index_v1
+            - name: ASTRO_ES_TIMEOUT_MS
+              value: "30000"
             - name: ASTRO_ES_OVERVIEW_CACHE_MS
               value: "60000"
-            - name: ASTRO_FLINK_NAMESPACE
-              value: warehouse
-            - name: ASTRO_FLINK_SECRET_NAMESPACE
-              value: warehouse
-            - name: ASTRO_FLINK_POLL_MS
+            - name: ASTRO_WAREHOUSE_NAMESPACE
+              value: astro-data-workspace
+            - name: ASTRO_WAREHOUSE_POLL_MS
               value: "5000"
-            - name: ASTRO_FLINK_ES_HOST
-              value: astro-search-elasticsearch.astro-data-workspace.svc.cluster.local
-            - name: ASTRO_FLINK_ES_PORT
-              value: "9200"
-            - name: ASTRO_FLINK_ES_SCHEMA
-              value: http
+            - name: ASTRO_WAREHOUSE_ES_URL
+              value: http://atlas-warehouse-elasticsearch.atlas-warehouse.svc.cluster.local:9200
+            - name: ASTRO_WAREHOUSE_LAYER_INDEX
+              value: ast_layer_index_v1
+            - name: ASTRO_WAREHOUSE_FILE_INDEX
+              value: ast_file_index_v1
+            - name: ASTRO_WAREHOUSE_COVERAGE_INDEX
+              value: ast_coverage_index_v1
+            - name: ASTRO_WAREHOUSE_EVIDENCE_CLAIM
+              value: workspace-evidence
+            - name: ASTRO_WAREHOUSE_EVIDENCE_MOUNT_PATH
+              value: /var/lib/atlas-evidence
+            - name: ASTRO_WAREHOUSE_SCANNER_IMAGE
+              value: crpi-wixjy6gci86ms14e.cn-hongkong.personal.cr.aliyuncs.com/ay-dev/astro-atlas-scanner:0.2.0-20260826-shutdownfix1
             - name: ASTRO_ALLOWED_HOSTS
               value: localhost,127.0.0.1,10.15.49.212,10.15.51.75,astro.workspace.dev.72602.space,astro-data-workspace-mcp,astro-data-workspace-mcp.astro-data-workspace,astro-data-workspace-mcp.astro-data-workspace.svc,astro-data-workspace-mcp.astro-data-workspace.svc.cluster.local
           readinessProbe:
@@ -237,6 +481,8 @@ spec:
                   value: astro-data-workspace-mcp
             initialDelaySeconds: 2
             periodSeconds: 5
+            timeoutSeconds: 5
+            failureThreshold: 6
           livenessProbe:
             httpGet:
               path: /healthz
@@ -246,13 +492,15 @@ spec:
                   value: astro-data-workspace-mcp
             initialDelaySeconds: 5
             periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 6
           resources:
             requests:
-              cpu: 25m
-              memory: 64Mi
+              cpu: 100m
+              memory: 128Mi
             limits:
-              cpu: 250m
-              memory: 256Mi
+              cpu: "1"
+              memory: 1Gi
           securityContext:
             allowPrivilegeEscalation: false
             capabilities:
@@ -266,6 +514,8 @@ spec:
               mountPath: /state
             - name: resource-packages
               mountPath: /resource-packages
+            - name: warehouse-evidence
+              mountPath: /var/lib/atlas-evidence
             - name: tmp
               mountPath: /tmp
             - name: local-data
@@ -278,6 +528,9 @@ spec:
         - name: resource-packages
           persistentVolumeClaim:
             claimName: resource-packages
+        - name: warehouse-evidence
+          persistentVolumeClaim:
+            claimName: workspace-evidence
         - name: tmp
           emptyDir: {}
         - name: local-data

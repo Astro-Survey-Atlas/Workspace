@@ -595,6 +595,28 @@ input {
   display: none;
 }
 
+.remote-coverage-fields {
+  display: grid;
+  gap: 8px;
+  margin: 12px 0 2px;
+  padding: 11px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--panel) 72%, transparent);
+}
+
+.remote-coverage-fields[hidden] {
+  display: none;
+}
+
+.remote-coverage-fields .catalog-form-grid {
+  margin-top: 0;
+}
+
+.remote-coverage-form .control-note {
+  margin: 0 0 12px;
+}
+
 .catalog-scan-fieldset .field-label {
   margin: 0;
 }

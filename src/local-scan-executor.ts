@@ -9,8 +9,13 @@ import type { DataAssetRecord, DataCatalogRegistry } from "./data-catalog.js";
 import type { LocalConnectorRootsPolicy } from "./local-connector-roots.js";
 import { scanLocalCsv, type LocalCsvScanLimits, type LocalScanDocument } from "./local-scan.js";
 import { defaultMocCoreAdapter, type MocCoreAdapter } from "./moc-core-adapter.js";
+import type { UserMocArtifactContext, UserMocArtifactStore } from "./user-moc-artifacts.js";
 
 export const LOCAL_CSV_SCAN_EXECUTOR = "local-csv";
+
+function workspaceLayerId(assetId: string): string {
+  return `workspace-${assetId}`.toLowerCase().replace(/[^a-z0-9-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 180) || "workspace-asset";
+}
 
 const MAX_BULK_DOCUMENTS = 500;
 const MAX_BULK_BYTES = 2 * 1024 * 1024;
@@ -39,6 +44,7 @@ export interface LocalCsvScanExecutorOptions {
   maxRows?: number;
   maxFileBytes?: number;
   mocCore?: MocCoreAdapter;
+  artifacts?: UserMocArtifactStore;
 }
 
 export class LocalScanDisabledError extends Error {
@@ -187,6 +193,7 @@ export class LocalCsvScanExecutor {
   readonly #maxRows?: number;
   readonly #maxFileBytes?: number;
   readonly #mocCore: MocCoreAdapter;
+  readonly #artifacts: UserMocArtifactStore | undefined;
   readonly #tasks = new Map<string, Promise<ConnectorIngestRunRecord>>();
 
   constructor(options: LocalCsvScanExecutorOptions) {
@@ -201,6 +208,7 @@ export class LocalCsvScanExecutor {
     this.#maxRows = optionalLimit(options.maxRows, "maxRows");
     this.#maxFileBytes = optionalLimit(options.maxFileBytes, "maxFileBytes");
     this.#mocCore = options.mocCore ?? defaultMocCoreAdapter;
+    this.#artifacts = options.artifacts;
   }
 
   async submit(connectorId: string, input?: LocalCsvScanInput, idempotencyKey?: string): Promise<ConnectorIngestRunRecord> {
@@ -222,7 +230,13 @@ export class LocalCsvScanExecutor {
     if (linked.length !== 1) {
       throw new LocalScanPreconditionError(`Asset-level local scanning requires exactly one linked Connector; found ${linked.length}`);
     }
-    return this.#submitPrepared(linked[0]!, asset, request, idempotencyKey);
+    // An asset's declared source path is the stable default for UI/API scans.
+    // An explicit request path still wins, and normalizeInput keeps both paths
+    // subject to the same connector-root safety checks.
+    const effectiveRequest = request.relativePath === undefined && asset.sourceRelativePath !== undefined
+      ? normalizeInput({ relativePath: asset.sourceRelativePath, ...(request.maxRows === undefined ? {} : { maxRows: request.maxRows }) })
+      : request;
+    return this.#submitPrepared(linked[0]!, asset, effectiveRequest, idempotencyKey);
   }
 
   async #submitPrepared(
@@ -310,6 +324,31 @@ export class LocalCsvScanExecutor {
     return this.awaitCompletion(runId);
   }
 
+  /** Mark work that cannot survive a process restart as failed before serving requests. */
+  async recoverInterruptedRuns(): Promise<number> {
+    const interrupted = (await this.#runs.list())
+      .filter((run) => run.executor === LOCAL_CSV_SCAN_EXECUTOR && (run.status === "queued" || run.status === "running"));
+    for (const run of interrupted) {
+      const message = "Service restarted before local CSV scan completed";
+      const assetId = run.assetId ?? run.assetIds?.[0];
+      if (this.#artifacts && assetId) {
+        await this.#artifacts.fail({
+          layerId: workspaceLayerId(assetId),
+          scanRunId: run.id,
+          coverageRole: run.coverageRole ?? "object_presence",
+          dataOrigin: "catalog",
+          sourceTier: "user_file_derived",
+          precision: run.precision ?? "exact",
+          availableOrders: run.availableOrders ?? [8],
+          maxOrder: run.maxOrder ?? 10,
+          ...(run.sourceSnapshotSha256 === undefined ? {} : { sourceSnapshotSha256: run.sourceSnapshotSha256 }),
+        }, message).catch(() => undefined);
+      }
+      await this.#runs.update(run.id, { status: "failed", error: message, completedAt: new Date().toISOString() });
+    }
+    return interrupted.length;
+  }
+
   async #linkedAsset(connector: ConnectorRecord): Promise<DataAssetRecord> {
     const assets = (await this.#dataCatalog.list())
       .filter((asset) => asset.origin === "user" && linkedToConnector(asset, connector));
@@ -378,6 +417,17 @@ export class LocalCsvScanExecutor {
   }
 
   async #execute(scan: PreparedLocalScan): Promise<ConnectorIngestRunRecord> {
+    const baseArtifactContext: UserMocArtifactContext = {
+      layerId: workspaceLayerId(scan.asset.id),
+      scanRunId: scan.run.id,
+      coverageRole: "object_presence",
+      dataOrigin: "catalog",
+      sourceTier: "user_file_derived",
+      precision: "exact",
+      availableOrders: [8],
+      maxOrder: 10,
+    };
+    let artifactContext = baseArtifactContext;
     try {
       await this.#runs.update(scan.run.id, { status: "running" });
       const limits: LocalCsvScanLimits = {
@@ -404,6 +454,10 @@ export class LocalCsvScanExecutor {
       // Validate the complete stream before the first irreversible bulk write.
       // This keeps configured row/file limits from leaving partial index data.
       const validated = await scanLocalCsv(scan.file.containerPath, scanOptions);
+      const sourceSnapshotSha256 = validated.summary.sourceSnapshotSha256;
+      await this.#runs.update(scan.run.id, { sourceSnapshotSha256 });
+      artifactContext = { ...baseArtifactContext, sourceSnapshotSha256 };
+      await this.#artifacts?.createPending(artifactContext);
       const currentFile = await stat(scan.file.containerPath);
       if (currentFile.size !== scan.file.size || currentFile.mtimeMs !== scan.file.mtimeMs) {
         throw new LocalScanPreconditionError("CSV source changed after validation; run the scan again");
@@ -434,17 +488,29 @@ export class LocalCsvScanExecutor {
         if (documents.length >= MAX_BULK_DOCUMENTS || bufferedBytes >= MAX_BULK_BYTES) await flush();
       };
 
-      await scanLocalCsv(scan.file.containerPath, scanOptions, sink);
+      const indexed = await scanLocalCsv(scan.file.containerPath, scanOptions, sink);
       await flush();
+      if (indexed.summary.sourceSnapshotSha256 !== sourceSnapshotSha256) {
+        throw new LocalScanPreconditionError("CSV source changed while it was being indexed; run the scan again");
+      }
+
+      const artifact = this.#artifacts && indexed.moc
+        ? await this.#artifacts.persist(indexed.moc, artifactContext, {
+            statistics: { ...validated.summary, availableOrders: [indexed.summary.healpix_order] },
+            provenance: { schemaVersion: 1, layerId: workspaceLayerId(scan.asset.id), scanRunId: scan.run.id, coordinateFrame: "ICRS", ordering: "NESTED", coverageRole: "object_presence", sourceTier: "user_file_derived", sourceSnapshotSha256 },
+          })
+        : undefined;
 
       return await this.#runs.update(scan.run.id, {
         status: "succeeded",
         fileCount: 1,
         documentCount: validated.summary.objectCount,
+        ...(artifact ? { artifactId: artifact.id, mocStatus: artifact.status, availableOrders: artifact.availableOrders, maxOrder: artifact.maxOrder, precision: artifact.precision, coverageRole: artifact.coverageRole } : {}),
         completedAt: new Date().toISOString(),
       });
     } catch (error) {
       const completedAt = new Date().toISOString();
+      await this.#artifacts?.fail(artifactContext, error).catch(() => undefined);
       try {
         return await this.#runs.update(scan.run.id, {
           status: "failed",

@@ -5,8 +5,10 @@ import type { ConnectorIngestRun } from "../../src/connector-history";
 import type { TagDefinition } from "../../src/tags";
 import type { ReleaseAvailability, ReleaseKind, SurveyCard, SurveyModality, SurveyRecord, SurveyRegistrationInput } from "../../src/survey-registry";
 import type { SurveyFootprintManifest } from "../../src/survey-footprints";
-import type { PublicResourcePackage, ResourceCatalogStatus, ResourcePackageJob, ResourcePackageLoad } from "../../src/resource-packages";
-import type { AstroOverviewResponse, AstroSkyQueryInput, AstroSpatialSummary } from "../../src/astro-index";
+import type { PublicResourcePackage, ResourceCatalogStatus, ResourcePackageJob, ResourcePackageLoad, ResourcePackageMocLayer } from "../../src/resource-packages";
+import type { AstroCoverageLayer, AstroOverviewResponse, AstroSkyQueryInput, AstroSpatialSummary } from "../../src/astro-index";
+import type { UserMocArtifact } from "../../src/user-moc-artifacts";
+import type { CoverageJobSpec } from "../../src/coverage-jobs";
 import type {
   AstroCellsQueryInput,
   AstroCellsQueryResult,
@@ -15,7 +17,8 @@ import type {
 } from "../../src/astro-object-index";
 
 export interface WorkspaceCapabilities {
-  dataWarehouse: { enabled: boolean };
+  dataWarehouse: { enabled: boolean; configured?: boolean; namespace?: string; layerIndex?: string; coverageIndex?: string };
+  userMocs?: { rootConfigured: boolean; count: number };
   localScan?: { enabled: boolean; configured: boolean; executor: string; objectIndex: string; coverageIndex: string };
   metadataStore: { engine: string };
 }
@@ -73,7 +76,7 @@ export interface WorkspaceCoverageBreakdown {
   objectCount?: number;
 }
 
-export interface WorkspaceAssetCoverageLayer {
+export interface WorkspaceAssetCoverageLayer extends Omit<AstroCoverageLayer, "key" | "assetIds" | "pixels" | "byAsset"> {
   key: string;
   assetId?: string;
   assetIds: string[];
@@ -83,13 +86,27 @@ export interface WorkspaceAssetCoverageLayer {
   pixels: number[];
   objectCount?: number;
   byAsset: WorkspaceCoverageBreakdown[];
-  source?: "connector" | "asset" | "unassigned" | "conflict";
-  status?: "ready" | "unavailable" | "error";
+  status?: "ready" | "pending" | "unavailable" | "error";
+  nside?: number;
+  layerId?: string;
+  productId?: string;
+  modality?: string;
+  coverageRole?: string;
+  source?: "connector" | "asset" | "warehouse" | "combined" | "unassigned" | "conflict";
+  nativeOrders?: number[];
+  availableOrders?: number[];
+  maxOrder?: number;
+  precision?: "exact" | "estimated" | "entrypoint-only";
+  mocStatus?: "pending" | "ready" | "failed" | "unavailable";
+  artifactId?: string;
+  latestMocStatus?: "pending" | "ready" | "failed" | "unavailable";
+  latestArtifactId?: string;
+  state?: string;
   message?: string;
 }
 
 export interface WorkspaceAssetCoverageResponse {
-  status: "ready" | "unavailable" | "error";
+  status: "ready" | "pending" | "unavailable" | "error";
   index: string;
   nside: number;
   pixels: number[];
@@ -101,6 +118,18 @@ export interface WorkspaceAssetCoverageResponse {
 export interface ResourceCatalogConfig extends ResourceCatalogStatus {
   adminConfigured: boolean;
   updatedAt?: string;
+}
+
+/** Browser-safe input for a Workspace-owned remote coverage scan. The server
+ * adds the route asset id and keeps credentials in its namespace Secret. */
+export interface RemoteCoverageScanInput {
+  surveyId: string;
+  connectorId: string;
+  releaseId: string;
+  product: string;
+  path?: string;
+  allowedSuffixes?: string[];
+  coverage: CoverageJobSpec;
 }
 
 async function getJson<T>(url: string): Promise<T> {
@@ -182,6 +211,9 @@ export const workspaceApi = {
   },
   async executeDataAssetLocalScan(id: string): Promise<ConnectorScanRun> {
     return (await postJson<{ run: ConnectorScanRun }>(`/api/data-assets/${encodeURIComponent(id)}/local-scan`, {})).run;
+  },
+  async executeDataAssetRemoteScan(id: string, input: RemoteCoverageScanInput): Promise<ConnectorScanRun> {
+    return (await postJson<{ run: ConnectorScanRun }>(`/api/data-assets/${encodeURIComponent(id)}/remote-scan`, input)).run;
   },
   async dataAssetScanRuns(id: string): Promise<ConnectorScanRun[]> {
     const parameters = new URLSearchParams({ assetId: id });
@@ -268,6 +300,12 @@ export const workspaceApi = {
   async resourcePackageJob(id: string): Promise<ResourcePackageJob> {
     return (await getJson<{ job: ResourcePackageJob }>(`/api/resource-packages/jobs/${encodeURIComponent(id)}`)).job;
   },
+  async resourcePackageMocs(id: string): Promise<ResourcePackageMocLayer[]> {
+    return (await getJson<{ layers: ResourcePackageMocLayer[] }>(`/api/resource-packages/${encodeURIComponent(id)}/mocs`)).layers;
+  },
+  resourcePackageMocUrl(id: string, layerId: string): string {
+    return `/api/resource-packages/${encodeURIComponent(id)}/mocs/${encodeURIComponent(layerId)}`;
+  },
   async setActiveResourcePackages(loads: ResourcePackageLoad[] | string[]): Promise<PublicResourcePackage[]> {
     const body = typeof loads[0] === "string" ? { ids: loads } : { loads };
     return (await putJson<{ packages: PublicResourcePackage[] }>("/api/resource-packages/active", body)).packages;
@@ -305,6 +343,9 @@ export const workspaceApi = {
     if (input.survey) parameters.set("survey", input.survey);
     if (input.release) parameters.set("release", input.release);
     return getJson<WorkspaceAssetCoverageResponse>(`/api/sky/coverage?${parameters}`);
+  },
+  async userMocs(): Promise<UserMocArtifact[]> {
+    return (await getJson<{ artifacts: UserMocArtifact[] }>("/api/user-mocs")).artifacts;
   },
   async registerSurvey(input: SurveyRegistrationInput): Promise<SurveyRecord> {
     return (await postJson<{ survey: SurveyRecord }>("/api/surveys/registrations", input)).survey;

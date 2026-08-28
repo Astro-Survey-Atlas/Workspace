@@ -37,3 +37,13 @@ helm.sh/chart: {{ .Chart.Name }}-{{ .Chart.Version | replace "+" "_" }}
 {{- define "astro-data-workspace.elasticsearchUrl" -}}
 {{- printf "http://%s:9200" (include "astro-data-workspace.elasticsearchFullname" .) -}}
 {{- end }}
+{{- define "astro-data-workspace.warehouseEvidenceClaim" -}}
+{{- if .Values.dataWarehouse.evidence.existingClaim -}}
+{{- .Values.dataWarehouse.evidence.existingClaim -}}
+{{- else -}}
+{{- printf "%s-evidence" (include "astro-data-workspace.fullname" .) | trunc 63 | trimSuffix "-" -}}
+{{- end -}}
+{{- end }}
+{{- define "astro-data-workspace.warehouseNamespace" -}}
+{{- default .Release.Namespace .Values.dataWarehouse.namespace -}}
+{{- end }}

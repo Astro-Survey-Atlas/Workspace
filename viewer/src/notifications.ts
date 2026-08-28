@@ -63,4 +63,3 @@ export function notifyWorkspace(summary: string, detail = "", options: Workspace
 export function notifyWorkspaceError(error: unknown, summary = "请求失败"): void {
   notifyWorkspace(summary, error instanceof Error ? error.message : String(error), { tone: "error" });
 }
-

@@ -89,3 +89,25 @@ test("generic asset coverage compacts scanner cells into the project sky order",
   assert.equal(result.byAsset[0]?.key, "custom-catalog");
   await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
 });
+
+test("astro index extracts URL credentials before querying external Elasticsearch", async () => {
+  let authorization = "";
+  let requestUrl = "";
+  const server = createServer(async (request, response) => {
+    requestUrl = request.url ?? "";
+    authorization = request.headers.authorization ?? "";
+    let body = "";
+    for await (const chunk of request) body += chunk;
+    assert.ok(body);
+    response.setHeader("Content-Type", "application/json");
+    response.end(JSON.stringify({ aggregations: { coverage_cells: { buckets: [] }, by_asset: { buckets: [] } } }));
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const service = new AstroIndexService({ baseUrl: `http://atlas-user:p%40ss@127.0.0.1:${address.port}` });
+  await service.coverage({ nside: 16 });
+  assert.equal(requestUrl, "/astro_file_index_v1/_search");
+  assert.equal(authorization, `Basic ${Buffer.from("atlas-user:p@ss", "utf8").toString("base64")}`);
+  await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+});

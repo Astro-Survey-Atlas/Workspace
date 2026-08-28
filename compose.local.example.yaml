@@ -3,6 +3,7 @@
 services:
   workspace:
     environment:
+      ASTRO_LOCAL_SCAN_ENABLED: "true"
       ASTRO_LOCAL_CONNECTOR_ROOTS: /data/local
     volumes:
       - type: bind

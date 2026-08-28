@@ -2,15 +2,34 @@ import { expect, test, type Page } from "@playwright/test";
 import type { ConnectorIngestRun } from "../../src/connector-history.js";
 
 const apiRoot = process.env.ASTRO_E2E_API ?? "http://astro.workspace.dev.72602.space:32080";
+const TRANSIENT_STATUSES = new Set([502, 503, 504]);
+
+async function retryDelay(attempt: number): Promise<void> {
+  await new Promise((resolve) => setTimeout(resolve, 250 * (attempt + 1)));
+}
+
+async function fetchWithRetry(url: string, init?: RequestInit): Promise<Response> {
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    try {
+      const response = await fetch(url, init);
+      if (!TRANSIENT_STATUSES.has(response.status) || attempt === 2) return response;
+      await response.arrayBuffer().catch(() => undefined);
+    } catch (error) {
+      if (attempt === 2) throw error;
+    }
+    await retryDelay(attempt);
+  }
+  throw new Error("unreachable");
+}
 
 async function apiJson<T>(path: string): Promise<T> {
-  const response = await fetch(`${apiRoot}${path}`);
+  const response = await fetchWithRetry(`${apiRoot}${path}`);
   if (!response.ok) throw new Error(`GET ${path} failed: ${response.status} ${await response.text()}`);
   return await response.json() as T;
 }
 
 async function apiResponse(path: string): Promise<Response> {
-  return fetch(`${apiRoot}${path}`);
+  return fetchWithRetry(`${apiRoot}${path}`);
 }
 
 async function proxyApi(page: Page): Promise<void> {
@@ -20,8 +39,17 @@ async function proxyApi(page: Page): Promise<void> {
       await route.continue();
       return;
     }
-    const response = await route.fetch({ url: `${apiRoot}${requestUrl.pathname}${requestUrl.search}` });
-    await route.fulfill({ response });
+    try {
+      let response = await route.fetch({ url: `${apiRoot}${requestUrl.pathname}${requestUrl.search}`, timeout: 10_000 });
+      for (let attempt = 0; TRANSIENT_STATUSES.has(response.status()) && attempt < 2; attempt += 1) {
+        await response.body().catch(() => undefined);
+        await retryDelay(attempt);
+        response = await route.fetch({ url: `${apiRoot}${requestUrl.pathname}${requestUrl.search}`, timeout: 10_000 });
+      }
+      await route.fulfill({ response });
+    } catch {
+      await route.abort().catch(() => undefined);
+    }
   });
 }
 
@@ -38,8 +66,7 @@ async function openCatalog(page: Page): Promise<void> {
 }
 
 test.beforeEach(async ({ page }) => proxyApi(page));
-test.afterEach(async ({ page }) => page.unrouteAll({ behavior: "ignoreErrors" }));
-
+test.afterEach(async ({ page }) => page.close());
 test("theme follows the system until a choice is persisted", async ({ page }) => {
   await page.emulateMedia({ colorScheme: "light" });
   await page.goto("/");

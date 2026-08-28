@@ -302,6 +302,27 @@ export interface ResourcePackageJob {
   error?: string;
 }
 
+/** A verified native MOC shipped inside an installed Assets package. */
+export interface ResourcePackageMocLayer {
+  packageId: string;
+  version: string;
+  layerId: string;
+  surveyId: string;
+  releaseId: string;
+  coverageRole: string;
+  dataOrigin: string;
+  sourceTier: string;
+  modality: string;
+  path: `mocs/${string}.moc.fits`;
+  byteLength: number;
+  sha256: string;
+}
+
+export interface ResourcePackageMocArtifact extends ResourcePackageMocLayer {
+  /** Internal path used by the HTTP adapter; never serialize this field. */
+  filePath: string;
+}
+
 export interface ResourcePackageManagerOptions {
   catalogUrl: string;
   root: string;
@@ -404,7 +425,13 @@ function sources(value: unknown, label: string): ResourcePackageCatalogEntry["so
 function releaseLabels(value: unknown, releases: string[], label: string): Record<string, string> {
   const labels = object(value, label);
   const result: Record<string, string> = {};
-  for (const releaseId of releases) result[releaseId] = text(labels[releaseId], `${label} ${releaseId}`, 160);
+  // Assets may omit a display label for a metadata-only release. Consumers
+  // already fall back to the stable release id; reject only labels for
+  // releases that are not declared by the package.
+  for (const [releaseId, rawLabel] of Object.entries(labels)) {
+    if (!releases.includes(releaseId)) throw new Error(`${label} contains an unknown release: ${releaseId}`);
+    result[releaseId] = text(rawLabel, `${label} ${releaseId}`, 160);
+  }
   return result;
 }
 
@@ -768,7 +795,7 @@ export class ResourcePackageManager {
       parsed = parseCatalog(JSON.parse(catalogBytes.toString("utf8")) as unknown);
       for (const installed of this.#state.packages) {
         const entry = parsed.packages.find((candidate) => candidate.id === installed.id);
-        if (!entry || (entry.version === installed.version && entry.sha256 !== installed.sha256)) {
+        if (!entry) {
           throw new Error(`Installed resource package is absent from the trusted catalog: ${installed.id}@${installed.version}`);
         }
         await this.#readFootprints(installed);
@@ -845,7 +872,7 @@ export class ResourcePackageManager {
     this.#assertAvailable();
     return this.#catalog.packages.filter((entry) => !entry.hidden).map((entry) => {
       const installed = this.#state.packages.find((record) => record.id === entry.id);
-      const update = Boolean(installed && installed.version !== entry.version);
+      const update = this.#hasUpdate(entry, installed);
       return this.#toPublic(entry, installed, update);
     });
   }
@@ -905,6 +932,7 @@ export class ResourcePackageManager {
         if (!entry) throw new Error(`Resource package not found: ${load.packageId}`);
         if (!installed) throw new RangeError(`Resource package must be installed before loading: ${load.packageId}`);
         if (installed.version !== entry.version) throw new RangeError(`Resource package version must be current before loading: ${load.packageId}`);
+        if (installed.sha256 !== entry.sha256) throw new RangeError(`Resource package checksum must be current before loading: ${load.packageId}`);
         if (new Set(load.releaseIds).size !== load.releaseIds.length) throw new RangeError(`releaseIds must be unique for resource package: ${load.packageId}`);
         const manifest = this.#installedFootprints.get(load.packageId);
         if (!manifest) throw new Error(`Installed resource package manifest is unavailable: ${load.packageId}`);
@@ -955,6 +983,52 @@ export class ResourcePackageManager {
       footprints.set(identity, footprint);
     }
     return { schemaVersion: 1, generatedAt: new Date().toISOString(), coordinateFrame: "ICRS", nside, footprints: [...footprints.values()] };
+  }
+
+  /** List the native FITS MOCs declared by one installed, verified package. */
+  async mocLayers(id: string): Promise<ResourcePackageMocLayer[]> {
+    this.#assertAvailable();
+    const installed = this.#installed(id);
+    const manifest = await this.#readManifest(installed);
+    return manifest.layers.map((layer) => ({
+      packageId: installed.id,
+      version: installed.version,
+      layerId: layer.layerId,
+      surveyId: layer.surveyId,
+      releaseId: layer.releaseId,
+      coverageRole: layer.coverageRole,
+      dataOrigin: layer.dataOrigin,
+      sourceTier: layer.sourceTier,
+      modality: layer.modality,
+      path: layer.path,
+      byteLength: layer.sizeBytes,
+      sha256: layer.sha256,
+    }));
+  }
+
+  /** Resolve one manifest-declared native MOC without accepting arbitrary paths. */
+  async mocArtifact(id: string, layerId: string): Promise<ResourcePackageMocArtifact> {
+    const installed = this.#installed(id);
+    const layers = await this.mocLayers(id);
+    const layer = layers.find((candidate) => candidate.layerId === layerId);
+    if (!layer) throw new Error(`Resource package MOC layer not found: ${id}/${layerId}`);
+    const packageRoot = path.resolve(this.#root, "installed", installed.id, installed.version);
+    const filePath = path.resolve(packageRoot, layer.path);
+    if (filePath !== packageRoot && !filePath.startsWith(`${packageRoot}${path.sep}`)) {
+      throw new Error(`Resource package MOC layer path is outside its installation: ${id}/${layerId}`);
+    }
+    const details = await stat(filePath).catch(() => undefined);
+    if (!details?.isFile() || details.size !== layer.byteLength) {
+      throw new Error(`Resource package MOC artifact is not available: ${id}/${layerId}`);
+    }
+    // Installation verifies the archive once, but the persistent volume can
+    // be modified afterwards. Recheck the manifest digest at every download
+    // boundary so a same-size tamper cannot be served as public coverage.
+    const bytes = await readFile(filePath);
+    if (createHash("sha256").update(bytes).digest("hex") !== layer.sha256) {
+      throw new Error(`Resource package MOC artifact SHA-256 does not match its manifest: ${id}/${layerId}`);
+    }
+    return { ...layer, filePath };
   }
 
   async #runInstall(entry: ResourcePackageCatalogEntry, job: ResourcePackageJob): Promise<void> {
@@ -1014,8 +1088,12 @@ export class ResourcePackageManager {
     const entry = this.#catalog.packages.find((candidate) => candidate.id === id);
     if (!entry) return undefined;
     const installed = this.#state.packages.find((record) => record.id === id);
-    const update = Boolean(installed && installed.version !== entry.version);
+    const update = this.#hasUpdate(entry, installed);
     return this.#toPublic(entry, installed, update);
+  }
+
+  #hasUpdate(entry: ResourcePackageCatalogEntry, installed: InstalledPackage | undefined): boolean {
+    return Boolean(installed && (installed.version !== entry.version || installed.sha256 !== entry.sha256));
   }
 
   async #validateInstalled(record: InstalledPackage): Promise<SurveyFootprintManifest> {
@@ -1024,13 +1102,21 @@ export class ResourcePackageManager {
     // offline. Public operations still fail through #assertAvailable until a
     // trusted catalog is available again.
     if (!entry && this.#catalogError) return this.#readFootprints(record);
-    if (!entry || (entry.version === record.version && entry.sha256 !== record.sha256)) throw new Error(`Installed resource package is absent from the trusted catalog: ${record.id}@${record.version}`);
+    if (!entry) throw new Error(`Installed resource package is absent from the trusted catalog: ${record.id}@${record.version}`);
     const manifest = await this.#readFootprints(record);
     return manifest;
   }
 
   async #readFootprints(record: InstalledPackage): Promise<SurveyFootprintManifest> {
     return normalizeSurveyFootprintManifest(JSON.parse(await readFile(path.join(this.#root, "installed", record.id, record.version, "footprints", "survey-footprints.json"), "utf8")) as unknown);
+  }
+
+  async #readManifest(record: InstalledPackage): Promise<ResourcePackageManifest> {
+    const manifest = parseManifest(JSON.parse(await readFile(path.join(this.#root, "installed", record.id, record.version, "resource-package.json"), "utf8")) as unknown);
+    if (manifest.id !== record.id || manifest.version !== record.version) {
+      throw new Error(`Installed resource package manifest identity does not match state: ${record.id}@${record.version}`);
+    }
+    return manifest;
   }
 
   async #persist(packages = this.#state.packages): Promise<void> {

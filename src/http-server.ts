@@ -9,14 +9,14 @@ import express from "express";
 import type { Request, Response } from "express";
 
 import { AgentService } from "./agent.js";
-import { AstroIndexService, ASTRO_OVERVIEW_NSIDE, type AstroCoverageLayer, type AstroSkyQueryInput } from "./astro-index.js";
+import { AstroIndexService, ASTRO_FILE_INDEX, ASTRO_OVERVIEW_NSIDE, type AstroCoverageLayer, type AstroSkyQueryInput } from "./astro-index.js";
 import { AstroObjectIndexService, type AstroCellsQueryInput, type ObjectRegionQueryInput } from "./astro-object-index.js";
 import { McpCatalogQueryClient } from "./catalog-mcp-client.js";
 import { createConnectorCredentialStore, type StoredConnectorCredentials } from "./connector-credentials.js";
 import { ConnectorRegistry, connectorLocationKey, validateConnectorInput, type ConnectorCheckInput, type ConnectorPublicRecord, type ConnectorRecord, type ConnectorRegistrationInput } from "./connectors.js";
 import { ConnectorIngestRunCatalog, publicConnectorIngestRun, type ConnectorIngestRunFilter, type ConnectorIngestRunRecord, type ConnectorIngestRunStatus } from "./connector-history.js";
 import { DataCatalogRegistry, type DataAssetAccess, type DataAssetRecord, type DataAssetRegistrationInput } from "./data-catalog.js";
-import { ConnectorScanCapabilityError, ConnectorScanPreconditionError, DataWarehouseDisabledError, dataWarehouseEnabled, FlinkScanService, validateConnectorSelfScanBody } from "./flink-ingest.js";
+import { ConnectorScanCapabilityError, ConnectorScanPreconditionError, DataWarehouseDisabledError, dataWarehouseEnabled, validateConnectorSelfScanBody } from "./warehouse-scan.js";
 import { createAstroMcpServer } from "./mcp.js";
 import { ResourceCatalogSyncError, ResourceCatalogUnavailableError, ResourcePackageManager, resourcePackageSurveyRecords, type ResourcePackageLoad } from "./resource-packages.js";
 import type { SurveyFootprintManifest } from "./survey-footprints.js";
@@ -28,6 +28,9 @@ import { createMetadataStore, importJsonState } from "./storage/index.js";
 import { LocalConnectorRootsPolicy, LocalConnectorPolicyError, localConnectorRootsResponse } from "./local-connector-roots.js";
 import { inspectLocalCsv, listLocalCsvFiles, LocalSourceInspectionCapabilityError, LocalSourceInspectionError } from "./local-source-inspection.js";
 import { LocalCsvScanExecutor, LocalScanCapabilityError, LocalScanDisabledError, LocalScanPreconditionError, localScanEnabled, LOCAL_CSV_SCAN_EXECUTOR, type LocalCsvScanInput } from "./local-scan-executor.js";
+import { UserMocArtifactStore, type UserMocArtifact } from "./user-moc-artifacts.js";
+import { WarehouseIndexService, type WarehouseCoverageLayer } from "./warehouse-index.js";
+import { WarehouseScanService } from "./warehouse-scan.js";
 
 const projectRoot = fileURLToPath(new URL("../", import.meta.url));
 const port = Number(process.env.PORT ?? "3000");
@@ -60,13 +63,14 @@ const resourceCatalogAllowedOrigins = (process.env.ASTRO_RESOURCE_CATALOG_ALLOWE
 const resourceAdminToken = process.env.ASTRO_RESOURCE_ADMIN_TOKEN;
 const catalogMcpUrl = process.env.ASTRO_CATALOG_MCP_URL ?? "http://eva24002-entrance.lab.zverse.space:30082/mcp";
 const catalogMcpTimeoutMs = Number(process.env.ASTRO_CATALOG_MCP_TIMEOUT_MS ?? "15000");
-const flinkNamespace = process.env.ASTRO_FLINK_NAMESPACE ?? "warehouse";
-const flinkSecretNamespace = process.env.ASTRO_FLINK_SECRET_NAMESPACE ?? flinkNamespace;
-const flinkPollMs = Number(process.env.ASTRO_FLINK_POLL_MS ?? "5000");
+const warehouseNamespace = process.env.ASTRO_WAREHOUSE_NAMESPACE ?? process.env.POD_NAMESPACE ?? "astro-data-workspace";
+const warehousePollMs = Number(process.env.ASTRO_WAREHOUSE_POLL_MS ?? "5000");
 const astroEsUrl = process.env.ASTRO_ES_URL ?? "";
-const astroEsIndex = process.env.ASTRO_ES_ASTRO_INDEX ?? "astro_file_index_v1";
-const astroEsObjectIndex = process.env.ASTRO_ES_OBJECT_INDEX ?? "astro_object_index_v1";
-const astroEsCoverageIndex = process.env.ASTRO_ES_COVERAGE_INDEX ?? "astro_coverage_index_v1";
+const warehouseEsUrl = process.env.ASTRO_WAREHOUSE_ES_URL ?? "";
+const warehouseEsLayerIndex = process.env.ASTRO_WAREHOUSE_LAYER_INDEX ?? "ast_layer_index_v1";
+const warehouseEsFileIndex = process.env.ASTRO_WAREHOUSE_FILE_INDEX ?? "ast_file_index_v1";
+const warehouseEsCoverageIndex = process.env.ASTRO_WAREHOUSE_COVERAGE_INDEX ?? "ast_coverage_index_v1";
+const userMocRoot = process.env.ASTRO_USER_MOC_ROOT ?? path.join(stateRoot, "user-mocs");
 const warehouseEnabled = dataWarehouseEnabled();
 const localCsvScanEnabled = localScanEnabled();
 const metadataStoreEngine = process.env.ASTRO_METADATA_STORE || "sqlite";
@@ -78,6 +82,7 @@ const dataCatalog = new DataCatalogRegistry(metadataStore);
 const connectors = new ConnectorRegistry(metadataStore, localConnectorRoots);
 const connectorCredentials = createConnectorCredentialStore();
 const connectorRuns = new ConnectorIngestRunCatalog(metadataStore);
+const userMocs = new UserMocArtifactStore({ root: userMocRoot });
 const astroObjectIndex = new AstroObjectIndexService({ baseUrl: astroEsUrl });
 const localCsvScans = new LocalCsvScanExecutor({
   enabled: localCsvScanEnabled,
@@ -86,24 +91,25 @@ const localCsvScans = new LocalCsvScanExecutor({
   runs: connectorRuns,
   roots: localConnectorRoots,
   indexService: astroObjectIndex,
+  artifacts: userMocs,
 });
-const flinkScans = new FlinkScanService({
+const resourcePackages = new ResourcePackageManager({ catalogUrl: resourceCatalogUrl, root: resourcePackageRoot, statePath: resourcePackageStatePath, snapshotRoot: resourceSnapshotRoot, allowedOrigins: resourceCatalogAllowedOrigins });
+// Search indices are independent from the optional warehouse integration.
+const astroIndex = new AstroIndexService({ baseUrl: astroEsUrl });
+// The Warehouse data plane is optional. Do not let an inherited endpoint make
+// the coverage route read a remote ES while the integration is disabled.
+const warehouseIndex = new WarehouseIndexService({ url: warehouseEnabled ? warehouseEsUrl : "", layerIndex: warehouseEsLayerIndex, fileIndex: warehouseEsFileIndex, coverageIndex: warehouseEsCoverageIndex });
+const warehouseScans = new WarehouseScanService({
   enabled: warehouseEnabled,
   connectors,
   dataCatalog,
   credentials: connectorCredentials,
   runs: connectorRuns,
-  namespace: flinkNamespace,
-  secretNamespace: flinkSecretNamespace,
-  esUrl: astroEsUrl,
-  esIndex: astroEsIndex,
-  esObjectIndex: astroEsObjectIndex,
-  esCoverageIndex: astroEsCoverageIndex,
-  pollMs: flinkPollMs,
+  namespace: warehouseNamespace,
+  warehouseEsUrl,
+  pollMs: warehousePollMs,
+  artifacts: userMocs,
 });
-const resourcePackages = new ResourcePackageManager({ catalogUrl: resourceCatalogUrl, root: resourcePackageRoot, statePath: resourcePackageStatePath, snapshotRoot: resourceSnapshotRoot, allowedOrigins: resourceCatalogAllowedOrigins });
-// Search indices are independent from the optional warehouse integration.
-const astroIndex = new AstroIndexService({ baseUrl: astroEsUrl });
 const workflowEngine = new WorkflowEngine(workflowStore, new McpCatalogQueryClient(catalogMcpUrl, catalogMcpTimeoutMs, 1));
 const agentService = new AgentService(workflowStore, workflowEngine);
 const app = createMcpExpressApp({ host, allowedHosts });
@@ -114,9 +120,10 @@ app.get("/healthz", (_request: Request, response: Response) => {
   response.json({ status: "ok", service: "astro-data-workspace", version: "0.10.38" });
 });
 
-app.get("/api/capabilities", (_request: Request, response: Response) => {
+app.get("/api/capabilities", async (_request: Request, response: Response) => {
   response.json({
-    dataWarehouse: { enabled: warehouseEnabled },
+    dataWarehouse: { enabled: warehouseEnabled, configured: warehouseIndex.configured, namespace: warehouseNamespace, layerIndex: warehouseIndex.layerIndex, coverageIndex: warehouseIndex.coverageIndex },
+    userMocs: { rootConfigured: Boolean(userMocRoot), count: (await userMocs.list()).length },
     localScan: {
       enabled: localCsvScanEnabled,
       configured: astroObjectIndex.configured,
@@ -251,7 +258,8 @@ async function validateConnectorIds(input: DataAssetRegistrationInput): Promise<
 
 function sendApiError(response: Response, error: unknown): void {
   const message = error instanceof Error ? error.message : String(error);
-  const notFound = message.startsWith("Dataset not found:") || message.startsWith("Data asset not found:") || message.startsWith("Connector not found:") || message.startsWith("Connector ingest run not found:") || message.startsWith("Coverage job not found:") || message.startsWith("Survey not found:") || message.startsWith("Public survey not found:") || message.startsWith("Resource package not found:") || message.startsWith("Resource package is not installed:") || message.startsWith("Resource package job not found:")
+  const notFound = message.startsWith("Dataset not found:") || message.startsWith("Data asset not found:") || message.startsWith("Connector not found:") || message.startsWith("Connector ingest run not found:") || message.startsWith("Coverage job not found:") || message.startsWith("Survey not found:") || message.startsWith("Public survey not found:") || message.startsWith("Resource package not found:") || message.startsWith("Resource package is not installed:") || message.startsWith("Resource package job not found:") || message.startsWith("Resource package MOC layer not found:") || message.startsWith("Resource package MOC artifact is not available:")
+    || message.startsWith("User MOC artifact file not found:")
     || message.startsWith("Workflow not found:")
     || message.startsWith("Workflow run not found:") || message.startsWith("Workflow artifact not found:") || message.startsWith("Agent session not found:");
   const status = error instanceof LocalConnectorPolicyError ? error.statusCode
@@ -378,7 +386,7 @@ app.post("/api/data-assets/:id/remote-scan", async (request: Request, response: 
     if (!surveyId) throw new RangeError("surveyId is required for a remote scan");
     const input = { ...request.body, assetId };
     delete input.surveyId;
-    response.status(202).json({ run: publicConnectorIngestRun(await flinkScans.submitRemoteAssetScan(surveyId, input, idempotencyKey(request))) });
+    response.status(202).json({ run: publicConnectorIngestRun(await warehouseScans.submitRemoteAssetScan(surveyId, input, idempotencyKey(request))) });
   } catch (error) {
     sendApiError(response, error);
   }
@@ -457,7 +465,7 @@ app.post("/api/connectors/:id/local-files/inspect", async (request: Request, res
 
 app.get("/api/connector-ingest-runs", async (request: Request, response: Response) => {
   try {
-    if (warehouseEnabled) void flinkScans.poll();
+    if (warehouseEnabled) void warehouseScans.poll();
     response.json({ runs: publicConnectorRuns(await connectorRuns.list(connectorRunFilter(request))) });
   } catch (error) {
     sendApiError(response, error);
@@ -475,7 +483,7 @@ app.get("/api/connectors/:id", async (request: Request, response: Response) => {
 app.get("/api/connectors/:id/ingest-runs", async (request: Request, response: Response) => {
   try {
     const connector = await connectors.get(datasetIdFrom(request));
-    if (warehouseEnabled) void flinkScans.poll();
+    if (warehouseEnabled) void warehouseScans.poll();
     response.json({ runs: publicConnectorRuns(await connectorRunHistory(connector)) });
   } catch (error) {
     sendApiError(response, error);
@@ -486,7 +494,7 @@ app.get("/api/connectors/:id/ingest-runs", async (request: Request, response: Re
 app.get("/api/connectors/:id/runs", async (request: Request, response: Response) => {
   try {
     const connector = await connectors.get(datasetIdFrom(request));
-    if (warehouseEnabled) void flinkScans.poll();
+    if (warehouseEnabled) void warehouseScans.poll();
     response.json({ runs: publicConnectorRuns(await connectorRunHistory(connector)) });
   } catch (error) {
     sendApiError(response, error);
@@ -517,7 +525,7 @@ app.post("/api/connectors/check", async (request: Request, response: Response) =
 app.post("/api/connectors/:id/scan-runs", async (request: Request, response: Response) => {
   try {
     validateConnectorSelfScanBody(request.body);
-    const run = await flinkScans.submitConnectorScan(datasetIdFrom(request), idempotencyKey(request));
+    const run = await warehouseScans.submitConnectorScan(datasetIdFrom(request), idempotencyKey(request));
     response.status(202).json({ run: publicConnectorIngestRun(run) });
   } catch (error) {
     sendApiError(response, error);
@@ -717,6 +725,35 @@ app.post("/api/resource-packages/:id/install", (request: Request, response: Resp
   }
 });
 
+app.get("/api/resource-packages/:id/mocs", async (request: Request, response: Response) => {
+  try {
+    response.set("Cache-Control", "no-store");
+    response.json({ layers: await resourcePackages.mocLayers(datasetIdFrom(request)) });
+  } catch (error) {
+    sendApiError(response, error);
+  }
+});
+
+app.get("/api/resource-packages/:id/mocs/:layerId", async (request: Request, response: Response) => {
+  try {
+    const rawLayerId = request.params.layerId;
+    const layerId = Array.isArray(rawLayerId) ? rawLayerId[0] : rawLayerId;
+    if (!layerId) throw new RangeError("resource package MOC layer id is required");
+    const artifact = await resourcePackages.mocArtifact(datasetIdFrom(request), layerId);
+    response.set({
+      "Content-Type": "application/fits",
+      "Content-Length": String(artifact.byteLength),
+      "Cache-Control": "public, max-age=31536000, immutable",
+      "X-Content-Type-Options": "nosniff",
+      "ETag": `\"${artifact.sha256}\"`,
+      "Content-Disposition": `attachment; filename=\"${artifact.layerId}.moc.fits\"`,
+    });
+    response.sendFile(artifact.filePath);
+  } catch (error) {
+    sendApiError(response, error);
+  }
+});
+
 app.put("/api/resource-packages/active", async (request: Request, response: Response) => {
   try {
     const loads = request.body?.loads ?? (Array.isArray(request.body?.ids)
@@ -761,6 +798,36 @@ app.post("/api/surveys/registrations", async (request: Request, response: Respon
     // User registrations are Atlas-local and never require a public package.
     const survey = await surveys.register(request.body as SurveyRegistrationInput);
     response.status(201).json({ survey });
+  } catch (error) {
+    sendApiError(response, error);
+  }
+});
+
+app.get("/api/user-mocs", async (_request: Request, response: Response) => {
+  try {
+    response.set("Cache-Control", "no-store");
+    response.json({ artifacts: await userMocs.list() });
+  } catch (error) {
+    sendApiError(response, error);
+  }
+});
+
+app.get("/api/user-mocs/:layerId/:scanRunId/:name", async (request: Request, response: Response) => {
+  try {
+    const layerId = Array.isArray(request.params.layerId) ? request.params.layerId[0] : request.params.layerId;
+    const scanRunId = Array.isArray(request.params.scanRunId) ? request.params.scanRunId[0] : request.params.scanRunId;
+    const name = Array.isArray(request.params.name) ? request.params.name[0] : request.params.name;
+    if (!layerId || !scanRunId || !name) throw new RangeError("user MOC artifact path is incomplete");
+    const { artifact, filePath } = await userMocs.filePath(layerId, scanRunId, name);
+    const file = artifact.files.find((candidate) => candidate.name === path.basename(name));
+    response.set({
+      "Content-Type": file?.mediaType ?? "application/octet-stream",
+      ...(file ? { "Content-Length": String(file.byteLength) } : {}),
+      "Cache-Control": "private, no-store",
+      "X-Content-Type-Options": "nosniff",
+      "Content-Disposition": name.endsWith(".fits") ? `attachment; filename="${path.basename(name)}"` : `inline; filename="${path.basename(name)}"`,
+    });
+    response.sendFile(filePath);
   } catch (error) {
     sendApiError(response, error);
   }
@@ -838,10 +905,182 @@ app.post("/api/sky/objects/query", async (request: Request, response: Response) 
   }
 });
 
+type WorkspaceCoverageStatus = "ready" | "pending" | "unavailable" | "error";
+
+function nsideOrderForCoverage(nside: number): number {
+  if (!Number.isInteger(nside) || nside < 1 || (nside & (nside - 1)) !== 0 || nside > 256) {
+    throw new RangeError("nside must be a power of two between 1 and 256");
+  }
+  return Math.log2(nside);
+}
+
+function workspaceLayerIdForAsset(assetId: string): string {
+  return `workspace-${assetId}`.toLowerCase().replace(/[^a-z0-9-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 180) || "workspace-asset";
+}
+
+function coverageStatus(value: string | undefined): WorkspaceCoverageStatus {
+  if (value === "pending" || value === "error" || value === "unavailable") return value;
+  return "ready";
+}
+
+function hasActiveWarehouseCoverage(layers: readonly WarehouseCoverageLayer[]): boolean {
+  return layers.some((layer) => layer.state === "ACTIVE" && layer.status === "ready");
+}
+
+function aggregateCoverageStatus(values: readonly WorkspaceCoverageStatus[]): WorkspaceCoverageStatus {
+  // A healthy local index or artifact remains useful when the optional
+  // Warehouse endpoint is down. Surface that degradation through `message`
+  // without hiding the ready coverage from the viewer.
+  if (values.includes("ready")) return "ready";
+  if (values.includes("error")) return "error";
+  if (values.includes("pending")) return "pending";
+  if (values.length > 0 && values.every((value) => value === "unavailable")) return "unavailable";
+  return "ready";
+}
+
+function warehouseLayerForAsset(layer: WarehouseCoverageLayer, asset: DataAssetRecord): boolean {
+  return layer.layerId === asset.id || layer.layerId === workspaceLayerIdForAsset(asset.id) || layer.layerId === `user-${asset.id}`;
+}
+
+function artifactMatchesCoverageFilter(artifact: UserMocArtifact, asset: DataAssetRecord | undefined, survey?: string, release?: string): boolean {
+  // User-MOC metadata intentionally does not duplicate mutable asset labels.
+  // Once a caller asks for a survey/release, an artifact without a local asset
+  // association cannot be safely attributed and must stay out of the result.
+  if (!survey && !release) return true;
+  if (!asset) return false;
+  return (!survey || asset.surveyId === survey) && (!release || asset.releaseId === release);
+}
+
+interface UserMocArtifactSelection {
+  latest: UserMocArtifact;
+  renderable: UserMocArtifact;
+}
+
+function artifactTimestamp(artifact: UserMocArtifact): string {
+  return `${artifact.updatedAt}\u0000${artifact.createdAt}\u0000${artifact.id}`;
+}
+
+/**
+ * Keep the newest artifact as the task state, but retain the newest validated
+ * artifact as the display/download source while a replacement is pending or
+ * failed. Artifact history remains available through /api/user-mocs.
+ */
+function selectUserMocArtifacts(artifacts: readonly UserMocArtifact[]): Map<string, UserMocArtifactSelection> {
+  const grouped = new Map<string, UserMocArtifact[]>();
+  artifacts.forEach((artifact) => {
+    const entries = grouped.get(artifact.layerId) ?? [];
+    entries.push(artifact);
+    grouped.set(artifact.layerId, entries);
+  });
+  const selected = new Map<string, UserMocArtifactSelection>();
+  grouped.forEach((entries, layerId) => {
+    const ordered = [...entries].sort((left, right) => artifactTimestamp(right).localeCompare(artifactTimestamp(left)));
+    const latest = ordered[0];
+    if (!latest) return;
+    const renderable = ordered.find((artifact) => artifact.status === "ready") ?? latest;
+    selected.set(layerId, { latest, renderable });
+  });
+  return selected;
+}
+
+function workspaceWarehouseLayerIds(
+  assets: readonly DataAssetRecord[],
+  artifacts: readonly UserMocArtifact[],
+  runs: readonly ConnectorIngestRunRecord[],
+): string[] {
+  const ids = new Set<string>();
+  for (const asset of assets) {
+    ids.add(asset.id);
+    ids.add(workspaceLayerIdForAsset(asset.id));
+    ids.add(`user-${asset.id}`);
+  }
+  artifacts.forEach((artifact) => ids.add(artifact.layerId));
+  runs
+    // Only the current Workspace executor has an explicit ownership marker.
+    // Older records can be present in the shared metadata store after Assets
+    // and Workspace were upgraded independently; taskKind alone is not enough
+    // to distinguish those records.
+    .filter((run) => run.backend === "warehouse"
+      && run.executor === "warehouse-scan"
+      && (run.taskKind === "user_scan" || run.taskKind === "user_coverage")
+      && run.batchId?.startsWith("workspace-")
+      && run.warehouseLayerId?.startsWith("workspace-"))
+    .map((run) => run.warehouseLayerId)
+    .filter((layerId): layerId is string => Boolean(layerId))
+    .forEach((layerId) => ids.add(layerId));
+  return [...ids].sort();
+}
+
+function mergeCoveragePrecision(left: AstroCoverageLayer["precision"], right: AstroCoverageLayer["precision"]): AstroCoverageLayer["precision"] {
+  if (left === "entrypoint-only" || right === "entrypoint-only") return "entrypoint-only";
+  if (left === "estimated" || right === "estimated") return "estimated";
+  return left ?? right;
+}
+
+function mergeCoverageLayers(base: AstroCoverageLayer, extra: AstroCoverageLayer, key: string): AstroCoverageLayer {
+  const status = aggregateCoverageStatus([
+    coverageStatus(base.status),
+    coverageStatus(extra.status),
+  ]);
+  const byAsset = new Map<string, AstroCoverageLayer["byAsset"][number]>();
+  [...base.byAsset, ...extra.byAsset].forEach((entry) => {
+    if (!byAsset.has(entry.key)) byAsset.set(entry.key, entry);
+  });
+  const messages = [base.message, extra.message].filter((value): value is string => Boolean(value));
+  return {
+    ...base,
+    ...extra,
+    key,
+    status,
+    source: base.source === extra.source ? base.source : "combined",
+    pixels: [...new Set([...base.pixels, ...extra.pixels])].sort((left, right) => left - right),
+    byAsset: [...byAsset.values()],
+    assetIds: [...new Set([...base.assetIds, ...extra.assetIds])].sort(),
+    availableOrders: [...new Set([...(base.availableOrders ?? []), ...(extra.availableOrders ?? [])])].sort((left, right) => left - right),
+    nativeOrders: [...new Set([...(base.nativeOrders ?? []), ...(extra.nativeOrders ?? [])])].sort((left, right) => left - right),
+    ...(base.maxOrder === undefined && extra.maxOrder === undefined
+      ? {}
+      : { maxOrder: Math.max(base.maxOrder ?? 0, extra.maxOrder ?? 0) }),
+    precision: mergeCoveragePrecision(base.precision, extra.precision),
+    ...(messages.length ? { message: [...new Set(messages)].join("; ") } : {}),
+  };
+}
+
+async function artifactCoverageLayer(
+  artifact: UserMocArtifact,
+  nside: number,
+  asset?: DataAssetRecord,
+  latestArtifact: UserMocArtifact = artifact,
+): Promise<AstroCoverageLayer> {
+  const order = nsideOrderForCoverage(nside);
+  const projection = await userMocs.projection(artifact.layerId, artifact.scanRunId, order).catch(() => ({ order, pixels: [] }));
+  const status: WorkspaceCoverageStatus = artifact.status === "ready" ? "ready" : artifact.status === "failed" ? "error" : artifact.status === "pending" ? "pending" : "unavailable";
+  const messages = [artifact.error, latestArtifact.id === artifact.id ? undefined : latestArtifact.error].filter((value): value is string => Boolean(value));
+  return {
+    key: asset ? `asset:${asset.id}` : `moc:${artifact.id}`,
+    layerId: artifact.layerId,
+    ...(asset ? { assetId: asset.id, assetIds: [asset.id], assetName: asset.name, surveyId: asset.surveyId, releaseId: asset.releaseId } : { assetIds: [] }),
+    status,
+    source: "asset",
+    ...(messages.length ? { message: [...new Set(messages)].join("; ") } : {}),
+    nside,
+    pixels: projection.pixels,
+    availableOrders: artifact.availableOrders,
+    ...(artifact.maxOrder === undefined ? {} : { maxOrder: artifact.maxOrder }),
+    precision: artifact.precision,
+    ...(artifact.coverageRole ? { coverageRole: artifact.coverageRole } : {}),
+    mocStatus: artifact.status,
+    artifactId: artifact.id,
+    latestMocStatus: latestArtifact.status,
+    latestArtifactId: latestArtifact.id,
+    byAsset: asset ? [{ key: asset.id, label: asset.name, files: 0, bytes: 0 }] : [],
+  };
+}
+
 app.get("/api/sky/coverage", async (request: Request, response: Response) => {
   try {
     const nside = Number(request.query.nside ?? ASTRO_OVERVIEW_NSIDE);
-    if (!Number.isInteger(nside) || nside < 1) throw new RangeError("nside must be a positive integer");
+    nsideOrderForCoverage(nside);
     const rawAssetIds = typeof request.query.assetIds === "string" ? request.query.assetIds : "";
     const assetIds = rawAssetIds.split(",").map((value) => value.trim()).filter(Boolean);
     const survey = queryText(request.query.survey, "survey");
@@ -852,6 +1091,19 @@ app.get("/api/sky/coverage", async (request: Request, response: Response) => {
       ...(release ? { release } : {}),
     };
 
+    const artifacts = await userMocs.list();
+    const artifactSelections = selectUserMocArtifacts(artifacts);
+    const knownAssets = await dataCatalog.list();
+    const runs = await connectorRuns.list();
+    const ownedWarehouseLayerIds = workspaceWarehouseLayerIds(knownAssets, artifacts, runs);
+    const warehouse = await warehouseIndex.coverage({
+      nside,
+      ...(assetIds.length ? { assetIds } : {}),
+      ...(survey ? { survey } : {}),
+      ...(release ? { release } : {}),
+      layerIds: ownedWarehouseLayerIds,
+    });
+
     // ES documents written by older scanner jobs may have blank survey / release
     // fields. Use the Atlas asset's own local labels when assembling per-asset
     // layers; never infer them from a Connector or the Assets package.
@@ -859,7 +1111,7 @@ app.get("/api/sky/coverage", async (request: Request, response: Response) => {
       const layers: AstroCoverageLayer[] = [];
       const allPixels = new Set<number>();
       const allAssets = new Map<string, AstroCoverageLayer["byAsset"][number]>();
-      const statuses: string[] = [];
+      const statuses: WorkspaceCoverageStatus[] = [];
       const messages: string[] = [];
       for (const assetId of [...new Set(assetIds)]) {
         let asset: DataAssetRecord;
@@ -870,20 +1122,34 @@ app.get("/api/sky/coverage", async (request: Request, response: Response) => {
         // authoritative projection for local CSV scans; the file index keeps
         // historical scanner documents visible without rewriting them.
         const [legacy, local] = await Promise.all([
-          astroIndex.coverage({ nside, assetIds: [assetId] }),
+          nside <= ASTRO_OVERVIEW_NSIDE
+            ? astroIndex.coverage({ nside, assetIds: [assetId] })
+            : Promise.resolve({ status: "unavailable" as const, index: ASTRO_FILE_INDEX, nside, pixels: [], byAsset: [], message: "legacy file coverage is available only through NSIDE 16" }),
           astroObjectIndex.queryCoverageFacts({ nside, assetIds: [assetId] }),
         ]);
+        const warehouseLayer = warehouse.layers.find((candidate) => warehouseLayerForAsset(candidate, asset));
+        const artifactSelection = [...artifactSelections.values()].find(({ latest }) => latest.layerId === workspaceLayerIdForAsset(asset.id)
+          || latest.layerId === asset.id
+          || latest.layerId === `user-${asset.id}`);
+        const mocLayer = artifactSelection
+          ? await artifactCoverageLayer(artifactSelection.renderable, nside, asset, artifactSelection.latest)
+          : undefined;
         const pixels = new Set<number>(legacy.pixels);
         local.pixels.forEach((pixel) => pixels.add(pixel));
+        warehouseLayer?.pixels.forEach((pixel) => pixels.add(pixel));
+        mocLayer?.pixels.forEach((pixel) => pixels.add(pixel));
         const objectCount = local.facts.reduce((sum, fact) => sum + fact.objectCount, 0);
-        const status = legacy.status === "error" || local.status === "error"
-          ? "error"
-          : legacy.status === "unavailable" && local.status === "unavailable"
-            ? "unavailable"
-            : "ready";
+        const status = aggregateCoverageStatus([
+          coverageStatus(legacy.status),
+          coverageStatus(local.status),
+          ...(warehouseLayer ? [coverageStatus(warehouseLayer.status)] : warehouse.status === "error" ? ["error" as const] : []),
+          ...(mocLayer ? [coverageStatus(mocLayer.status)] : []),
+        ]);
         const message = [
           legacy.status === "error" ? legacy.message : undefined,
           local.status !== "ready" ? local.message : undefined,
+          warehouseLayer?.message,
+          mocLayer?.message,
         ].filter(Boolean).join("; ") || undefined;
         const breakdown = {
           key: asset.id,
@@ -906,6 +1172,17 @@ app.get("/api/sky/coverage", async (request: Request, response: Response) => {
           pixels: [...pixels].sort((left, right) => left - right),
           objectCount,
           byAsset: [breakdown],
+          layerId: warehouseLayer?.layerId ?? mocLayer?.layerId ?? workspaceLayerIdForAsset(asset.id),
+          productId: warehouseLayer?.productId ?? asset.product,
+          modality: warehouseLayer?.modality ?? asset.modalities[0],
+          coverageRole: warehouseLayer?.coverageRole ?? mocLayer?.coverageRole,
+          nativeOrders: warehouseLayer?.nativeOrders ?? mocLayer?.availableOrders,
+          availableOrders: warehouseLayer?.availableOrders ?? mocLayer?.availableOrders,
+          maxOrder: warehouseLayer?.maxOrder ?? mocLayer?.maxOrder,
+          precision: warehouseLayer?.precision ?? mocLayer?.precision,
+          state: warehouseLayer?.state,
+          mocStatus: mocLayer?.mocStatus,
+          artifactId: mocLayer?.artifactId,
         } satisfies AstroCoverageLayer;
         statuses.push(status);
         if (message) messages.push(message);
@@ -914,10 +1191,10 @@ app.get("/api/sky/coverage", async (request: Request, response: Response) => {
         layers.push(layer);
       }
       if (layers.length) {
-        const status = statuses.includes("error") ? "error" : statuses.includes("unavailable") ? "unavailable" : "ready";
+        const status = aggregateCoverageStatus(statuses);
         response.json({
           status,
-          index: astroObjectIndex.coverageIndex,
+          index: hasActiveWarehouseCoverage(warehouse.layers) ? warehouse.index : astroObjectIndex.coverageIndex,
           nside,
           pixels: [...allPixels].sort((left, right) => left - right),
           byAsset: [...allAssets.values()],
@@ -927,10 +1204,72 @@ app.get("/api/sky/coverage", async (request: Request, response: Response) => {
         return;
       }
     }
-    response.json(await astroIndex.coverage({
-      ...baseInput,
-      ...(assetIds.length ? { assetIds } : {}),
-    }));
+    const local = nside <= ASTRO_OVERVIEW_NSIDE
+      ? await astroIndex.coverage({ ...baseInput, ...(assetIds.length ? { assetIds } : {}) })
+      : { status: "unavailable" as const, index: ASTRO_FILE_INDEX, nside, pixels: [], byAsset: [], message: "legacy file coverage is available only through NSIDE 16" };
+    const assetForLayer = (layerId: string | undefined): DataAssetRecord | undefined => {
+      if (!layerId) return undefined;
+      return knownAssets.find((asset) => warehouseLayerForAsset({ ...({ layerId } as WarehouseCoverageLayer) }, asset));
+    };
+    const artifactLayers = await Promise.all([...artifactSelections.values()]
+      .map((selection) => ({ selection, asset: assetForLayer(selection.latest.layerId) }))
+      .filter(({ selection, asset }) => artifactMatchesCoverageFilter(selection.latest, asset, survey, release))
+      .map(async ({ selection, asset }): Promise<AstroCoverageLayer> => {
+        const layer = await artifactCoverageLayer(selection.renderable, nside, asset, selection.latest);
+        return layer;
+      }));
+    const warehouseLayers = warehouse.layers.map((layer): AstroCoverageLayer => {
+      const asset = assetForLayer(layer.layerId);
+      return {
+        key: layer.key,
+        layerId: layer.layerId,
+        surveyId: asset?.surveyId ?? layer.surveyId,
+        releaseId: asset?.releaseId ?? layer.releaseId,
+        productId: layer.productId ?? asset?.product,
+        modality: layer.modality ?? asset?.modalities[0],
+        coverageRole: layer.coverageRole,
+        assetIds: asset ? [asset.id] : layer.assetIds,
+        ...(asset ? { assetId: asset.id, assetName: asset.name } : {}),
+        pixels: layer.pixels,
+        byAsset: [],
+        status: coverageStatus(layer.status),
+        source: "warehouse",
+        message: layer.message,
+        nside,
+        nativeOrders: layer.nativeOrders,
+        availableOrders: layer.availableOrders,
+        ...(layer.maxOrder === undefined ? {} : { maxOrder: layer.maxOrder }),
+        precision: layer.precision,
+        state: layer.state,
+      };
+    });
+    const layersByKey = new Map<string, AstroCoverageLayer>();
+    warehouseLayers.forEach((layer) => {
+      const asset = assetForLayer(layer.layerId);
+      const key = asset ? `asset:${asset.id}` : `warehouse:${layer.layerId}`;
+      layersByKey.set(key, { ...layer, key });
+    });
+    artifactLayers.forEach((layer) => {
+      const asset = layer.assetId ? knownAssets.find((candidate) => candidate.id === layer.assetId) : assetForLayer(layer.layerId);
+      const assetKey = asset ? `asset:${asset.id}` : undefined;
+      const existingKey = assetKey ?? [...layersByKey.keys()].find((candidate) => layersByKey.get(candidate)?.layerId === layer.layerId);
+      const key = existingKey ?? layer.key;
+      const existing = layersByKey.get(key);
+      layersByKey.set(key, existing ? mergeCoverageLayers(existing, layer, key) : { ...layer, key });
+    });
+    const layers = [...layersByKey.values()];
+    response.json({
+      ...local,
+      status: aggregateCoverageStatus([
+        coverageStatus(local.status),
+        ...(warehouse.status === "error" ? ["error" as const] : warehouse.status === "unavailable" ? ["unavailable" as const] : []),
+        ...layers.map((layer) => coverageStatus(layer.status)),
+      ]),
+      index: hasActiveWarehouseCoverage(warehouse.layers) ? warehouse.index : local.index,
+      pixels: [...new Set([...local.pixels, ...layers.flatMap((layer) => layer.pixels)])].sort((left, right) => left - right),
+      layers,
+      ...(warehouse.message ? { message: [local.message, warehouse.message].filter(Boolean).join("; ") } : {}),
+    });
   } catch (error) {
     sendApiError(response, error);
   }
@@ -1065,9 +1404,11 @@ async function start(): Promise<void> {
   await dataCatalog.initialize();
   await connectors.initialize();
   await connectorRuns.initialize();
+  const recoveredLocalScans = await localCsvScans.recoverInterruptedRuns();
+  if (recoveredLocalScans) console.warn(`Marked ${recoveredLocalScans} interrupted local CSV scan(s) as failed`);
   await loadResourceCatalogConfig();
   await resourcePackages.initialize();
-  flinkScans.start();
+  warehouseScans.start();
 
   httpServer = app.listen(port, host, () => {
     console.log(`astro-data-workspace listening on http://${host}:${port}`);
@@ -1081,7 +1422,7 @@ void start().catch(async (error) => {
 });
 
 async function shutdown(): Promise<void> {
-  flinkScans.stop();
+  warehouseScans.stop();
   if (httpServer) await new Promise<void>((resolve) => httpServer!.close(() => resolve()));
   await metadataStore.close();
   process.exit(0);

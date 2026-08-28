@@ -14,3 +14,21 @@ spec:
   storageClassName: {{ . | quote }}
   {{- end }}
 {{- end }}
+{{- if and .Values.dataWarehouse.enabled (not .Values.dataWarehouse.evidence.existingClaim) }}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "astro-data-workspace.warehouseEvidenceClaim" . }}
+  labels:
+    {{- include "astro-data-workspace.labels" . | nindent 4 }}
+    atlas.zhejianglab.org/evidence: "true"
+spec:
+  accessModes: {{ toYaml .Values.dataWarehouse.evidence.accessModes | nindent 4 }}
+  resources:
+    requests:
+      storage: {{ .Values.dataWarehouse.evidence.size }}
+  {{- with .Values.dataWarehouse.evidence.storageClass }}
+  storageClassName: {{ . | quote }}
+  {{- end }}
+{{- end }}

@@ -40,6 +40,10 @@ spec:
               value: 0.0.0.0
             - name: PORT
               value: "3000"
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
             - name: ASTRO_STATE_ROOT
               value: /state
             - name: ASTRO_DATA_CATALOG_STATE
@@ -95,21 +99,40 @@ spec:
               value: {{ .Values.search.index.object | quote }}
             - name: ASTRO_ES_COVERAGE_INDEX
               value: {{ .Values.search.index.coverage | quote }}
+            - name: ASTRO_ES_TIMEOUT_MS
+              value: {{ .Values.search.timeoutMs | quote }}
             - name: ASTRO_LOCAL_SCAN_ENABLED
               value: {{ .Values.search.localScanEnabled | quote }}
+            - name: ASTRO_DATA_WAREHOUSE_ENABLED
+              value: {{ .Values.dataWarehouse.enabled | quote }}
+            - name: ASTRO_USER_MOC_ROOT
+              value: /state/user-mocs
             {{- if .Values.dataWarehouse.enabled }}
-            - name: ASTRO_FLINK_NAMESPACE
-              value: {{ .Values.dataWarehouse.namespace | quote }}
-            - name: ASTRO_FLINK_SECRET_NAMESPACE
-              value: {{ .Values.dataWarehouse.namespace | quote }}
-            - name: ASTRO_FLINK_POLL_MS
+            - name: ASTRO_WAREHOUSE_NAMESPACE
+              value: {{ include "astro-data-workspace.warehouseNamespace" . | quote }}
+            - name: ASTRO_WAREHOUSE_POLL_MS
               value: {{ .Values.dataWarehouse.pollIntervalMs | quote }}
-            - name: ASTRO_FLINK_ES_HOST
-              value: {{ .Values.dataWarehouse.elasticsearch.host | quote }}
-            - name: ASTRO_FLINK_ES_PORT
-              value: {{ .Values.dataWarehouse.elasticsearch.port | quote }}
-            - name: ASTRO_FLINK_ES_SCHEMA
-              value: {{ .Values.dataWarehouse.elasticsearch.schema | quote }}
+            - name: ASTRO_WAREHOUSE_ES_URL
+              {{- if .Values.dataWarehouse.elasticsearch.url }}
+              value: {{ .Values.dataWarehouse.elasticsearch.url | quote }}
+              {{- else }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.dataWarehouse.elasticsearch.existingSecret | quote }}
+                  key: {{ .Values.dataWarehouse.elasticsearch.existingSecretKey | quote }}
+              {{- end }}
+            - name: ASTRO_WAREHOUSE_LAYER_INDEX
+              value: {{ .Values.dataWarehouse.elasticsearch.layerIndex | quote }}
+            - name: ASTRO_WAREHOUSE_FILE_INDEX
+              value: {{ .Values.dataWarehouse.elasticsearch.fileIndex | quote }}
+            - name: ASTRO_WAREHOUSE_COVERAGE_INDEX
+              value: {{ .Values.dataWarehouse.elasticsearch.coverageIndex | quote }}
+            - name: ASTRO_WAREHOUSE_EVIDENCE_CLAIM
+              value: {{ include "astro-data-workspace.warehouseEvidenceClaim" . | quote }}
+            - name: ASTRO_WAREHOUSE_EVIDENCE_MOUNT_PATH
+              value: {{ .Values.dataWarehouse.evidence.mountPath | quote }}
+            - name: ASTRO_WAREHOUSE_SCANNER_IMAGE
+              value: {{ .Values.dataWarehouse.scannerImage | quote }}
             {{- end }}
             {{- with .Values.env }}
             {{- toYaml . | nindent 12 }}
@@ -142,16 +165,16 @@ spec:
                     fetch(endpoint, { headers, signal: AbortSignal.timeout(1500) }),
                   ]).then(([app, search]) => process.exit(app.ok && search.ok ? 0 : 1)).catch(() => process.exit(1));
             periodSeconds: 5
-            timeoutSeconds: 2
-            failureThreshold: 3
+            timeoutSeconds: 5
+            failureThreshold: 6
           livenessProbe:
             httpGet:
               path: /healthz
               port: http
             initialDelaySeconds: 10
             periodSeconds: 10
-            timeoutSeconds: 2
-            failureThreshold: 3
+            timeoutSeconds: 5
+            failureThreshold: 6
           resources: {{ toYaml .Values.resources | nindent 12 }}
           securityContext: {{ toYaml .Values.containerSecurityContext | nindent 12 }}
           volumeMounts:
@@ -159,6 +182,10 @@ spec:
               mountPath: /state
             - name: tmp
               mountPath: /tmp
+            {{- if .Values.dataWarehouse.enabled }}
+            - name: warehouse-evidence
+              mountPath: {{ .Values.dataWarehouse.evidence.mountPath | quote }}
+            {{- end }}
             {{- if .Values.localData.enabled }}
             - name: local-data
               mountPath: /data/local
@@ -177,6 +204,11 @@ spec:
           {{- end }}
         - name: tmp
           emptyDir: {}
+        {{- if .Values.dataWarehouse.enabled }}
+        - name: warehouse-evidence
+          persistentVolumeClaim:
+            claimName: {{ include "astro-data-workspace.warehouseEvidenceClaim" . | quote }}
+        {{- end }}
         {{- if .Values.localData.enabled }}
         - name: local-data
           {{- if .Values.localData.existingClaim }}

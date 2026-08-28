@@ -194,6 +194,24 @@ test("explicit catalog sync trusts v3 metadata without downloading package archi
   }
 });
 
+test("catalog sync accepts sparse release labels and falls back to the release id", async () => {
+  const paths = await fixture();
+  try {
+    const catalogPath = paths.catalogUrl.replace("file://", "");
+    const catalog = JSON.parse(await readFile(catalogPath, "utf8")) as { packages: Array<{ releaseLabels: Record<string, string> }> };
+    delete catalog.packages[0]!.releaseLabels["release-b"];
+    await writeFile(catalogPath, `${JSON.stringify(catalog, null, 2)}\n`, "utf8");
+
+    const status = await paths.manager.sync();
+    assert.equal(status.available, true);
+    const record = resourcePackageSurveyRecords([paths.manager.get("public-legacy-surveys-footprints")])[0]!;
+    assert.equal(record.releases.find((release) => release.id === "release-a")?.label, "RELEASE-A");
+    assert.equal(record.releases.find((release) => release.id === "release-b")?.label, "release-b");
+  } finally {
+    await rm(paths.directory, { recursive: true, force: true });
+  }
+});
+
 test("resource packages list lifecycle status and survive a registry restart", async () => {
   const paths = await fixture();
   try {
@@ -227,6 +245,29 @@ test("resource packages list lifecycle status and survive a registry restart", a
     await restarted.initialize();
     assert.equal(restarted.get("public-legacy-surveys-footprints").status, "not_installed");
     assert.equal(restarted.get("public-galex-footprints").status, "active");
+  } finally {
+    await rm(paths.directory, { recursive: true, force: true });
+  }
+});
+
+test("exposes only manifest-declared native MOCs from an installed package", async () => {
+  const paths = await fixture();
+  try {
+    await waitForJob(paths.manager, paths.manager.install("public-legacy-surveys-footprints"));
+    const layers = await paths.manager.mocLayers("public-legacy-surveys-footprints");
+    assert.deepEqual(layers.map((layer) => ({ layerId: layer.layerId, releaseId: layer.releaseId, path: layer.path })), [
+      { layerId: "legacy-surveys-coverage", releaseId: "release-a", path: "mocs/legacy-surveys-coverage.moc.fits" },
+    ]);
+    assert.equal(layers[0]?.byteLength, fitsMoc().length);
+    const artifact = await paths.manager.mocArtifact("public-legacy-surveys-footprints", "legacy-surveys-coverage");
+    assert.equal((await readFile(artifact.filePath)).length, fitsMoc().length);
+    assert.equal(artifact.sha256, createHash("sha256").update(fitsMoc()).digest("hex"));
+    const original = await readFile(artifact.filePath);
+    const tampered = Buffer.from(original);
+    tampered[tampered.length - 1] = tampered[tampered.length - 1]! ^ 1;
+    await writeFile(artifact.filePath, tampered);
+    await assert.rejects(() => paths.manager.mocArtifact("public-legacy-surveys-footprints", "legacy-surveys-coverage"), /SHA-256 does not match/);
+    await assert.rejects(() => paths.manager.mocArtifact("public-legacy-surveys-footprints", "../outside"), /MOC layer not found/);
   } finally {
     await rm(paths.directory, { recursive: true, force: true });
   }
@@ -450,6 +491,31 @@ test("updating a package preserves only selected releases still installed", asyn
     assert.deepEqual(record.availableReleaseIds, ["release-b", "release-c"]);
     assert.deepEqual(record.activeReleaseIds, ["release-b"]);
     assert.equal(record.activeReleaseIds.includes("release-c"), false);
+  } finally {
+    await rm(paths.directory, { recursive: true, force: true });
+  }
+});
+
+test("same-version catalog checksum changes preserve the old install as update available", async () => {
+  const paths = await fixture();
+  try {
+    await waitForJob(paths.manager, paths.manager.install("public-legacy-surveys-footprints"));
+    const catalogPath = paths.catalogUrl.replace("file://", "");
+    const catalog = JSON.parse(await readFile(catalogPath, "utf8")) as { packages: Array<{ id: string; sha256: string }> };
+    catalog.packages[0]!.sha256 = "0".repeat(64);
+    await writeFile(catalogPath, `${JSON.stringify(catalog, null, 2)}\n`, "utf8");
+
+    const status = await paths.manager.sync();
+    assert.equal(status.available, true);
+    assert.equal(paths.manager.get("public-legacy-surveys-footprints").status, "update_available");
+
+    const restarted = new ResourcePackageManager({ catalogUrl: paths.catalogUrl, root: paths.root, statePath: paths.statePath });
+    await restarted.initialize();
+    assert.equal(restarted.get("public-legacy-surveys-footprints").status, "update_available");
+    await assert.rejects(
+      () => restarted.setActive([{ packageId: "public-legacy-surveys-footprints", releaseIds: ["release-a"] }]),
+      /checksum must be current/,
+    );
   } finally {
     await rm(paths.directory, { recursive: true, force: true });
   }

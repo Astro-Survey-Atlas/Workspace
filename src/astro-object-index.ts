@@ -4,6 +4,7 @@ import {
   type LocalScanDocument,
 } from "./local-scan.js";
 import { COVERAGE_ROLES, DATA_ORIGINS, SOURCE_TIERS, type CoverageDataOrigin, type CoverageRole, type CoverageSourceTier } from "./assets-core.js";
+import { parseElasticsearchEndpoint } from "./es-endpoint.js";
 
 export const ASTRO_OBJECT_INDEX = LOCAL_OBJECT_INDEX;
 export const ASTRO_COVERAGE_INDEX = LOCAL_COVERAGE_INDEX;
@@ -253,10 +254,6 @@ class ElasticsearchUnavailableError extends Error {
     super(message);
     this.name = "ElasticsearchUnavailableError";
   }
-}
-
-function normalizeBaseUrl(value: string): string {
-  return value.trim().replace(/\/+$/, "");
 }
 
 function normalizeIndex(value: unknown, name: string, fallback: string): string {
@@ -1069,9 +1066,12 @@ export class AstroObjectIndexService {
   readonly #objectIndex: string;
   readonly #coverageIndex: string;
   readonly #timeoutMs: number;
+  readonly #authorization?: string;
 
   constructor(options: AstroObjectIndexOptions = {}) {
-    this.#baseUrl = normalizeBaseUrl(options.baseUrl ?? process.env.ASTRO_ES_URL ?? "");
+    const endpoint = parseElasticsearchEndpoint(options.baseUrl ?? process.env.ASTRO_ES_URL ?? "");
+    this.#baseUrl = endpoint.url ?? "";
+    this.#authorization = endpoint.authorization;
     this.#objectIndex = normalizeIndex(
       options.objectIndex ?? process.env.ASTRO_ES_OBJECT_INDEX,
       "objectIndex",
@@ -1334,6 +1334,7 @@ export class AstroObjectIndexService {
         headers: {
           Accept: "application/json",
           "Content-Type": contentType,
+          ...(this.#authorization ? { Authorization: this.#authorization } : {}),
         },
         body,
         signal: controller.signal,
@@ -1364,12 +1365,17 @@ export class AstroObjectIndexService {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), this.#timeoutMs);
     try {
-      const exists = await fetch(`${this.#baseUrl}/${encodedIndex}`, { method: "HEAD", signal: controller.signal });
+      const headers = this.#authorization ? { Authorization: this.#authorization } : undefined;
+      const exists = await fetch(`${this.#baseUrl}/${encodedIndex}`, { method: "HEAD", ...(headers ? { headers } : {}), signal: controller.signal });
       if (exists.ok) return;
       if (exists.status !== 404) throw new Error(`Elasticsearch index check returned HTTP ${exists.status}: ${index}`);
       const created = await fetch(`${this.#baseUrl}/${encodedIndex}`, {
         method: "PUT",
-        headers: { Accept: "application/json", "Content-Type": "application/json" },
+        headers: {
+          Accept: "application/json",
+          "Content-Type": "application/json",
+          ...(this.#authorization ? { Authorization: this.#authorization } : {}),
+        },
         body: JSON.stringify({ mappings }),
         signal: controller.signal,
       });
