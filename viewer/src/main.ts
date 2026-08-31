@@ -14,6 +14,8 @@ import {
   type WorkspaceAssetCoverageResponse,
   type WorkspaceCapabilities,
   type RemoteCoverageScanInput,
+  type DataAssetOperationalStatusResponse,
+  type SkyOverlapResponse,
 } from "./api";
 import { Healpix } from "healpixjs";
 import { cartesianToRaDec, raDecToCartesian } from "./coordinates";
@@ -28,6 +30,7 @@ import {
   type SurveyLayerSelection,
   type SurveyLayerState,
   type SurveyObjectPoint,
+  type SurveyLayerOverlapComponent,
   type WorkspaceCoverageLayer,
 } from "./survey-layer-viewer";
 import type { AssetsSurveyRelease, PublicResourcePackage, ResourceCatalogStatus } from "../../src/resource-packages";
@@ -70,10 +73,28 @@ function formatBytes(value: number): string {
 
 const PROJECT_STATE_LABELS: Record<DataAssetRecord["projectState"], string> = {
   public_reference: "公开参考",
-  acquired: "已掌握",
+  acquired: "已获取",
   processed: "已加工",
   deliverable: "可交付",
   planned: "计划中",
+};
+
+const COVERAGE_STATE_LABELS: Record<string, string> = {
+  not_started: "未开始",
+  pending: "处理中",
+  failed: "失败",
+  ready: "已建立",
+  empty: "已完成但为空",
+  unavailable: "不可用",
+};
+
+const NEXT_ACTION_LABELS: Record<string, string> = {
+  scan_local: "扫描本地文件",
+  scan_remote: "提交远程扫描",
+  retry: "重试上次扫描",
+  configure_connector: "配置 Connector",
+  configure_index: "配置空间索引",
+  none: "无需操作",
 };
 
 function projectAssetCounts(): Record<DataAssetRecord["projectState"], number> {
@@ -103,6 +124,30 @@ function renderProjectMetrics(): void {
   metrics.forEach(([labelId, valueId, state]) => {
     byId(labelId).textContent = PROJECT_STATE_LABELS[state as DataAssetRecord["projectState"]].toUpperCase();
     byId(valueId).textContent = formatInteger(counts[state as DataAssetRecord["projectState"]]);
+  });
+}
+
+function renderCoverageMetrics(): void {
+  const publicCount = new Set((surveyFootprints?.footprints ?? []).map((footprint) => `${footprint.surveyId}:${footprint.releaseId}:${footprint.product}`)).size;
+  const workspaceCount = [...workspaceAssetLayers.values()].filter((layer) => layer.pixels.length > 0 && layer.status === "ready").length
+    + legacyWorkspaceLayers.filter((layer) => layer.pixels.length > 0 && layer.status === "ready").length
+    + [...workspaceExtraLayers.values()].filter((layer) => layer.pixels.length > 0 && layer.status === "ready").length;
+  const statuses = [...coverageStatusesByAsset.values()];
+  const pending = statuses.filter((status) => status.coverage === "pending").length
+    + [...workspaceExtraLayers.values()].filter((layer) => layer.status === "pending").length;
+  const failed = statuses.filter((status) => status.coverage === "failed").length
+    + [...workspaceExtraLayers.values()].filter((layer) => layer.status === "error").length;
+  const queryable = statuses.filter((status) => status.objects === "queryable").length;
+  const values: Array<[string, string, number]> = [
+    ["metric-one", "PUBLIC", publicCount],
+    ["metric-two", "WORKSPACE", workspaceCount],
+    ["metric-three", "PENDING", pending],
+    ["metric-four", "FAILED", failed],
+    ["metric-five", "OBJECT-QUERYABLE", queryable],
+  ];
+  values.forEach(([valueId, label, value]) => {
+    byId(`${valueId}-label`).textContent = label;
+    byId(valueId).textContent = formatInteger(value);
   });
 }
 
@@ -275,6 +320,7 @@ let visibleSurveyIds = new Set<string>();
 let visibleAssetIds = new Set<string>();
 let assetVisibilityPreferenceRestored = false;
 const workspaceAssetLayers = new Map<string, WorkspaceCoverageLayer & { assetId: string; objectCount?: number; coverageStatus: WorkspaceAssetCoverageResponse["status"] }>();
+const coverageStatusesByAsset = new Map<string, DataAssetOperationalStatusResponse>();
 let legacyWorkspaceLayers: WorkspaceCoverageLayer[] = [];
 const workspaceExtraLayers = new Map<string, WorkspaceCoverageLayer>();
 const userMocArtifacts = new Map<string, UserMocArtifact>();
@@ -288,6 +334,8 @@ let layerLayoutMode: SurveyLayerLayoutMode = "overlap";
 let layerInteractionMode: SurveyLayerInteractionMode = "inspect";
 let hoverDismissTimer: ReturnType<typeof setTimeout> | null = null;
 let layerViewer: SurveyLayerViewer | null = null;
+let overlapResponse: SkyOverlapResponse | null = null;
+let overlapModeActive = false;
 let aladinExplorer: AladinExplorer | null = null;
 let aladinSnapshot: AladinExplorerSnapshot | null = null;
 let latestAladinStatus: AladinExplorerStatus | null = null;
@@ -1183,20 +1231,119 @@ function renderLayerState(state: SurveyLayerState): void {
     ].map((value) => value.toFixed(4)).join(",");
   } else delete canvas.dataset.selectionBounds;
   byId("camera-distance").textContent = `${state.cameraDistance.toFixed(2)} R`;
-  byId("layer-visible-output").textContent = `${state.layerDepths.length} ACTIVE · ${state.visibleSurveyIds.length} PUBLIC · ${state.visibleAssetIds.length} OWNED · ${state.visibleWorkspaceLayerKeys.length} REMOTE`;
+  const visibleSources = state.visibleSurveyIds.length + state.visibleAssetIds.length + state.visibleWorkspaceLayerKeys.length;
+  byId("layer-visible-output").textContent = `${visibleSources} SOURCES · ${formatInteger(state.visibleCellCount)} CELLS`;
   renderRegionSceneLegend(state);
   setActiveButtons("[data-layer-layout]", (button) => button.dataset.layerLayout === state.layoutMode);
   byId("legend-min").textContent = state.layoutMode === "layers" ? "图层内侧" : "1 SURVEY";
   byId("legend-max").textContent = state.layoutMode === "layers" ? "图层外侧" : "MOST OVERLAP";
   byId("scene-frame-label").textContent = "ICRS";
-  byId("scene-mode-value").textContent = "PUBLIC + OWNED";
-  byId("scene-badge").textContent = state.selectedCellCount ? `${state.selectedCellCount} 个已选区块` : "天球概览";
+  byId("scene-mode-value").textContent = overlapModeActive ? "G · OVERLAP" : "PUBLIC + OWNED";
+  byId("scene-badge").textContent = overlapModeActive ? "天区重合" : state.selectedCellCount ? `${state.selectedCellCount} 个已选区块` : "天球概览";
   byId("layer-selection-count").textContent = state.selectedCellCount ? `${state.selectedCellCount} CELLS` : "NO CELL";
   byId("object-status").textContent = `${formatInteger(state.occupiedCellCount)} COVERAGE CELLS`;
   const backButton = byId<HTMLButtonElement>("drill-back-button");
   backButton.disabled = true;
   backButton.setAttribute("aria-label", "返回上一级天区");
   backButton.title = "返回上一级天区";
+}
+
+function renderOverlapSummary(result: SkyOverlapResponse): void {
+  const sourceLabels = (result.sources ?? []).map((source) => source.label).join(" / ") || "当前可见来源";
+  inspectorRows("G · 天区重合", [
+    ["来源", sourceLabels],
+    ["参与来源", formatInteger(result.sourceIds.length)],
+    ["重合区块", formatInteger(result.components.length)],
+    ["HEALPix 单元", formatInteger(result.pixels.length)],
+    ["状态", result.status === "ready" ? "已计算" : "没有共同覆盖"],
+  ]);
+}
+
+function renderOverlapComponent(component: SurveyLayerOverlapComponent): void {
+  const selected = overlapResponse?.components.find((candidate) => candidate.id === component.id) ?? component;
+  layerViewer?.setActiveOverlapComponent(selected.id);
+  const sourceIds = selected.sourceIds ?? overlapResponse?.sourceIds ?? [];
+  const sourceLabels = (overlapResponse?.sources ?? [])
+    .filter((source) => sourceIds.includes(source.id))
+    .map((source) => source.label)
+    .join(" / ") || sourceIds.join(" / ") || "--";
+  const rows: Array<[string, string]> = [
+    ["模式", "G · 天区重合"],
+    ["区块", selected.id],
+    ["HEALPix 单元", formatInteger(selected.cells.length)],
+    ["来源", sourceLabels],
+    ...(selected.areaDeg2 === undefined ? [] : [["面积", `${selected.areaDeg2.toFixed(3)} deg²`] as [string, string]]),
+    ["反查", "正在读取来源文件…"],
+  ];
+  inspectorRows(`重合区块 ${selected.id}`, rows);
+  void workspaceApi.skyReverseLookup({ componentId: selected.id, sourceIds, nside: overlapResponse?.nside ?? 16 })
+    .then((lookup) => {
+      if (!overlapModeActive) return;
+      const actions: HTMLButtonElement[] = [];
+      if (lookup.files.length) {
+        const download = actionButton(`下载并登记 Connector（${lookup.files.length}）`, () => {
+          download.disabled = true;
+          void workspaceApi.submitCoverageDownload({ files: lookup.files, componentId: selected.id, sourceIds })
+            .then((job) => notifyWorkspace("重合来源下载已提交", `${job.id} · ${job.totalFiles} 个文件`, { tone: "success" }))
+            .catch((error) => notifyWorkspace("重合来源下载失败", error instanceof Error ? error.message : String(error), { tone: "error" }))
+            .finally(() => { download.disabled = false; });
+        });
+        actions.push(download);
+      }
+      inspectorRows(`重合区块 ${selected.id}`, [
+        ["模式", "G · 天区重合"],
+        ["区块", selected.id],
+        ["HEALPix 单元", formatInteger(selected.cells.length)],
+        ["来源", sourceLabels],
+        ...(selected.areaDeg2 === undefined ? [] : [["面积", `${selected.areaDeg2.toFixed(3)} deg²`] as [string, string]]),
+        ["反查文件", lookup.files.length ? `${lookup.files.length} 个可下载文件` : "未找到可下载文件"],
+        ...(lookup.unavailable.length ? [["不可下载", lookup.unavailable.map((entry) => entry.reason).join("；")] as [string, string]] : []),
+        ...(lookup.warnings?.length ? [["提示", lookup.warnings.join("；")] as [string, string]] : []),
+      ], actions);
+    })
+    .catch((error) => notifyWorkspace("重合区块反查失败", error instanceof Error ? error.message : String(error), { tone: "warning" }));
+}
+
+async function enterSkyOverlapMode(): Promise<void> {
+  if (!layerViewer || mode !== "layers") return;
+  overlapModeActive = true;
+  overlapResponse = null;
+  layerViewer.setOverlapMode(true);
+  canvas.dataset.overlapMode = "true";
+  byId("scene-mode-value").textContent = "G · OVERLAP";
+  byId("scene-badge").textContent = "天区重合";
+  try {
+    const state = layerViewer.state;
+    const result = await workspaceApi.skyOverlap({
+      nside: state.nside,
+      surveyIds: state.visibleSurveyIds.filter((surveyId) => surveyId !== "__unassigned__"),
+      assetIds: state.visibleAssetIds,
+      includePublic: true,
+      includeWorkspace: true,
+    });
+    if (!overlapModeActive) return;
+    overlapResponse = result;
+    layerViewer.setOverlapCells(result.nside, result.pixels);
+    layerViewer.setOverlapComponents(result.components);
+    renderOverlapSummary(result);
+    if (result.status === "empty") notifyWorkspace("当前可见来源没有共同覆盖", "请选择至少两个已建立覆盖的来源后重试。", { tone: "info" });
+  } catch (error) {
+    overlapModeActive = false;
+    layerViewer.setOverlapMode(false);
+    canvas.dataset.overlapMode = "false";
+    notifyWorkspace("天区重合计算失败", error instanceof Error ? error.message : String(error), { tone: "error" });
+  }
+}
+
+function exitSkyOverlapMode(): void {
+  if (!overlapModeActive) return;
+  overlapModeActive = false;
+  overlapResponse = null;
+  layerViewer?.setOverlapMode(false);
+  canvas.dataset.overlapMode = "false";
+  byId("scene-mode-value").textContent = "PUBLIC + OWNED";
+  byId("scene-badge").textContent = "天球概览";
+  inspectorRows("", []);
 }
 
 function renderRegionSceneLegend(state: SurveyLayerState): void {
@@ -1697,9 +1844,17 @@ async function loadWorkspaceAssetCoverage(scannedAssetId?: string): Promise<void
   const extraCoverageResult = await Promise.allSettled([
     workspaceApi.skyCoverage({ nside }),
     workspaceApi.userMocs(),
+    workspaceApi.dataAssetStatuses(),
   ]);
   const extraCoverage = extraCoverageResult[0]?.status === "fulfilled" ? extraCoverageResult[0].value : undefined;
   const listedMocs = extraCoverageResult[1]?.status === "fulfilled" ? extraCoverageResult[1].value : [];
+  const statusResult = extraCoverageResult[2];
+  if (statusResult?.status === "fulfilled") {
+    coverageStatusesByAsset.clear();
+    statusResult.value.forEach((status) => coverageStatusesByAsset.set(status.assetId, status));
+  } else {
+    [...coverageStatusesByAsset.keys()].filter((assetId) => !availableAssetIds.has(assetId)).forEach((assetId) => coverageStatusesByAsset.delete(assetId));
+  }
   userMocArtifacts.clear();
   listedMocs.forEach((artifact) => userMocArtifacts.set(artifact.id, artifact));
   workspaceExtraLayers.clear();
@@ -1758,6 +1913,7 @@ async function loadWorkspaceAssetCoverage(scannedAssetId?: string): Promise<void
   layerViewer?.setVisibleWorkspaceLayerKeys(visibleWorkspaceLayerKeys);
   layerViewer?.setVisibleSurveys(new Set([...visibleSurveyIds, ...(unassignedWorkspaceVisible ? ["__unassigned__"] : [])]));
   buildSurveyList();
+  renderCoverageMetrics();
   persistLayerPreferences();
   if (mode === "layers") {
     coverage.layers.filter((layer) => layer.coverageStatus === "error").forEach((layer) => {
@@ -1779,7 +1935,7 @@ async function refreshWorkspaceAssets(scannedAssetId?: string): Promise<void> {
   records.forEach((survey) => localSurveyRecordsById.set(survey.id, survey));
   await loadWorkspaceAssetCoverage(scannedAssetId);
   if (mode === "layers") {
-    renderProjectMetrics();
+    renderCoverageMetrics();
     const selected = selectedLayerAssetId ? dataAssets.find((asset) => asset.id === selectedLayerAssetId) : undefined;
     if (selected) renderLayerAssetDetails(selected);
   }
@@ -2308,6 +2464,10 @@ function assetHasS3Connector(asset: DataAssetRecord): boolean {
   return [asset.access, ...(asset.accesses ?? [])].some((access) => access.connector === "s3");
 }
 
+function assetHasLocalConnector(asset: DataAssetRecord): boolean {
+  return [asset.access, ...(asset.accesses ?? [])].some((access) => access.connector === "local");
+}
+
 function linkedS3Connectors(asset: DataAssetRecord, connectors: readonly ConnectorPublicRecord[]): ConnectorPublicRecord[] {
   const connectorIds = new Set([...(asset.connectorIds ?? []), ...[asset.access, ...(asset.accesses ?? [])].map((access) => access.connectorId).filter((id): id is string => Boolean(id))]);
   const connectorLocations = new Set([...(asset.connectorLocationKeys ?? []), ...[asset.access, ...(asset.accesses ?? [])].map((access) => access.uri)]);
@@ -2520,46 +2680,67 @@ function renderLayerAssetDetails(asset: DataAssetRecord): void {
   selectedLayerAssetId = asset.id;
   const layer = workspaceAssetLayers.get(asset.id);
   const scan = asset.scanSpec;
+  const operational = coverageStatusesByAsset.get(asset.id);
   const actions: HTMLButtonElement[] = [];
-  if (scan && asset.connectorIds?.length === 1) {
-    const scanButton = actionButton("扫描此资产", () => {
-      scanButton.disabled = true;
-      notifyWorkspace("正在提交用户资产扫描", asset.name, { tone: "info" });
-      void workspaceApi.executeDataAssetLocalScan(asset.id)
-        .then((run) => {
-          notifyWorkspace("用户资产扫描已提交", `${asset.name} · ${run.taskKind ?? "user_scan"}`, { tone: "success" });
-          return refreshWorkspaceAssets(asset.id).catch((error) => {
-            notifyWorkspace("用户资产覆盖刷新失败", error instanceof Error ? error.message : String(error), { tone: "warning" });
-          });
-        })
-        .catch((error) => {
-          notifyWorkspace("用户资产扫描失败", error instanceof Error ? error.message : String(error), { tone: "error" });
-        })
-        .finally(() => { scanButton.disabled = false; });
-    });
+  const runLocalScan = (): void => {
+    if (!scan) return;
+    const scanButton = actions.find((button) => button.dataset.action === "local-scan");
+    if (scanButton) scanButton.disabled = true;
+    notifyWorkspace("正在提交用户资产扫描", asset.name, { tone: "info" });
+    void workspaceApi.executeDataAssetLocalScan(asset.id)
+      .then((run) => {
+        notifyWorkspace("用户资产扫描已提交", `${asset.name} · ${run.taskKind ?? "user_scan"}`, { tone: "success" });
+        return refreshWorkspaceAssets(asset.id).catch((error) => {
+          notifyWorkspace("用户资产覆盖刷新失败", error instanceof Error ? error.message : String(error), { tone: "warning" });
+        });
+      })
+      .catch((error) => notifyWorkspace("用户资产扫描失败", error instanceof Error ? error.message : String(error), { tone: "error" }))
+      .finally(() => { if (scanButton) scanButton.disabled = false; });
+  };
+  if (scan && assetHasLocalConnector(asset) && (operational?.nextAction === "scan_local" || operational?.nextAction === "retry" || !operational)) {
+    const scanButton = actionButton(operational?.nextAction === "retry" ? "重试本地扫描" : "扫描本地文件", runLocalScan);
+    scanButton.dataset.action = "local-scan";
     actions.push(scanButton);
   }
-  if (assetHasS3Connector(asset)) {
+  if (assetHasS3Connector(asset) && (operational?.nextAction === "scan_remote" || operational?.nextAction === "retry" || operational?.nextAction === "configure_index" || !operational)) {
     const warehouseDisabled = workspaceCapabilities?.dataWarehouse.enabled === false || workspaceCapabilities?.dataWarehouse.configured === false;
-    const remoteButton = actionButton(warehouseDisabled ? "Warehouse 未启用" : "提交远程覆盖扫描", () => {
+    const remoteButton = actionButton(operational?.nextAction === "retry" ? "重试远程扫描" : warehouseDisabled ? "Warehouse 未启用" : "提交远程覆盖扫描", () => {
       void openRemoteCoverageDialog(asset);
     });
     remoteButton.disabled = warehouseDisabled;
     remoteButton.title = warehouseDisabled ? "当前 Workspace 未配置可用的 Warehouse；本地 ES 不受影响" : "使用 Warehouse 读取 S3 / OSS 并生成用户 MOC";
     actions.push(remoteButton);
   }
-  const coverage = layer?.coverageStatus === "pending" || layer?.status === "pending"
-    ? "覆盖扫描处理中"
-    : layer?.coverageStatus === "ready" && layer.pixels.length
-      ? `${layer.pixels.length} 个 HEALPix 单元 · ${formatInteger(layer.objectCount ?? 0)} 个对象`
-      : layer?.coverageStatus === "unavailable" ? "尚未连接 Elasticsearch"
-      : layer?.coverageStatus === "error" ? layer.message ?? "覆盖查询失败"
-        : "未建立覆盖";
+  if (operational?.nextAction === "configure_connector") {
+    actions.push(actionButton("配置 Connector", () => {
+      void activateMode("connectors").catch(showFatal);
+    }));
+  }
+  if (operational?.nextAction === "configure_index") {
+    const hint = actionButton("查看空间索引配置", () => {
+      notifyWorkspace("空间索引尚未配置", "请配置 ASTRO_ES_URL 或启用 Warehouse 后重新扫描。", { tone: "warning" });
+    });
+    hint.disabled = true;
+    actions.push(hint);
+  }
+  const coverageState = operational?.coverage ?? (layer?.coverageStatus === "pending" || layer?.status === "pending" ? "pending" : layer?.coverageStatus === "ready" && layer.pixels.length ? "ready" : layer?.coverageStatus === "error" ? "failed" : layer?.coverageStatus === "unavailable" ? "unavailable" : "not_started");
+  const coverage = coverageState === "pending"
+    ? "处理中"
+    : coverageState === "ready"
+      ? layer?.pixels.length ? `${formatInteger(layer.pixels.length)} 个 HEALPix 单元 · ${formatInteger(layer.objectCount ?? 0)} 个对象` : "已建立，但覆盖为空"
+      : coverageState === "empty" ? "已完成但为空"
+        : coverageState === "failed" ? operational?.message ?? layer?.message ?? "扫描失败"
+          : coverageState === "unavailable" ? operational?.message ?? "空间索引不可用"
+            : "未开始";
+  const nextAction = operational?.nextAction ? (NEXT_ACTION_LABELS[operational.nextAction] ?? operational.nextAction) : "--";
   inspectorRows(asset.name, [
     ["巡天 / 发布", `${asset.surveyId ?? "未关联"} / ${asset.releaseId ?? "未关联"}`],
     ["数据类型", asset.kind],
-    ["使用阶段", asset.projectState],
-    ["覆盖状态", coverage],
+    ["使用阶段", asset.projectState === "acquired" ? "已获取（已登记访问权，不代表已有空间覆盖）" : asset.projectState],
+    ["覆盖状态", `${COVERAGE_STATE_LABELS[coverageState] ?? coverageState}${coverage && coverage !== COVERAGE_STATE_LABELS[coverageState] ? ` · ${coverage}` : ""}`],
+    ["对象查询", operational?.objects === "queryable" ? "可查询" : operational?.objects === "unavailable" ? "索引不可用" : "尚未建立对象索引"],
+    ["下一步", nextAction],
+    ...(operational?.message ? [["说明", operational.message] as [string, string]] : []),
     ["CSV 文件", asset.sourceRelativePath ?? "未指定"],
     ["对象列", scan ? `${scan.objectIdColumn} · RA ${scan.raColumn} · Dec ${scan.decColumn}` : "未配置 CSV scanSpec"],
   ], actions);
@@ -2729,10 +2910,10 @@ function buildSurveyList(): void {
       metadata.textContent = `${survey.mission} · PUBLIC FOOTPRINT`;
     } else if (asset) {
       const layer = workspaceAssetLayers.get(asset.id);
-      count.textContent = layer?.status === "pending" || layer?.coverageStatus === "pending"
-        ? "PENDING"
-        : layer?.pixels.length ? `${formatInteger(layer.objectCount ?? 0)} OBJECTS` : "未建立覆盖";
-      metadata.textContent = `${asset.surveyId ?? "未设置巡天标签"} · ${asset.releaseId ?? "未设置发布标签"}`;
+      const operational = coverageStatusesByAsset.get(asset.id);
+      const coverageState = operational?.coverage ?? (layer?.status === "pending" || layer?.coverageStatus === "pending" ? "pending" : layer?.pixels.length ? "ready" : layer?.status === "error" || layer?.coverageStatus === "error" ? "failed" : "not_started");
+      count.textContent = COVERAGE_STATE_LABELS[coverageState] ?? coverageState;
+      metadata.textContent = [asset.surveyId ?? "未设置巡天标签", asset.releaseId ?? "未设置发布标签", layer?.objectCount !== undefined ? `${formatInteger(layer.objectCount)} OBJECTS` : undefined].filter(Boolean).join(" · ");
     } else if (workspaceLayer) {
       count.textContent = workspaceLayer.status === "ready" ? `${formatInteger(workspaceLayer.pixels.length)} CELLS` : workspaceLayer.status === "pending" ? "PENDING" : workspaceLayer.status === "error" ? "FAILED" : "UNAVAILABLE";
       metadata.textContent = [workspaceLayer.source === "warehouse" ? "WAREHOUSE" : "USER MOC", workspaceLayer.surveyId, workspaceLayer.releaseId, workspaceLayer.precision].filter(Boolean).join(" · ");
@@ -2899,14 +3080,14 @@ async function activateMode(nextMode: ViewMode): Promise<void> {
     byId("panel-kicker").textContent = "DATA COVERAGE";
     byId("panel-dataset-name").textContent = "数据覆盖";
     byId("dataset-state").textContent = "公开覆盖与用户资产状态已载入";
-    renderProjectMetrics();
+    renderCoverageMetrics();
     byId("scene-mode-label").textContent = "DATA COVERAGE";
     byId("scene-mode-value").textContent = "PUBLIC + OWNED";
     byId("scene-badge").textContent = "数据覆盖";
     byId("legend-min").textContent = "公开覆盖";
     byId("legend-max").textContent = "项目资产";
     byId("object-status").textContent = `${surveyFootprints?.footprints.length ?? 0} COVERAGE SOURCES`;
-     layerViewer = new SurveyLayerViewer(targetCanvas, surveyFootprints!, publicSurveyCards, renderSurveySelection, renderSurveyHover, renderSurveyInspection, renderSurveyContextMenu, renderLayerState, renderSurveyObjectPoint);
+     layerViewer = new SurveyLayerViewer(targetCanvas, surveyFootprints!, publicSurveyCards, renderSurveySelection, renderSurveyHover, renderSurveyInspection, renderSurveyContextMenu, renderLayerState, renderSurveyObjectPoint, renderOverlapComponent);
     applySceneBackground(storedSceneBackground());
     layerViewer.setLayoutMode(layerLayoutMode);
     layerViewer.setVisibleSurveys(visibleSurveyIds);
@@ -3049,6 +3230,15 @@ byId<HTMLButtonElement>("drill-back-button").addEventListener("click", () => {
   }
 });
 window.addEventListener("keydown", (event) => {
+  if (event.key === "g" || event.key === "G") {
+    if (event.metaKey || event.ctrlKey || event.altKey || aladinExplorer || mode !== "layers") return;
+    const target = event.target as HTMLElement | null;
+    if (target?.matches("input, textarea, select, [contenteditable='true']")) return;
+    event.preventDefault();
+    if (overlapModeActive) exitSkyOverlapMode();
+    else void enterSkyOverlapMode().catch(showFatal);
+    return;
+  }
   if (event.key === "f" || event.key === "F") {
     if (event.metaKey || event.ctrlKey || event.altKey || aladinExplorer || mode !== "layers") return;
     const target = event.target as HTMLElement | null;
@@ -3062,6 +3252,11 @@ window.addEventListener("keydown", (event) => {
   if (aladinExplorer || aladinSnapshot) {
     event.preventDefault();
     void leaveAladinExplorer().catch(showFatal);
+    return;
+  }
+  if (overlapModeActive) {
+    event.preventDefault();
+    exitSkyOverlapMode();
     return;
   }
   const target = event.target as HTMLElement | null;

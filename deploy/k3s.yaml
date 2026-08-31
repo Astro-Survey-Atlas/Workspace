@@ -414,7 +414,9 @@ spec:
             - name: ASTRO_CONNECTOR_RUN_STATE
               value: /state/connector-ingest-runs.json
             - name: ASTRO_LOCAL_CONNECTOR_ROOTS
-              value: /data/local:/catalogs
+              value: /data/local:/catalogs:/state/coverage-downloads
+            - name: ASTRO_COVERAGE_DOWNLOAD_ROOT
+              value: /state/coverage-downloads
             - name: ASTRO_WORKFLOW_ROOT
               value: /state/workflow-runs
             - name: ASTRO_USER_MOC_ROOT

@@ -4,7 +4,8 @@ services:
   workspace:
     environment:
       ASTRO_LOCAL_SCAN_ENABLED: "true"
-      ASTRO_LOCAL_CONNECTOR_ROOTS: /data/local
+      ASTRO_LOCAL_CONNECTOR_ROOTS: /data/local:/state/coverage-downloads
+      ASTRO_COVERAGE_DOWNLOAD_ROOT: /state/coverage-downloads
     volumes:
       - type: bind
         source: ${ASTRO_LOCAL_DATA_ROOT}

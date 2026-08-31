@@ -55,11 +55,11 @@
           <div class="dataset-state"><span></span><span id="dataset-state">索引载入中</span></div>
 
           <dl id="metric-grid" class="metric-grid">
-            <div><dt id="metric-one-label">PUBLIC REFERENCE</dt><dd id="metric-one">--</dd></div>
-            <div><dt id="metric-two-label">ACQUIRED</dt><dd id="metric-two">--</dd></div>
-            <div><dt id="metric-three-label">PROCESSED</dt><dd id="metric-three">--</dd></div>
-            <div><dt id="metric-four-label">DELIVERABLE</dt><dd id="metric-four">--</dd></div>
-            <div><dt id="metric-five-label">PLANNED</dt><dd id="metric-five">--</dd></div>
+            <div><dt id="metric-one-label">PUBLIC</dt><dd id="metric-one">0</dd></div>
+            <div><dt id="metric-two-label">WORKSPACE</dt><dd id="metric-two">0</dd></div>
+            <div><dt id="metric-three-label">PENDING</dt><dd id="metric-three">0</dd></div>
+            <div><dt id="metric-four-label">FAILED</dt><dd id="metric-four">0</dd></div>
+            <div><dt id="metric-five-label">OBJECT-QUERYABLE</dt><dd id="metric-five">0</dd></div>
           </dl>
         </div>
 
@@ -69,7 +69,7 @@
             <label class="field-label" for="catalog-kind-filter">数据类型</label>
             <select id="catalog-kind-filter" class="field-input"><option value="all">全部类型</option><option value="catalog">星表</option><option value="image">图像</option><option value="spectra">光谱</option><option value="cube">数据立方</option><option value="timeseries">时序</option><option value="other">其他</option></select>
             <label class="field-label" for="catalog-project-filter">项目阶段</label>
-            <select id="catalog-project-filter" class="field-input"><option value="all">全部阶段</option><option value="public_reference">公开参考</option><option value="acquired">已掌握</option><option value="processed">已加工</option><option value="deliverable">可交付</option><option value="planned">计划中</option></select>
+            <select id="catalog-project-filter" class="field-input"><option value="all">全部阶段</option><option value="public_reference">公开参考</option><option value="acquired">已获取</option><option value="processed">已加工</option><option value="deliverable">可交付</option><option value="planned">计划中</option></select>
             <p class="control-note">这里只显示当前工作区中由用户登记的资产。筛选只改变中栏结果；新增资产在中栏完成，编辑和删除位于右栏详情。</p>
           </section>
         </div>
@@ -95,7 +95,7 @@
 
         <div id="layer-controls" hidden>
           <section class="control-section layer-survey-section">
-            <div class="section-heading"><span>数据图层</span><output id="layer-visible-output">1 ACTIVE</output></div>
+            <div class="section-heading"><span>数据图层</span><output id="layer-visible-output">0 SOURCES · 0 CELLS</output></div>
             <div class="representation-control" role="group" aria-label="图层显示深度模式">
               <button type="button" class="representation-button active" data-layer-layout="overlap" aria-pressed="true" title="所有巡天共享同一 RA / Dec / HEALPix 位置">重合</button>
               <button type="button" class="representation-button" data-layer-layout="layers" aria-pressed="false" title="仅沿球面法线分开数据来源，不代表物理距离">径向展开</button>
@@ -138,7 +138,7 @@
           <input id="catalog-search" class="field-input" type="search" placeholder="搜索用户资产名称、巡天、发布、Tag、路径或 Connector" />
           <button id="catalog-new" class="primary-command compact-command" type="button"><i data-lucide="plus"></i><span>新增用户资产</span></button>
          </div>
-            <div class="catalog-columns"><span>数据资产</span><span>巡天</span><span>类型</span><span>使用阶段 <button class="status-help" type="button" aria-label="使用阶段说明"><i data-lucide="info" aria-hidden="true"></i><span class="sr-only">使用阶段说明</span><span class="status-help-tooltip" role="tooltip">计划中：已登记但尚未准备使用。已获取：已获得数据或访问权。已处理：已完成项目处理。可用：可作为项目交付或分析输入。公开参考：仅作为公开说明参考。</span></button></span></div>
+            <div class="catalog-columns"><span>数据资产</span><span>巡天</span><span>类型</span><span>使用阶段 <button class="status-help" type="button" aria-label="使用阶段说明"><i data-lucide="info" aria-hidden="true"></i><span class="sr-only">使用阶段说明</span><span class="status-help-tooltip" role="tooltip">计划中：已登记但尚未准备使用。已获取：已获得数据或访问权，但不代表已经建立空间覆盖。已处理：已完成项目处理。可用：可作为项目交付或分析输入。公开参考：仅作为公开说明参考。</span></button></span></div>
         <div id="catalog-asset-list" class="catalog-asset-list"></div>
         <div id="catalog-empty" class="catalog-empty" hidden>没有符合当前筛选条件的用户资产。</div>
         <footer class="catalog-stage-footer">可选 Warehouse 会读取这里登记的用户访问描述；Workspace 也可以在本地扫描并生成用户 MOC。</footer>

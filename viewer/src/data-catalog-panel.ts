@@ -17,7 +17,7 @@ function inputValue(id: string): string {
 
 const PROJECT_LABELS: Record<DataAssetProjectState, string> = {
   public_reference: "公开参考",
-  acquired: "已掌握",
+  acquired: "已获取",
   processed: "已加工",
   deliverable: "可用",
   planned: "计划中",

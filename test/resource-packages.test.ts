@@ -212,6 +212,22 @@ test("catalog sync accepts sparse release labels and falls back to the release i
   }
 });
 
+test("catalog accepts an explicit empty replacement list from dynamic Assets packages", async () => {
+  const paths = await fixture();
+  try {
+    const catalogPath = paths.catalogUrl.replace("file://", "");
+    const catalog = JSON.parse(await readFile(catalogPath, "utf8")) as { packages: Array<{ replacedBy?: string[] }> };
+    catalog.packages[0]!.replacedBy = [];
+    await writeFile(catalogPath, `${JSON.stringify(catalog, null, 2)}\n`, "utf8");
+    const manager = new ResourcePackageManager({ catalogUrl: paths.catalogUrl, root: paths.root, statePath: paths.statePath });
+    await manager.initialize();
+    assert.equal(manager.available, true);
+    assert.equal(manager.list()[0]?.replacedBy.length, 0);
+  } finally {
+    await rm(paths.directory, { recursive: true, force: true });
+  }
+});
+
 test("resource packages list lifecycle status and survive a registry restart", async () => {
   const paths = await fixture();
   try {
@@ -619,5 +635,43 @@ test("resource package manager options are honored and install is serialized per
     assert.equal(result.status, "completed");
   } finally {
     await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("a published JWST package is searchable through its installed MOC layer", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "astro-resource-packages-jwst-"));
+  try {
+    const packageRecord = await createPackage(directory, "public-jwst-footprints-a1b2c3d4e5f6", "jwst", { releases: ["jwst-dr1"] });
+    const catalogUrl = await writeCatalog(directory, [packageRecord]);
+    const manager = new ResourcePackageManager({ catalogUrl, root: path.join(directory, "resource-packages"), statePath: path.join(directory, "state.json") });
+    await manager.initialize();
+    const job = await waitForJob(manager, manager.install(packageRecord.id));
+    assert.equal(job.status, "completed");
+    const layers = await manager.mocLayers(packageRecord.id);
+    assert.equal(layers[0]?.surveyId, "jwst");
+    assert.equal(layers[0]?.releaseId, "jwst-dr1");
+    assert.equal(resourcePackageSurveyRecords([manager.get(packageRecord.id)])[0]?.id, "jwst");
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("an unavailable catalog keeps the last snapshot and active package selection", async () => {
+  const paths = await fixture();
+  try {
+    const snapshotRoot = path.join(paths.directory, "snapshot-state");
+    const manager = new ResourcePackageManager({ catalogUrl: paths.catalogUrl, root: paths.root, statePath: paths.statePath, snapshotRoot });
+    await manager.initialize();
+    await waitForJob(manager, manager.install("public-legacy-surveys-footprints"));
+    await manager.activate("public-legacy-surveys-footprints");
+    await writeFile(paths.catalogUrl.replace("file://", ""), "temporarily unavailable\n", "utf8");
+
+    const restarted = new ResourcePackageManager({ catalogUrl: paths.catalogUrl, root: paths.root, statePath: paths.statePath, snapshotRoot });
+    await restarted.initialize();
+    assert.equal(restarted.available, true);
+    assert.equal(restarted.get("public-legacy-surveys-footprints").active, true);
+    assert.equal((await restarted.activeFootprints()).footprints[0]?.surveyId, "legacy-surveys");
+  } finally {
+    await rm(paths.directory, { recursive: true, force: true });
   }
 });

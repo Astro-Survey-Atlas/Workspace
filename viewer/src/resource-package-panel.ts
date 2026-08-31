@@ -184,7 +184,10 @@ export class ResourcePackagePanel {
   }
 
   #catalogReleaseIds(record: PublicResourcePackage): string[] {
-    return [...new Set(record.releases)];
+    // Once installed, only releases backed by a verified local footprint may
+    // be selected. Before installation the catalog's declared releases are
+    // the remote choices; their geometry is checked during installation.
+    return [...new Set(record.installedVersion ? record.availableReleaseIds : record.releases)];
   }
 
   #renderFilters(): void {
@@ -218,7 +221,7 @@ export class ResourcePackagePanel {
   }
 
   #visibleRecords(): PublicResourcePackage[] {
-    return this.#records.filter((record) => {
+    const filtered = this.#records.filter((record) => {
       const publicReleaseSearch = (record.publicReleases ?? []).flatMap((release) => [release.id, release.label, ...release.products.map((product) => product.name)]);
       const searchable = [record.name, record.description, record.surveyId, ...record.modalities, ...record.wavelengths, ...record.productTypes, ...record.facilities, ...record.releases, ...publicReleaseSearch].join(" ").toLocaleLowerCase();
       if (this.#search && !searchable.includes(this.#search)) return false;
@@ -227,6 +230,17 @@ export class ResourcePackagePanel {
         return !selected?.size || record[field].some((value) => selected.has(value));
       });
     });
+    const group = (record: PublicResourcePackage): number => {
+      const loadable = this.#catalogReleaseIds(record).length > 0;
+      if (record.active) return 0;
+      if (record.installedVersion) return 1;
+      if (loadable) return 2;
+      return 3;
+    };
+    return filtered
+      .map((record, index) => ({ record, index, group: group(record) }))
+      .sort((left, right) => left.group - right.group || left.index - right.index)
+      .map(({ record }) => record);
   }
 
   #render(): void {
@@ -238,7 +252,30 @@ export class ResourcePackagePanel {
       this.#showSelected();
     }
     const list = byId("resource-package-list");
-    list.replaceChildren(...visible.map((record) => {
+    const groups: Array<{ key: string; label: string; records: PublicResourcePackage[] }> = [
+      { key: "active", label: "已应用到天球", records: [] },
+      { key: "installed", label: "已下载，尚未应用", records: [] },
+      { key: "remote", label: "未下载，目录中可用", records: [] },
+      { key: "unavailable", label: "暂无可加载几何", records: [] },
+    ];
+    visible.forEach((record) => {
+      const index = record.active ? 0 : record.installedVersion ? 1 : this.#catalogReleaseIds(record).length ? 2 : 3;
+      groups[index]!.records.push(record);
+    });
+    const rows = groups.flatMap((group) => {
+      if (!group.records.length) return [];
+      const section = document.createElement("section");
+      section.className = "resource-package-group";
+      section.dataset.resourceGroup = group.key;
+      const heading = document.createElement("header");
+      heading.className = "resource-package-group-heading";
+      const title = document.createElement("strong");
+      title.textContent = group.label;
+      const count = document.createElement("output");
+      count.textContent = String(group.records.length);
+      heading.append(title, count);
+      section.append(heading);
+      section.append(...group.records.map((record) => {
       const row = document.createElement("article");
       row.className = "resource-package-row";
       row.dataset.status = record.status;
@@ -323,7 +360,10 @@ export class ResourcePackagePanel {
       }
       row.append(toggle, identity, version, status, progress);
       return row;
-    }));
+      }));
+      return [section];
+    });
+    list.replaceChildren(...rows);
 
     const selectedPackages = this.#draftReleases.size;
     const dirtyPackages = this.#records.filter((record) => this.#packageIsDirty(record.id)).length;

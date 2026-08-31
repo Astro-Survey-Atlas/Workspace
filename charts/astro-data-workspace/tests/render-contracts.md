@@ -48,7 +48,10 @@ the bundled dependency. Invalid mode/dependency combinations must fail schema
 validation and the template guards. All modes must retain the legacy JSON paths
 on `/state` for one-time migration. Local data output must contain exactly one
 source volume at `/data/local`, a read-only mount, and
-`ASTRO_LOCAL_CONNECTOR_ROOTS=/data/local`; disabled output must contain neither.
+`ASTRO_LOCAL_CONNECTOR_ROOTS=/data/local:/state/coverage-downloads`; disabled
+output must omit the `/data/local` source volume and retain only the writable
+`ASTRO_LOCAL_CONNECTOR_ROOTS=/state/coverage-downloads` root for overlap
+downloads.
 Invalid local-data source combinations and a hostPath type other than
 `Directory` must fail schema validation and template guards. When
 `dataWarehouse.enabled=true`, output must contain only namespaced Workspace

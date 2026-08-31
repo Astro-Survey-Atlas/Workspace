@@ -9,6 +9,8 @@ import type { PublicResourcePackage, ResourceCatalogStatus, ResourcePackageJob, 
 import type { AstroCoverageLayer, AstroOverviewResponse, AstroSkyQueryInput, AstroSpatialSummary } from "../../src/astro-index";
 import type { UserMocArtifact } from "../../src/user-moc-artifacts";
 import type { CoverageJobSpec } from "../../src/coverage-jobs";
+import type { DataAssetCoverageState, DataAssetNextAction, DataAssetObjectState, DataAssetOperationalStatus } from "../../src/data-asset-status";
+import type { SkyOverlapComponent, SkyOverlapSource } from "../../src/sky-overlap";
 import type {
   AstroCellsQueryInput,
   AstroCellsQueryResult,
@@ -103,6 +105,9 @@ export interface WorkspaceAssetCoverageLayer extends Omit<AstroCoverageLayer, "k
   latestArtifactId?: string;
   state?: string;
   message?: string;
+  coverageState?: DataAssetCoverageState;
+  objectState?: DataAssetObjectState;
+  nextAction?: DataAssetNextAction;
 }
 
 export interface WorkspaceAssetCoverageResponse {
@@ -113,6 +118,44 @@ export interface WorkspaceAssetCoverageResponse {
   byAsset: WorkspaceCoverageBreakdown[];
   layers?: WorkspaceAssetCoverageLayer[];
   message?: string;
+}
+
+export interface DataAssetOperationalStatusResponse extends DataAssetOperationalStatus {
+  assetName?: string;
+}
+
+export interface SkyOverlapResponse {
+  status: "ready" | "empty";
+  order: number;
+  nside: number;
+  sourceIds: string[];
+  pixels: number[];
+  components: SkyOverlapComponent[];
+  sources?: SkyOverlapSource[];
+}
+
+export interface CoverageDownloadFile {
+  url: string;
+  name: string;
+  sizeBytes?: number;
+  sha256?: string;
+  sourceId?: string;
+}
+
+export interface CoverageDownloadJob {
+  id: string;
+  status: "queued" | "running" | "completed" | "failed" | "cancelled";
+  phase: "queued" | "downloading" | "verifying" | "registering" | "completed" | "failed" | "cancelled";
+  files: CoverageDownloadFile[];
+  downloadedFiles: number;
+  totalFiles: number;
+  downloadedBytes: number;
+  totalBytes: number;
+  outputConnectorId?: string;
+  outputPath?: string;
+  error?: string;
+  createdAt: string;
+  updatedAt: string;
 }
 
 export interface ResourceCatalogConfig extends ResourceCatalogStatus {
@@ -193,6 +236,9 @@ export const workspaceApi = {
   },
   async dataAssets(): Promise<DataAssetRecord[]> {
     return (await getJson<{ assets: DataAssetRecord[] }>("/api/data-assets")).assets;
+  },
+  async dataAssetStatuses(): Promise<DataAssetOperationalStatusResponse[]> {
+    return (await getJson<{ statuses: DataAssetOperationalStatusResponse[] }>("/api/data-assets/status")).statuses;
   },
   async dataAsset(id: string): Promise<DataAssetRecord> {
     return (await getJson<{ asset: DataAssetRecord }>(`/api/data-assets/${encodeURIComponent(id)}`)).asset;
@@ -343,6 +389,27 @@ export const workspaceApi = {
     if (input.survey) parameters.set("survey", input.survey);
     if (input.release) parameters.set("release", input.release);
     return getJson<WorkspaceAssetCoverageResponse>(`/api/sky/coverage?${parameters}`);
+  },
+  async skyOverlap(input: { sourceIds?: string[]; surveyIds?: string[]; assetIds?: string[]; nside?: number; includePublic?: boolean; includeWorkspace?: boolean }): Promise<SkyOverlapResponse> {
+    return postJson<SkyOverlapResponse>("/api/sky/overlap", input);
+  },
+  async skyOverlapDetails(input: { componentId: string; sourceIds: string[]; nside: number }): Promise<Record<string, unknown>> {
+    return postJson<Record<string, unknown>>("/api/sky/overlap/details", input);
+  },
+  async skyReverseLookup(input: { componentId?: string; sourceIds?: string[]; assetIds?: string[]; pixels?: number[]; nside?: number }): Promise<{ files: CoverageDownloadFile[]; unavailable: Array<{ sourceId: string; url?: string; reason: string }>; warnings?: string[]; sources: SkyOverlapSource[] }> {
+    return postJson<{ files: CoverageDownloadFile[]; unavailable: Array<{ sourceId: string; url?: string; reason: string }>; warnings?: string[]; sources: SkyOverlapSource[] }>("/api/sky/reverse-lookup", input);
+  },
+  async submitCoverageDownload(input: { files: CoverageDownloadFile[]; componentId?: string; sourceIds?: string[] }): Promise<CoverageDownloadJob> {
+    return (await postJson<{ job: CoverageDownloadJob }>("/api/coverage-downloads", input)).job;
+  },
+  async coverageDownloads(): Promise<CoverageDownloadJob[]> {
+    return (await getJson<{ jobs: CoverageDownloadJob[] }>("/api/coverage-downloads")).jobs;
+  },
+  async coverageDownload(id: string): Promise<CoverageDownloadJob> {
+    return (await getJson<{ job: CoverageDownloadJob }>(`/api/coverage-downloads/${encodeURIComponent(id)}`)).job;
+  },
+  async cancelCoverageDownload(id: string): Promise<CoverageDownloadJob> {
+    return (await postJson<{ job: CoverageDownloadJob }>(`/api/coverage-downloads/${encodeURIComponent(id)}/cancel`, {})).job;
   },
   async userMocs(): Promise<UserMocArtifact[]> {
     return (await getJson<{ artifacts: UserMocArtifact[] }>("/api/user-mocs")).artifacts;

@@ -182,6 +182,88 @@ order-4/order-8 投影送入天球展示。
 `maxOrder` 是 MOC Core/Warehouse layer 声明的权威上限，`availableOrders`
 只列出源数据实际提供的 order，二者不能互相推导。
 
+### 用户资产运行状态
+
+```http
+GET /api/data-assets/status
+```
+
+这是覆盖页使用的派生读模型，不会改写资产登记记录。每个用户资产返回：
+
+| 字段 | 值 | 含义 |
+| --- | --- | --- |
+| `coverage` | `not_started` / `pending` / `failed` / `ready` / `empty` / `unavailable` | 覆盖证据和最近一次扫描的综合状态 |
+| `objects` | `queryable` / `not_indexed` / `unavailable` | 对象索引是否能查询该资产 |
+| `nextAction` | `scan_local` / `scan_remote` / `retry` / `configure_connector` / `configure_index` / `none` | 当前可以执行的下一步 |
+
+`acquired`（界面显示为“已获取”）只表示资产已经登记了数据或访问权，
+不代表已经建立空间覆盖；只有 `coverage=ready` 才会把像元显示在用户天球层。
+旧资产中已经不存在的 Connector ID/location 不会被当作有效连接，状态会重新给出
+配置 Connector 的下一步。
+
+### 天区重合和反查
+
+```http
+POST /api/sky/overlap
+Content-Type: application/json
+
+{
+  "nside": 16,
+  "surveyIds": ["desi", "gaia"],
+  "assetIds": ["user-asset-123"],
+  "includePublic": true,
+  "includeWorkspace": true
+}
+```
+
+接口只对当前可见且已有像元证据的公共/工作区来源求交，返回共同像元和按
+HEALPix 四邻接拆分的 `components`（区块 ID、面积、边界和来源 ID）。
+Three.js 天球的 `G` 模式使用同一结果绘制动态虚线边界；点击区块可查询：
+
+```http
+POST /api/sky/overlap/details
+POST /api/sky/reverse-lookup
+```
+
+`componentId` 可代替 `pixels`。反查只返回已经确认可直接读取的 HTTP/HTTPS 文件
+URL；没有文件 URL、S3 凭据或不受支持协议的来源会放在 `unavailable`，不会伪装成
+可下载文件。Workspace 内置的受限爬虫会识别直链，并从小型 HTML/XML 目录提取
+数据文件链接；结果过多时只返回前 128 个并在 `warnings` 中说明。MOC JSON、普通
+说明页和无法确认文件类型的服务 URL 会保持不可下载状态。
+
+### 重合来源下载闭环
+
+```http
+POST /api/coverage-downloads
+Content-Type: application/json
+
+{
+  "componentId": "C01",
+  "sourceIds": ["public:desi:dr1:catalog"],
+  "files": [{
+    "url": "https://example.org/catalog.fits",
+    "name": "catalog.fits",
+    "sizeBytes": 1048576,
+    "sha256": "<sha256>"
+  }]
+}
+```
+
+提交返回 `202` 和任务 ID。Workspace 会限制文件名、单文件/总大小和 URL 协议，
+在服务器上下载并校验大小和 SHA-256；成功后把文件放到受管本地目录并自动登记
+一个新的 `local` Connector，任务的 `outputConnectorId`/`outputPath` 指向该闭环
+结果。可用下面的接口轮询或取消任务：
+
+```http
+GET  /api/coverage-downloads
+GET  /api/coverage-downloads/{jobId}
+POST /api/coverage-downloads/{jobId}/cancel
+```
+
+任务状态为 `queued`、`running`、`completed`、`failed` 或 `cancelled`，并带有
+`downloading`、`verifying`、`registering` 等阶段。下载任务始终创建新的 Connector；
+旧版的 `targetConnectorId` 参数会被明确拒绝，不会静默写入已有位置。
+
 ### Assets 原生 MOC
 
 ```http

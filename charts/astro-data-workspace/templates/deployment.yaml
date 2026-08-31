@@ -62,8 +62,13 @@ spec:
               value: /state/resource-package-state.json
             {{- if .Values.localData.enabled }}
             - name: ASTRO_LOCAL_CONNECTOR_ROOTS
-              value: /data/local
+              value: /data/local:/state/coverage-downloads
+            {{- else }}
+            - name: ASTRO_LOCAL_CONNECTOR_ROOTS
+              value: /state/coverage-downloads
             {{- end }}
+            - name: ASTRO_COVERAGE_DOWNLOAD_ROOT
+              value: /state/coverage-downloads
             - name: ASTRO_METADATA_STORE
               value: {{ ternary "sqlite" "postgres" (eq .Values.metadataStore.mode "sqlite") | quote }}
             {{- if eq .Values.metadataStore.mode "sqlite" }}

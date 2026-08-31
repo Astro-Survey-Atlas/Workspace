@@ -16,6 +16,7 @@ import { createConnectorCredentialStore, type StoredConnectorCredentials } from 
 import { ConnectorRegistry, connectorLocationKey, validateConnectorInput, type ConnectorCheckInput, type ConnectorPublicRecord, type ConnectorRecord, type ConnectorRegistrationInput } from "./connectors.js";
 import { ConnectorIngestRunCatalog, publicConnectorIngestRun, type ConnectorIngestRunFilter, type ConnectorIngestRunRecord, type ConnectorIngestRunStatus } from "./connector-history.js";
 import { DataCatalogRegistry, type DataAssetAccess, type DataAssetRecord, type DataAssetRegistrationInput } from "./data-catalog.js";
+import { deriveDataAssetOperationalStatus, type DataAssetCoverageEvidence, type DataAssetRunEvidence } from "./data-asset-status.js";
 import { ConnectorScanCapabilityError, ConnectorScanPreconditionError, DataWarehouseDisabledError, dataWarehouseEnabled, validateConnectorSelfScanBody } from "./warehouse-scan.js";
 import { createAstroMcpServer } from "./mcp.js";
 import { ResourceCatalogSyncError, ResourceCatalogUnavailableError, ResourcePackageManager, resourcePackageSurveyRecords, type ResourcePackageLoad } from "./resource-packages.js";
@@ -31,6 +32,9 @@ import { LocalCsvScanExecutor, LocalScanCapabilityError, LocalScanDisabledError,
 import { UserMocArtifactStore, type UserMocArtifact } from "./user-moc-artifacts.js";
 import { WarehouseIndexService, type WarehouseCoverageLayer } from "./warehouse-index.js";
 import { WarehouseScanService } from "./warehouse-scan.js";
+import { calculateSkyOverlap, type SkyOverlapSource } from "./sky-overlap.js";
+import { CoverageDownloadService, type CoverageDownloadFile } from "./coverage-downloads.js";
+import { discoverSourceFiles } from "./source-crawler.js";
 
 const projectRoot = fileURLToPath(new URL("../", import.meta.url));
 const port = Number(process.env.PORT ?? "3000");
@@ -51,6 +55,8 @@ const dataCatalogStatePath = process.env.ASTRO_DATA_CATALOG_STATE ?? path.join(s
 const connectorStatePath = process.env.ASTRO_CONNECTOR_STATE ?? path.join(stateRoot, "connectors.json");
 const connectorRunStatePath = process.env.ASTRO_CONNECTOR_RUN_STATE ?? path.join(stateRoot, "connector-ingest-runs.json");
 const localConnectorRoots = LocalConnectorRootsPolicy.fromEnvironment();
+const coverageDownloadRoot = path.resolve(process.env.ASTRO_COVERAGE_DOWNLOAD_ROOT ?? path.join(stateRoot, "coverage-downloads"));
+const coverageDownloadStatePath = path.resolve(process.env.ASTRO_COVERAGE_DOWNLOAD_STATE ?? path.join(stateRoot, "coverage-download-jobs.json"));
 const resourcePackageRoot = process.env.ASTRO_RESOURCE_PACKAGE_ROOT ?? path.join(stateRoot, "resource-packages");
 const resourcePackageStatePath = process.env.ASTRO_RESOURCE_PACKAGE_STATE ?? path.join(stateRoot, "resource-package-state.json");
 const resourceCatalogUrl = process.env.ASTRO_RESOURCE_CATALOG_URL ?? pathToFileURL(path.join(stateRoot, "assets-current", "catalog.json")).href;
@@ -109,6 +115,11 @@ const warehouseScans = new WarehouseScanService({
   warehouseEsUrl,
   pollMs: warehousePollMs,
   artifacts: userMocs,
+});
+const coverageDownloads = new CoverageDownloadService({
+  root: coverageDownloadRoot,
+  statePath: coverageDownloadStatePath,
+  registerConnector: (input) => connectors.register(input),
 });
 const workflowEngine = new WorkflowEngine(workflowStore, new McpCatalogQueryClient(catalogMcpUrl, catalogMcpTimeoutMs, 1));
 const agentService = new AgentService(workflowStore, workflowEngine);
@@ -258,7 +269,7 @@ async function validateConnectorIds(input: DataAssetRegistrationInput): Promise<
 
 function sendApiError(response: Response, error: unknown): void {
   const message = error instanceof Error ? error.message : String(error);
-  const notFound = message.startsWith("Dataset not found:") || message.startsWith("Data asset not found:") || message.startsWith("Connector not found:") || message.startsWith("Connector ingest run not found:") || message.startsWith("Coverage job not found:") || message.startsWith("Survey not found:") || message.startsWith("Public survey not found:") || message.startsWith("Resource package not found:") || message.startsWith("Resource package is not installed:") || message.startsWith("Resource package job not found:") || message.startsWith("Resource package MOC layer not found:") || message.startsWith("Resource package MOC artifact is not available:")
+  const notFound = message.startsWith("Dataset not found:") || message.startsWith("Data asset not found:") || message.startsWith("Connector not found:") || message.startsWith("Connector ingest run not found:") || message.startsWith("Coverage job not found:") || message.startsWith("Coverage download job not found:") || message.startsWith("Overlap component not found:") || message.startsWith("Survey not found:") || message.startsWith("Public survey not found:") || message.startsWith("Resource package not found:") || message.startsWith("Resource package is not installed:") || message.startsWith("Resource package job not found:") || message.startsWith("Resource package MOC layer not found:") || message.startsWith("Resource package MOC artifact is not available:")
     || message.startsWith("User MOC artifact file not found:")
     || message.startsWith("Workflow not found:")
     || message.startsWith("Workflow run not found:") || message.startsWith("Workflow artifact not found:") || message.startsWith("Agent session not found:");
@@ -353,6 +364,84 @@ app.get("/api/data-assets", async (request: Request, response: Response) => {
     // endpoint is deliberately limited to Atlas-owned user records.
     if (request.query.origin !== undefined) throw new RangeError("data asset origin filters are not supported");
     response.json({ assets: await Promise.all((await dataCatalog.list()).map(publicDataAsset)) });
+  } catch (error) {
+    sendApiError(response, error);
+  }
+});
+
+/**
+ * Return derived execution state for every user asset. The catalog remains a
+ * metadata registry; this endpoint is the workflow read model used by the
+ * coverage view and by clients that need to decide the next action.
+ */
+app.get("/api/data-assets/status", async (_request: Request, response: Response) => {
+  try {
+    const assets = await dataCatalog.list();
+    const [connectorRecords, runs] = await Promise.all([connectors.list(), connectorRuns.list()]);
+    const artifacts = await userMocs.list();
+    const artifactSelections = selectUserMocArtifacts(artifacts);
+    const warehouse = await warehouseIndex.coverage({
+      nside: ASTRO_OVERVIEW_NSIDE,
+      ...(assets.length ? { assetIds: assets.map((asset) => asset.id) } : {}),
+      layerIds: workspaceWarehouseLayerIds(assets, artifacts, runs),
+    });
+    const connectorById = new Map(connectorRecords.map((connector) => [connector.id, connector]));
+    const connectorByLocation = new Map(connectorRecords.map((connector) => [connector.locationKey, connector]));
+    const statuses = await Promise.all(assets.map(async (asset) => {
+      const accesses = [asset.access, ...(asset.accesses ?? [])];
+      const linked = [
+        ...(asset.connectorIds ?? []).map((id) => connectorById.get(id)),
+        ...(asset.connectorLocationKeys ?? []).map((key) => connectorByLocation.get(key)),
+        ...accesses.flatMap((access) => [
+          ...(access.connectorId ? [connectorById.get(access.connectorId)] : []),
+          ...(access.uri ? [connectorByLocation.get(access.uri)] : []),
+        ]),
+      ].filter((connector): connector is typeof connectorRecords[number] => Boolean(connector));
+      const uniqueLinked = [...new Map(linked.map((connector) => [connector.id, connector])).values()];
+      const latestRun = [...runs]
+        .filter((run) => run.assetId === asset.id || run.assetIds?.includes(asset.id))
+        .sort((left, right) => `${right.updatedAt ?? right.createdAt}\u0000${right.id}`.localeCompare(`${left.updatedAt ?? left.createdAt}\u0000${left.id}`))[0];
+      let coverage: DataAssetCoverageEvidence | undefined;
+      try {
+        const [legacy, local] = await Promise.all([
+          astroIndex.coverage({ nside: ASTRO_OVERVIEW_NSIDE, assetIds: [asset.id] }),
+          astroObjectIndex.queryCoverageFacts({ nside: ASTRO_OVERVIEW_NSIDE, assetIds: [asset.id] }),
+        ]);
+        const warehouseLayer = warehouse.layers.find((candidate) => warehouseLayerForAsset(candidate, asset));
+        const artifactSelection = [...artifactSelections.values()].find(({ latest }) => latest.layerId === workspaceLayerIdForAsset(asset.id)
+          || latest.layerId === asset.id
+          || latest.layerId === `user-${asset.id}`);
+        const mocLayer = artifactSelection
+          ? await artifactCoverageLayer(artifactSelection.renderable, ASTRO_OVERVIEW_NSIDE, asset, artifactSelection.latest)
+          : undefined;
+        coverage = {
+          status: aggregateCoverageStatus([
+            coverageStatus(legacy.status),
+            coverageStatus(local.status),
+            ...(warehouseLayer ? [coverageStatus(warehouseLayer.status)] : warehouse.status === "error" ? ["error" as const] : []),
+            ...(mocLayer ? [coverageStatus(mocLayer.status)] : []),
+          ]),
+          objectStatus: local.status,
+          latestMocStatus: mocLayer?.latestMocStatus,
+          pixels: [...new Set([...legacy.pixels, ...local.pixels, ...(warehouseLayer?.pixels ?? []), ...(mocLayer?.pixels ?? [])])],
+          objectCount: local.facts.reduce((sum, fact) => sum + fact.objectCount, 0),
+          message: [legacy.message, local.message, warehouseLayer?.message, mocLayer?.message].filter(Boolean).join("; ") || undefined,
+        };
+      } catch (error) {
+        coverage = { status: "unavailable", pixels: [], message: error instanceof Error ? error.message : String(error) };
+      }
+      const derived = deriveDataAssetOperationalStatus({
+        asset,
+        connectorKinds: uniqueLinked.map((connector) => connector.kind),
+        coverage,
+        latestRun: latestRun as DataAssetRunEvidence | undefined,
+        objectIndexConfigured: astroObjectIndex.configured,
+        localScanConfigured: localCsvScanEnabled && astroObjectIndex.configured,
+        warehouseConfigured: warehouseEnabled && warehouseIndex.configured,
+      });
+      return { ...derived, assetName: asset.name };
+    }));
+    response.json({ statuses });
   } catch (error) {
     sendApiError(response, error);
   }
@@ -905,6 +994,360 @@ app.post("/api/sky/objects/query", async (request: Request, response: Response) 
   }
 });
 
+interface SkyOverlapRequest {
+  nside?: unknown;
+  sourceIds?: unknown;
+  surveyIds?: unknown;
+  releaseIds?: unknown;
+  assetIds?: unknown;
+  includePublic?: unknown;
+  includeWorkspace?: unknown;
+}
+
+function stringArrayInput(value: unknown, name: string, maximum = 256): string[] | undefined {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value) || value.length > maximum || value.some((entry) => typeof entry !== "string" || !entry.trim() || entry.length > 160)) {
+    throw new RangeError(`${name} must be an array of non-empty strings`);
+  }
+  return [...new Set(value.map((entry) => entry.trim()))];
+}
+
+function booleanInput(value: unknown, name: string, fallback: boolean): boolean {
+  if (value === undefined) return fallback;
+  if (typeof value !== "boolean") throw new RangeError(`${name} must be a boolean`);
+  return value;
+}
+
+function overlapSourceIdForPublic(footprint: SurveyFootprintManifest["footprints"][number]): string {
+  return `public:${footprint.surveyId}:${footprint.releaseId}:${footprint.product}`;
+}
+
+function overlapSourceIdForAsset(assetId: string): string {
+  return `workspace:asset:${assetId}`;
+}
+
+function overlapSourceMatches(source: SkyOverlapSource, filters: {
+  sourceIds?: ReadonlySet<string>;
+  surveyIds?: ReadonlySet<string>;
+  releaseIds?: ReadonlySet<string>;
+  assetIds?: ReadonlySet<string>;
+}): boolean {
+  if (filters.sourceIds?.size && !filters.sourceIds.has(source.id)) return false;
+  if (filters.surveyIds?.size && (!source.surveyId || !filters.surveyIds.has(source.surveyId))) return false;
+  if (filters.releaseIds?.size && (!source.releaseId || !filters.releaseIds.has(source.releaseId))) return false;
+  // Asset filters scope workspace sources. Public footprints intentionally
+  // remain eligible so a mixed public/workspace overlap can be requested.
+  if (filters.assetIds?.size && source.kind === "workspace" && (!source.assetId || !filters.assetIds.has(source.assetId))) return false;
+  return true;
+}
+
+interface OverlapSourceContext {
+  nside: number;
+  sourceIds?: ReadonlySet<string>;
+  surveyIds?: ReadonlySet<string>;
+  releaseIds?: ReadonlySet<string>;
+  assetIds?: ReadonlySet<string>;
+  includePublic: boolean;
+  includeWorkspace: boolean;
+}
+
+async function overlapSources(context: OverlapSourceContext): Promise<SkyOverlapSource[]> {
+  const result = new Map<string, SkyOverlapSource>();
+  const accept = (source: SkyOverlapSource): void => {
+    if (!source.pixels.length || !overlapSourceMatches(source, context)) return;
+    result.set(source.id, { ...source, pixels: [...new Set(source.pixels)].sort((left, right) => left - right) });
+  };
+
+  if (context.includePublic) {
+    let manifest: SurveyFootprintManifest | undefined;
+    try { manifest = await effectiveFootprints(); } catch (error) { console.warn("Public overlap sources unavailable", error); }
+    manifest?.footprints
+      .filter((footprint) => footprint.nside === context.nside)
+      .forEach((footprint) => accept({
+        id: overlapSourceIdForPublic(footprint),
+        label: footprint.label,
+        kind: "public",
+        nside: footprint.nside,
+        pixels: footprint.pixels,
+        surveyId: footprint.surveyId,
+        releaseId: footprint.releaseId,
+        product: footprint.product,
+        sourceUrl: footprint.sourceUrl,
+      }));
+  }
+
+  if (!context.includeWorkspace) return [...result.values()].sort((left, right) => left.id.localeCompare(right.id));
+  const assets = (await dataCatalog.list()).filter((asset) => {
+    if (context.assetIds?.size && !context.assetIds.has(asset.id)) return false;
+    if (context.surveyIds?.size && (!asset.surveyId || !context.surveyIds.has(asset.surveyId))) return false;
+    if (context.releaseIds?.size && (!asset.releaseId || !context.releaseIds.has(asset.releaseId))) return false;
+    return true;
+  });
+  const artifacts = await userMocs.list();
+  const runs = await connectorRuns.list();
+  const warehouseLayerIds = workspaceWarehouseLayerIds(assets, artifacts, runs);
+  const warehouse = await warehouseIndex.coverage({
+    nside: context.nside,
+    ...(assets.length ? { assetIds: assets.map((asset) => asset.id) } : {}),
+    layerIds: warehouseLayerIds,
+  });
+  const artifactSelections = selectUserMocArtifacts(artifacts);
+  await Promise.all(assets.map(async (asset) => {
+    const [legacy, local] = await Promise.all([
+      context.nside <= ASTRO_OVERVIEW_NSIDE
+        ? astroIndex.coverage({ nside: context.nside, assetIds: [asset.id] })
+        : Promise.resolve({ status: "unavailable" as const, index: ASTRO_FILE_INDEX, nside: context.nside, pixels: [], byAsset: [], message: "legacy coverage supports NSIDE up to 16" }),
+      astroObjectIndex.queryCoverageFacts({ nside: context.nside, assetIds: [asset.id] }),
+    ]);
+    const pixels = new Set<number>([...legacy.pixels, ...local.pixels]);
+    warehouse.layers.filter((layer) => warehouseLayerForAsset(layer, asset)).forEach((layer) => layer.pixels.forEach((pixel) => pixels.add(pixel)));
+    const mocSelection = [...artifactSelections.values()].find(({ latest }) => latest.layerId === workspaceLayerIdForAsset(asset.id) || latest.layerId === asset.id || latest.layerId === `user-${asset.id}`);
+    if (mocSelection) {
+      const projection = await userMocs.projection(mocSelection.renderable.layerId, mocSelection.renderable.scanRunId, Math.log2(context.nside)).catch(() => ({ order: Math.log2(context.nside), pixels: [] }));
+      projection.pixels.forEach((pixel) => pixels.add(pixel));
+    }
+    const access = [asset.access, ...(asset.accesses ?? [])].find((entry) => entry.connector !== "metadata");
+    accept({
+      id: overlapSourceIdForAsset(asset.id),
+      label: asset.name,
+      kind: "workspace",
+      nside: context.nside,
+      pixels: [...pixels],
+      surveyId: asset.surveyId,
+      releaseId: asset.releaseId,
+      assetId: asset.id,
+      product: asset.product,
+      modality: asset.modalities[0],
+      sourceUrl: access?.uri,
+    });
+  }));
+  // Keep unassigned Warehouse/MOC layers discoverable for workspaces that have
+  // no Atlas asset row yet. They are still explicit workspace sources, never
+  // folded into a public footprint.
+  warehouse.layers.filter((layer) => !layer.assetIds.length && layer.pixels.length).forEach((layer) => accept({
+    id: `workspace:warehouse:${layer.layerId}`,
+    label: layer.productId || layer.layerId,
+    kind: "workspace",
+    nside: context.nside,
+    pixels: layer.pixels,
+    surveyId: layer.surveyId,
+    releaseId: layer.releaseId,
+    product: layer.productId,
+    modality: layer.modality,
+  }));
+  return [...result.values()].sort((left, right) => left.id.localeCompare(right.id));
+}
+
+function overlapContext(body: SkyOverlapRequest): OverlapSourceContext {
+  const nside = Number(body.nside ?? ASTRO_OVERVIEW_NSIDE);
+  nsideOrderForCoverage(nside);
+  const toSet = (value: unknown, name: string): ReadonlySet<string> | undefined => {
+    const values = stringArrayInput(value, name);
+    return values === undefined ? undefined : new Set(values);
+  };
+  return {
+    nside,
+    sourceIds: toSet(body.sourceIds, "sourceIds"),
+    surveyIds: toSet(body.surveyIds, "surveyIds"),
+    releaseIds: toSet(body.releaseIds, "releaseIds"),
+    assetIds: toSet(body.assetIds, "assetIds"),
+    includePublic: booleanInput(body.includePublic, "includePublic", true),
+    includeWorkspace: booleanInput(body.includeWorkspace, "includeWorkspace", true),
+  };
+}
+
+function overlapPixelsInput(value: unknown, maximum = 4096): number[] {
+  if (!Array.isArray(value) || value.length < 1 || value.length > maximum || value.some((entry) => !Number.isSafeInteger(entry) || Number(entry) < 0)) {
+    throw new RangeError(`pixels must contain between 1 and ${maximum} HEALPix cells`);
+  }
+  return [...new Set(value as number[])].sort((left, right) => left - right);
+}
+
+interface ReverseLookupUnavailable {
+  sourceId: string;
+  url?: string;
+  reason: string;
+}
+
+interface ReverseLookupResult {
+  files: CoverageDownloadFile[];
+  unavailable: ReverseLookupUnavailable[];
+  warnings?: string[];
+}
+
+async function reverseLookupFiles(sources: readonly SkyOverlapSource[]): Promise<ReverseLookupResult> {
+  const files = new Map<string, CoverageDownloadFile>();
+  const unavailable = new Map<string, ReverseLookupUnavailable>();
+  const usedNames = new Set<string>();
+  const warnings: string[] = [];
+  const discoveredSources = await Promise.all([...sources]
+    .sort((left, right) => left.id.localeCompare(right.id))
+    .map(async (source) => ({ source, discovered: /^https?:\/\//i.test(source.sourceUrl ?? "") ? await discoverSourceFiles(source.sourceUrl!) : undefined })));
+  discoveredSources.forEach(({ source, discovered }) => {
+    if (!source.sourceUrl) {
+      unavailable.set(source.id, { sourceId: source.id, reason: "来源没有可反查的文件 URL" });
+      return;
+    }
+    if (!/^https?:\/\//i.test(source.sourceUrl)) {
+      unavailable.set(source.id, {
+        sourceId: source.id,
+        url: source.sourceUrl,
+        reason: /^s3:\/\//i.test(source.sourceUrl)
+          ? "S3 URL 需要配置凭据后才能下载"
+          : "仅支持 HTTP/HTTPS 文件 URL",
+      });
+      return;
+    }
+    if (!discovered) return;
+    if (!discovered.files.length) {
+      unavailable.set(source.id, {
+        sourceId: source.id,
+        url: source.sourceUrl,
+        reason: discovered.reason ?? "爬虫未发现可下载文件",
+      });
+      return;
+    }
+    discovered.files.forEach((candidate, index) => {
+      let name = candidate.name;
+      if (usedNames.has(name)) {
+        const suffix = source.id.replace(/[^a-z0-9._-]+/gi, "-").replace(/^-+|-+$/g, "").slice(-24) || "source";
+        const extension = name.match(/\.[a-z0-9]{1,8}(?:\.gz)?$/i)?.[0] ?? "";
+        const stem = extension ? name.slice(0, -extension.length) : name;
+        name = `${stem}-${suffix}${extension}`;
+        let serial = 2;
+        while (usedNames.has(name)) name = `${stem}-${suffix}-${serial++}${extension}`;
+      }
+      usedNames.add(name);
+      const key = `${candidate.url}\u0000${source.id}\u0000${index}`;
+      files.set(key, { ...candidate, name, sourceId: source.id });
+    });
+    if (discovered.truncated) warnings.push(`${source.label}：来源文件过多，仅返回前 128 个文件`);
+  });
+  return {
+    files: [...files.values()].sort((left, right) => left.url.localeCompare(right.url)),
+    unavailable: [...unavailable.values()].sort((left, right) => left.sourceId.localeCompare(right.sourceId)),
+    ...(warnings.length ? { warnings } : {}),
+  };
+}
+
+app.post("/api/sky/overlap", async (request: Request, response: Response) => {
+  try {
+    const context = overlapContext((request.body ?? {}) as SkyOverlapRequest);
+    const sources = await overlapSources(context);
+    const result = calculateSkyOverlap(sources, context.nside);
+    response.json({ ...result, sources });
+  } catch (error) {
+    sendApiError(response, error);
+  }
+});
+
+app.post("/api/sky/overlap/details", async (request: Request, response: Response) => {
+  try {
+    const body = (request.body ?? {}) as SkyOverlapRequest & { componentId?: unknown; pixels?: unknown };
+    const context = overlapContext(body);
+    const sources = await overlapSources(context);
+    const overlap = calculateSkyOverlap(sources, context.nside);
+    const componentId = typeof body.componentId === "string" ? body.componentId : undefined;
+    const component = componentId ? overlap.components.find((candidate) => candidate.id === componentId) : undefined;
+    if (componentId && !component) throw new Error(`Overlap component not found: ${componentId}`);
+    const pixels = component?.cells ?? (body.pixels === undefined ? overlap.pixels : overlapPixelsInput(body.pixels));
+    const selectedSources = sources.filter((source) => pixels.some((pixel) => source.pixels.includes(pixel)));
+    response.json({ component: component ?? null, pixels, sources: selectedSources, ...(await reverseLookupFiles(selectedSources)) });
+  } catch (error) {
+    sendApiError(response, error);
+  }
+});
+
+app.post("/api/sky/reverse-lookup", async (request: Request, response: Response) => {
+  try {
+    const body = (request.body ?? {}) as SkyOverlapRequest & { componentId?: unknown; pixels?: unknown };
+    const context = overlapContext(body);
+    const sources = await overlapSources(context);
+    let pixels = body.pixels === undefined ? undefined : overlapPixelsInput(body.pixels);
+    if (typeof body.componentId === "string") {
+      const overlap = calculateSkyOverlap(sources, context.nside);
+      const component = overlap.components.find((candidate) => candidate.id === body.componentId);
+      if (!component) throw new Error(`Overlap component not found: ${body.componentId}`);
+      pixels = component.cells;
+    }
+    if (!pixels?.length) throw new RangeError("pixels or componentId is required");
+    const selectedSources = sources.filter((source) => pixels!.some((pixel) => source.pixels.includes(pixel)));
+    response.json({ pixels, sources: selectedSources, ...(await reverseLookupFiles(selectedSources)) });
+  } catch (error) {
+    sendApiError(response, error);
+  }
+});
+
+interface CoverageDownloadRequest {
+  files: CoverageDownloadFile[];
+  componentId?: string;
+  sourceIds?: string[];
+}
+
+function coverageDownloadInput(value: unknown): CoverageDownloadRequest {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new RangeError("coverage download body must be an object");
+  const body = value as Record<string, unknown>;
+  if (!Array.isArray(body.files)) throw new RangeError("files is required");
+  const text = (entry: unknown, name: string): string | undefined => {
+    if (entry === undefined) return undefined;
+    if (typeof entry !== "string" || !entry.trim() || entry.trim().length > 180) throw new RangeError(`${name} is invalid`);
+    return entry.trim();
+  };
+  const sourceIds = stringArrayInput(body.sourceIds, "sourceIds");
+  if (body.targetConnectorId !== undefined) {
+    throw new RangeError("targetConnectorId is not supported; coverage downloads create a new Connector");
+  }
+  const componentId = text(body.componentId, "componentId");
+  return {
+    files: body.files as CoverageDownloadFile[],
+    ...(componentId ? { componentId } : {}),
+    ...(sourceIds?.length ? { sourceIds } : {}),
+  };
+}
+
+function assertCoverageDownloadOutputConfigured(): void {
+  // ConnectorRegistry intentionally rejects local paths outside the configured
+  // roots. Check the lexical boundary before creating an asynchronous job so a
+  // missing writable root is reported by the request rather than hidden in a
+  // background failure.
+  localConnectorRoots.assertConfiguredPath(path.join(coverageDownloadRoot, "files"));
+}
+
+app.post("/api/coverage-downloads", async (request: Request, response: Response) => {
+  try {
+    const input = coverageDownloadInput(request.body);
+    assertCoverageDownloadOutputConfigured();
+    response.status(202).json({ job: await coverageDownloads.submit(input) });
+  } catch (error) {
+    sendApiError(response, error);
+  }
+});
+
+app.get("/api/coverage-downloads", async (_request: Request, response: Response) => {
+  try {
+    response.set("Cache-Control", "no-store");
+    response.json({ jobs: await coverageDownloads.list() });
+  } catch (error) {
+    sendApiError(response, error);
+  }
+});
+
+app.get("/api/coverage-downloads/:id", async (request: Request, response: Response) => {
+  try {
+    response.json({ job: await coverageDownloads.get(datasetIdFrom(request)) });
+  } catch (error) {
+    sendApiError(response, error);
+  }
+});
+
+app.post("/api/coverage-downloads/:id/cancel", async (request: Request, response: Response) => {
+  try {
+    response.json({ job: await coverageDownloads.cancel(datasetIdFrom(request)) });
+  } catch (error) {
+    sendApiError(response, error);
+  }
+});
+
 type WorkspaceCoverageStatus = "ready" | "pending" | "unavailable" | "error";
 
 function nsideOrderForCoverage(nside: number): number {
@@ -935,7 +1378,9 @@ function aggregateCoverageStatus(values: readonly WorkspaceCoverageStatus[]): Wo
   if (values.includes("error")) return "error";
   if (values.includes("pending")) return "pending";
   if (values.length > 0 && values.every((value) => value === "unavailable")) return "unavailable";
-  return "ready";
+  // Empty evidence is not a healthy index. Callers can distinguish a real
+  // ready-but-empty scan by inspecting its run/artifact state.
+  return "unavailable";
 }
 
 function warehouseLayerForAsset(layer: WarehouseCoverageLayer, asset: DataAssetRecord): boolean {
@@ -1404,6 +1849,7 @@ async function start(): Promise<void> {
   await dataCatalog.initialize();
   await connectors.initialize();
   await connectorRuns.initialize();
+  await coverageDownloads.initialize();
   const recoveredLocalScans = await localCsvScans.recoverInterruptedRuns();
   if (recoveredLocalScans) console.warn(`Marked ${recoveredLocalScans} interrupted local CSV scan(s) as failed`);
   await loadResourceCatalogConfig();

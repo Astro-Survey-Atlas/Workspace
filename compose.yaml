@@ -42,6 +42,8 @@ services:
       PORT: "3000"
       ASTRO_DATA_WAREHOUSE_ENABLED: "false"
       ASTRO_LOCAL_SCAN_ENABLED: "false"
+      ASTRO_LOCAL_CONNECTOR_ROOTS: /state/coverage-downloads
+      ASTRO_COVERAGE_DOWNLOAD_ROOT: /state/coverage-downloads
       # Workspace always owns this search service. Warehouse, when enabled,
       # uses the separate ASTRO_WAREHOUSE_ES_URL endpoint below.
       ASTRO_ES_URL: http://workspace-elasticsearch:9200

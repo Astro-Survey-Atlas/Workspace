@@ -42,8 +42,10 @@ or verifying the dependency.
 ## Controlled local data mount
 
 `localData` is disabled by default. When enabled, exactly one read-only source
-is mounted at `/data/local` and the Deployment emits
-`ASTRO_LOCAL_CONNECTOR_ROOTS=/data/local`. The chart does not create a PV or
+is mounted at `/data/local`. The Deployment always reserves the writable
+`/state/coverage-downloads` root for files downloaded from a sky-overlap
+result, and emits it in `ASTRO_LOCAL_CONNECTOR_ROOTS` alongside `/data/local`.
+The chart does not create a PV or
 PVC for local data; `existingClaim` must refer to a claim managed separately.
 
 Choose one source in a values file:

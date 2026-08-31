@@ -1710,6 +1710,35 @@ input {
   gap: 3px;
 }
 
+.resource-package-group {
+  display: grid;
+  gap: 5px;
+  padding-top: 12px;
+  border-top: 1px dashed color-mix(in srgb, var(--cyan) 48%, var(--border));
+}
+
+.resource-package-group:first-child {
+  padding-top: 0;
+  border-top: 0;
+}
+
+.resource-package-group-heading {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  padding: 0 14px 2px;
+  color: var(--text-soft);
+  font-family: "SFMono-Regular", Consolas, monospace;
+  font-size: 9px;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+}
+
+.resource-package-group-heading output {
+  color: var(--quiet);
+  font-size: 8px;
+}
+
 .resource-package-row {
   position: relative;
   isolation: isolate;

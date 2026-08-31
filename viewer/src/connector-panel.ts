@@ -107,6 +107,11 @@ export class ConnectorPanel {
     this.#render();
   }
 
+  async refresh(): Promise<void> {
+    if (!this.#active) return;
+    await this.activate(this.#selectedId ?? undefined);
+  }
+
   select(id: string): void {
     this.#selectedId = id;
     this.#editingId = null;

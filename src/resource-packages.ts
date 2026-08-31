@@ -405,7 +405,8 @@ function stringList(value: unknown, label: string): string[] {
 
 function optionalStringList(value: unknown, label: string): string[] {
   if (value === undefined) return [];
-  return stringList(value, label);
+  if (!Array.isArray(value) || value.some((entry) => typeof entry !== "string" || !entry.trim())) throw new Error(`${label} is invalid`);
+  return [...new Set(value.map((entry) => String(entry).trim()))];
 }
 
 function sources(value: unknown, label: string): ResourcePackageCatalogEntry["sources"] {
