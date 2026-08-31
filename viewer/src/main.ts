@@ -2849,7 +2849,7 @@ async function activateMode(nextMode: ViewMode): Promise<void> {
     workflowPanel.deactivate();
     byId("panel-kicker").textContent = "CONNECTOR REGISTRY";
     byId("panel-dataset-name").textContent = "连接器配置";
-    byId("dataset-state").textContent = "当前仅 S3 / OSS 可提交扫描；历史记录由执行器统一上报";
+    byId("dataset-state").textContent = "连接 S3 / OSS / JDBC 提交扫描";
     byId("metric-one-label").textContent = "CONNECTORS";
     byId("metric-one").textContent = "--";
     byId("metric-two-label").textContent = "S3 / OSS";

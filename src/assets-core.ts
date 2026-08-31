@@ -1,5 +1,5 @@
-/** Stable Assets Core identifiers shared with the scanner image. */
-export const ASSETS_CORE_DISTRIBUTION = "astro-survey-atlas-assets";
+/** Stable organization Core identifiers shared with Assets and Warehouse. */
+export const ASSETS_CORE_DISTRIBUTION = "astro-survey-moc-core";
 export const ASSETS_CORE_IMPORT = "astro_survey_moc_core";
 export const ASSETS_CORE_CLI = "astro-survey-moc-core";
 export const ASSETS_CORE_CONTRACT_VERSION = "1.0.0";

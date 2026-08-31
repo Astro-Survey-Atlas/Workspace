@@ -426,7 +426,7 @@ test("explicit remote scan carries local asset metadata without Connector or Ass
       fileIndex: "astro_file_index_v1",
       coverageIndex: "astro_coverage_index_v1",
       objectIndex: "astro_object_index_v1",
-      mocCoreDistribution: "astro-survey-atlas-assets",
+      mocCoreDistribution: "astro-survey-moc-core",
       mocCoreImport: "astro_survey_moc_core",
       mocCoreCli: "astro-survey-moc-core",
       mocCoreContract: "1.0.0",
