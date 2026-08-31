@@ -17,7 +17,7 @@ function inputValue(id: string): string {
 
 const PROJECT_LABELS: Record<DataAssetProjectState, string> = {
   public_reference: "公开参考",
-  acquired: "已获取",
+  acquired: "已掌握",
   processed: "已加工",
   deliverable: "可用",
   planned: "计划中",
@@ -200,7 +200,7 @@ export class DataCatalogPanel {
     const note = document.createElement("p");
     note.className = "catalog-detail-copy";
     note.textContent = asset.description || "暂无说明";
-    const basic = this.#detailEditing === "basic" ? this.#basicEditor(asset) : this.#rows([["资产 ID", asset.id], ["来源", "用户登记"], ["巡天 / 发布", `${this.#surveyName(this.#effectiveSurveyId(asset))} / ${this.#effectiveReleaseId(asset) ?? "未设置"}`], ["产品 / 类型", `${asset.product} / ${asset.kind}`], ["Tag", this.#tagText(asset.tags ?? asset.modalities) || "未标注"], ["使用阶段", projectStatesLabel(asset)]]);
+    const basic = this.#detailEditing === "basic" ? this.#basicEditor(asset) : this.#rows([["资产 ID", asset.id], ["来源", "用户登记"], ["巡天 / 发布", `${this.#surveyName(this.#effectiveSurveyId(asset))} / ${this.#effectiveReleaseId(asset) ?? "未设置"}`], ["产品 / 类型", `${asset.product} / ${asset.kind}`], ["Tag", this.#tagText(asset.tags ?? asset.modalities) || "未标注"], ["使用阶段", projectStatesLabel(asset)], ...(projectStatesLabel(asset).includes("已掌握") ? [["已掌握说明", "已获得数据或访问权，但尚未证明建立空间覆盖；请扫描或删除旧记录。"] as [string, string]] : [])]);
     const sourceList = this.#detailEditing === "sources" ? this.#sourceEditor(asset) : document.createElement("ul");
     if (this.#detailEditing !== "sources") { (asset.sources ?? []).forEach((source) => { const item = document.createElement("li"); const link = document.createElement("a"); link.href = source.url; link.target = "_blank"; link.rel = "noreferrer"; link.textContent = `${source.label}: ${source.url}`; item.append(link); source.description && item.append(` · ${source.description}`); sourceList.append(item); }); if (!sourceList.childElementCount) sourceList.textContent = "尚未登记公开来源"; }
     const accessList = this.#detailEditing === "access" ? this.#accessEditor(asset) : document.createElement("ul");

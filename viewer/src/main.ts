@@ -40,6 +40,9 @@ import type { ConnectorPublicRecord } from "../../src/connectors";
 import type { CoverageCoordinateUnits, CoverageJobMode, CoverageJobSpec } from "../../src/coverage-jobs";
 import type { UserMocArtifact } from "../../src/user-moc-artifacts";
 import { WorkflowPanel } from "./workflow-panel";
+import { ProductionPanel, type ProductionContext } from "./production-panel";
+import { SystemPanel } from "./system-panel";
+import { AgentDock } from "./agent-dock";
 import { DataCatalogPanel } from "./data-catalog-panel";
 import { ConnectorPanel, type ConnectorMetrics } from "./connector-panel";
 import { ResourcePackagePanel, type ResourcePackageSelectionCallbacks } from "./resource-package-panel";
@@ -48,7 +51,7 @@ import { nestedSkyRegion } from "./sky-region";
 import { normalizeLayerOrder } from "./layer-order";
 import { notifyWorkspace, notifyWorkspaceError } from "./notifications";
 
-type ViewMode = "catalog" | "packages" | "connectors" | "layers" | "workflow";
+type ViewMode = "catalog" | "packages" | "connectors" | "layers" | "workflow" | "system";
 
 function byId<T extends HTMLElement>(id: string): T {
   const element = document.getElementById(id);
@@ -74,7 +77,7 @@ function formatBytes(value: number): string {
 
 const PROJECT_STATE_LABELS: Record<DataAssetRecord["projectState"], string> = {
   public_reference: "公开参考",
-  acquired: "已获取",
+  acquired: "已掌握",
   processed: "已加工",
   deliverable: "可交付",
   planned: "计划中",
@@ -98,54 +101,28 @@ const NEXT_ACTION_LABELS: Record<string, string> = {
   none: "无需操作",
 };
 
-function projectAssetCounts(): Record<DataAssetRecord["projectState"], number> {
-  const counts: Record<DataAssetRecord["projectState"], number> = {
-    public_reference: 0,
-    acquired: 0,
-    processed: 0,
-    deliverable: 0,
-    planned: 0,
-  };
-  dataAssets.forEach((asset) => {
-    const states = asset.projectStates?.length ? asset.projectStates : [asset.projectState];
-    states.forEach((state) => { counts[state] += 1; });
-  });
-  return counts;
-}
-
-function renderProjectMetrics(): void {
-  const counts = projectAssetCounts();
-  const metrics: Array<[string, string, string]> = [
-    ["metric-one-label", "metric-one", "public_reference"],
-    ["metric-two-label", "metric-two", "acquired"],
-    ["metric-three-label", "metric-three", "processed"],
-    ["metric-four-label", "metric-four", "deliverable"],
-    ["metric-five-label", "metric-five", "planned"],
-  ];
-  metrics.forEach(([labelId, valueId, state]) => {
-    byId(labelId).textContent = PROJECT_STATE_LABELS[state as DataAssetRecord["projectState"]].toUpperCase();
-    byId(valueId).textContent = formatInteger(counts[state as DataAssetRecord["projectState"]]);
-  });
-}
-
 function renderCoverageMetrics(): void {
-  const publicCount = new Set((surveyFootprints?.footprints ?? []).map((footprint) => `${footprint.surveyId}:${footprint.releaseId}:${footprint.product}`)).size;
-  const workspaceCount = [...workspaceAssetLayers.values()].filter((layer) => layer.pixels.length > 0 && layer.status === "ready").length
-    + legacyWorkspaceLayers.filter((layer) => layer.pixels.length > 0 && layer.status === "ready").length
-    + [...workspaceExtraLayers.values()].filter((layer) => layer.pixels.length > 0 && layer.status === "ready").length;
-  const statuses = [...coverageStatusesByAsset.values()];
-  const pending = statuses.filter((status) => status.coverage === "pending").length
-    + [...workspaceExtraLayers.values()].filter((layer) => layer.status === "pending").length;
-  const failed = statuses.filter((status) => status.coverage === "failed").length
-    + [...workspaceExtraLayers.values()].filter((layer) => layer.status === "error").length;
-  const queryable = statuses.filter((status) => status.objects === "queryable").length;
-  const values: Array<[string, string, number]> = [
-    ["metric-one", "PUBLIC", publicCount],
-    ["metric-two", "WORKSPACE", workspaceCount],
-    ["metric-three", "PENDING", pending],
-    ["metric-four", "FAILED", failed],
-    ["metric-five", "OBJECT-QUERYABLE", queryable],
+  const publicSources = new Set(
+    (surveyFootprints?.footprints ?? [])
+      .filter((footprint) => visibleSurveyIds.has(footprint.surveyId) && footprint.pixels.length > 0)
+      .map((footprint) => `${footprint.surveyId}:${footprint.releaseId}:${footprint.product}`),
+  );
+  const ownedLayers = [
+    ...[...workspaceAssetLayers.values()].filter((layer) => visibleAssetIds.has(layer.assetId) && layer.pixels.length > 0 && layer.status === "ready"),
+    ...legacyWorkspaceLayers.filter((layer) => layer.pixels.length > 0 && layer.status === "ready"),
+    ...[...workspaceExtraLayers.entries()].filter(([key, layer]) => visibleWorkspaceLayerKeys.has(key) && layer.source !== "warehouse" && layer.pixels.length > 0 && layer.status === "ready").map(([, layer]) => layer),
   ];
+  const remoteLayers = [...workspaceExtraLayers.entries()].filter(([key, layer]) => visibleWorkspaceLayerKeys.has(key) && layer.source === "warehouse" && layer.pixels.length > 0 && layer.status === "ready");
+  const active = publicSources.size + ownedLayers.length + remoteLayers.length;
+  const values: Array<[string, string, number]> = [
+    ["metric-one", "ACTIVE", active],
+    ["metric-two", "PUBLIC", publicSources.size],
+    ["metric-three", "OWNED", ownedLayers.length],
+    ["metric-four", "REMOTE", remoteLayers.length],
+  ];
+  byId("metric-five-label").textContent = "";
+  byId("metric-five").textContent = "";
+  byId("metric-five").parentElement?.setAttribute("hidden", "true");
   values.forEach(([valueId, label, value]) => {
     byId(`${valueId}-label`).textContent = label;
     byId(valueId).textContent = formatInteger(value);
@@ -357,6 +334,9 @@ let activeWorkspaceHover: SurveyLayerHover | null = null;
 let astroInspectionGeneration = 0;
 
 const workflowPanel = new WorkflowPanel((error) => console.error("Workflow UI request failed", error));
+const productionPanel = new ProductionPanel((error) => console.error("Production UI request failed", error));
+const systemPanel = new SystemPanel((error) => console.error("System settings UI request failed", error));
+const agentDock = new AgentDock((error) => console.error("Agent UI request failed", error));
 let connectorSelectionRequest: string | null = null;
 const dataCatalogPanel = new DataCatalogPanel((error) => notifyWorkspaceError(error, "用户资产操作失败"), (connectorId) => {
   connectorSelectionRequest = connectorId;
@@ -833,7 +813,7 @@ function selectionSurveyIds(selection: SurveyLayerSelection): string[] {
     .sort();
 }
 
-type SkyRegionMenu = { clientX: number; clientY: number; nside: number; pixels: number[]; surveyIds: string[]; releaseIds?: string[]; assetIds: string[] };
+type SkyRegionMenu = { clientX: number; clientY: number; nside: number; pixels: number[]; surveyIds: string[]; releaseIds?: string[]; assetIds: string[]; componentId?: string };
 
 function sameSkyPixels(nside: number, pixels: readonly number[], selection: SurveyLayerSelection | null): boolean {
   if (!selection || selection.nside !== nside) return false;
@@ -1250,15 +1230,29 @@ async function leaveAladinExplorer(): Promise<void> {
 function renderSurveyContextMenu(menu: SkyRegionMenu): void {
   const contextMenu = byId("coverage-context-menu");
   const enter = byId<HTMLButtonElement>("coverage-enter-flat");
+  const buildDownload = byId<HTMLButtonElement>("coverage-build-download");
+  const buildCrossmatch = byId<HTMLButtonElement>("coverage-build-crossmatch");
   const stage = byId("scene-stage").getBoundingClientRect();
   contextMenu.style.left = `${Math.max(8, Math.min(menu.clientX - stage.left, stage.width - 190))}px`;
-  contextMenu.style.top = `${Math.max(8, Math.min(menu.clientY - stage.top, stage.height - 52))}px`;
+  contextMenu.style.top = `${Math.max(8, Math.min(menu.clientY - stage.top, stage.height - 132))}px`;
   contextMenu.hidden = false;
   contextMenu.classList.add("visible");
   enter.onclick = () => {
     contextMenu.hidden = true;
     contextMenu.classList.remove("visible");
     void enterAladinExplorer(menu).catch(showFatal);
+  };
+  const selectedComponent = menu.componentId ? overlapResponse?.components.find((candidate) => candidate.id === menu.componentId) : undefined;
+  const context: ProductionContext = { nside: menu.nside, pixels: selectedComponent?.cells ?? menu.pixels, sourceIds: selectedComponent?.sourceIds ?? [...menu.surveyIds.map((id) => `public:${id}`), ...menu.assetIds.map((id) => `workspace:asset:${id}`)], componentId: menu.componentId, assetIds: menu.assetIds };
+  buildDownload.onclick = () => {
+    closeSkyContextMenu();
+    productionPanel.setContext(context);
+    void activateMode("workflow").catch(showFatal);
+  };
+  buildCrossmatch.onclick = () => {
+    closeSkyContextMenu();
+    productionPanel.setContext(context, "object-crossmatch@1");
+    void activateMode("workflow").catch(showFatal);
   };
 }
 
@@ -1357,15 +1351,9 @@ function renderOverlapComponent(component: SurveyLayerOverlapComponent): void {
       if (!overlapModeActive) return;
       const actions: HTMLButtonElement[] = [];
       if (lookup.files.length) {
-        const download = actionButton(`下载并登记 Connector（${lookup.files.length}）`, () => {
-          download.disabled = true;
-          void workspaceApi.submitCoverageDownload({ files: lookup.files, componentId: selected.id, sourceIds })
-            .then((job) => {
-              notifyWorkspace("重合来源下载已提交", `${job.id} · ${job.totalFiles} 个文件`, { tone: "success" });
-              watchCoverageDownload(job.id);
-            })
-            .catch((error) => notifyWorkspace("重合来源下载失败", error instanceof Error ? error.message : String(error), { tone: "error" }))
-            .finally(() => { download.disabled = false; });
+        const download = actionButton(`构建数据下载任务（${lookup.files.length}）`, () => {
+          productionPanel.setContext({ nside: overlapResponse?.nside ?? 16, pixels: selected.cells, sourceIds, componentId: selected.id, files: lookup.files });
+          void activateMode("workflow").catch(showFatal);
         });
         actions.push(download);
       }
@@ -1541,6 +1529,10 @@ function renderSurveySelection(selection: SurveyLayerSelection | null): void {
     layerViewer?.clearRegionSelection();
   });
   clearAction.classList.add("secondary");
+  const buildAction = actionButton("交给数据生产", () => {
+    productionPanel.setContext({ nside: selection.nside, pixels: selection.pixels, sourceIds: [...selectedSurveyIds.map((id) => `public:${id}`), ...selection.assetIds.map((id) => `workspace:asset:${id}`)], assetIds: selection.assetIds });
+    void activateMode("workflow").catch(showFatal);
+  });
    inspectorRows(`已选择 ${selection.pixels.length} 个天区`, [
     ["天区中心", `RA ${selection.centerRaDeg.toFixed(4)}° · Dec ${selection.centerDecDeg >= 0 ? "+" : ""}${selection.centerDecDeg.toFixed(4)}°`],
     ["HEALPix mask", `NESTED · NSIDE ${selection.nside} · ${selection.pixels.length} cells`],
@@ -1554,7 +1546,7 @@ function renderSurveySelection(selection: SurveyLayerSelection | null): void {
     ["产品与模态", artifactSummary || "所选区块尚无已登记产品"],
       ["项目资产", projectStateSummary(selectedAssets)],
       ["选区状态", selection.notice ?? "普通点击替换区块；Ctrl / Meta 点击可增减；右键在 Aladin 中探索"],
-   ], [downloadAction, clearAction]);
+   ], [downloadAction, buildAction, clearAction]);
   if (layerViewer) renderRegionSceneLegend(layerViewer.state);
 }
 
@@ -1695,9 +1687,13 @@ function renderSurveyInspection(inspection: SurveyLayerInspection | null): void 
   const prepare = document.createElement("button");
   prepare.type = "button";
   prepare.className = "command-button";
-  prepare.disabled = true;
-  prepare.textContent = "准备数据任务 · 待接入";
-  prepare.title = "区域任务编排尚未开放；请先在数据资产面板启动用户扫描";
+  prepare.disabled = false;
+  prepare.textContent = "构建数据生产任务";
+  prepare.title = "把当前数据覆盖区块交给数据生产工作台";
+  prepare.addEventListener("click", () => {
+    productionPanel.setContext({ nside: inspection.nside, pixels: [inspection.pixel], sourceIds: inspectionSurveyIds.map((id) => `public:${id}`), assetIds: inspection.assetIds });
+    void activateMode("workflow").catch(showFatal);
+  });
   nextStep.append(nextCopy, prepare);
   const workspaceSection = renderWorkspaceDataSection(workspaceSummaryForPixel(inspection.pixel, inspection.assetIds));
   workspaceSection.id = "coverage-workspace-data";
@@ -2819,7 +2815,7 @@ function renderLayerAssetDetails(asset: DataAssetRecord): void {
             : "未开始";
   const nextAction = operational?.nextAction ? (NEXT_ACTION_LABELS[operational.nextAction] ?? operational.nextAction) : "--";
   const projectState = asset.projectState === "acquired"
-    ? "已获取（已登记访问权，不代表已有空间覆盖）"
+    ? "已掌握（已登记访问权，不代表已有空间覆盖）"
     : PROJECT_STATE_LABELS[asset.projectState] ?? asset.projectState;
   inspectorRows(asset.name, [
     ["巡天 / 发布", `${asset.surveyId ?? "未关联"} / ${asset.releaseId ?? "未关联"}`],
@@ -3032,26 +3028,33 @@ async function activateMode(nextMode: ViewMode): Promise<void> {
   if (nextMode === "layers" && !surveyFootprints) throw new Error("Survey footprint catalog is not configured");
   mode = nextMode;
   destroyViewer();
+  // Coverage uses four semantic metrics and hides the fifth slot. Restore the
+  // slot before switching to any other view so its metrics remain visible.
+  byId("metric-five").parentElement?.removeAttribute("hidden");
   setActiveButtons("[data-mode]", (button) => button.dataset.mode === mode);
   byId("catalog-controls").hidden = mode !== "catalog";
   byId("resource-package-controls").hidden = mode !== "packages";
   byId("connector-controls").hidden = mode !== "connectors";
   byId("layer-controls").hidden = mode !== "layers";
   byId("workflow-controls").hidden = mode !== "workflow";
+  byId("system-controls").hidden = mode !== "system";
   byId("catalog-stage").hidden = mode !== "catalog";
   byId("resource-package-stage").hidden = mode !== "packages";
   byId("connector-stage").hidden = mode !== "connectors";
-  byId("scene-stage").hidden = mode === "workflow" || mode === "catalog" || mode === "connectors" || mode === "packages";
+  byId("scene-stage").hidden = mode === "workflow" || mode === "system" || mode === "catalog" || mode === "connectors" || mode === "packages";
   sceneBackgroundPopover.hidden = true;
   byId("aladin-explorer").hidden = true;
   byId("aladin-controls").hidden = true;
-  byId("workflow-stage").hidden = mode !== "workflow";
-  document.querySelectorAll<HTMLElement>(".scene-action").forEach((element) => { element.hidden = mode === "workflow" || mode === "catalog" || mode === "connectors" || mode === "packages"; });
+  byId("workflow-stage").hidden = true;
+  byId("production-stage").hidden = mode !== "workflow";
+  byId("system-stage").hidden = mode !== "system";
+  document.querySelectorAll<HTMLElement>(".scene-action").forEach((element) => { element.hidden = mode === "workflow" || mode === "system" || mode === "catalog" || mode === "connectors" || mode === "packages"; });
   byId("scene-legend").hidden = false;
   byId("region-scene-legend").hidden = mode !== "layers";
   byId<HTMLButtonElement>("drill-back-button").disabled = true;
   byId("context-summary").hidden = false;
   document.querySelector<HTMLElement>(".workspace-shell")?.classList.toggle("workflow-active", mode === "workflow");
+  document.querySelector<HTMLElement>(".workspace-shell")?.classList.toggle("system-active", mode === "system");
   document.querySelector<HTMLElement>(".workspace-shell")?.classList.toggle("catalog-active", mode === "catalog");
   document.querySelector<HTMLElement>(".workspace-shell")?.classList.toggle("connector-active", mode === "connectors");
   byId("inspector-panel").classList.remove("mobile-open");
@@ -3060,6 +3063,8 @@ async function activateMode(nextMode: ViewMode): Promise<void> {
 
   if (mode === "catalog") {
     workflowPanel.deactivate();
+    productionPanel.deactivate();
+    systemPanel.deactivate();
     resourcePackagePanel.deactivate();
     byId("panel-kicker").textContent = "USER ASSETS";
     byId("panel-dataset-name").textContent = "用户资产";
@@ -3086,6 +3091,8 @@ async function activateMode(nextMode: ViewMode): Promise<void> {
   resourcePackagePanel.deactivate();
   if (mode === "packages") {
     workflowPanel.deactivate();
+    productionPanel.deactivate();
+    systemPanel.deactivate();
     byId("inspector-kicker").textContent = "SURVEY INFORMATION";
     byId("panel-kicker").textContent = "PUBLIC SURVEY COVERAGE";
     byId("panel-dataset-name").textContent = "公开资源集";
@@ -3116,6 +3123,8 @@ async function activateMode(nextMode: ViewMode): Promise<void> {
   }
   if (mode === "connectors") {
     workflowPanel.deactivate();
+    productionPanel.deactivate();
+    systemPanel.deactivate();
     byId("panel-kicker").textContent = "CONNECTOR REGISTRY";
     byId("panel-dataset-name").textContent = "连接器配置";
     byId("dataset-state").textContent = "连接 S3 / OSS / JDBC 提交扫描";
@@ -3138,27 +3147,52 @@ async function activateMode(nextMode: ViewMode): Promise<void> {
   }
   if (mode === "workflow") {
     workflowPanel.deactivate();
-    byId("panel-kicker").textContent = "WORKFLOW CONTROL";
-    byId("panel-dataset-name").textContent = "Euclid × DESI Pipeline";
-    byId("dataset-state").textContent = "工作流服务连接中";
-    byId("metric-one-label").textContent = "STEPS";
-    byId("metric-one").textContent = "0/7";
-    byId("metric-two-label").textContent = "PUBLIC REF";
-    byId("metric-two").textContent = formatInteger(projectAssetCounts().public_reference);
-    byId("metric-three-label").textContent = "RESULTS";
+    systemPanel.deactivate();
+    byId("panel-kicker").textContent = "PRODUCTION WORKBENCH";
+    byId("panel-dataset-name").textContent = "数据生产";
+    byId("dataset-state").textContent = "多流水线任务与产物已载入";
+    byId("metric-one-label").textContent = "PIPELINES";
+    byId("metric-one").textContent = "3";
+    byId("metric-two-label").textContent = "RUNS";
+    byId("metric-two").textContent = "--";
+    byId("metric-three-label").textContent = "QUEUED";
     byId("metric-three").textContent = "--";
-    byId("metric-four-label").textContent = "ENGINE";
-    byId("metric-four").textContent = "RULES";
-    byId("metric-five-label").textContent = "PLANNED";
-    byId("metric-five").textContent = formatInteger(projectAssetCounts().planned);
-    byId("render-status").textContent = "WORKFLOW DAG";
-    byId("object-status").textContent = "0 MATCHES";
+    byId("metric-four-label").textContent = "ARTIFACTS";
+    byId("metric-four").textContent = "--";
+    byId("metric-five-label").textContent = "EXECUTORS";
+    byId("metric-five").textContent = "HTTP + MCP";
+    byId("render-status").textContent = "PRODUCTION RUNS";
+    byId("object-status").textContent = "NO ACTIVE RUN";
     loadingIndicator.classList.remove("visible");
-    await workflowPanel.activate();
+    await productionPanel.activate();
+    return;
+  }
+  if (mode === "system") {
+    workflowPanel.deactivate();
+    productionPanel.deactivate();
+    byId("panel-kicker").textContent = "SYSTEM CONFIGURATION";
+    byId("panel-dataset-name").textContent = "系统配置";
+    byId("dataset-state").textContent = "AI Provider 与 MCP Server 管理";
+    byId("metric-one-label").textContent = "AI PROVIDERS";
+    byId("metric-one").textContent = "--";
+    byId("metric-two-label").textContent = "MCP SERVERS";
+    byId("metric-two").textContent = "--";
+    byId("metric-three-label").textContent = "CONNECTED";
+    byId("metric-three").textContent = "--";
+    byId("metric-four-label").textContent = "SECRETS";
+    byId("metric-four").textContent = "MASKED";
+    byId("metric-five-label").textContent = "AGENT";
+    byId("metric-five").textContent = "READY";
+    byId("render-status").textContent = "SETTINGS";
+    byId("object-status").textContent = "NO ACTIVE RUN";
+    loadingIndicator.classList.remove("visible");
+    await systemPanel.activate();
     return;
   }
 
   workflowPanel.deactivate();
+  productionPanel.deactivate();
+  systemPanel.deactivate();
   byId("panel-dataset-name").textContent = "巡天图层";
   const targetCanvas = freshCanvas();
   targetCanvas.hidden = false;
@@ -3366,8 +3400,14 @@ document.addEventListener("pointerdown", (event) => {
 });
 byId<HTMLButtonElement>("controls-toggle").addEventListener("click", () => controlsPanel.classList.toggle("mobile-open"));
 window.addEventListener("astro:navigate", (event) => {
-  const nextMode = (event as CustomEvent<{ mode?: ViewMode }>).detail?.mode;
+  const detail = (event as CustomEvent<{ mode?: ViewMode; productionContext?: ProductionContext; productionPipeline?: string }>).detail;
+  const nextMode = detail?.mode;
   if (nextMode === "layers") void activateMode(nextMode).catch(showFatal);
+  if (nextMode === "workflow") {
+    productionPanel.setContext(detail.productionContext ?? null, detail.productionPipeline);
+    void activateMode(nextMode).catch(showFatal);
+  }
+  if (nextMode === "system") void activateMode(nextMode).catch(showFatal);
 });
 
 const scrollTimers = new WeakMap<HTMLElement, number>();
@@ -3448,9 +3488,13 @@ async function start(): Promise<void> {
     layerDepths: canvas.dataset.layerDepths ? JSON.parse(canvas.dataset.layerDepths) : [],
     ...dataCatalogPanel.debugState(),
     ...workflowPanel.debugState(),
+    ...productionPanel.debugState(),
+    ...systemPanel.debugState(),
+    ...agentDock.debugState(),
   });
   const initialQuery = new URL(window.location.href).searchParams;
-  await activateMode(initialQuery.get("mode") === "packages" ? "packages" : initialQuery.get("mode") === "catalog" ? "catalog" : publicCatalogUnavailable ? "packages" : "layers");
+  await agentDock.initialize();
+  await activateMode(initialQuery.get("mode") === "packages" ? "packages" : initialQuery.get("mode") === "catalog" ? "catalog" : initialQuery.get("mode") === "workflow" ? "workflow" : initialQuery.get("mode") === "system" ? "system" : publicCatalogUnavailable ? "packages" : "layers");
   void resumeCoverageDownloads();
 }
 

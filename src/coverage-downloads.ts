@@ -25,6 +25,8 @@ export interface CoverageDownloadJob {
   totalFiles: number;
   downloadedBytes: number;
   totalBytes: number;
+  /** Maximum number of files downloaded concurrently. */
+  concurrency?: number;
   outputConnectorId?: string;
   outputPath?: string;
   componentId?: string;
@@ -45,6 +47,17 @@ export interface CoverageDownloadServiceOptions {
   maxFiles?: number;
   maxFileBytes?: number;
   maxTotalBytes?: number;
+}
+
+export interface CoverageDownloadSubmitInput {
+  files: readonly CoverageDownloadFile[];
+  componentId?: string;
+  sourceIds?: readonly string[];
+  concurrency?: number;
+  /** Internal server-owned output root. Browser callers cannot set this. */
+  outputRoot?: string;
+  /** Internal safe directory name used below outputRoot. */
+  outputPrefix?: string;
 }
 
 interface PersistedState {
@@ -157,7 +170,7 @@ export class CoverageDownloadService {
     return clone(job);
   }
 
-  async submit(input: { files: readonly CoverageDownloadFile[]; componentId?: string; sourceIds?: readonly string[] }): Promise<CoverageDownloadJob> {
+  async submit(input: CoverageDownloadSubmitInput): Promise<CoverageDownloadJob> {
     await this.initialize();
     // Downloads are deliberately isolated into a new directory and handed off
     // to a newly registered Connector. A target Connector would need an
@@ -171,6 +184,12 @@ export class CoverageDownloadService {
     if (new Set(files.map((file) => file.name)).size !== files.length) throw new RangeError("files must not contain duplicate names");
     const totalBytes = files.reduce((sum, file) => sum + (file.sizeBytes ?? 0), 0);
     if (totalBytes > this.#maxTotalBytes) throw new RangeError("declared download size exceeds the Workspace limit");
+    const concurrency = input.concurrency === undefined ? 4 : input.concurrency;
+    if (!Number.isSafeInteger(concurrency) || concurrency < 1 || concurrency > 16) throw new RangeError("concurrency must be an integer between 1 and 16");
+    if (input.outputRoot !== undefined && (!input.outputRoot || !path.isAbsolute(input.outputRoot))) throw new RangeError("outputRoot must be an absolute path");
+    const outputRoot = input.outputRoot === undefined ? undefined : path.normalize(input.outputRoot);
+    const outputPrefix = input.outputPrefix === undefined ? undefined : input.outputPrefix.trim();
+    if (outputPrefix !== undefined && (!outputPrefix || !/^[a-zA-Z0-9][a-zA-Z0-9._-]*$/.test(outputPrefix))) throw new RangeError("outputPrefix must be a safe directory name");
     const now = new Date().toISOString();
     const id = `coverage-download-${randomUUID()}`;
     const job: CoverageDownloadJob = {
@@ -182,6 +201,7 @@ export class CoverageDownloadService {
       totalFiles: files.length,
       downloadedBytes: 0,
       totalBytes,
+      concurrency,
       ...(input.componentId ? { componentId: input.componentId } : {}),
       ...(input.sourceIds?.length ? { sourceIds: [...new Set(input.sourceIds)] } : {}),
       createdAt: now,
@@ -189,7 +209,7 @@ export class CoverageDownloadService {
     };
     this.#jobs.set(id, job);
     await this.#persist();
-    void this.#run(id);
+    void this.#run(id, outputRoot, outputPrefix);
     return clone(job);
   }
 
@@ -206,17 +226,23 @@ export class CoverageDownloadService {
     return clone(job);
   }
 
-  async #run(id: string): Promise<void> {
+  async #run(id: string, outputRoot?: string, outputPrefix?: string): Promise<void> {
     const job = this.#jobs.get(id);
     if (!job || job.status !== "queued") return;
     const controller = new AbortController();
     this.#abortControllers.set(id, controller);
+    const directory = outputRoot
+      ? path.join(outputRoot, outputPrefix ?? id)
+      : path.join(this.#root, "files", outputPrefix ?? id);
     try {
       this.#update(job, { status: "running", phase: "downloading" });
       await this.#persist();
-      const directory = path.join(this.#root, "files", id);
       await mkdir(directory, { recursive: true });
-      for (const file of job.files) {
+      let nextFile = 0;
+      const downloadOne = async (): Promise<void> => {
+        while (true) {
+          const file = job.files[nextFile++];
+          if (!file) return;
         if (controller.signal.aborted) throw new DOMException("Download cancelled", "AbortError");
         await assertPublicHttpUrl(file.url, { resolveHostname: this.#resolveHostname, skipDnsLookup: this.#skipDnsLookup });
         const response = await this.#fetch(file.url, { method: "GET", redirect: "error", signal: controller.signal });
@@ -235,11 +261,16 @@ export class CoverageDownloadService {
         const totalBytes = Math.max(job.totalBytes, downloadedBytes);
         this.#update(job, { phase: "downloading", downloadedFiles: job.downloadedFiles + 1, downloadedBytes, totalBytes });
         await this.#persist();
-      }
+        }
+      };
+      const workers = Array.from({ length: Math.min(job.concurrency ?? 1, job.files.length) }, () => downloadOne());
+      const workerResults = await Promise.allSettled(workers);
+      const failedWorker = workerResults.find((result): result is PromiseRejectedResult => result.status === "rejected");
+      if (failedWorker) throw failedWorker.reason;
       this.#update(job, { phase: "registering" });
       await this.#persist();
       if (!this.#registerConnector) throw new Error("No Connector registrar is configured for coverage downloads");
-      const connectorPath = this.#connectorPath ?? path.join(this.#root, "files", id);
+      const connectorPath = this.#connectorPath ?? directory;
       const connector = await this.#registerConnector({
         name: `Coverage download ${id.slice(-12)}`,
         description: `Workspace coverage download ${id}`,
@@ -257,7 +288,7 @@ export class CoverageDownloadService {
         error: cancelled ? "Cancelled by user" : errorText(error),
       });
       await this.#persist();
-      await rm(path.join(this.#root, "files", id), { recursive: true, force: true }).catch(() => undefined);
+      await rm(directory, { recursive: true, force: true }).catch(() => undefined);
     } finally {
       this.#abortControllers.delete(id);
     }

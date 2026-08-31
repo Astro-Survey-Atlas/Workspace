@@ -19,6 +19,7 @@ RUN npm ci --registry=${NPM_REGISTRY}
 COPY tsconfig.json tsconfig.viewer.json vite.config.ts ./
 COPY src ./src
 COPY viewer ./viewer
+COPY packages ./packages
 RUN npm run build && npm prune --omit=dev
 
 FROM node:22.22.1-bookworm-slim AS runtime
@@ -59,6 +60,7 @@ RUN apt-get update \
 COPY --from=moc-core /opt/moc-core /usr/local
 COPY --from=build --chown=astro:astro /app/node_modules ./node_modules
 COPY --from=build --chown=astro:astro /app/dist/src ./dist
+COPY --from=build --chown=astro:astro /app/packages/cli/dist ./packages/cli/dist
 COPY --from=build --chown=astro:astro /app/dist/viewer ./viewer
 
 USER 10001:10001

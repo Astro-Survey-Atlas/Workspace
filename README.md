@@ -163,6 +163,16 @@ kubectl -n astro-data-workspace rollout status deployment/astro-data-workspace-m
 * **Ingress endpoint**: `http://astro.workspace.dev.72602.space:32080/`
 * **Direct NodePort access**: Port `32082` (maps directly to container port `3000`)
 
+For a local Viewer preview on port `4173`, point the Vite proxy at the k3s API
+instead of its local default:
+
+```bash
+ASTRO_API_URL=http://astro.workspace.dev.72602.space:32080 npm run preview:viewer
+```
+
+The preview server is only a development frontend. The deployed Workspace
+serves the Viewer and `/api` from the same Ingress/NodePort endpoint.
+
 ---
 
 ## 🧪 Testing & Validation

@@ -35,6 +35,9 @@ import { WarehouseScanService } from "./warehouse-scan.js";
 import { calculateSkyOverlap, type SkyOverlapSource } from "./sky-overlap.js";
 import { CoverageDownloadService, type CoverageDownloadFile } from "./coverage-downloads.js";
 import { discoverSourceFiles } from "./source-crawler.js";
+import { ProductionService } from "./production.js";
+import { SystemConfigStore } from "./system-config.js";
+import { WorkspaceAgentService } from "./workspace-agent.js";
 
 const projectRoot = fileURLToPath(new URL("../", import.meta.url));
 const port = Number(process.env.PORT ?? "3000");
@@ -50,6 +53,8 @@ const allowedHosts = (
   .filter(Boolean);
 const viewerRoot = process.env.ASTRO_VIEWER_ROOT ?? path.join(projectRoot, "viewer");
 const workflowRoot = process.env.ASTRO_WORKFLOW_ROOT ?? path.join(stateRoot, "workflow-runs");
+const productionRoot = process.env.ASTRO_PRODUCTION_ROOT ?? path.join(stateRoot, "production");
+const systemConfigRoot = process.env.ASTRO_SYSTEM_CONFIG_ROOT ?? path.join(stateRoot, "system-config");
 const surveyRegistryStatePath = process.env.ASTRO_SURVEY_REGISTRY_STATE ?? path.join(stateRoot, "survey-registrations.json");
 const dataCatalogStatePath = process.env.ASTRO_DATA_CATALOG_STATE ?? path.join(stateRoot, "data-catalog.json");
 const connectorStatePath = process.env.ASTRO_CONNECTOR_STATE ?? path.join(stateRoot, "connectors.json");
@@ -121,6 +126,16 @@ const coverageDownloads = new CoverageDownloadService({
   statePath: coverageDownloadStatePath,
   registerConnector: (input) => connectors.register(input),
 });
+const productionService = new ProductionService({
+  root: productionRoot,
+  downloads: coverageDownloads,
+  connectors,
+  dataCatalog,
+  objectIndex: astroObjectIndex,
+  localRoots: localConnectorRoots,
+});
+const systemConfig = new SystemConfigStore(systemConfigRoot);
+const workspaceAgent = new WorkspaceAgentService({ root: path.join(stateRoot, "agent"), config: systemConfig, dataCatalog, connectors, production: productionService });
 const workflowEngine = new WorkflowEngine(workflowStore, new McpCatalogQueryClient(catalogMcpUrl, catalogMcpTimeoutMs, 1));
 const agentService = new AgentService(workflowStore, workflowEngine);
 const app = createMcpExpressApp({ host, allowedHosts });
@@ -272,7 +287,9 @@ function sendApiError(response: Response, error: unknown): void {
   const notFound = message.startsWith("Dataset not found:") || message.startsWith("Data asset not found:") || message.startsWith("Connector not found:") || message.startsWith("Connector ingest run not found:") || message.startsWith("Coverage job not found:") || message.startsWith("Coverage download job not found:") || message.startsWith("Overlap component not found:") || message.startsWith("Survey not found:") || message.startsWith("Public survey not found:") || message.startsWith("Resource package not found:") || message.startsWith("Resource package is not installed:") || message.startsWith("Resource package job not found:") || message.startsWith("Resource package MOC layer not found:") || message.startsWith("Resource package MOC artifact is not available:")
     || message.startsWith("User MOC artifact file not found:")
     || message.startsWith("Workflow not found:")
-    || message.startsWith("Workflow run not found:") || message.startsWith("Workflow artifact not found:") || message.startsWith("Agent session not found:");
+    || message.startsWith("Workflow run not found:") || message.startsWith("Workflow artifact not found:") || message.startsWith("Agent session not found:")
+    || message.startsWith("Production run not found:") || message.startsWith("Production artifact not found:") || message.startsWith("Workspace agent session not found:")
+    || message.startsWith("AI Provider not found:") || message.startsWith("MCP Server not found:");
   const status = error instanceof LocalConnectorPolicyError ? error.statusCode
     : error instanceof LocalScanDisabledError ? error.statusCode
     : error instanceof LocalScanCapabilityError ? error.statusCode
@@ -1734,6 +1751,89 @@ app.get("/api/sky/coverage", async (request: Request, response: Response) => {
   }
 });
 
+app.get("/api/production-pipelines", (_request: Request, response: Response) => {
+  response.json({ pipelines: productionService.listPipelines() });
+});
+
+app.get("/api/production-runs", async (_request: Request, response: Response) => {
+  try {
+    response.set("Cache-Control", "no-store");
+    response.json({ runs: await productionService.listRuns() });
+  } catch (error) { sendApiError(response, error); }
+});
+
+app.post("/api/production-runs", async (request: Request, response: Response) => {
+  try {
+    response.status(202).json({ run: await productionService.submit(request.body) });
+  } catch (error) { sendApiError(response, error); }
+});
+
+app.get("/api/production-runs/:id", async (request: Request, response: Response) => {
+  try { response.json({ run: await productionService.getRun(datasetIdFrom(request)) }); }
+  catch (error) { sendApiError(response, error); }
+});
+
+app.post("/api/production-runs/:id/cancel", async (request: Request, response: Response) => {
+  try { response.status(202).json({ run: await productionService.cancel(datasetIdFrom(request)) }); }
+  catch (error) { sendApiError(response, error); }
+});
+
+app.post("/api/production-runs/:id/retry", async (request: Request, response: Response) => {
+  try { response.status(202).json({ run: await productionService.retry(datasetIdFrom(request)) }); }
+  catch (error) { sendApiError(response, error); }
+});
+
+app.get("/api/production-runs/:id/artifacts/:name", async (request: Request, response: Response) => {
+  try {
+    const rawName = request.params.name;
+    const name = Array.isArray(rawName) ? rawName[0] : rawName;
+    if (!name) throw new RangeError("artifact name is required");
+    const { artifact, filePath } = await productionService.artifactPath(datasetIdFrom(request), name);
+    response.set({ "Content-Type": artifact.mediaType, "Content-Length": String(artifact.byteLength), "Cache-Control": "private, no-store", "X-Content-Type-Options": "nosniff", "Content-Disposition": `${artifact.mediaType.startsWith("text/csv") ? "attachment" : "inline"}; filename="${artifact.name}"` });
+    response.sendFile(filePath);
+  } catch (error) { sendApiError(response, error); }
+});
+
+app.get("/api/system-config/ai-providers", async (_request: Request, response: Response) => {
+  try { response.json({ providers: await systemConfig.listAiProviders() }); }
+  catch (error) { sendApiError(response, error); }
+});
+
+app.post("/api/system-config/ai-providers", async (request: Request, response: Response) => {
+  try { response.status(201).json({ provider: await systemConfig.upsertAiProvider(request.body) }); }
+  catch (error) { sendApiError(response, error); }
+});
+
+app.post("/api/system-config/ai-providers/:id/test", async (request: Request, response: Response) => {
+  try { response.json({ provider: await systemConfig.testAiProvider(datasetIdFrom(request)) }); }
+  catch (error) { sendApiError(response, error); }
+});
+
+app.delete("/api/system-config/ai-providers/:id", async (request: Request, response: Response) => {
+  try { await systemConfig.removeAiProvider(datasetIdFrom(request)); response.status(204).end(); }
+  catch (error) { sendApiError(response, error); }
+});
+
+app.get("/api/system-config/mcp-servers", async (_request: Request, response: Response) => {
+  try { response.json({ servers: await systemConfig.listMcpServers() }); }
+  catch (error) { sendApiError(response, error); }
+});
+
+app.post("/api/system-config/mcp-servers", async (request: Request, response: Response) => {
+  try { response.status(201).json({ server: await systemConfig.upsertMcpServer(request.body) }); }
+  catch (error) { sendApiError(response, error); }
+});
+
+app.post("/api/system-config/mcp-servers/:id/test", async (request: Request, response: Response) => {
+  try { response.json({ server: await systemConfig.testMcpServer(datasetIdFrom(request)) }); }
+  catch (error) { sendApiError(response, error); }
+});
+
+app.delete("/api/system-config/mcp-servers/:id", async (request: Request, response: Response) => {
+  try { await systemConfig.removeMcpServer(datasetIdFrom(request)); response.status(204).end(); }
+  catch (error) { sendApiError(response, error); }
+});
+
 app.get("/api/tools", (_request: Request, response: Response) => {
   response.json({ tools: workflowEngine.tools.list() });
 });
@@ -1813,6 +1913,37 @@ app.post("/api/agent/sessions/:id/messages", async (request: Request, response: 
   }
 });
 
+app.get("/api/agent/workspace-sessions", async (_request: Request, response: Response) => {
+  try { response.set("Cache-Control", "no-store"); response.json({ sessions: await workspaceAgent.listSessions() }); }
+  catch (error) { sendApiError(response, error); }
+});
+
+app.post("/api/agent/workspace-sessions", async (_request: Request, response: Response) => {
+  try { response.status(201).json({ session: await workspaceAgent.createSession() }); }
+  catch (error) { sendApiError(response, error); }
+});
+
+app.get("/api/agent/workspace-sessions/:id", async (request: Request, response: Response) => {
+  try { response.json({ session: await workspaceAgent.getSession(datasetIdFrom(request)) }); }
+  catch (error) { sendApiError(response, error); }
+});
+
+app.post("/api/agent/workspace-sessions/:id/messages", async (request: Request, response: Response) => {
+  try {
+    const body = request.body as { message?: unknown; context?: unknown };
+    const context = body.context && typeof body.context === "object" && !Array.isArray(body.context) ? body.context as Record<string, unknown> : undefined;
+    response.status(202).json({ session: await workspaceAgent.sendMessage(datasetIdFrom(request), body.message, context) });
+  } catch (error) { sendApiError(response, error); }
+});
+
+app.post("/api/agent/workspace-sessions/:id/confirm", async (request: Request, response: Response) => {
+  try {
+    const approved = (request.body as { approved?: unknown })?.approved;
+    if (typeof approved !== "boolean") throw new RangeError("approved must be boolean");
+    response.status(202).json({ session: await workspaceAgent.confirmTool(datasetIdFrom(request), approved) });
+  } catch (error) { sendApiError(response, error); }
+});
+
 app.post("/mcp", async (request: Request, response: Response) => {
   const server = createAstroMcpServer(dataCatalog);
   const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
@@ -1864,6 +1995,9 @@ async function start(): Promise<void> {
   await connectors.initialize();
   await connectorRuns.initialize();
   await coverageDownloads.initialize();
+  await productionService.initialize();
+  await systemConfig.initialize();
+  await workspaceAgent.initialize();
   const recoveredLocalScans = await localCsvScans.recoverInterruptedRuns();
   if (recoveredLocalScans) console.warn(`Marked ${recoveredLocalScans} interrupted local CSV scan(s) as failed`);
   await loadResourceCatalogConfig();

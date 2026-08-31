@@ -37,6 +37,7 @@
           <button type="button" class="mode-button active" data-mode="catalog">用户资产</button>
           <button type="button" class="mode-button" data-mode="layers">数据覆盖</button>
           <button type="button" class="mode-button" data-mode="workflow">数据生产</button>
+          <button type="button" class="mode-button" data-mode="system">系统配置</button>
         </div>
         <div class="toolbar-actions">
           <button id="theme-toggle" class="icon-button" type="button" aria-label="切换到浅色主题" title="切换到浅色主题">
@@ -69,7 +70,7 @@
             <label class="field-label" for="catalog-kind-filter">数据类型</label>
             <select id="catalog-kind-filter" class="field-input"><option value="all">全部类型</option><option value="catalog">星表</option><option value="image">图像</option><option value="spectra">光谱</option><option value="cube">数据立方</option><option value="timeseries">时序</option><option value="other">其他</option></select>
             <label class="field-label" for="catalog-project-filter">项目阶段</label>
-            <select id="catalog-project-filter" class="field-input"><option value="all">全部阶段</option><option value="public_reference">公开参考</option><option value="acquired">已获取</option><option value="processed">已加工</option><option value="deliverable">可交付</option><option value="planned">计划中</option></select>
+            <select id="catalog-project-filter" class="field-input"><option value="all">全部阶段</option><option value="public_reference">公开参考</option><option value="acquired">已掌握</option><option value="processed">已加工</option><option value="deliverable">可交付</option><option value="planned">计划中</option></select>
             <p class="control-note">这里只显示当前工作区中由用户登记的资产。筛选只改变中栏结果；新增资产在中栏完成，编辑和删除位于右栏详情。</p>
           </section>
         </div>
@@ -119,6 +120,17 @@
             <div id="workflow-tool-health" class="tool-health-list"></div>
           </section>
         </div>
+
+        <div id="system-controls" hidden>
+          <section class="control-section">
+            <div class="section-heading"><span>系统配置</span><span>SETTINGS</span></div>
+            <p class="control-note">管理 AI Provider、MCP Server 和 Agent 的运行连接。密钥只显示配置状态，不在页面回显。</p>
+            <nav class="settings-nav" aria-label="系统配置分区">
+              <button type="button" class="settings-nav-button active" data-settings-section="ai">AI Provider</button>
+              <button type="button" class="settings-nav-button" data-settings-section="mcp">MCP Server</button>
+            </nav>
+          </section>
+        </div>
       </aside>
 
       <section id="catalog-stage" class="catalog-stage" aria-label="用户资产">
@@ -138,7 +150,7 @@
           <input id="catalog-search" class="field-input" type="search" placeholder="搜索用户资产名称、巡天、发布、Tag、路径或 Connector" />
           <button id="catalog-new" class="primary-command compact-command" type="button"><i data-lucide="plus"></i><span>新增用户资产</span></button>
          </div>
-            <div class="catalog-columns"><span>数据资产</span><span>巡天</span><span>类型</span><span>使用阶段 <button class="status-help" type="button" aria-label="使用阶段说明"><i data-lucide="info" aria-hidden="true"></i><span class="sr-only">使用阶段说明</span><span class="status-help-tooltip" role="tooltip">计划中：已登记但尚未准备使用。已获取：已获得数据或访问权，但不代表已经建立空间覆盖。已处理：已完成项目处理。可用：可作为项目交付或分析输入。公开参考：仅作为公开说明参考。</span></button></span></div>
+            <div class="catalog-columns"><span>数据资产</span><span>巡天</span><span>类型</span><span>使用阶段 <button class="status-help" type="button" aria-label="使用阶段说明"><i data-lucide="info" aria-hidden="true"></i><span class="sr-only">使用阶段说明</span><span class="status-help-tooltip" role="tooltip">计划中：已登记但尚未准备使用。已掌握：已获得数据或访问权，但不代表已经建立空间覆盖。已处理：已完成项目处理。可用：可作为项目交付或分析输入。公开参考：仅作为公开说明参考。</span></button></span></div>
         <div id="catalog-asset-list" class="catalog-asset-list"></div>
         <div id="catalog-empty" class="catalog-empty" hidden>没有符合当前筛选条件的用户资产。</div>
         <footer class="catalog-stage-footer">可选 Warehouse 会读取这里登记的用户访问描述；Workspace 也可以在本地扫描并生成用户 MOC。</footer>
@@ -273,6 +285,8 @@
         <aside id="coverage-hover" class="coverage-hover" aria-live="polite" hidden></aside>
         <aside id="region-scene-legend" class="region-scene-legend" aria-live="polite" hidden></aside>
         <div id="coverage-context-menu" class="coverage-context-menu" role="menu" hidden>
+          <button id="coverage-build-download" type="button" role="menuitem">构建数据下载任务</button>
+          <button id="coverage-build-crossmatch" type="button" role="menuitem">构建交叉匹配任务</button>
           <button id="coverage-enter-flat" type="button" role="menuitem">在 Aladin 中探索</button>
         </div>
         <div id="loading-indicator" class="loading-indicator visible">载入多巡天索引</div>
@@ -331,6 +345,48 @@
             <table id="workflow-result-table" class="result-table"><thead></thead><tbody></tbody></table>
             <div id="workflow-result-empty" class="result-empty">NO RESULT</div>
           </div>
+        </section>
+      </section>
+
+      <section id="production-stage" class="production-stage" aria-label="数据生产工作台" hidden>
+        <header class="workflow-stage-header">
+          <div>
+            <span class="panel-kicker">PRODUCTION WORKBENCH</span>
+            <h2>数据生产</h2>
+            <p class="stage-subtitle">选择流水线，复用天球区域快照，查看可追溯任务与产物。</p>
+          </div>
+          <div class="stage-primary-actions"><button id="production-new" class="primary-command compact-command" type="button"><i data-lucide="plus"></i><span>新建任务</span></button><span id="production-status-badge" class="run-status" data-status="idle">IDLE</span></div>
+        </header>
+        <div class="production-workbench-grid">
+          <section class="production-pipeline-section" aria-labelledby="production-pipelines-heading">
+            <div class="section-heading"><span id="production-pipelines-heading">流水线</span><span id="production-pipeline-count">--</span></div>
+            <div id="production-pipeline-list" class="production-pipeline-list"></div>
+          </section>
+          <section class="production-runs-section" aria-labelledby="production-runs-heading">
+            <div class="section-heading"><span id="production-runs-heading">生产任务</span><span id="production-run-count">0</span></div>
+            <div id="production-run-list" class="production-run-list"></div>
+            <div id="production-run-empty" class="catalog-empty">暂无生产任务</div>
+          </section>
+        </div>
+        <section id="production-detail" class="production-detail" hidden></section>
+      </section>
+
+      <section id="system-stage" class="system-stage" aria-label="系统配置" hidden>
+        <header class="workflow-stage-header">
+          <div><span class="panel-kicker">WORKSPACE SETTINGS</span><h2>系统配置</h2><p class="stage-subtitle">注册 AI Provider 与 MCP Server，连接测试结果会保留在工作区。</p></div>
+          <div class="stage-primary-actions"><span id="system-status-badge" class="run-status" data-status="idle">READY</span></div>
+        </header>
+        <div class="settings-tabs" role="tablist" aria-label="系统配置视图">
+          <button type="button" class="settings-tab active" role="tab" aria-selected="true" data-settings-tab="ai">AI Provider</button>
+          <button type="button" class="settings-tab" role="tab" aria-selected="false" data-settings-tab="mcp">MCP Server</button>
+        </div>
+        <section id="settings-ai-view" class="settings-view" role="tabpanel">
+          <div class="settings-view-header"><div><span class="panel-kicker">OPENAI-COMPATIBLE</span><h3>AI Provider</h3></div><button id="ai-provider-new" class="primary-command compact-command" type="button"><i data-lucide="plus"></i><span>注册 Provider</span></button></div>
+          <div id="ai-provider-list" class="settings-record-list"></div>
+        </section>
+        <section id="settings-mcp-view" class="settings-view" role="tabpanel" hidden>
+          <div class="settings-view-header"><div><span class="panel-kicker">REMOTE TOOLS</span><h3>MCP Server</h3></div><button id="mcp-server-new" class="primary-command compact-command" type="button"><i data-lucide="plus"></i><span>注册 Server</span></button></div>
+          <div id="mcp-server-list" class="settings-record-list"></div>
         </section>
       </section>
 
@@ -442,8 +498,63 @@
         </form>
       </dialog>
 
+      <dialog id="production-create-dialog" class="workspace-dialog wide-dialog">
+        <form id="production-form" class="dialog-form production-form">
+          <header><div><span class="panel-kicker">NEW PRODUCTION RUN</span><h2>提交数据生产任务</h2></div><button id="production-dialog-close" class="icon-button" type="button" aria-label="关闭"><i data-lucide="x"></i></button></header>
+          <label class="field-label" for="production-pipeline-select">流水线</label><select id="production-pipeline-select" class="field-input" required></select>
+          <div id="production-overlap-fields" class="production-form-fields">
+            <div class="form-section-title">重合区域下载</div>
+            <p id="production-region-summary" class="control-note">尚未附加区域；请从 G 模式或数据覆盖右栏进入。</p>
+            <label class="field-label" for="production-export-format">区域导出格式</label><select id="production-export-format" class="field-input"><option value="json">JSON</option><option value="csv">CSV</option></select>
+            <label class="field-label" for="production-crawler">爬虫执行器</label><select id="production-crawler" class="field-input"><option value="builtin-http">内置 HTTP 爬虫</option></select>
+            <label class="field-label" for="production-concurrency">并发数</label><input id="production-concurrency" class="field-input" type="number" min="1" max="16" step="1" value="4" />
+            <label class="field-label" for="production-storage">存储位置</label><select id="production-storage" class="field-input"><option value="">Workspace 托管目录（自动创建 Connector）</option></select>
+            <p id="production-files-summary" class="control-note">尚未反查文件</p>
+          </div>
+          <div id="production-crossmatch-fields" class="production-form-fields" hidden>
+            <div class="form-section-title">对象交叉匹配</div>
+            <label class="field-label" for="production-left-asset">左表资产</label><select id="production-left-asset" class="field-input"></select>
+            <label class="field-label" for="production-right-asset">右表资产</label><select id="production-right-asset" class="field-input"></select>
+            <label class="field-label" for="production-match-radius">匹配半径（角秒）</label><input id="production-match-radius" class="field-input" type="number" min="0.01" max="60" step="0.01" value="1.5" />
+            <p id="production-crossmatch-note" class="control-note">只显示具备 RA / Dec 对象索引的 catalog 资产；MOC-only 资产不能交叉匹配。</p>
+          </div>
+          <footer><button id="production-form-cancel" class="command-button secondary" type="button">取消</button><button id="production-form-submit" class="primary-command" type="submit"><i data-lucide="play"></i><span>提交任务</span></button></footer>
+        </form>
+      </dialog>
+
+      <dialog id="ai-provider-dialog" class="workspace-dialog compact-dialog">
+        <form id="ai-provider-form" class="dialog-form"><header><div><span class="panel-kicker">AI PROVIDER</span><h2>注册 AI Provider</h2></div><button id="ai-provider-dialog-close" class="icon-button" type="button" aria-label="关闭"><i data-lucide="x"></i></button></header>
+          <label class="field-label" for="ai-provider-name">名称</label><input id="ai-provider-name" class="field-input" required maxlength="120" placeholder="OpenAI / 内网模型" />
+          <label class="field-label" for="ai-provider-url">Base URL</label><input id="ai-provider-url" class="field-input" type="url" required placeholder="https://api.example.com/v1" />
+          <label class="field-label" for="ai-provider-model">模型</label><input id="ai-provider-model" class="field-input" required maxlength="180" placeholder="gpt-4o-mini" />
+          <label class="field-label" for="ai-provider-key">API Key</label><input id="ai-provider-key" class="field-input" type="password" autocomplete="new-password" placeholder="留空则保留已保存密钥" />
+          <label class="toggle-row"><input id="ai-provider-default" type="checkbox" /><span>设为 Agent 默认 Provider</span></label>
+          <footer><button id="ai-provider-cancel" class="command-button secondary" type="button">取消</button><button id="ai-provider-test" class="command-button secondary" type="button">连接测试</button><button class="primary-command" type="submit">保存</button></footer>
+        </form>
+      </dialog>
+
+      <dialog id="mcp-server-dialog" class="workspace-dialog compact-dialog">
+        <form id="mcp-server-form" class="dialog-form"><header><div><span class="panel-kicker">MCP SERVER</span><h2>注册 MCP Server</h2></div><button id="mcp-server-dialog-close" class="icon-button" type="button" aria-label="关闭"><i data-lucide="x"></i></button></header>
+          <label class="field-label" for="mcp-server-name">名称</label><input id="mcp-server-name" class="field-input" required maxlength="120" placeholder="数据爬虫 MCP" />
+          <label class="field-label" for="mcp-server-url">URL</label><input id="mcp-server-url" class="field-input" type="url" required placeholder="https://mcp.example.com/mcp" />
+          <label class="field-label" for="mcp-server-transport">传输</label><select id="mcp-server-transport" class="field-input"><option value="streamable-http">Streamable HTTP</option><option value="sse">SSE</option></select>
+          <label class="field-label" for="mcp-server-token">Token</label><input id="mcp-server-token" class="field-input" type="password" autocomplete="new-password" placeholder="留空则保留已保存 Token" />
+          <footer><button id="mcp-server-cancel" class="command-button secondary" type="button">取消</button><button id="mcp-server-test" class="command-button secondary" type="button">连接并发现工具</button><button class="primary-command" type="submit">保存</button></footer>
+        </form>
+      </dialog>
+
+      <section id="agent-panel" class="agent-panel" hidden aria-label="Workspace Agent">
+        <header class="agent-heading"><div><span class="panel-kicker">WORKSPACE AGENT</span><h2>Agent 对话</h2></div><div class="agent-heading-actions"><select id="agent-session-select" class="field-input" aria-label="Agent 会话"></select><button id="agent-new-session" class="icon-button" type="button" aria-label="新建 Agent 会话" title="新建 Agent 会话"><i data-lucide="plus"></i></button><button id="agent-collapse" class="icon-button" type="button" aria-label="收起 Agent" title="收起 Agent"><i data-lucide="chevron-down"></i></button></div></header>
+        <div id="agent-messages" class="agent-messages" aria-live="polite"></div>
+        <div id="agent-confirmation" class="agent-confirmation" hidden></div>
+        <form id="agent-expanded-form" class="agent-form"><button id="agent-attach" class="icon-button" type="button" aria-label="附加 Workspace 上下文" title="附加 Workspace 上下文"><i data-lucide="plus"></i></button><textarea id="agent-expanded-input" rows="2" maxlength="2000" placeholder="向 Agent 描述要执行的 Workspace 操作"></textarea><button class="primary-command" type="submit" aria-label="发送"><i data-lucide="corner-down-left"></i><span>发送</span></button></form>
+      </section>
+
       <footer class="statusbar">
-        <span><i class="status-light"></i><span id="service-status">SERVICE CONNECTING</span></span>
+        <form id="agent-collapsed-form" class="agent-collapsed-form"><button id="agent-collapsed-attach" class="agent-plus-button" type="button" aria-label="附加 Workspace 上下文" title="附加 Workspace 上下文">+</button><input id="agent-collapsed-input" type="text" maxlength="2000" placeholder="与 Workspace Agent 沟通" /><button class="agent-submit-button" type="submit" aria-label="提交 Agent 消息" title="提交 Agent 消息"><i data-lucide="corner-down-left"></i></button></form>
+        <!-- Kept for backwards-compatible e2e selectors; the visible statusbar
+             is now the Agent input above it. -->
+        <span id="service-status" class="service-status-legacy" aria-hidden="true">SERVICE CONNECTING</span>
         <span id="render-status">WEBGL2</span>
         <span id="object-status">0 OBJECTS</span>
       </footer>

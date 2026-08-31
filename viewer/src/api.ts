@@ -11,6 +11,9 @@ import type { UserMocArtifact } from "../../src/user-moc-artifacts";
 import type { CoverageJobSpec } from "../../src/coverage-jobs";
 import type { DataAssetCoverageState, DataAssetNextAction, DataAssetObjectState, DataAssetOperationalStatus } from "../../src/data-asset-status";
 import type { SkyOverlapComponent, SkyOverlapSource } from "../../src/sky-overlap";
+import type { ProductionPipelineDefinition, ProductionRun, ProductionRunInput } from "../../src/production";
+import type { AiProviderInput, AiProviderRecord, McpServerInput, McpServerRecord } from "../../src/system-config";
+import type { WorkspaceAgentSession } from "../../src/workspace-agent";
 import type {
   AstroCellsQueryInput,
   AstroCellsQueryResult,
@@ -410,6 +413,66 @@ export const workspaceApi = {
   },
   async cancelCoverageDownload(id: string): Promise<CoverageDownloadJob> {
     return (await postJson<{ job: CoverageDownloadJob }>(`/api/coverage-downloads/${encodeURIComponent(id)}/cancel`, {})).job;
+  },
+  async productionPipelines(): Promise<ProductionPipelineDefinition[]> {
+    return (await getJson<{ pipelines: ProductionPipelineDefinition[] }>("/api/production-pipelines")).pipelines;
+  },
+  async productionRuns(): Promise<ProductionRun[]> {
+    return (await getJson<{ runs: ProductionRun[] }>("/api/production-runs")).runs;
+  },
+  async productionRun(id: string): Promise<ProductionRun> {
+    return (await getJson<{ run: ProductionRun }>(`/api/production-runs/${encodeURIComponent(id)}`)).run;
+  },
+  async submitProductionRun(input: ProductionRunInput): Promise<ProductionRun> {
+    return (await postJson<{ run: ProductionRun }>("/api/production-runs", input)).run;
+  },
+  async cancelProductionRun(id: string): Promise<ProductionRun> {
+    return (await postJson<{ run: ProductionRun }>(`/api/production-runs/${encodeURIComponent(id)}/cancel`, {})).run;
+  },
+  async retryProductionRun(id: string): Promise<ProductionRun> {
+    return (await postJson<{ run: ProductionRun }>(`/api/production-runs/${encodeURIComponent(id)}/retry`, {})).run;
+  },
+  productionArtifactUrl(id: string, name: string): string {
+    return `/api/production-runs/${encodeURIComponent(id)}/artifacts/${encodeURIComponent(name)}`;
+  },
+  async aiProviders(): Promise<AiProviderRecord[]> {
+    return (await getJson<{ providers: AiProviderRecord[] }>("/api/system-config/ai-providers")).providers;
+  },
+  async saveAiProvider(input: AiProviderInput): Promise<AiProviderRecord> {
+    return (await postJson<{ provider: AiProviderRecord }>("/api/system-config/ai-providers", input)).provider;
+  },
+  async testAiProvider(id: string): Promise<AiProviderRecord> {
+    return (await postJson<{ provider: AiProviderRecord }>(`/api/system-config/ai-providers/${encodeURIComponent(id)}/test`, {})).provider;
+  },
+  async deleteAiProvider(id: string): Promise<void> {
+    await deleteRequest(`/api/system-config/ai-providers/${encodeURIComponent(id)}`);
+  },
+  async mcpServers(): Promise<McpServerRecord[]> {
+    return (await getJson<{ servers: McpServerRecord[] }>("/api/system-config/mcp-servers")).servers;
+  },
+  async saveMcpServer(input: McpServerInput): Promise<McpServerRecord> {
+    return (await postJson<{ server: McpServerRecord }>("/api/system-config/mcp-servers", input)).server;
+  },
+  async testMcpServer(id: string): Promise<McpServerRecord> {
+    return (await postJson<{ server: McpServerRecord }>(`/api/system-config/mcp-servers/${encodeURIComponent(id)}/test`, {})).server;
+  },
+  async deleteMcpServer(id: string): Promise<void> {
+    await deleteRequest(`/api/system-config/mcp-servers/${encodeURIComponent(id)}`);
+  },
+  async workspaceAgentSessions(): Promise<WorkspaceAgentSession[]> {
+    return (await getJson<{ sessions: WorkspaceAgentSession[] }>("/api/agent/workspace-sessions")).sessions;
+  },
+  async createWorkspaceAgentSession(): Promise<WorkspaceAgentSession> {
+    return (await postJson<{ session: WorkspaceAgentSession }>("/api/agent/workspace-sessions", {})).session;
+  },
+  async workspaceAgentSession(id: string): Promise<WorkspaceAgentSession> {
+    return (await getJson<{ session: WorkspaceAgentSession }>(`/api/agent/workspace-sessions/${encodeURIComponent(id)}`)).session;
+  },
+  async sendWorkspaceAgentMessage(id: string, message: string, context?: Record<string, unknown>): Promise<WorkspaceAgentSession> {
+    return (await postJson<{ session: WorkspaceAgentSession }>(`/api/agent/workspace-sessions/${encodeURIComponent(id)}/messages`, { message, ...(context ? { context } : {}) })).session;
+  },
+  async confirmWorkspaceAgentTool(id: string, approved: boolean): Promise<WorkspaceAgentSession> {
+    return (await postJson<{ session: WorkspaceAgentSession }>(`/api/agent/workspace-sessions/${encodeURIComponent(id)}/confirm`, { approved })).session;
   },
   async userMocs(): Promise<UserMocArtifact[]> {
     return (await getJson<{ artifacts: UserMocArtifact[] }>("/api/user-mocs")).artifacts;

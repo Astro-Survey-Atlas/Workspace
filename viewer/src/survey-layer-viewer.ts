@@ -79,6 +79,7 @@ export interface SurveyLayerContextMenu {
   surveyIds: string[];
   releaseIds?: string[];
   assetIds: string[];
+  componentId?: string;
 }
 
 export interface SurveyLayerOverlapComponent {
@@ -2011,6 +2012,7 @@ export class SurveyLayerViewer {
       workspace.releaseIds.forEach((releaseId) => releaseIds.add(releaseId));
       workspace.assetIds.forEach((assetId) => assetIds.add(assetId));
     }
+    const overlapComponent = this.#overlapMode ? this.#pickOverlapComponent(event) : null;
     this.#onContextMenu({
       clientX: event.clientX,
       clientY: event.clientY,
@@ -2019,6 +2021,7 @@ export class SurveyLayerViewer {
       surveyIds: [...surveyIds].sort(),
       releaseIds: [...releaseIds].sort(),
       assetIds: [...assetIds].sort(),
+      ...(overlapComponent ? { componentId: overlapComponent.id } : {}),
     });
   };
 
