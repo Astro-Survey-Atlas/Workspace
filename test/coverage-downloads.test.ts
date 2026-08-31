@@ -70,6 +70,7 @@ test("rejects unsupported protocols and duplicate file names before starting a j
       { url: "https://example.test/a", name: "same" },
       { url: "https://example.test/b", name: "same" },
     ] }), /duplicate names/);
+    await assert.rejects(() => service.submit({ files: [{ url: "http://127.0.0.1/private.csv", name: "private.csv" }] }), /local or private/);
   } finally {
     await rm(directory, { recursive: true, force: true });
   }

@@ -48,3 +48,14 @@ test("does not turn MOC JSON or an ordinary documentation page into a file", asy
   assert.equal(result.files.length, 0);
   assert.match(result.reason ?? "", /未发现可下载文件/);
 });
+
+test("filters listing links whose host resolves to a private address", async () => {
+  const result = await discoverSourceFiles("https://example.test/data/", {
+    resolveHostname: async (hostname) => hostname === "example.test" ? ["203.0.114.20"] : ["10.0.0.8"],
+    fetchImpl: async (_input, init) => init?.method === "HEAD"
+      ? new Response(null, { status: 200, headers: { "content-type": "text/html" } })
+      : new Response('<a href="https://private.example/catalog.fits">private</a>', { status: 200, headers: { "content-type": "text/html" } }),
+  });
+  assert.equal(result.files.length, 0);
+  assert.match(result.reason ?? "", /未发现可下载文件/);
+});

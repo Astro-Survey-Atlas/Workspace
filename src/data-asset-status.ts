@@ -104,10 +104,12 @@ export function deriveDataAssetOperationalStatus(input: DataAssetStatusInput): D
     else if (hasRemote && input.warehouseConfigured) nextAction = "scan_remote";
     else if (!connectorAvailable) nextAction = "configure_connector";
     else if (hasLocal || hasRemote) nextAction = "configure_index";
+    else nextAction = "configure_connector";
   } else if (state === "unavailable") {
     if (!connectorAvailable) nextAction = "configure_connector";
     else if (!input.objectIndexConfigured) nextAction = "configure_index";
     else if (hasLocal || hasRemote) nextAction = "configure_index";
+    else nextAction = "configure_connector";
   }
 
   const message = coverage?.message ?? run?.error;

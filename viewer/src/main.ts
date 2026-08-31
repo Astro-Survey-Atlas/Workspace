@@ -16,6 +16,7 @@ import {
   type RemoteCoverageScanInput,
   type DataAssetOperationalStatusResponse,
   type SkyOverlapResponse,
+  type CoverageDownloadJob,
 } from "./api";
 import { Healpix } from "healpixjs";
 import { cartesianToRaDec, raDecToCartesian } from "./coordinates";
@@ -92,7 +93,7 @@ const NEXT_ACTION_LABELS: Record<string, string> = {
   scan_local: "扫描本地文件",
   scan_remote: "提交远程扫描",
   retry: "重试上次扫描",
-  configure_connector: "配置 Connector",
+  configure_connector: "配置可扫描 Connector",
   configure_index: "配置空间索引",
   none: "无需操作",
 };
@@ -379,6 +380,68 @@ function renderConnectorMetrics(metrics: ConnectorMetrics): void {
   });
 }
 const connectorPanel = new ConnectorPanel((error) => notifyWorkspaceError(error, "Connector 操作失败"), renderConnectorMetrics);
+
+const coverageDownloadWatchers = new Set<string>();
+
+function coverageDownloadTerminal(job: CoverageDownloadJob): boolean {
+  return job.status === "completed" || job.status === "failed" || job.status === "cancelled";
+}
+
+async function refreshCoverageConsumers(): Promise<void> {
+  const results = await Promise.allSettled([
+    workspaceApi.connectors().then((connectors) => { workspaceConnectors = connectors; }),
+    refreshWorkspaceAssets(),
+    dataCatalogPanel.refresh(),
+    connectorPanel.refresh(),
+  ]);
+  const failures = results
+    .filter((result): result is PromiseRejectedResult => result.status === "rejected")
+    .map((result) => result.reason instanceof Error ? result.reason.message : String(result.reason));
+  if (failures.length) {
+    notifyWorkspace("下载结果已登记，但界面刷新不完整", failures.join("；"), { tone: "warning", dedupeMs: 5_000 });
+  }
+}
+
+async function handleCoverageDownloadTerminal(job: CoverageDownloadJob): Promise<void> {
+  if (job.status === "completed") {
+    notifyWorkspace("重合来源下载已完成", `${job.downloadedFiles} 个文件 · 已登记 Connector ${job.outputConnectorId ?? ""}`.trim(), { tone: "success" });
+    await refreshCoverageConsumers();
+  } else if (job.status === "failed") {
+    notifyWorkspace("重合来源下载失败", job.error ?? "下载或校验未完成", { tone: "error" });
+  } else {
+    notifyWorkspace("重合来源下载已取消", job.error ?? "已取消下载任务", { tone: "warning" });
+  }
+}
+
+function watchCoverageDownload(id: string): void {
+  if (coverageDownloadWatchers.has(id)) return;
+  coverageDownloadWatchers.add(id);
+  const poll = async (): Promise<void> => {
+    try {
+      const job = await workspaceApi.coverageDownload(id);
+      if (coverageDownloadTerminal(job)) {
+        coverageDownloadWatchers.delete(id);
+        await handleCoverageDownloadTerminal(job);
+        return;
+      }
+    } catch (error) {
+      coverageDownloadWatchers.delete(id);
+      notifyWorkspace("重合来源下载状态读取失败", error instanceof Error ? error.message : String(error), { tone: "warning", dedupeMs: 5_000 });
+      return;
+    }
+    window.setTimeout(() => void poll(), 700);
+  };
+  void poll();
+}
+
+async function resumeCoverageDownloads(): Promise<void> {
+  try {
+    const jobs = await workspaceApi.coverageDownloads();
+    jobs.filter((job) => job.status === "queued" || job.status === "running").forEach((job) => watchCoverageDownload(job.id));
+  } catch (error) {
+    console.warn("Unable to resume coverage download jobs", error);
+  }
+}
 
 function surveyRegistrationFeedback(summary: string, detail = ""): void {
   if (summary === "尚未保存") return;
@@ -1259,6 +1322,19 @@ function renderOverlapSummary(result: SkyOverlapResponse): void {
   ]);
 }
 
+function overlapSourceIdsForState(state: SurveyLayerState): string[] {
+  const ids = new Set<string>();
+  (surveyFootprints?.footprints ?? [])
+    .filter((footprint) => footprint.nside === state.nside && state.visibleSurveyIds.includes(footprint.surveyId))
+    .forEach((footprint) => ids.add(`public:${footprint.surveyId}:${footprint.releaseId}:${footprint.product}`));
+  state.visibleAssetIds.forEach((assetId) => ids.add(`workspace:asset:${assetId}`));
+  state.visibleWorkspaceLayerKeys.forEach((key) => {
+    if (key.startsWith("warehouse:")) ids.add(`workspace:warehouse:${key.slice("warehouse:".length)}`);
+    else if (key.startsWith("moc:")) ids.add(`workspace:moc:${key.slice("moc:".length)}`);
+  });
+  return [...ids].sort();
+}
+
 function renderOverlapComponent(component: SurveyLayerOverlapComponent): void {
   const selected = overlapResponse?.components.find((candidate) => candidate.id === component.id) ?? component;
   layerViewer?.setActiveOverlapComponent(selected.id);
@@ -1284,7 +1360,10 @@ function renderOverlapComponent(component: SurveyLayerOverlapComponent): void {
         const download = actionButton(`下载并登记 Connector（${lookup.files.length}）`, () => {
           download.disabled = true;
           void workspaceApi.submitCoverageDownload({ files: lookup.files, componentId: selected.id, sourceIds })
-            .then((job) => notifyWorkspace("重合来源下载已提交", `${job.id} · ${job.totalFiles} 个文件`, { tone: "success" }))
+            .then((job) => {
+              notifyWorkspace("重合来源下载已提交", `${job.id} · ${job.totalFiles} 个文件`, { tone: "success" });
+              watchCoverageDownload(job.id);
+            })
             .catch((error) => notifyWorkspace("重合来源下载失败", error instanceof Error ? error.message : String(error), { tone: "error" }))
             .finally(() => { download.disabled = false; });
         });
@@ -1314,10 +1393,15 @@ async function enterSkyOverlapMode(): Promise<void> {
   byId("scene-badge").textContent = "天区重合";
   try {
     const state = layerViewer.state;
+    const sourceIds = overlapSourceIdsForState(state);
     const result = await workspaceApi.skyOverlap({
       nside: state.nside,
-      surveyIds: state.visibleSurveyIds.filter((surveyId) => surveyId !== "__unassigned__"),
-      assetIds: state.visibleAssetIds,
+      ...(sourceIds.length
+        ? { sourceIds }
+        : {
+            surveyIds: state.visibleSurveyIds.filter((surveyId) => surveyId !== "__unassigned__"),
+            assetIds: state.visibleAssetIds,
+          }),
       includePublic: true,
       includeWorkspace: true,
     });
@@ -1840,6 +1924,7 @@ async function loadWorkspaceAssetCoverage(scannedAssetId?: string): Promise<void
   const assets = userDataAssets();
   const availableAssetIds = new Set(assets.map((asset) => asset.id));
   visibleAssetIds = new Set([...visibleAssetIds].filter((assetId) => availableAssetIds.has(assetId)));
+  if (selectedLayerAssetId && !availableAssetIds.has(selectedLayerAssetId)) selectedLayerAssetId = null;
   const nside = surveyFootprints?.nside ?? 16;
   const extraCoverageResult = await Promise.allSettled([
     workspaceApi.skyCoverage({ nside }),
@@ -2712,7 +2797,7 @@ function renderLayerAssetDetails(asset: DataAssetRecord): void {
     actions.push(remoteButton);
   }
   if (operational?.nextAction === "configure_connector") {
-    actions.push(actionButton("配置 Connector", () => {
+    actions.push(actionButton("配置可扫描 Connector", () => {
       void activateMode("connectors").catch(showFatal);
     }));
   }
@@ -2733,10 +2818,13 @@ function renderLayerAssetDetails(asset: DataAssetRecord): void {
           : coverageState === "unavailable" ? operational?.message ?? "空间索引不可用"
             : "未开始";
   const nextAction = operational?.nextAction ? (NEXT_ACTION_LABELS[operational.nextAction] ?? operational.nextAction) : "--";
+  const projectState = asset.projectState === "acquired"
+    ? "已获取（已登记访问权，不代表已有空间覆盖）"
+    : PROJECT_STATE_LABELS[asset.projectState] ?? asset.projectState;
   inspectorRows(asset.name, [
     ["巡天 / 发布", `${asset.surveyId ?? "未关联"} / ${asset.releaseId ?? "未关联"}`],
     ["数据类型", asset.kind],
-    ["使用阶段", asset.projectState === "acquired" ? "已获取（已登记访问权，不代表已有空间覆盖）" : asset.projectState],
+    ["使用阶段", projectState],
     ["覆盖状态", `${COVERAGE_STATE_LABELS[coverageState] ?? coverageState}${coverage && coverage !== COVERAGE_STATE_LABELS[coverageState] ? ` · ${coverage}` : ""}`],
     ["对象查询", operational?.objects === "queryable" ? "可查询" : operational?.objects === "unavailable" ? "索引不可用" : "尚未建立对象索引"],
     ["下一步", nextAction],
@@ -3363,6 +3451,7 @@ async function start(): Promise<void> {
   });
   const initialQuery = new URL(window.location.href).searchParams;
   await activateMode(initialQuery.get("mode") === "packages" ? "packages" : initialQuery.get("mode") === "catalog" ? "catalog" : publicCatalogUnavailable ? "packages" : "layers");
+  void resumeCoverageDownloads();
 }
 
 void start().catch(showFatal);

@@ -1,5 +1,7 @@
 import path from "node:path";
 
+import { assertPublicHttpUrl, type RemoteHostnameResolver } from "./remote-url-policy.js";
+
 export interface SourceFileCandidate {
   url: string;
   name: string;
@@ -14,6 +16,8 @@ export interface SourceCrawlResult {
 
 export interface SourceCrawlerOptions {
   fetchImpl?: typeof fetch;
+  resolveHostname?: RemoteHostnameResolver;
+  skipDnsLookup?: boolean;
   maxFiles?: number;
   maxListingBytes?: number;
   timeoutMs?: number;
@@ -133,7 +137,14 @@ export async function discoverSourceFiles(sourceUrl: string, options: SourceCraw
   } catch {
     return { files: [], reason: "来源 URL 无法解析" };
   }
-  if (source.protocol !== "http:" && source.protocol !== "https:") return { files: [], reason: "仅支持 HTTP/HTTPS 来源" };
+  try {
+    source = await assertPublicHttpUrl(source, {
+      resolveHostname: options.resolveHostname,
+      skipDnsLookup: options.skipDnsLookup ?? Boolean(options.fetchImpl && !options.resolveHostname),
+    });
+  } catch (error) {
+    return { files: [], reason: error instanceof Error ? error.message : String(error) };
+  }
   const fetchImpl = options.fetchImpl ?? fetch;
   const maxFiles = Math.max(1, Math.min(DEFAULT_MAX_FILES, options.maxFiles ?? DEFAULT_MAX_FILES));
   const maxListingBytes = Math.max(1024, Math.min(8 * 1024 * 1024, options.maxListingBytes ?? DEFAULT_MAX_LISTING_BYTES));
@@ -167,7 +178,18 @@ export async function discoverSourceFiles(sourceUrl: string, options: SourceCraw
       return { files: [{ url: source.href, name, ...(sizeBytes === undefined ? {} : { sizeBytes }) }] };
     }
     const body = await readLimited(response, maxListingBytes);
-    const discovered = uniqueCandidates(listingLinks(body, source), maxFiles);
+    const listing = listingLinks(body, source);
+    const checked = await Promise.all(listing.map(async (url) => {
+      try {
+        return await assertPublicHttpUrl(url, {
+          resolveHostname: options.resolveHostname,
+          skipDnsLookup: options.skipDnsLookup ?? Boolean(options.fetchImpl && !options.resolveHostname),
+        });
+      } catch {
+        return undefined;
+      }
+    }));
+    const discovered = uniqueCandidates(checked.filter((url): url is URL => Boolean(url)), maxFiles);
     if (!discovered.files.length) return { files: [], reason: "爬虫未发现可下载文件（来源可能是说明页或 MOC 服务）", truncated: discovered.truncated };
     return discovered;
   } catch (error) {

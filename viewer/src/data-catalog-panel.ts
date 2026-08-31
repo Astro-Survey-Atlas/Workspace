@@ -41,7 +41,7 @@ export class DataCatalogPanel {
   readonly #onError: (error: unknown) => void;
   readonly #onConnectorSelected?: (connectorId: string) => void;
   readonly #onNewConnector?: () => void;
-  readonly #onAssetChanged?: (assetId: string) => void | Promise<void>;
+  readonly #onAssetChanged?: (assetId?: string) => void | Promise<void>;
   #assets: DataAssetRecord[] = [];
   #connectors: ConnectorPublicRecord[] = [];
   #tags: TagDefinition[] = [];
@@ -53,7 +53,7 @@ export class DataCatalogPanel {
   #scanInspection: LocalCsvInspection | null = null;
   #scanConnectorId: string | null = null;
 
-  constructor(onError: (error: unknown) => void, onConnectorSelected?: (connectorId: string) => void, onNewConnector?: () => void, onAssetChanged?: (assetId: string) => void | Promise<void>) {
+  constructor(onError: (error: unknown) => void, onConnectorSelected?: (connectorId: string) => void, onNewConnector?: () => void, onAssetChanged?: (assetId?: string) => void | Promise<void>) {
     this.#onError = onError;
     this.#onConnectorSelected = onConnectorSelected;
     this.#onNewConnector = onNewConnector;
@@ -85,6 +85,11 @@ export class DataCatalogPanel {
     this.#renderCreateConnectors();
     if (!this.#selectedId || !this.#assets.some((asset) => asset.id === this.#selectedId)) this.#selectedId = this.#assets[0]?.id ?? null;
     this.#render();
+  }
+
+  async refresh(): Promise<void> {
+    if (!this.#active) return;
+    await this.activate(this.#surveys, this.#surveyRecords);
   }
 
   deactivate(): void { this.#active = false; }
@@ -411,6 +416,11 @@ export class DataCatalogPanel {
     this.#selectedId = null;
     this.#detailEditing = null;
     this.#render();
+    try {
+      await this.#onAssetChanged?.();
+    } catch (error) {
+      notifyWorkspace("用户资产覆盖刷新失败", error instanceof Error ? error.message : String(error), { tone: "warning" });
+    }
     notifyWorkspace("用户资产已删除", asset.name, { tone: "success" });
   }
 
@@ -438,7 +448,17 @@ export class DataCatalogPanel {
 
   #saveDetail(input: DataAssetRegistrationInput): void {
     if (!this.#selectedId) return;
-    void workspaceApi.updateDataAsset(this.#selectedId, input).then(async (updated) => { this.#assets = await this.#loadUserAssets(); this.#detailEditing = null; this.#render(); notifyWorkspace("用户资产已更新", updated.name, { tone: "success" }); }).catch((error) => { notifyWorkspace("用户资产更新失败", error instanceof Error ? error.message : String(error), { tone: "error" }); });
+    void workspaceApi.updateDataAsset(this.#selectedId, input).then(async (updated) => {
+      this.#assets = await this.#loadUserAssets();
+      this.#detailEditing = null;
+      this.#render();
+      try {
+        await this.#onAssetChanged?.(updated.id);
+      } catch (error) {
+        notifyWorkspace("用户资产覆盖刷新失败", error instanceof Error ? error.message : String(error), { tone: "warning" });
+      }
+      notifyWorkspace("用户资产已更新", updated.name, { tone: "success" });
+    }).catch((error) => { notifyWorkspace("用户资产更新失败", error instanceof Error ? error.message : String(error), { tone: "error" }); });
   }
 
   #basicEditor(asset: DataAssetRecord): HTMLElement {

@@ -3,6 +3,7 @@ import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 import type { ConnectorRecord, ConnectorRegistrationInput } from "./connectors.js";
+import { assertPublicHttpUrl, type RemoteHostnameResolver } from "./remote-url-policy.js";
 
 export interface CoverageDownloadFile {
   url: string;
@@ -39,6 +40,8 @@ export interface CoverageDownloadServiceOptions {
   connectorPath?: string;
   registerConnector?: (input: ConnectorRegistrationInput) => Promise<ConnectorRecord>;
   fetchImpl?: typeof fetch;
+  resolveHostname?: RemoteHostnameResolver;
+  skipDnsLookup?: boolean;
   maxFiles?: number;
   maxFileBytes?: number;
   maxTotalBytes?: number;
@@ -98,6 +101,8 @@ export class CoverageDownloadService {
   readonly #connectorPath?: string;
   readonly #registerConnector?: CoverageDownloadServiceOptions["registerConnector"];
   readonly #fetch: typeof fetch;
+  readonly #resolveHostname?: RemoteHostnameResolver;
+  readonly #skipDnsLookup: boolean;
   readonly #maxFiles: number;
   readonly #maxFileBytes: number;
   readonly #maxTotalBytes: number;
@@ -113,6 +118,8 @@ export class CoverageDownloadService {
     this.#connectorPath = options.connectorPath;
     this.#registerConnector = options.registerConnector;
     this.#fetch = options.fetchImpl ?? fetch;
+    this.#resolveHostname = options.resolveHostname;
+    this.#skipDnsLookup = options.skipDnsLookup ?? Boolean(options.fetchImpl && !options.resolveHostname);
     this.#maxFiles = Math.max(1, Math.min(DEFAULT_MAX_FILES, options.maxFiles ?? DEFAULT_MAX_FILES));
     this.#maxFileBytes = Math.max(1, options.maxFileBytes ?? DEFAULT_MAX_FILE_BYTES);
     this.#maxTotalBytes = Math.max(this.#maxFileBytes, options.maxTotalBytes ?? DEFAULT_MAX_TOTAL_BYTES);
@@ -160,6 +167,7 @@ export class CoverageDownloadService {
     if (legacyTarget !== undefined) throw new RangeError("targetConnectorId is not supported; coverage downloads create a new Connector");
     if (!Array.isArray(input.files) || input.files.length < 1 || input.files.length > this.#maxFiles) throw new RangeError(`files must contain between 1 and ${this.#maxFiles} entries`);
     const files = input.files.map((file, index) => normalizedFile(file, index));
+    await Promise.all(files.map((file) => assertPublicHttpUrl(file.url, { resolveHostname: this.#resolveHostname, skipDnsLookup: this.#skipDnsLookup })));
     if (new Set(files.map((file) => file.name)).size !== files.length) throw new RangeError("files must not contain duplicate names");
     const totalBytes = files.reduce((sum, file) => sum + (file.sizeBytes ?? 0), 0);
     if (totalBytes > this.#maxTotalBytes) throw new RangeError("declared download size exceeds the Workspace limit");
@@ -210,6 +218,7 @@ export class CoverageDownloadService {
       await mkdir(directory, { recursive: true });
       for (const file of job.files) {
         if (controller.signal.aborted) throw new DOMException("Download cancelled", "AbortError");
+        await assertPublicHttpUrl(file.url, { resolveHostname: this.#resolveHostname, skipDnsLookup: this.#skipDnsLookup });
         const response = await this.#fetch(file.url, { method: "GET", redirect: "error", signal: controller.signal });
         if (!response.ok) throw new Error(`Download returned HTTP ${response.status}: ${file.url}`);
         const declaredLength = Number(response.headers.get("content-length") ?? "");

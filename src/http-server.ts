@@ -1121,6 +1121,20 @@ async function overlapSources(context: OverlapSourceContext): Promise<SkyOverlap
       sourceUrl: access?.uri,
     });
   }));
+  const unassignedMocSources = await Promise.all([...artifactSelections.values()]
+    .filter(({ latest }) => !assets.some((asset) => [asset.id, workspaceLayerIdForAsset(asset.id), `user-${asset.id}`].includes(latest.layerId)))
+    .map(async ({ latest, renderable }) => {
+      const projection = await userMocs.projection(renderable.layerId, renderable.scanRunId, Math.log2(context.nside)).catch(() => ({ order: Math.log2(context.nside), pixels: [] }));
+      return {
+        id: `workspace:moc:${latest.id}`,
+        label: latest.layerId,
+        kind: "workspace" as const,
+        nside: context.nside,
+        pixels: projection.pixels,
+        product: latest.layerId,
+      } satisfies SkyOverlapSource;
+    }));
+  unassignedMocSources.forEach(accept);
   // Keep unassigned Warehouse/MOC layers discoverable for workspaces that have
   // no Atlas asset row yet. They are still explicit workspace sources, never
   // folded into a public footprint.

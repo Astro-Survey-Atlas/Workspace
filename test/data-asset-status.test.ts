@@ -44,6 +44,13 @@ test("a remote Connector uses the Warehouse scan action", () => {
   }).nextAction, "scan_remote");
 });
 
+test("unsupported Connector kinds still expose a configuration action", () => {
+  assert.equal(status({
+    asset: { ...baseAsset, access: { connector: "http", uri: "https://example.test/cosmos.csv", format: "csv" } },
+    connectorKinds: ["http"],
+  }).nextAction, "configure_connector");
+});
+
 test("failed runs expose retry and preserve the failure message", () => {
   assert.deepEqual(status({
     coverage: { status: "ready", pixels: [] },
