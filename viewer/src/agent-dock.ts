@@ -19,12 +19,9 @@ export class AgentDock {
 
   constructor(private readonly onError: (error: unknown) => void) {
     byId<HTMLFormElement>("agent-collapsed-form").addEventListener("submit", (event) => { event.preventDefault(); const input = byId<HTMLInputElement>("agent-collapsed-input"); void this.send(input.value, input).catch((error) => this.fail(error)); });
-    byId<HTMLFormElement>("agent-expanded-form").addEventListener("submit", (event) => { event.preventDefault(); const input = byId<HTMLTextAreaElement>("agent-expanded-input"); void this.send(input.value, input).catch((error) => this.fail(error)); });
-    byId<HTMLTextAreaElement>("agent-expanded-input").addEventListener("keydown", (event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); byId<HTMLFormElement>("agent-expanded-form").requestSubmit(); } });
     byId<HTMLButtonElement>("agent-collapse").addEventListener("click", () => this.setOpen(false));
     byId<HTMLButtonElement>("agent-new-session").addEventListener("click", () => void this.newSession().catch((error) => this.fail(error)));
     byId<HTMLSelectElement>("agent-session-select").addEventListener("change", () => { const selected = this.sessions.find((session) => session.id === byId<HTMLSelectElement>("agent-session-select").value); if (selected) { this.session = selected; this.render(); } });
-    byId<HTMLButtonElement>("agent-attach").addEventListener("click", () => this.attachCurrent());
     byId<HTMLButtonElement>("agent-collapsed-attach").addEventListener("click", () => this.attachCurrent());
     window.addEventListener("astro:agent-context", (event) => { const context = (event as CustomEvent<AgentDockContext>).detail; if (context) { this.attachedContext = context; this.renderAttachmentState(); } });
   }
@@ -44,7 +41,7 @@ export class AgentDock {
     const panel = byId("agent-panel");
     panel.hidden = !open;
     document.querySelector(".workspace-shell")?.classList.toggle("agent-open", open);
-    if (open) { byId<HTMLTextAreaElement>("agent-expanded-input").focus(); this.render(); }
+    if (open) { byId<HTMLInputElement>("agent-collapsed-input").focus(); this.render(); }
   }
 
   private attachCurrent(): void {
@@ -74,7 +71,7 @@ export class AgentDock {
     } finally { this.sending = false; this.renderSending(false); }
   }
 
-  private renderSending(sending: boolean): void { byId<HTMLInputElement>("agent-collapsed-input").disabled = sending; byId<HTMLTextAreaElement>("agent-expanded-input").disabled = sending; }
+  private renderSending(sending: boolean): void { byId<HTMLInputElement>("agent-collapsed-input").disabled = sending; }
 
   private render(): void {
     if (!this.session) return;
@@ -105,9 +102,7 @@ export class AgentDock {
 
   private renderAttachmentState(): void {
     const label = this.attachedContext ? "已附加" : "附加";
-    byId<HTMLButtonElement>("agent-attach").title = `${label} Workspace 上下文`;
     byId<HTMLButtonElement>("agent-collapsed-attach").title = `${label} Workspace 上下文`;
-    byId<HTMLButtonElement>("agent-attach").classList.toggle("is-attached", Boolean(this.attachedContext));
     byId<HTMLButtonElement>("agent-collapsed-attach").classList.toggle("is-attached", Boolean(this.attachedContext));
   }
 

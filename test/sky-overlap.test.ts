@@ -7,6 +7,10 @@ function source(id: string, pixels: number[], nside = 4): SkyOverlapSource {
   return { id, label: id, kind: "workspace", nside, pixels };
 }
 
+function surveySource(id: string, surveyId: string, pixels: number[], nside = 4): SkyOverlapSource {
+  return { ...source(id, pixels, nside), surveyId };
+}
+
 test("intersects every source and reports connected components", () => {
   const result = calculateSkyOverlap([
     source("a", [0, 1, 50, 51]),
@@ -19,6 +23,17 @@ test("intersects every source and reports connected components", () => {
   assert.deepEqual(result.components.map((component) => component.cells), [[0, 1], [50, 51]]);
   assert.ok(result.components.every((component) => component.areaDeg2 > 0));
   assert.ok(result.components.every((component) => component.sourceIds.join(",") === "a,b,c"));
+});
+
+test("unions products within a survey before intersecting surveys", () => {
+  const result = calculateSkyOverlap([
+    surveySource("a-one", "survey-a", [0, 1]),
+    surveySource("a-two", "survey-a", [2, 3]),
+    surveySource("b-one", "survey-b", [1, 2, 3]),
+  ], 4);
+  assert.equal(result.status, "ready");
+  assert.deepEqual(result.pixels, [1, 2, 3]);
+  assert.deepEqual(result.sourceIds, ["a-one", "a-two", "b-one"]);
 });
 
 test("returns an empty result when there is no common cell or fewer than two sources", () => {

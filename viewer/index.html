@@ -544,19 +544,18 @@
       </dialog>
 
       <section id="agent-panel" class="agent-panel" hidden aria-label="Workspace Agent">
-        <header class="agent-heading"><div><span class="panel-kicker">WORKSPACE AGENT</span><h2>Agent 对话</h2></div><div class="agent-heading-actions"><select id="agent-session-select" class="field-input" aria-label="Agent 会话"></select><button id="agent-new-session" class="icon-button" type="button" aria-label="新建 Agent 会话" title="新建 Agent 会话"><i data-lucide="plus"></i></button><button id="agent-collapse" class="icon-button" type="button" aria-label="收起 Agent" title="收起 Agent"><i data-lucide="chevron-down"></i></button></div></header>
+        <header class="agent-heading"><div><span class="panel-kicker">WORKSPACE AGENT</span><h2>Agent 对话</h2></div><div class="agent-heading-actions"><select id="agent-session-select" class="field-input" aria-label="Agent 会话"></select><button id="agent-new-session" class="icon-button" type="button" aria-label="新建 Agent 会话" title="新建 Agent 会话"><i data-lucide="plus"></i></button><button id="agent-collapse" class="icon-button" type="button" aria-label="关闭 Agent" title="关闭 Agent"><i data-lucide="x"></i></button></div></header>
         <div id="agent-messages" class="agent-messages" aria-live="polite"></div>
         <div id="agent-confirmation" class="agent-confirmation" hidden></div>
-        <form id="agent-expanded-form" class="agent-form"><button id="agent-attach" class="icon-button" type="button" aria-label="附加 Workspace 上下文" title="附加 Workspace 上下文"><i data-lucide="plus"></i></button><textarea id="agent-expanded-input" rows="2" maxlength="2000" placeholder="向 Agent 描述要执行的 Workspace 操作"></textarea><button class="primary-command" type="submit" aria-label="发送"><i data-lucide="corner-down-left"></i><span>发送</span></button></form>
       </section>
 
       <footer class="statusbar">
-        <form id="agent-collapsed-form" class="agent-collapsed-form"><button id="agent-collapsed-attach" class="agent-plus-button" type="button" aria-label="附加 Workspace 上下文" title="附加 Workspace 上下文">+</button><input id="agent-collapsed-input" type="text" maxlength="2000" placeholder="与 Workspace Agent 沟通" /><button class="agent-submit-button" type="submit" aria-label="提交 Agent 消息" title="提交 Agent 消息"><i data-lucide="corner-down-left"></i></button></form>
+        <form id="agent-collapsed-form" class="agent-collapsed-form"><button id="agent-collapsed-attach" class="agent-plus-button" type="button" aria-label="附加 Workspace 上下文" title="附加 Workspace 上下文"><i data-lucide="plus"></i></button><input id="agent-collapsed-input" type="text" maxlength="2000" placeholder="与 Workspace Agent 沟通" /><button class="agent-submit-button" type="submit" aria-label="提交 Agent 消息" title="提交 Agent 消息"><i data-lucide="send"></i></button></form>
         <!-- Kept for backwards-compatible e2e selectors; the visible statusbar
              is now the Agent input above it. -->
         <span id="service-status" class="service-status-legacy" aria-hidden="true">SERVICE CONNECTING</span>
-        <span id="render-status">WEBGL2</span>
-        <span id="object-status">0 OBJECTS</span>
+        <span id="render-status" class="statusbar-legacy" aria-hidden="true">WEBGL2</span>
+        <span id="object-status" class="statusbar-legacy" aria-hidden="true">0 OBJECTS</span>
       </footer>
     </main>
     <script type="module" src="/src/main.ts"></script>

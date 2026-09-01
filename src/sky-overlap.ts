@@ -42,6 +42,30 @@ function sourcePixels(source: SkyOverlapSource, nside: number): Set<number> {
   return new Set(source.pixels.filter((pixel) => Number.isInteger(pixel) && pixel >= 0 && pixel < 12 * nside ** 2));
 }
 
+interface OverlapSourceGroup {
+  sourceIds: string[];
+  pixels: Set<number>;
+}
+
+function groupSources(sources: readonly SkyOverlapSource[], nside: number): OverlapSourceGroup[] {
+  const groups = new Map<string, OverlapSourceGroup>();
+  sources.forEach((source) => {
+    const pixels = sourcePixels(source, nside);
+    if (!pixels.size) return;
+    // A survey can publish several releases/products covering complementary
+    // regions. Treat those products as one logical survey for G-mode overlap.
+    // Sources without a survey identity retain the previous source-level
+    // behavior so unassigned workspace layers remain independently selectable.
+    const surveyId = source.surveyId?.trim();
+    const key = surveyId ? `survey:${surveyId}` : `source:${source.id}`;
+    const group = groups.get(key) ?? { sourceIds: [], pixels: new Set<number>() };
+    group.sourceIds.push(source.id);
+    pixels.forEach((pixel) => group.pixels.add(pixel));
+    groups.set(key, group);
+  });
+  return [...groups.values()];
+}
+
 function bounds(cells: readonly number[], nside: number): SkyOverlapComponent["bounds"] {
   const healpix = new Healpix(nside);
   const values: Array<{ ra: number; dec: number }> = [];
@@ -103,10 +127,11 @@ export function calculateSkyOverlap(sources: readonly SkyOverlapSource[], reques
   if (!validNside(nside)) throw new RangeError("nside must be a power of two between 1 and 256");
   const selected = validSources.filter((source) => source.nside === nside);
   const sourceIds = selected.map((source) => source.id).sort();
-  if (selected.length < 2) return { status: "empty", order: Math.log2(nside), nside, sourceIds, pixels: [], components: [] };
-  let overlap = sourcePixels(selected[0]!, nside);
-  for (const source of selected.slice(1)) {
-    const next = sourcePixels(source, nside);
+  const groups = groupSources(selected, nside);
+  if (groups.length < 2) return { status: "empty", order: Math.log2(nside), nside, sourceIds, pixels: [], components: [] };
+  let overlap = new Set(groups[0]!.pixels);
+  for (const group of groups.slice(1)) {
+    const next = group.pixels;
     overlap = new Set([...overlap].filter((pixel) => next.has(pixel)));
     if (!overlap.size) break;
   }
@@ -120,4 +145,3 @@ export function calculateSkyOverlap(sources: readonly SkyOverlapSource[], reques
     components: pixels.length ? components(pixels, nside, sourceIds) : [],
   };
 }
-

@@ -2694,8 +2694,6 @@ input {
   .production-detail-steps { grid-template-columns: 1fr; }
   .agent-heading-actions .field-input { width: 108px; }
   .agent-panel { padding: 10px 12px 8px; }
-  .agent-form { grid-template-columns: 30px minmax(0, 1fr); }
-  .agent-form .primary-command { grid-column: 2; justify-self: end; min-height: 30px; }
   .workspace-shell.agent-open { grid-template-rows: 58px minmax(0, 1fr) minmax(260px, 55vh) 28px; }
 }
 
@@ -3511,33 +3509,17 @@ html[data-theme="light"] .scene-background-color {
 .statusbar {
   grid-column: 1 / -1;
   display: grid;
-  grid-template-columns: 1fr auto 1fr;
+  grid-template-columns: minmax(0, 1fr);
   align-items: center;
   min-width: 0;
-  padding: 0 12px;
-  border-top: 1px solid var(--border);
-  color: #626e79;
-  background: #080c10;
+  padding: 0;
+  border-top: 0;
+  color: var(--text-soft);
+  background: var(--control);
   font-size: 8px;
 }
 
-.statusbar > span:first-child {
-  display: flex;
-  align-items: center;
-  gap: 7px;
-}
-
-.statusbar > span:nth-child(2) {
-  justify-self: center;
-}
-
-.statusbar > span:nth-child(3) {
-  justify-self: center;
-}
-
-.statusbar > span:last-child {
-  justify-self: end;
-}
+.statusbar > span { display: none !important; }
 
 .field-label {
   display: block;
@@ -3546,8 +3528,7 @@ html[data-theme="light"] .scene-background-color {
   font-size: 9px;
 }
 
-.field-input,
-.agent-form textarea {
+.field-input {
   width: 100%;
   min-width: 0;
   min-height: 30px;
@@ -3561,8 +3542,7 @@ html[data-theme="light"] .scene-background-color {
   font-size: 10px;
 }
 
-.field-input:focus,
-.agent-form textarea:focus {
+.field-input:focus {
   border-color: var(--cyan);
 }
 
@@ -4285,21 +4265,6 @@ select.field-input {
   overflow-wrap: anywhere;
 }
 
-.agent-form {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) 32px;
-  align-items: end;
-  gap: 6px;
-  padding-top: 12px;
-  border-top: 1px solid var(--border);
-}
-
-.agent-form textarea {
-  min-height: 64px;
-  resize: none;
-  line-height: 1.4;
-}
-
 /* Production workbench, system settings, and the global Agent dock. */
 .production-stage,
 .system-stage {
@@ -4370,25 +4335,34 @@ select.field-input {
 
 .workspace-shell.agent-open { grid-template-rows: 58px minmax(0, 1fr) minmax(220px, 50vh) 28px; }
 .workspace-shell.agent-open .statusbar { grid-row: 4; }
+.workspace-shell.agent-open .scene-stage,
+.workspace-shell.agent-open .workflow-stage,
+.workspace-shell.agent-open .catalog-stage,
+.workspace-shell.agent-open .connector-stage,
+.workspace-shell.agent-open .production-stage,
+.workspace-shell.agent-open .system-stage { min-height: 0; }
 .agent-panel { grid-column: 1 / -1; grid-row: 3; min-width: 0; min-height: 0; padding: 12px 18px 10px; border-top: 1px solid var(--border); background: var(--topbar); }
 .agent-heading { padding-bottom: 8px; }
 .agent-heading-actions { display: flex; align-items: center; gap: 6px; }
 .agent-heading-actions .field-input { width: 160px; min-height: 28px; }
 .agent-messages { padding: 8px 0; }
-.agent-form { grid-template-columns: 32px minmax(0, 1fr) auto; padding-top: 8px; }
-.agent-form textarea { min-height: 42px; resize: vertical; }
-.agent-form .primary-command { min-height: 42px; }
 .agent-confirmation { display: flex; align-items: center; gap: 8px; padding: 8px; border: 1px solid #74652f; background: #17150c; }
 .agent-confirmation p { flex: 1; margin: 0; color: var(--amber); font-size: 10px; }
-.agent-collapsed-form { display: grid; grid-template-columns: 28px minmax(0, 1fr) 30px; align-items: center; gap: 6px; min-width: 0; }
+.agent-collapsed-form { grid-column: 1 / -1; display: grid; grid-template-columns: 32px minmax(0, 1fr) 32px; align-items: center; gap: 0; width: 100%; min-width: 0; height: 100%; background: var(--control); }
 .agent-plus-button,
-.agent-submit-button { display: grid; place-items: center; width: 28px; height: 24px; padding: 0; border: 1px solid var(--border); border-radius: 4px; color: var(--cyan); background: transparent; cursor: pointer; }
-.agent-plus-button { font-size: 17px; line-height: 1; }
+.agent-submit-button { display: grid; place-items: center; width: 32px; height: 100%; padding: 0; border: 0; border-radius: 0; color: var(--cyan); background: transparent; cursor: pointer; }
+.agent-plus-button svg,
+.agent-submit-button svg { width: 15px; height: 15px; }
 .agent-plus-button.is-attached,
-.agent-submit-button:hover { border-color: var(--cyan); background: #0e1b1c; }
-.agent-collapsed-form input { min-width: 0; height: 24px; padding: 3px 7px; border: 1px solid var(--border); border-radius: 4px; outline: none; color: var(--text); background: var(--control); font: 10px "SFMono-Regular", Consolas, monospace; }
-.agent-collapsed-form input:focus { border-color: var(--cyan); }
+.agent-submit-button:hover,
+.agent-submit-button:focus-visible { color: var(--text-strong); background: color-mix(in srgb, var(--cyan) 12%, transparent); outline: none; }
+.agent-plus-button.is-attached { color: var(--amber); background: color-mix(in srgb, var(--amber) 12%, transparent); }
+.agent-collapsed-form input { min-width: 0; height: 100%; padding: 3px 7px; border: 0; border-radius: 0; outline: none; color: var(--text); background: transparent; font: 10px "SFMono-Regular", Consolas, monospace; }
+.agent-collapsed-form input::placeholder { color: var(--muted); opacity: 1; }
+.agent-collapsed-form:focus-within { background: color-mix(in srgb, var(--control) 88%, var(--cyan)); }
+.agent-collapsed-form:focus-within input { color: var(--text-strong); }
 .service-status-legacy { display: none !important; }
+.statusbar-legacy { display: none !important; }
 
 .sr-only {
   position: absolute;
@@ -4563,7 +4537,6 @@ html[data-theme="light"] .result-empty {
 }
 
 html[data-theme="light"] .field-input,
-html[data-theme="light"] .agent-form textarea,
 html[data-theme="light"] .field-input:disabled,
 html[data-theme="light"] .level-control,
 html[data-theme="light"] .representation-control,
@@ -4593,6 +4566,29 @@ html[data-theme="light"] .command-button.danger {
   border-color: #c88781;
   color: #9e3028;
   background: #fff4f2;
+}
+
+html[data-theme="light"] .inspector-actions > .command-button:first-child,
+html[data-theme="light"] .catalog-inspector-actions > .command-button:first-child {
+  border-color: var(--cyan);
+  color: var(--on-accent);
+  background: var(--cyan);
+}
+
+html[data-theme="light"] #agent-collapse,
+html[data-theme="light"] #agent-new-session {
+  border-color: var(--border);
+  color: var(--text-soft);
+  background: var(--control);
+}
+
+html[data-theme="light"] #agent-collapse:hover,
+html[data-theme="light"] #agent-collapse:focus-visible,
+html[data-theme="light"] #agent-new-session:hover,
+html[data-theme="light"] #agent-new-session:focus-visible {
+  border-color: #78a7a4;
+  color: var(--text-strong);
+  background: var(--row-hover);
 }
 
 html[data-theme="light"] .primary-command:disabled {
@@ -5171,12 +5167,8 @@ html[data-theme="light"] .scene-tool:disabled kbd { border-color: var(--border);
   }
 
   .statusbar {
-    grid-template-columns: 1fr auto;
-  }
-
-  .statusbar > span:nth-child(2),
-  .statusbar > span:nth-child(3) {
-    display: none;
+    grid-template-columns: minmax(0, 1fr);
+    padding: 0;
   }
 }
 
@@ -5582,4 +5574,65 @@ html[data-theme="light"] .scene-tool:disabled kbd { border-color: var(--border);
     right: 48px;
   }
 
+}
+
+/* The production and settings workbenches share the stage palette with the
+   catalog. Keep their nested dark defaults from leaking into light mode. */
+html[data-theme="light"] .production-stage,
+html[data-theme="light"] .system-stage {
+  color: var(--text);
+  background: var(--stage);
+}
+
+html[data-theme="light"] .production-workbench-grid,
+html[data-theme="light"] .production-pipeline-section,
+html[data-theme="light"] .production-runs-section,
+html[data-theme="light"] .settings-tabs {
+  border-color: var(--border);
+}
+
+html[data-theme="light"] .production-pipeline-card,
+html[data-theme="light"] .production-run-row,
+html[data-theme="light"] .settings-record {
+  border-color: var(--border);
+  color: var(--text);
+  background: var(--row);
+}
+
+html[data-theme="light"] .production-pipeline-card:hover:not(:disabled),
+html[data-theme="light"] .production-pipeline-card:focus-visible,
+html[data-theme="light"] .production-run-row:hover,
+html[data-theme="light"] .production-run-row.active {
+  border-color: #71aaa6;
+  background: var(--row-hover);
+}
+
+html[data-theme="light"] .production-detail {
+  border-color: var(--border);
+  background: var(--surface);
+}
+
+html[data-theme="light"] .production-detail-steps {
+  background: var(--border);
+}
+
+html[data-theme="light"] .production-detail-steps li {
+  background: var(--surface);
+}
+
+html[data-theme="light"] .production-pipeline-card strong,
+html[data-theme="light"] .production-run-row strong,
+html[data-theme="light"] .settings-record header strong,
+html[data-theme="light"] .production-detail h3,
+html[data-theme="light"] .settings-view-header h3 {
+  color: var(--text-strong);
+}
+
+html[data-theme="light"] .production-pipeline-card small,
+html[data-theme="light"] .production-run-row small,
+html[data-theme="light"] .production-run-row span,
+html[data-theme="light"] .settings-record p,
+html[data-theme="light"] .settings-record small,
+html[data-theme="light"] .production-detail-steps span {
+  color: var(--muted);
 }
