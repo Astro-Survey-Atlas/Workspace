@@ -19,6 +19,7 @@ export class AgentDock {
 
   constructor(private readonly onError: (error: unknown) => void) {
     byId<HTMLFormElement>("agent-collapsed-form").addEventListener("submit", (event) => { event.preventDefault(); const input = byId<HTMLInputElement>("agent-collapsed-input"); void this.send(input.value, input).catch((error) => this.fail(error)); });
+    byId<HTMLButtonElement>("agent-open").addEventListener("click", () => { void this.openHistory().catch((error) => this.fail(error)); });
     byId<HTMLButtonElement>("agent-collapse").addEventListener("click", () => this.setOpen(false));
     byId<HTMLButtonElement>("agent-new-session").addEventListener("click", () => void this.newSession().catch((error) => this.fail(error)));
     byId<HTMLSelectElement>("agent-session-select").addEventListener("change", () => { const selected = this.sessions.find((session) => session.id === byId<HTMLSelectElement>("agent-session-select").value); if (selected) { this.session = selected; this.render(); } });
@@ -42,6 +43,11 @@ export class AgentDock {
     panel.hidden = !open;
     document.querySelector(".workspace-shell")?.classList.toggle("agent-open", open);
     if (open) { byId<HTMLInputElement>("agent-collapsed-input").focus(); this.render(); }
+  }
+
+  private async openHistory(): Promise<void> {
+    if (!this.initialized) await this.initialize();
+    this.setOpen(true);
   }
 
   private attachCurrent(): void {

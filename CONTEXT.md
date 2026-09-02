@@ -3,6 +3,7 @@
 This workspace treats data production as a durable, inspectable operation rather than a page-specific action.
 
 - **Pipeline definition**: a versioned declaration of one production capability, its input requirements, executors, and output artifacts.
+- **Pipeline preset**: a server-persisted configuration copy of an available pipeline definition. Presets retain their own name, parameters, and pin state while runs keep the preset ID used at submission time.
 - **Production run**: one submitted execution of a pipeline. It owns status, steps, progress, errors, cancellation, retry, and provenance.
 - **Data artifact**: a named, checksummed file or connector handoff produced by a run.
 - **Region snapshot**: an immutable ICRS/NESTED HEALPix selection with source and overlap identifiers. Production inputs reference the snapshot, not a mutable canvas selection.

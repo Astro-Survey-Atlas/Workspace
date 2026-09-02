@@ -1755,6 +1755,28 @@ app.get("/api/production-pipelines", (_request: Request, response: Response) => 
   response.json({ pipelines: productionService.listPipelines() });
 });
 
+app.get("/api/production-pipeline-presets", async (_request: Request, response: Response) => {
+  try {
+    response.set("Cache-Control", "no-store");
+    response.json({ presets: await productionService.listPresets() });
+  } catch (error) { sendApiError(response, error); }
+});
+
+app.post("/api/production-pipeline-presets", async (request: Request, response: Response) => {
+  try { response.status(201).json({ preset: await productionService.upsertPreset(request.body) }); }
+  catch (error) { sendApiError(response, error); }
+});
+
+app.put("/api/production-pipeline-presets/:id", async (request: Request, response: Response) => {
+  try { response.json({ preset: await productionService.upsertPreset({ ...request.body, id: datasetIdFrom(request) }) }); }
+  catch (error) { sendApiError(response, error); }
+});
+
+app.delete("/api/production-pipeline-presets/:id", async (request: Request, response: Response) => {
+  try { await productionService.deletePreset(datasetIdFrom(request)); response.status(204).end(); }
+  catch (error) { sendApiError(response, error); }
+});
+
 app.get("/api/production-runs", async (_request: Request, response: Response) => {
   try {
     response.set("Cache-Control", "no-store");

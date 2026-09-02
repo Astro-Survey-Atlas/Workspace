@@ -401,23 +401,22 @@ test("workspace notifications share one mobile deck with dedupe, cap, and expiry
   await expect(page.locator("#workspace-notification-deck .workspace-notification")).toHaveCount(0, { timeout: 12_000 });
 });
 
-test("data production keeps cross-match runnable and exposes cutout/package contracts", async ({ page }) => {
+test("data production exposes templates, DAG previews, saved copies, and run entrypoints", async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
   await page.goto("/");
   await waitForWorkspace(page);
   await page.locator('[data-mode="workflow"]').click();
   await expect(page.locator('[data-mode="workflow"]')).toHaveClass(/active/);
-  await expect(page.locator('[data-production-action="crossmatch"]')).toHaveClass(/active/);
-  await expect(page.locator("#workflow-form")).toBeHidden();
-  await page.locator("#workflow-new").click();
-  await expect(page.locator("#workflow-form")).toBeVisible();
-  await page.locator("#workflow-dialog-close").click();
-  await page.locator('[data-production-action="cutout"]').click();
-  await expect(page.locator('[data-production-action="cutout"]')).toHaveClass(/active/);
-  await expect(page.locator("#workflow-form")).toBeHidden();
-  await expect(page.locator("#production-action-copy")).toContainText("cutout");
-  await page.locator('[data-production-action="package"]').click();
-  await expect(page.locator("#production-action-copy")).toContainText("打包");
+  await expect(page.locator("#production-stage")).toBeVisible();
+  await expect(page.locator("#production-template-list .production-template-card")).toHaveCount(3);
+  await expect(page.locator("#production-instance-list .production-instance-card")).toHaveCount(0);
+  await page.locator("#production-template-list .production-template-card").nth(1).click();
+  await expect(page.locator("#production-dag-list .production-dag-node")).toHaveCount(3);
+  await expect(page.locator("#inspector-kicker")).toHaveText("PIPELINE TEMPLATE");
+  await expect(page.locator("#inspector-content")).toContainText("从模板创建实例");
+  await expect(page.locator("#inspector-content")).toContainText("流水线参数");
+  await expect(page.locator("#production-pipeline-detail")).toHaveCount(0);
+  await expect(page.locator("#production-dag-list")).toContainText("对象");
 });
 
 test("connector view exposes S3, local path, and JDBC registration without scan parameter controls", async ({ page }) => {

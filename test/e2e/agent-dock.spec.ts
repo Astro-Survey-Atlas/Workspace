@@ -55,6 +55,33 @@ async function waitForWorkspace(page: Page): Promise<void> {
   await expect(page.locator("#loading-indicator")).not.toHaveClass(/visible/);
 }
 
+interface LayoutRect {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  top: number;
+  right: number;
+  bottom: number;
+  left: number;
+}
+
+async function readAgentLayout(page: Page): Promise<{
+  topbar: LayoutRect;
+  scene: LayoutRect;
+  panel: LayoutRect;
+  statusbar: LayoutRect;
+}> {
+  return page.evaluate(() => {
+    const read = (selector: string): LayoutRect => {
+      const element = document.querySelector<HTMLElement>(selector);
+      if (!element) throw new Error(`Missing layout element: ${selector}`);
+      return element.getBoundingClientRect().toJSON();
+    };
+    return { topbar: read(".topbar"), scene: read("#scene-stage"), panel: read("#agent-panel"), statusbar: read(".statusbar") };
+  });
+}
+
 test("agent dock has one input and pushes the workspace content", async ({ page }) => {
   await proxyApi(page);
   await page.emulateMedia({ colorScheme: "light" });
@@ -62,6 +89,7 @@ test("agent dock has one input and pushes the workspace content", async ({ page 
   await page.goto("/?mode=layers");
   await waitForWorkspace(page);
 
+  const before = await readAgentLayout(page);
   await page.locator("#agent-collapsed-input").fill("布局回归测试");
   await page.locator("#agent-collapsed-form").dispatchEvent("submit");
   await expect(page.locator("#agent-panel")).toBeVisible();
@@ -75,14 +103,65 @@ test("agent dock has one input and pushes the workspace content", async ({ page 
   expect(closeColors.color).not.toBe("rgb(255, 255, 255)");
   expect(closeColors.color).not.toBe(closeColors.background);
 
-  const layout = await page.evaluate(() => {
-    const read = (selector: string) => document.querySelector<HTMLElement>(selector)?.getBoundingClientRect().toJSON();
-    return { scene: read("#scene-stage"), panel: read("#agent-panel"), statusbar: read(".statusbar") };
+  const after = await readAgentLayout(page);
+  const shift = before.topbar.y - after.topbar.y;
+  expect(shift).toBeGreaterThan(1);
+  expect(Math.abs(after.topbar.height - before.topbar.height)).toBeLessThanOrEqual(1);
+  expect(Math.abs(after.scene.height - before.scene.height)).toBeLessThanOrEqual(1);
+  expect(Math.abs((before.scene.y - after.scene.y) - shift)).toBeLessThanOrEqual(1);
+  expect(Math.abs(after.panel.y - after.scene.bottom)).toBeLessThanOrEqual(1);
+  expect(Math.abs(after.panel.bottom - after.statusbar.y)).toBeLessThanOrEqual(1);
+  expect(Math.abs(after.statusbar.bottom - 900)).toBeLessThanOrEqual(1);
+  const inputBar = await page.locator(".statusbar").evaluate((element) => {
+    const style = getComputedStyle(element);
+    return {
+      borderWidths: [style.borderTopWidth, style.borderRightWidth, style.borderBottomWidth, style.borderLeftWidth],
+      borderStyles: [style.borderTopStyle, style.borderRightStyle, style.borderBottomStyle, style.borderLeftStyle],
+      boxShadow: style.boxShadow,
+    };
   });
-  expect(layout.scene).not.toBeNull();
-  expect(layout.panel).not.toBeNull();
-  expect(layout.scene!.bottom).toBeLessThanOrEqual(layout.panel!.y + 0.5);
-  expect(layout.panel!.bottom).toBeLessThanOrEqual(layout.statusbar!.y + 0.5);
+  expect(inputBar.borderWidths).toEqual(["0px", "0px", "0px", "0px"]);
+  expect(inputBar.borderStyles).toEqual(["none", "none", "none", "none"]);
+  expect(inputBar.boxShadow).toBe("none");
+});
+
+test("agent dock opens existing history without sending a message or adding another input", async ({ page }) => {
+  await proxyApi(page);
+  await page.emulateMedia({ colorScheme: "light" });
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto("/?mode=layers");
+  await waitForWorkspace(page);
+
+  await expect(page.locator("#agent-panel")).toBeHidden();
+  await page.locator("#agent-open").click();
+  await expect(page.locator("#agent-panel")).toBeVisible();
+  await expect(page.locator("#agent-messages")).toContainText("Agent ready");
+  await expect(page.locator("#agent-expanded-form")).toHaveCount(0);
+  await expect(page.locator("form:visible")).toHaveCount(1);
+  await expect(page.locator("#agent-collapsed-input")).toHaveValue("");
+});
+
+test("agent dock lifts the full mobile workspace without collapsing the header", async ({ page }) => {
+  await proxyApi(page);
+  await page.emulateMedia({ colorScheme: "light" });
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto("/?mode=layers");
+  await waitForWorkspace(page);
+
+  const before = await readAgentLayout(page);
+  await page.locator("#agent-collapsed-input").fill("移动端布局回归测试");
+  await page.locator("#agent-collapsed-form").dispatchEvent("submit");
+  await expect(page.locator("#agent-panel")).toBeVisible();
+
+  const after = await readAgentLayout(page);
+  const shift = before.topbar.y - after.topbar.y;
+  expect(shift).toBeGreaterThan(1);
+  expect(Math.abs(after.topbar.height - before.topbar.height)).toBeLessThanOrEqual(1);
+  expect(Math.abs(after.scene.height - before.scene.height)).toBeLessThanOrEqual(1);
+  expect(Math.abs((before.scene.y - after.scene.y) - shift)).toBeLessThanOrEqual(1);
+  expect(Math.abs(after.panel.y - after.scene.bottom)).toBeLessThanOrEqual(1);
+  expect(Math.abs(after.panel.bottom - after.statusbar.y)).toBeLessThanOrEqual(1);
+  expect(Math.abs(after.statusbar.bottom - 844)).toBeLessThanOrEqual(1);
 });
 
 test("light theme keeps the first inspector action readable", async ({ page }) => {
@@ -102,4 +181,18 @@ test("light theme keeps the first inspector action readable", async ({ page }) =
   });
   expect(colors.background).not.toBe("rgb(255, 255, 255)");
   expect(colors.color).not.toBe(colors.background);
+});
+
+test("workspace uses the supplied Atlas Workspace brand asset", async ({ page }) => {
+  await proxyApi(page);
+  await page.emulateMedia({ colorScheme: "light" });
+  await page.goto("/");
+  await waitForWorkspace(page);
+  await expect(page).toHaveTitle("Astro Survey Atlas Workspace");
+  const logo = page.locator(".brand-mark");
+  await expect(logo).toHaveAttribute("src", "/astro-survey-atlas-workspace.svg");
+  await expect.poll(() => logo.evaluate((element) => (element as HTMLImageElement).naturalWidth)).toBeGreaterThan(0);
+  await expect(page.locator(".brand-lockup strong")).toHaveText("Astro Survey Atlas Workspace");
+  await expect(page.locator(".brand-wordmark")).toHaveText("Workspace");
+  await expect(page.locator(".brand-wordmark")).toBeVisible();
 });

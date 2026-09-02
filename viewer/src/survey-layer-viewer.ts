@@ -812,6 +812,7 @@ export class SurveyLayerViewer {
     if (active) {
       this.#layoutMode = "overlap";
     } else {
+      this.#layoutMode = "layers";
       this.#overlapNside = null;
       this.#overlapPixels = null;
       this.#overlapComponents = [];
@@ -1353,6 +1354,10 @@ export class SurveyLayerViewer {
     const bounds = this.#canvas.getBoundingClientRect();
     if (bounds.width <= 0 || bounds.height <= 0) return null;
     this.#pointer.set(((event.clientX - bounds.left) / bounds.width) * 2 - 1, -((event.clientY - bounds.top) / bounds.height) * 2 + 1);
+    // Camera controls can update the pose between render frames (for example
+    // after Reset). Refresh the world matrix before ray construction so an
+    // immediate pointer event uses the current pose.
+    this.#camera.updateMatrixWorld();
     this.#raycaster.setFromCamera(this.#pointer, this.#camera);
     const renderedHit = this.#raycaster.intersectObjects([this.#drillGroup, this.#workspaceCoverageGroup], true).find((hit) => {
       const object = hit.object as Partial<LayerMesh>;
@@ -1386,6 +1391,7 @@ export class SurveyLayerViewer {
     const bounds = this.#canvas.getBoundingClientRect();
     if (bounds.width <= 0 || bounds.height <= 0) return null;
     this.#pointer.set(((event.clientX - bounds.left) / bounds.width) * 2 - 1, -((event.clientY - bounds.top) / bounds.height) * 2 + 1);
+    this.#camera.updateMatrixWorld();
     this.#raycaster.setFromCamera(this.#pointer, this.#camera);
     return this.#objectPointAt(event);
   }
@@ -1394,6 +1400,7 @@ export class SurveyLayerViewer {
     const bounds = this.#canvas.getBoundingClientRect();
     if (bounds.width <= 0 || bounds.height <= 0) return null;
     this.#pointer.set(((event.clientX - bounds.left) / bounds.width) * 2 - 1, -((event.clientY - bounds.top) / bounds.height) * 2 + 1);
+    this.#camera.updateMatrixWorld();
     this.#raycaster.setFromCamera(this.#pointer, this.#camera);
     const labelHit = this.#raycaster.intersectObjects([this.#overlapLabelGroup], true)[0];
     const labeled = labelHit?.object.userData.overlapComponent as SurveyLayerOverlapComponent | undefined;

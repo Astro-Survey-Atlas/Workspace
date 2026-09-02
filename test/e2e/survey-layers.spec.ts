@@ -498,8 +498,8 @@ test("remote coverage submission keeps credentials server-side and shows a pendi
   });
   expect(JSON.stringify(body)).not.toMatch(/accessKeyId|secretAccessKey|sessionToken|fixture-access-key/);
   await expect(page.locator("#workspace-notification-deck")).toContainText("远程覆盖扫描已提交");
-  await expect(page.locator("#sky-layer-list .workspace-asset-card").first()).toContainText("PENDING");
-  await expect(page.locator("#inspector-content")).toContainText("覆盖扫描处理中", { timeout: 10_000 });
+  await expect(page.locator("#sky-layer-list .workspace-asset-card").first()).toContainText(/PENDING|处理中/);
+  await expect(page.locator("#inspector-content")).toContainText("覆盖状态处理中", { timeout: 10_000 });
 });
 
 test("unified sky layer stack lists each user asset with its own visibility control", async ({ page }) => {
@@ -526,28 +526,20 @@ test("unified sky layer stack lists each user asset with its own visibility cont
   }
 });
 
-test("sky layers default to semantic overlap and expose radial depth as display-only", async ({ page }) => {
+test("sky layers default to radial depth and G toggles transient overlap", async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
   await openFresh(page);
-
-  const overlap = page.locator('[data-layer-layout="overlap"]');
-  const radial = page.locator('[data-layer-layout="layers"]');
-  await expect(overlap).toHaveClass(/active/);
-  await expect(overlap).toHaveAttribute("aria-pressed", "true");
-  await expect(radial).toHaveText("径向展开");
-  await expect(radial).toHaveAttribute("title", /不代表物理距离/);
 
   const assetLabels = await page.locator("#sky-layer-list .workspace-asset-card .survey-card-body").allTextContents();
   expect(assetLabels.every((label) => !/user[-_][a-z0-9-]+/i.test(label))).toBe(true);
   await expect(page.locator("#sky-layer-list")).not.toContainText("COSMOS Custom Catalog");
   await expect(page.locator("#sky-layer-list")).toContainText("COSMOS");
 
-  await radial.click();
-  await expect(radial).toHaveClass(/active/);
   await expect(page.locator("#scene-canvas")).toHaveAttribute("data-layout-mode", "layers");
-  await overlap.click();
-  await expect(overlap).toHaveClass(/active/);
+  await page.keyboard.press("g");
   await expect(page.locator("#scene-canvas")).toHaveAttribute("data-layout-mode", "overlap");
+  await page.keyboard.press("g");
+  await expect(page.locator("#scene-canvas")).toHaveAttribute("data-layout-mode", "layers");
 });
 
 test("sky layer order persists and drives the Three display depth", async ({ page }) => {
@@ -638,6 +630,48 @@ async function findCanvasPoint(
   const match = hits.find(predicate);
   if (match) return { x: match.x, y: match.y, pixel: match.pixel };
   throw new Error("No matching HEALPix point found on the visible hemisphere");
+}
+
+async function findSelectedCanvasPoint(page: Page, pixel: number): Promise<{ x: number; y: number; pixel: number }> {
+  const match = await page.evaluate((selectedPixel) => {
+    const canvas = document.querySelector<HTMLCanvasElement>("#scene-canvas");
+    if (!canvas) return null;
+    const rect = canvas.getBoundingClientRect();
+    const bounds = (canvas.dataset.selectionBounds ?? "").split(",").map(Number);
+    const [leftRatio = 0, rightRatio = 1, topRatio = 0, bottomRatio = 1] = bounds;
+    const hasBounds = bounds.length === 4 && bounds.every(Number.isFinite);
+    const left = hasBounds ? Math.max(0, Math.floor(leftRatio * rect.width) - 24) : 0;
+    const right = hasBounds ? Math.min(rect.width, Math.ceil(rightRatio * rect.width) + 24) : rect.width;
+    const top = hasBounds ? Math.max(0, Math.floor(topRatio * rect.height) - 24) : 0;
+    const bottom = hasBounds ? Math.min(rect.height, Math.ceil(bottomRatio * rect.height) + 24) : rect.height;
+    const step = 4;
+    for (let y = top; y <= bottom; y += step) {
+      for (let x = left; x <= right; x += step) {
+        canvas.dispatchEvent(new PointerEvent("pointermove", {
+          bubbles: true,
+          clientX: rect.left + x,
+          clientY: rect.top + y,
+          pointerId: 1,
+          pointerType: "mouse",
+          buttons: 0,
+        }));
+        if (Number(canvas.dataset.hoveredPixel) === selectedPixel && canvas.dataset.hoveredCovered === "true" && canvas.dataset.hoveredSelectable === "true") {
+          return { x, y, pixel: selectedPixel };
+        }
+      }
+    }
+    return null;
+  }, pixel);
+  if (match) return match;
+  const diagnostics = await page.locator("#scene-canvas").evaluate((canvas) => ({
+    selectedPixels: canvas.getAttribute("data-selected-pixels"),
+    selectionBounds: canvas.getAttribute("data-selection-bounds"),
+    cameraPosition: canvas.getAttribute("data-camera-position"),
+    cameraDistance: canvas.getAttribute("data-camera-distance"),
+    hoveredPixel: canvas.getAttribute("data-hovered-pixel"),
+    hoveredCovered: canvas.getAttribute("data-hovered-covered"),
+  }));
+  throw new Error(`No selected HEALPix point found after focus: ${JSON.stringify(diagnostics)}`);
 }
 
 test("project status remains available without legacy scene resources", async ({ page }) => {
@@ -914,7 +948,12 @@ test("sphere selection enters Aladin with an exact region snapshot", async ({ pa
   await expect(canvas).toHaveAttribute("data-selected-pixels", selectedPixels!);
   await expect(canvas).toHaveAttribute("data-selection-volume", "outline");
 
-  await canvas.click({ button: "right", position: point });
+  // Reset changes the camera framing and may put the selected cell on the far
+  // side of the sphere. Focus it again, then locate it in the current view.
+  await page.keyboard.press("f");
+  await page.waitForTimeout(800);
+  const resetPoint = await findSelectedCanvasPoint(page, Number(selectedPixels));
+  await canvas.click({ button: "right", position: resetPoint });
   await expect(page.locator("#coverage-context-menu")).toBeVisible();
   await expect(page.locator("#coverage-enter-flat")).toHaveText("在 Aladin 中探索");
   await page.locator("#coverage-enter-flat").click();
@@ -1114,7 +1153,7 @@ test("mobile controls keep the sphere free of legacy tool controls", async ({ pa
   await page.locator("#controls-toggle").click();
   await expect(page.locator("#controls-panel")).toHaveClass(/mobile-open/);
   await page.locator(".survey-card", { hasText: "SDSS" }).locator("input").check();
-  await expect(page.locator("#layer-visible-output")).toHaveText(/^\d+ ACTIVE · 2 PUBLIC · \d+ OWNED · \d+ REMOTE$/);
+  await expect(page.locator("#layer-visible-output")).toHaveText(/^\d+ SOURCES · [\d,]+ CELLS$/);
   await expect(page.locator("[data-layer-interaction]")).toHaveCount(0);
   await expect(page.locator("#layer-tool-strip")).toHaveCount(0);
   await expect(page.locator("#coverage-context-menu")).toHaveCount(1);

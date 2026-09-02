@@ -6,6 +6,7 @@ import type { ConnectorRegistry } from "./connectors.js";
 import type { DataCatalogRegistry } from "./data-catalog.js";
 import type { ProductionService } from "./production.js";
 import type { SystemConfigStore } from "./system-config.js";
+import { isAiProviderToolsUnsupported, requestAiProviderCompletion, type AiProviderChatMessage } from "./ai-provider-client.js";
 
 export type WorkspaceAgentMessageRole = "user" | "assistant" | "tool" | "system";
 
@@ -53,7 +54,7 @@ export const WORKSPACE_AGENT_TOOLS: readonly AgentToolDescriptor[] = [
   { name: "list_data_assets", description: "列出当前 Workspace 用户资产", readOnly: true, parameters: { type: "object", properties: {} } },
   { name: "list_connectors", description: "列出当前 Workspace Connector", readOnly: true, parameters: { type: "object", properties: {} } },
   { name: "list_production_runs", description: "列出数据生产任务", readOnly: true, parameters: { type: "object", properties: {} } },
-  { name: "submit_production_run", description: "提交一个数据生产任务，需要用户确认", readOnly: false, parameters: { type: "object", required: ["pipelineKey", "region"], properties: { pipelineKey: { type: "string" }, region: { type: "object" }, files: { type: "array" }, leftAssetId: { type: "string" }, rightAssetId: { type: "string" }, matchRadiusArcsec: { type: "number" }, exportFormat: { type: "string" }, concurrency: { type: "integer" } } } },
+  { name: "submit_production_run", description: "提交一个数据生产任务，需要用户确认", readOnly: false, parameters: { type: "object", required: ["pipelineKey", "region"], properties: { pipelineKey: { type: "string" }, pipelinePresetId: { type: "string" }, region: { type: "object" }, files: { type: "array" }, leftAssetId: { type: "string" }, rightAssetId: { type: "string" }, matchRadiusArcsec: { type: "number" }, exportFormat: { type: "string" }, concurrency: { type: "integer" } } } },
 ];
 
 interface WorkspaceAgentOptions {
@@ -149,16 +150,36 @@ export class WorkspaceAgentService {
   }
 
   async #completeWithProvider(session: WorkspaceAgentSession, baseUrl: string, model: string, apiKey?: string): Promise<void> {
-    const messages = session.messages.filter((message) => message.role !== "system").slice(-30).map((message) => ({ role: message.role === "tool" ? "tool" : message.role, content: message.content }));
-    const response = await fetch(`${baseUrl.replace(/\/$/, "")}/chat/completions`, {
-      method: "POST", headers: { Accept: "application/json", "Content-Type": "application/json", ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}) },
-      body: JSON.stringify({ model, messages, tools: WORKSPACE_AGENT_TOOLS.map((tool) => ({ type: "function", function: { name: tool.name, description: tool.description, parameters: tool.parameters } })), tool_choice: "auto" }),
-      signal: AbortSignal.timeout(60_000),
-    });
-    if (!response.ok) throw new Error(`Provider returned HTTP ${response.status}`);
-    const payload = await response.json() as { choices?: Array<{ message?: { content?: unknown; tool_calls?: Array<{ id?: string; function?: { name?: string; arguments?: string } }> } }> };
-    const message = payload.choices?.[0]?.message;
-    if (!message) throw new Error("Provider response has no message");
+    const messages = session.messages
+      .filter((message) => message.role !== "system")
+      .slice(-30)
+      .map((message): AiProviderChatMessage => ({
+        role: message.role === "tool" ? "tool" : message.role === "assistant" ? "assistant" : "user",
+        content: message.content,
+      }));
+    const tools = WORKSPACE_AGENT_TOOLS.map((tool) => ({ type: "function", function: { name: tool.name, description: tool.description, parameters: tool.parameters } }));
+    let completion;
+    try {
+      completion = await requestAiProviderCompletion({
+        baseUrl,
+        model,
+        messages,
+        ...(apiKey ? { apiKey } : {}),
+        tools,
+        toolChoice: "auto",
+        signal: AbortSignal.timeout(60_000),
+      });
+    } catch (error) {
+      if (!isAiProviderToolsUnsupported(error)) throw error;
+      completion = await requestAiProviderCompletion({
+        baseUrl,
+        model,
+        messages,
+        ...(apiKey ? { apiKey } : {}),
+        signal: AbortSignal.timeout(60_000),
+      });
+    }
+    const message = completion.message;
     const call = message.tool_calls?.[0];
     if (call?.function?.name) {
       const descriptor = WORKSPACE_AGENT_TOOLS.find((tool) => tool.name === call.function!.name);

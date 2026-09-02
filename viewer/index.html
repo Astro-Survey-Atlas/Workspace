@@ -18,18 +18,17 @@
         document.querySelector('meta[name="theme-color"]').content = theme === "dark" ? "#080b0f" : "#f4f7f8";
       })();
     </script>
-    <title>Astro Multi-Survey Workspace</title>
+    <title>Astro Survey Atlas Workspace</title>
   </head>
   <body>
     <main class="workspace-shell">
       <div id="workspace-notification-deck" class="workspace-notification-deck" aria-live="polite" aria-atomic="false"></div>
       <header class="topbar">
         <div class="brand-lockup">
-          <span class="brand-mark" aria-hidden="true"></span>
-          <div>
-            <strong>Astro Survey Atlas</strong>
-            <span id="dataset-name">用户资产与公开覆盖</span>
-          </div>
+          <img class="brand-mark" src="/astro-survey-atlas-workspace.svg" alt="Astro Survey Atlas Workspace" />
+          <span class="brand-wordmark">Workspace</span>
+          <strong class="sr-only">Astro Survey Atlas Workspace</strong>
+          <span id="dataset-name" class="sr-only">用户资产与公开覆盖</span>
         </div>
         <div class="mode-control" role="group" aria-label="视图模式">
           <button type="button" class="mode-button" data-mode="packages">公开资源集</button>
@@ -97,38 +96,26 @@
         <div id="layer-controls" hidden>
           <section class="control-section layer-survey-section">
             <div class="section-heading"><span>数据图层</span><output id="layer-visible-output">0 SOURCES · 0 CELLS</output></div>
-            <div class="representation-control" role="group" aria-label="图层显示深度模式">
-              <button type="button" class="representation-button active" data-layer-layout="overlap" aria-pressed="true" title="所有巡天共享同一 RA / Dec / HEALPix 位置">重合</button>
-              <button type="button" class="representation-button" data-layer-layout="layers" aria-pressed="false" title="仅沿球面法线分开数据来源，不代表物理距离">径向展开</button>
-            </div>
             <div id="sky-layer-list" class="survey-list sky-layer-list" aria-label="可排序数据图层"></div>
           </section>
         </div>
 
         <div id="workflow-controls" hidden>
-          <section class="control-section workflow-run-summary">
-            <div class="section-heading"><span>Current run</span><output id="workflow-run-state">IDLE</output></div>
-            <dl>
-              <div><dt>Run</dt><dd id="workflow-run-id">--</dd></div>
-              <div><dt>Euclid</dt><dd id="workflow-euclid-count">--</dd></div>
-              <div><dt>DESI</dt><dd id="workflow-desi-count">--</dd></div>
-              <div><dt>Matches</dt><dd id="workflow-match-count">--</dd></div>
-            </dl>
-          </section>
-          <section class="control-section tool-health-section">
-            <div class="section-heading"><span>Tool registry</span><output id="workflow-tool-count">--</output></div>
-            <div id="workflow-tool-health" class="tool-health-list"></div>
+          <section class="control-section production-template-sidebar">
+            <div class="section-heading"><span>流水线模板</span><output id="production-template-count">--</output></div>
+            <div id="production-template-list" class="production-template-list" aria-label="流水线模板列表"></div>
+            <div id="production-template-empty" class="catalog-empty" hidden>暂无可用流水线模板。</div>
           </section>
         </div>
 
         <div id="system-controls" hidden>
-          <section class="control-section">
-            <div class="section-heading"><span>系统配置</span><span>SETTINGS</span></div>
-            <p class="control-note">管理 AI Provider、MCP Server 和 Agent 的运行连接。密钥只显示配置状态，不在页面回显。</p>
-            <nav class="settings-nav" aria-label="系统配置分区">
-              <button type="button" class="settings-nav-button active" data-settings-section="ai">AI Provider</button>
-              <button type="button" class="settings-nav-button" data-settings-section="mcp">MCP Server</button>
-            </nav>
+          <section class="control-section system-status-sidebar">
+            <div class="section-heading"><span>连接状态</span><output id="system-sidebar-state">READY</output></div>
+            <dl class="settings-sidebar-summary">
+              <div><dt>AI Provider</dt><dd id="system-sidebar-provider-count">0</dd></div>
+              <div><dt>MCP Server</dt><dd id="system-sidebar-mcp-count">0</dd></div>
+              <div><dt>已连接</dt><dd id="system-sidebar-connected-count">0</dd></div>
+            </dl>
           </section>
         </div>
       </aside>
@@ -348,33 +335,40 @@
         </section>
       </section>
 
-      <section id="production-stage" class="production-stage" aria-label="数据生产工作台" hidden>
-        <header class="workflow-stage-header">
+      <section id="production-stage" class="production-stage" aria-label="数据生产" hidden>
+        <header class="catalog-stage-header">
           <div>
-            <span class="panel-kicker">PRODUCTION WORKBENCH</span>
+            <span class="panel-kicker">DATA PRODUCTION</span>
             <h2>数据生产</h2>
-            <p class="stage-subtitle">选择流水线，复用天球区域快照，查看可追溯任务与产物。</p>
+            <p>从流水线模板创建实例，查看 DAG、参数和执行结果。</p>
           </div>
-          <div class="stage-primary-actions"><button id="production-new" class="primary-command compact-command" type="button"><i data-lucide="plus"></i><span>新建任务</span></button><span id="production-status-badge" class="run-status" data-status="idle">IDLE</span></div>
+          <div class="stage-primary-actions"><button id="production-new" class="primary-command compact-command" type="button"><i data-lucide="plus"></i><span>从模板开始</span></button><span id="production-status-badge" class="run-status" data-status="idle">IDLE</span></div>
         </header>
         <div class="production-workbench-grid">
-          <section class="production-pipeline-section" aria-labelledby="production-pipelines-heading">
-            <div class="section-heading"><span id="production-pipelines-heading">流水线</span><span id="production-pipeline-count">--</span></div>
-            <div id="production-pipeline-list" class="production-pipeline-list"></div>
+          <section class="production-instance-section" aria-labelledby="production-instances-heading">
+            <div class="section-heading"><span id="production-instances-heading">流水线实例</span><span id="production-instance-count">0</span></div>
+            <div id="production-instance-list" class="production-instance-list"></div>
+            <div id="production-instance-empty" class="catalog-empty">还没有流水线实例，请从左侧模板开始。</div>
           </section>
-          <section class="production-runs-section" aria-labelledby="production-runs-heading">
-            <div class="section-heading"><span id="production-runs-heading">生产任务</span><span id="production-run-count">0</span></div>
-            <div id="production-run-list" class="production-run-list"></div>
-            <div id="production-run-empty" class="catalog-empty">暂无生产任务</div>
+          <section class="production-dag-section" aria-labelledby="production-dag-heading">
+            <div class="section-heading"><span id="production-dag-heading">DAG</span><span id="production-dag-count">--</span></div>
+            <div id="production-dag-list" class="production-dag-list"></div>
+            <div id="production-dag-empty" class="catalog-empty">选择一个流水线查看执行图。</div>
           </section>
         </div>
-        <section id="production-detail" class="production-detail" hidden></section>
       </section>
 
       <section id="system-stage" class="system-stage" aria-label="系统配置" hidden>
-        <header class="workflow-stage-header">
-          <div><span class="panel-kicker">WORKSPACE SETTINGS</span><h2>系统配置</h2><p class="stage-subtitle">注册 AI Provider 与 MCP Server，连接测试结果会保留在工作区。</p></div>
-          <div class="stage-primary-actions"><span id="system-status-badge" class="run-status" data-status="idle">READY</span></div>
+        <header class="catalog-stage-header">
+          <div><span class="panel-kicker">WORKSPACE SETTINGS</span><h2>系统配置</h2><p>注册 AI Provider 与 MCP Server，连接测试结果会保留在工作区。</p></div>
+          <div class="stage-header-right">
+            <dl class="catalog-summary">
+              <div><dt>AI Provider</dt><dd id="system-provider-count">0</dd></div>
+              <div><dt>MCP Server</dt><dd id="system-mcp-count">0</dd></div>
+              <div><dt>已连接</dt><dd id="system-connected-count">0</dd></div>
+            </dl>
+            <div class="stage-primary-actions"><span id="system-status-badge" class="run-status" data-status="idle">READY</span></div>
+          </div>
         </header>
         <div class="settings-tabs" role="tablist" aria-label="系统配置视图">
           <button type="button" class="settings-tab active" role="tab" aria-selected="true" data-settings-tab="ai">AI Provider</button>
@@ -550,7 +544,7 @@
       </section>
 
       <footer class="statusbar">
-        <form id="agent-collapsed-form" class="agent-collapsed-form"><button id="agent-collapsed-attach" class="agent-plus-button" type="button" aria-label="附加 Workspace 上下文" title="附加 Workspace 上下文"><i data-lucide="plus"></i></button><input id="agent-collapsed-input" type="text" maxlength="2000" placeholder="与 Workspace Agent 沟通" /><button class="agent-submit-button" type="submit" aria-label="提交 Agent 消息" title="提交 Agent 消息"><i data-lucide="send"></i></button></form>
+        <form id="agent-collapsed-form" class="agent-collapsed-form"><button id="agent-open" class="agent-open-button" type="button" aria-label="打开 Agent 对话" title="打开 Agent 对话"><i data-lucide="message-square"></i></button><button id="agent-collapsed-attach" class="agent-plus-button" type="button" aria-label="附加 Workspace 上下文" title="附加 Workspace 上下文"><i data-lucide="plus"></i></button><input id="agent-collapsed-input" type="text" maxlength="2000" placeholder="与 Workspace Agent 沟通" /><button class="agent-submit-button" type="submit" aria-label="提交 Agent 消息" title="提交 Agent 消息"><i data-lucide="send"></i></button></form>
         <!-- Kept for backwards-compatible e2e selectors; the visible statusbar
              is now the Agent input above it. -->
         <span id="service-status" class="service-status-legacy" aria-hidden="true">SERVICE CONNECTING</span>

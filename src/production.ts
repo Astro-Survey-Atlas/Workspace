@@ -48,11 +48,47 @@ export interface ProductionPipelineDefinition {
   availability: ProductionPipelineAvailability;
   inputRequirements: string[];
   outputs: string[];
+  dag: ProductionPipelineDagNode[];
+  parameters: ProductionPipelineParameter[];
+}
+
+export interface ProductionPipelineDagNode {
+  id: string;
+  title: string;
+  description: string;
+  dependsOn?: string[];
+}
+
+export interface ProductionPipelineParameter {
+  key: string;
+  label: string;
+  type: "text" | "number" | "select";
+  defaultValue?: string | number;
+  options?: string[];
+}
+
+export interface ProductionPipelinePreset {
+  id: string;
+  pipelineKey: string;
+  title: string;
+  config: Record<string, unknown>;
+  pinned: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ProductionPipelinePresetInput {
+  id?: string;
+  pipelineKey: string;
+  title?: string;
+  config?: Record<string, unknown>;
+  pinned?: boolean;
 }
 
 export interface ProductionRun {
   id: string;
   pipelineKey: string;
+  pipelinePresetId?: string;
   status: ProductionRunStatus;
   createdAt: string;
   updatedAt: string;
@@ -69,6 +105,7 @@ export interface ProductionRun {
 
 export interface ProductionRunInput {
   pipelineKey: string;
+  pipelinePresetId?: string;
   region?: unknown;
   files?: readonly CoverageDownloadFile[];
   exportFormat?: "json" | "csv";
@@ -91,6 +128,16 @@ export const PRODUCTION_PIPELINES: readonly ProductionPipelineDefinition[] = [
     availability: "available",
     inputRequirements: ["RegionSnapshot", "文件清单", "导出格式", "爬虫", "并发", "存储位置"],
     outputs: ["区域 JSON/CSV", "下载文件清单", "新的本地 Connector"],
+    dag: [
+      { id: "region", title: "固定区域快照", description: "保存重合区域的 ICRS / NESTED HEALPix 快照。" },
+      { id: "download", title: "爬虫下载与校验", description: "按并发配置下载反查文件并校验内容。", dependsOn: ["region"] },
+      { id: "connector", title: "登记结果 Connector", description: "把下载目录登记为新的 Workspace Connector。", dependsOn: ["download"] },
+    ],
+    parameters: [
+      { key: "exportFormat", label: "区域导出格式", type: "select", defaultValue: "json", options: ["json", "csv"] },
+      { key: "crawlerId", label: "爬虫执行器", type: "select", defaultValue: "builtin-http", options: ["builtin-http"] },
+      { key: "concurrency", label: "并发数", type: "number", defaultValue: 4 },
+    ],
   },
   {
     id: "object-crossmatch",
@@ -101,6 +148,15 @@ export const PRODUCTION_PIPELINES: readonly ProductionPipelineDefinition[] = [
     availability: "available",
     inputRequirements: ["RegionSnapshot", "两个 RA/Dec 对象资产", "匹配半径"],
     outputs: ["交叉匹配 CSV", "匹配摘要"],
+    dag: [
+      { id: "query", title: "读取对象索引", description: "读取区域内两个 catalog 资产的 RA / Dec 对象索引。" },
+      { id: "match", title: "最近邻球面匹配", description: "按匹配半径执行球面最近邻匹配。", dependsOn: ["query"] },
+      { id: "export", title: "导出结果与血缘", description: "写出 CSV / JSON 并保留输入资产和区域血缘。", dependsOn: ["match"] },
+    ],
+    parameters: [
+      { key: "matchRadiusArcsec", label: "匹配半径（角秒）", type: "number", defaultValue: 1.5 },
+      { key: "limit", label: "结果上限", type: "number", defaultValue: 10000 },
+    ],
   },
   {
     id: "training-data-preparation",
@@ -111,6 +167,16 @@ export const PRODUCTION_PIPELINES: readonly ProductionPipelineDefinition[] = [
     availability: "planned",
     inputRequirements: ["图像或立方体资产", "切图参数", "去噪策略"],
     outputs: ["训练样本集"],
+    dag: [
+      { id: "input", title: "准备输入资产", description: "选择图像或数据立方体作为训练输入。" },
+      { id: "cutout", title: "切图", description: "按目标或固定窗口生成样本切片。", dependsOn: ["input"] },
+      { id: "denoise", title: "去噪", description: "预留去噪策略和质量门控。", dependsOn: ["cutout"] },
+      { id: "package", title: "编排训练集", description: "把样本和元数据组织为可交付训练集。", dependsOn: ["denoise"] },
+    ],
+    parameters: [
+      { key: "cutoutSize", label: "切图尺寸", type: "number", defaultValue: 128 },
+      { key: "denoise", label: "去噪策略", type: "select", defaultValue: "pending", options: ["pending"] },
+    ],
   },
 ];
 
@@ -211,19 +277,23 @@ interface ProductionServiceOptions {
 export class ProductionService {
   readonly #root: string;
   readonly #statePath: string;
+  readonly #presetStatePath: string;
   readonly #downloads: CoverageDownloadService;
   readonly #connectors: ConnectorRegistry;
   readonly #dataCatalog: DataCatalogRegistry;
   readonly #objectIndex: AstroObjectIndexService;
   readonly #localRoots: LocalConnectorRootsPolicy;
   readonly #runs = new Map<string, ProductionRun>();
+  readonly #presets = new Map<string, ProductionPipelinePreset>();
   readonly #writes = new Map<string, Promise<void>>();
   #initialized = false;
+  #initializationPromise: Promise<void> | null = null;
 
   constructor(options: ProductionServiceOptions) {
     if (!path.isAbsolute(options.root)) throw new RangeError("production root must be absolute");
     this.#root = path.resolve(options.root);
     this.#statePath = path.join(this.#root, "production-runs.json");
+    this.#presetStatePath = path.join(this.#root, "production-pipeline-presets.json");
     this.#downloads = options.downloads;
     this.#connectors = options.connectors;
     this.#dataCatalog = options.dataCatalog;
@@ -233,7 +303,18 @@ export class ProductionService {
 
   async initialize(): Promise<void> {
     if (this.#initialized) return;
-    this.#initialized = true;
+    if (this.#initializationPromise) return this.#initializationPromise;
+    const initialization = this.#initializeState();
+    this.#initializationPromise = initialization;
+    try {
+      await initialization;
+      this.#initialized = true;
+    } finally {
+      if (this.#initializationPromise === initialization) this.#initializationPromise = null;
+    }
+  }
+
+  async #initializeState(): Promise<void> {
     await mkdir(this.#root, { recursive: true });
     try {
       const parsed = JSON.parse(await readFile(this.#statePath, "utf8")) as unknown;
@@ -253,10 +334,76 @@ export class ProductionService {
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") console.warn("Ignoring invalid production state", error);
     }
+    try {
+      const parsed = JSON.parse(await readFile(this.#presetStatePath, "utf8")) as unknown;
+      if (!Array.isArray(parsed)) throw new Error("production preset state must be an array");
+      for (const entry of parsed) {
+        if (!entry || typeof entry !== "object") continue;
+        const preset = entry as ProductionPipelinePreset;
+        if (typeof preset.id !== "string" || typeof preset.pipelineKey !== "string" || typeof preset.title !== "string") continue;
+        if (!PRODUCTION_PIPELINES.some((pipeline) => pipeline.key === preset.pipelineKey)) continue;
+        this.#presets.set(preset.id, {
+          id: preset.id,
+          pipelineKey: preset.pipelineKey,
+          title: preset.title,
+          config: preset.config && typeof preset.config === "object" && !Array.isArray(preset.config) ? clone(preset.config) : {},
+          pinned: preset.pinned === true,
+          createdAt: typeof preset.createdAt === "string" ? preset.createdAt : now(),
+          updatedAt: typeof preset.updatedAt === "string" ? preset.updatedAt : now(),
+        });
+      }
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") console.warn("Ignoring invalid production preset state", error);
+    }
   }
 
   listPipelines(): ProductionPipelineDefinition[] {
     return PRODUCTION_PIPELINES.map(clone);
+  }
+
+  async listPresets(): Promise<ProductionPipelinePreset[]> {
+    await this.initialize();
+    return [...this.#presets.values()]
+      .map(clone)
+      .sort((left, right) => Number(right.pinned) - Number(left.pinned) || right.updatedAt.localeCompare(left.updatedAt));
+  }
+
+  async upsertPreset(inputValue: unknown): Promise<ProductionPipelinePreset> {
+    await this.initialize();
+    if (!inputValue || typeof inputValue !== "object" || Array.isArray(inputValue)) throw new RangeError("production preset input must be an object");
+    const input = inputValue as ProductionPipelinePresetInput;
+    const pipelineKey = text(input.pipelineKey, "pipelineKey");
+    const pipeline = PRODUCTION_PIPELINES.find((candidate) => candidate.key === pipelineKey);
+    if (!pipeline) throw new RangeError(`Unknown production pipeline: ${pipelineKey}`);
+    if (pipeline.availability !== "available") throw new RangeError("该流水线尚未开放配置");
+    const existing = input.id === undefined ? undefined : this.#presets.get(text(input.id, "preset id"));
+    if (input.id !== undefined && !existing) throw new Error(`Production preset not found: ${input.id}`);
+    if (existing && existing.pipelineKey !== pipelineKey) throw new RangeError("preset pipelineKey cannot be changed");
+    const config = input.config === undefined ? existing?.config ?? {} : input.config;
+    if (!config || typeof config !== "object" || Array.isArray(config)) throw new RangeError("preset.config must be an object");
+    const serializedConfig = JSON.stringify(config);
+    if (serializedConfig.length > 32_000) throw new RangeError("preset.config is too large");
+    if (input.pinned !== undefined && typeof input.pinned !== "boolean") throw new RangeError("preset.pinned must be a boolean");
+    const timestamp = now();
+    const preset: ProductionPipelinePreset = {
+      id: existing?.id ?? `ppp_${timestamp.replace(/[-:.TZ]/g, "").slice(0, 14)}_${randomUUID().slice(0, 8)}`,
+      pipelineKey,
+      title: input.title === undefined ? existing?.title ?? pipeline.title : text(input.title, "title", 120),
+      config: clone(config),
+      pinned: input.pinned ?? existing?.pinned ?? false,
+      createdAt: existing?.createdAt ?? timestamp,
+      updatedAt: timestamp,
+    };
+    this.#presets.set(preset.id, preset);
+    await this.#persistPresets();
+    return clone(preset);
+  }
+
+  async deletePreset(id: string): Promise<void> {
+    await this.initialize();
+    const key = text(id, "preset id");
+    if (!this.#presets.delete(key)) throw new Error(`Production preset not found: ${key}`);
+    await this.#persistPresets();
   }
 
   async listRuns(): Promise<ProductionRun[]> {
@@ -279,8 +426,14 @@ export class ProductionService {
     const pipeline = PRODUCTION_PIPELINES.find((candidate) => candidate.key === pipelineKey);
     if (!pipeline) throw new RangeError(`Unknown production pipeline: ${pipelineKey}`);
     if (pipeline.availability !== "available") throw new RangeError("该流水线尚未开放提交");
+    const pipelinePresetId = input.pipelinePresetId === undefined ? undefined : text(input.pipelinePresetId, "pipelinePresetId");
+    if (pipelinePresetId) {
+      const preset = this.#presets.get(pipelinePresetId);
+      if (!preset) throw new RangeError(`Production preset not found: ${pipelinePresetId}`);
+      if (preset.pipelineKey !== pipelineKey) throw new RangeError("pipelinePresetId does not match pipelineKey");
+    }
     const region = regionSnapshot(input.region);
-    const normalized: Record<string, unknown> = { pipelineKey, region };
+    const normalized: Record<string, unknown> = { pipelineKey, region, ...(pipelinePresetId ? { pipelinePresetId } : {}) };
     const steps: ProductionStep[] = [];
     if (pipeline.id === "overlap-download") {
       if (!Array.isArray(input.files) || input.files.length < 1) throw new RangeError("overlap-download requires a non-empty files list");
@@ -315,6 +468,7 @@ export class ProductionService {
     const run: ProductionRun = {
       id: `prd_${createdAt.replace(/[-:.TZ]/g, "").slice(0, 14)}_${randomUUID().slice(0, 8)}`,
       pipelineKey,
+      ...(pipelinePresetId ? { pipelinePresetId } : {}),
       status: "queued",
       createdAt,
       updatedAt: createdAt,
@@ -512,6 +666,19 @@ export class ProductionService {
     });
     this.#writes.set("state", current);
     try { await current; } finally { if (this.#writes.get("state") === current) this.#writes.delete("state"); }
+  }
+
+  async #persistPresets(): Promise<void> {
+    const snapshot = [...this.#presets.values()]
+      .sort((left, right) => Number(right.pinned) - Number(left.pinned) || right.updatedAt.localeCompare(left.updatedAt));
+    const previous = this.#writes.get("presets") ?? Promise.resolve();
+    const current = previous.catch(() => undefined).then(async () => {
+      const temporary = `${this.#presetStatePath}.${randomUUID()}.tmp`;
+      await writeFile(temporary, `${JSON.stringify(snapshot, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
+      await rename(temporary, this.#presetStatePath);
+    });
+    this.#writes.set("presets", current);
+    try { await current; } finally { if (this.#writes.get("presets") === current) this.#writes.delete("presets"); }
   }
 }
 

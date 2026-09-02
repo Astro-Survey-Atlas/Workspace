@@ -6,6 +6,8 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { SSEClientTransport } from "@modelcontextprotocol/sdk/client/sse.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 
+import { requestAiProviderCompletion } from "./ai-provider-client.js";
+
 export type AiProviderCheckStatus = "unknown" | "ok" | "failed";
 export type McpTransport = "streamable-http" | "sse";
 
@@ -185,14 +187,14 @@ export class SystemConfigStore {
     const apiKey = persisted.apiKeyRef ? this.#secrets.values[persisted.apiKeyRef] : undefined;
     const checkedAt = now();
     try {
-      const response = await fetch(`${persisted.baseUrl}/chat/completions`, {
-        method: "POST",
-        headers: { Accept: "application/json", "Content-Type": "application/json", ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}) },
-        body: JSON.stringify({ model: persisted.model, messages: [{ role: "user", content: "Reply with OK" }], max_tokens: 4 }),
+      await requestAiProviderCompletion({
+        baseUrl: persisted.baseUrl,
+        model: persisted.model,
+        messages: [{ role: "user", content: "Reply with OK" }],
+        ...(apiKey ? { apiKey } : {}),
         signal: AbortSignal.timeout(15_000),
       });
-      if (!response.ok) throw new Error(`Provider returned HTTP ${response.status}`);
-      persisted.lastCheck = { status: "ok", detail: "Chat completion endpoint is reachable", checkedAt, toolCalling: true };
+      persisted.lastCheck = { status: "ok", detail: "Chat completion endpoint returned a valid JSON response", checkedAt };
     } catch (error) {
       persisted.lastCheck = { status: "failed", detail: error instanceof Error ? error.message.slice(0, 500) : String(error), checkedAt };
     }

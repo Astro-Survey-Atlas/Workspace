@@ -1,4 +1,4 @@
-import { ChevronLeft, ChevronRight, createIcons, Download, Globe2, GripVertical, Info, Layers3, Maximize2, Minimize2, Moon, Pin, PinOff, Play, Plus, RefreshCw, RotateCcw, Send, Settings2, SlidersHorizontal, Sun, Undo2, X } from "lucide";
+import { ChevronLeft, ChevronRight, createIcons, Download, Globe2, GripVertical, Info, Layers3, Maximize2, MessageSquare, Minimize2, Moon, Pin, PinOff, Play, Plus, RefreshCw, RotateCcw, Send, Settings2, SlidersHorizontal, Sun, Undo2, X } from "lucide";
 
 import "./styles.css";
 import {
@@ -40,8 +40,8 @@ import type { ConnectorPublicRecord } from "../../src/connectors";
 import type { CoverageCoordinateUnits, CoverageJobMode, CoverageJobSpec } from "../../src/coverage-jobs";
 import type { UserMocArtifact } from "../../src/user-moc-artifacts";
 import { WorkflowPanel } from "./workflow-panel";
-import { ProductionPanel, type ProductionContext } from "./production-panel";
-import { SystemPanel } from "./system-panel";
+import { ProductionPanel, type ProductionContext, type ProductionInspectorView, type ProductionSummary } from "./production-panel";
+import { SystemPanel, type SystemSummary } from "./system-panel";
 import { AgentDock } from "./agent-dock";
 import { DataCatalogPanel } from "./data-catalog-panel";
 import { ConnectorPanel, type ConnectorMetrics } from "./connector-panel";
@@ -260,6 +260,71 @@ function inspectorRows(title: string, rows: Array<[string, string]>, actions: HT
   content.replaceChildren(heading, list, ...(actions.length ? [actionBar] : []));
 }
 
+function renderProductionInspector(view: ProductionInspectorView | null): void {
+  const panel = byId("inspector-panel");
+  const empty = byId("inspector-empty");
+  const content = byId("inspector-content");
+  panel.classList.remove("aladin-object-selected");
+  delete panel.dataset.objectId;
+  byId("inspector-kicker").textContent = view?.kicker ?? "PIPELINE INSPECTOR";
+  content.className = "inspector-content production-inspector-content";
+  content.replaceChildren();
+  if (!view) {
+    empty.hidden = false;
+    content.hidden = true;
+    return;
+  }
+  empty.hidden = true;
+  content.hidden = false;
+  const heading = document.createElement("h2"); heading.textContent = view.title;
+  const metadata = document.createElement("dl");
+  (view.rows ?? []).forEach(([label, value]) => {
+    const row = document.createElement("div");
+    const term = document.createElement("dt"); term.textContent = label;
+    const detail = document.createElement("dd"); detail.textContent = value;
+    row.append(term, detail); metadata.append(row);
+  });
+  const children: Node[] = [heading];
+  if (view.summary) { const summary = document.createElement("p"); summary.className = "inspector-summary"; summary.textContent = view.summary; children.push(summary); }
+  if (view.rows?.length) children.push(metadata);
+  if (view.body) children.push(view.body);
+  if (view.actions?.length) { const actionBar = document.createElement("div"); actionBar.className = "inspector-actions production-inspector-actions"; actionBar.append(...view.actions); children.push(actionBar); }
+  content.append(...children);
+}
+
+function renderProductionSummary(summary: ProductionSummary): void {
+  const values: Array<[string, string, string]> = [
+    ["metric-one", "TEMPLATES", String(summary.templates)],
+    ["metric-two", "INSTANCES", String(summary.instances)],
+    ["metric-three", "RUNS", String(summary.runs)],
+    ["metric-four", "ACTIVE", String(summary.activeRuns)],
+    ["metric-five", "ARTIFACTS", String(summary.artifacts)],
+  ];
+  values.forEach(([valueId, label, value]) => { byId(`${valueId}-label`).textContent = label; byId(valueId).textContent = value; });
+  byId("dataset-state").textContent = summary.activeRuns ? `${summary.activeRuns} 个生产任务正在执行` : "流水线模板与实例已载入";
+  byId("object-status").textContent = summary.executors === "--" ? "NO ACTIVE EXECUTOR" : summary.executors;
+}
+
+function renderSystemSummary(summary: SystemSummary): void {
+  const values: Array<[string, string, string]> = [
+    ["metric-one", "AI PROVIDERS", String(summary.providers)],
+    ["metric-two", "MCP SERVERS", String(summary.servers)],
+    ["metric-three", "CONNECTED", String(summary.connected)],
+    ["metric-four", "SECRETS", "MASKED"],
+    ["metric-five", "AGENT", "READY"],
+  ];
+  values.forEach(([valueId, label, value]) => { byId(`${valueId}-label`).textContent = label; byId(valueId).textContent = value; });
+  byId("system-provider-count").textContent = String(summary.providers);
+  byId("system-mcp-count").textContent = String(summary.servers);
+  byId("system-connected-count").textContent = String(summary.connected);
+  byId("system-sidebar-provider-count").textContent = String(summary.providers);
+  byId("system-sidebar-mcp-count").textContent = String(summary.servers);
+  byId("system-sidebar-connected-count").textContent = String(summary.connected);
+  byId("system-sidebar-state").textContent = summary.connected ? "ONLINE" : "READY";
+  byId("system-status-badge").textContent = summary.connected ? `${summary.connected} 已连接` : "READY";
+  byId("system-status-badge").dataset.status = summary.connected ? "ok" : "idle";
+}
+
 function actionButton(label: string, action: () => void): HTMLButtonElement {
   const button = document.createElement("button");
   button.type = "button";
@@ -308,12 +373,13 @@ let hasUnassignedWorkspaceCoverage = false;
 let unassignedWorkspaceVisible = false;
 let remoteCoverageAssetId: string | null = null;
 let layerOrder: string[] = [];
-let layerLayoutMode: SurveyLayerLayoutMode = "overlap";
+let layerLayoutMode: SurveyLayerLayoutMode = "layers";
 let layerInteractionMode: SurveyLayerInteractionMode = "inspect";
 let hoverDismissTimer: ReturnType<typeof setTimeout> | null = null;
 let layerViewer: SurveyLayerViewer | null = null;
 let overlapResponse: SkyOverlapResponse | null = null;
 let overlapModeActive = false;
+let overlapRequestGeneration = 0;
 let aladinExplorer: AladinExplorer | null = null;
 let aladinSnapshot: AladinExplorerSnapshot | null = null;
 let latestAladinStatus: AladinExplorerStatus | null = null;
@@ -334,8 +400,12 @@ let activeWorkspaceHover: SurveyLayerHover | null = null;
 let astroInspectionGeneration = 0;
 
 const workflowPanel = new WorkflowPanel((error) => console.error("Workflow UI request failed", error));
-const productionPanel = new ProductionPanel((error) => console.error("Production UI request failed", error));
-const systemPanel = new SystemPanel((error) => console.error("System settings UI request failed", error));
+const productionPanel = new ProductionPanel(
+  (error) => console.error("Production UI request failed", error),
+  renderProductionSummary,
+  renderProductionInspector,
+);
+const systemPanel = new SystemPanel((error) => console.error("System settings UI request failed", error), renderSystemSummary);
 const agentDock = new AgentDock((error) => console.error("Agent UI request failed", error));
 let connectorSelectionRequest: string | null = null;
 const dataCatalogPanel = new DataCatalogPanel((error) => notifyWorkspaceError(error, "用户资产操作失败"), (connectorId) => {
@@ -582,7 +652,7 @@ const THEME_PREFERENCE_KEY = "astro-workspace:theme:v1";
 const SCENE_BACKGROUND_PREFERENCE_KEY = "astro-workspace:scene-background:v1";
 type WorkspaceTheme = "light" | "dark";
 
-createIcons({ icons: { ChevronLeft, ChevronRight, Download, Globe2, GripVertical, Info, Layers3, Maximize2, Minimize2, Moon, Pin, PinOff, Play, Plus, RefreshCw, RotateCcw, Send, Settings2, SlidersHorizontal, Sun, Undo2, X } });
+createIcons({ icons: { ChevronLeft, ChevronRight, Download, Globe2, GripVertical, Info, Layers3, Maximize2, MessageSquare, Minimize2, Moon, Pin, PinOff, Play, Plus, RefreshCw, RotateCcw, Send, Settings2, SlidersHorizontal, Sun, Undo2, X } });
 
 const themeQuery = window.matchMedia("(prefers-color-scheme: dark)");
 const themeToggle = byId<HTMLButtonElement>("theme-toggle");
@@ -1244,6 +1314,12 @@ function renderSurveyContextMenu(menu: SkyRegionMenu): void {
   };
   const selectedComponent = menu.componentId ? overlapResponse?.components.find((candidate) => candidate.id === menu.componentId) : undefined;
   const context: ProductionContext = { nside: menu.nside, pixels: selectedComponent?.cells ?? menu.pixels, sourceIds: selectedComponent?.sourceIds ?? [...menu.surveyIds.map((id) => `public:${id}`), ...menu.assetIds.map((id) => `workspace:asset:${id}`)], componentId: menu.componentId, assetIds: menu.assetIds };
+  const crossmatchableAssets = menu.assetIds.filter((assetId) => {
+    const asset = dataAssets.find((candidate) => candidate.id === assetId);
+    return asset?.kind === "catalog" && Boolean(asset.scanSpec?.raColumn && asset.scanSpec?.decColumn && asset.scanSpec?.objectIdColumn);
+  });
+  buildCrossmatch.disabled = crossmatchableAssets.length < 2;
+  buildCrossmatch.title = buildCrossmatch.disabled ? "需要两个已建立 RA / Dec 对象索引的 catalog 资产" : "构建对象交叉匹配任务";
   buildDownload.onclick = () => {
     closeSkyContextMenu();
     productionPanel.setContext(context);
@@ -1291,7 +1367,6 @@ function renderLayerState(state: SurveyLayerState): void {
   const visibleSources = state.visibleSurveyIds.length + state.visibleAssetIds.length + state.visibleWorkspaceLayerKeys.length;
   byId("layer-visible-output").textContent = `${visibleSources} SOURCES · ${formatInteger(state.visibleCellCount)} CELLS`;
   renderRegionSceneLegend(state);
-  setActiveButtons("[data-layer-layout]", (button) => button.dataset.layerLayout === state.layoutMode);
   byId("legend-min").textContent = state.layoutMode === "layers" ? "图层内侧" : "1 SURVEY";
   byId("legend-max").textContent = state.layoutMode === "layers" ? "图层外侧" : "MOST OVERLAP";
   byId("scene-frame-label").textContent = "ICRS";
@@ -1373,6 +1448,7 @@ function renderOverlapComponent(component: SurveyLayerOverlapComponent): void {
 
 async function enterSkyOverlapMode(): Promise<void> {
   if (!layerViewer || mode !== "layers") return;
+  const requestGeneration = ++overlapRequestGeneration;
   overlapModeActive = true;
   overlapResponse = null;
   layerViewer.setOverlapMode(true);
@@ -1393,13 +1469,14 @@ async function enterSkyOverlapMode(): Promise<void> {
       includePublic: true,
       includeWorkspace: true,
     });
-    if (!overlapModeActive) return;
+    if (!overlapModeActive || requestGeneration !== overlapRequestGeneration) return;
     overlapResponse = result;
     layerViewer.setOverlapCells(result.nside, result.pixels);
     layerViewer.setOverlapComponents(result.components);
     renderOverlapSummary(result);
     if (result.status === "empty") notifyWorkspace("当前可见来源没有共同覆盖", "请选择至少两个已建立覆盖的来源后重试。", { tone: "info" });
   } catch (error) {
+    if (requestGeneration !== overlapRequestGeneration) return;
     overlapModeActive = false;
     layerViewer.setOverlapMode(false);
     canvas.dataset.overlapMode = "false";
@@ -1409,8 +1486,10 @@ async function enterSkyOverlapMode(): Promise<void> {
 
 function exitSkyOverlapMode(): void {
   if (!overlapModeActive) return;
+  overlapRequestGeneration += 1;
   overlapModeActive = false;
   overlapResponse = null;
+  layerLayoutMode = "layers";
   layerViewer?.setOverlapMode(false);
   canvas.dataset.overlapMode = "false";
   byId("scene-mode-value").textContent = "PUBLIC + OWNED";
@@ -2208,7 +2287,8 @@ function restoreLayerPreferences(): void {
     if (restored.length || stored?.visibleSurveyIds?.length === 0) visibleSurveyIds = new Set(restored);
     else if (available.has("legacy-surveys")) visibleSurveyIds = new Set(["legacy-surveys"]);
     else visibleSurveyIds = new Set([...available].slice(0, 1));
-    layerLayoutMode = stored?.layoutMode === "layers" ? "layers" : "overlap";
+    // Radial expansion is the normal view. G temporarily switches to overlap.
+    layerLayoutMode = "layers";
     layerInteractionMode = stored?.interactionMode === "region" ? "region" : "inspect";
     unassignedWorkspaceVisible = stored?.unassignedWorkspaceVisible === true;
     const storedSchemaVersion = stored?.schemaVersion ?? 0;
@@ -2226,7 +2306,7 @@ function restoreLayerPreferences(): void {
     layerOrder = normalizeCurrentLayerOrder(stored?.layerOrder ?? [], addMissing);
   } catch {
     visibleSurveyIds = available.has("legacy-surveys") ? new Set(["legacy-surveys"]) : new Set([...available].slice(0, 1));
-    layerLayoutMode = "overlap";
+    layerLayoutMode = "layers";
     layerInteractionMode = "inspect";
     unassignedWorkspaceVisible = false;
     visibleAssetIds.clear();
@@ -2239,16 +2319,29 @@ function restoreLayerPreferences(): void {
 
 function persistLayerPreferences(): void {
   try {
-    localStorage.setItem(LAYER_PREFERENCES_KEY, JSON.stringify({
-      schemaVersion: 5,
+    const preferences: {
+      schemaVersion: number;
+      visibleSurveyIds: string[];
+      visibleAssetIds: string[];
+      visibleWorkspaceLayerKeys?: string[];
+      layerOrder: string[];
+      layoutMode: SurveyLayerLayoutMode;
+      interactionMode: SurveyLayerInteractionMode;
+      unassignedWorkspaceVisible: boolean;
+    } = {
+      // Do not claim that workspace-layer visibility was restored until the
+      // first coverage load has populated the extra MOC/Warehouse layers.
+      // Otherwise the early empty list would hide ready MOCs after reload.
+      schemaVersion: workspaceLayerVisibilityPreferenceRestored ? 5 : 4,
       visibleSurveyIds: [...visibleSurveyIds],
       visibleAssetIds: [...visibleAssetIds],
-      visibleWorkspaceLayerKeys: [...visibleWorkspaceLayerKeys],
       layerOrder: normalizeCurrentLayerOrder(),
       layoutMode: layerLayoutMode,
       interactionMode: layerInteractionMode,
       unassignedWorkspaceVisible,
-    }));
+    };
+    if (workspaceLayerVisibilityPreferenceRestored) preferences.visibleWorkspaceLayerKeys = [...visibleWorkspaceLayerKeys];
+    localStorage.setItem(LAYER_PREFERENCES_KEY, JSON.stringify(preferences));
   } catch {}
 }
 
@@ -3148,7 +3241,8 @@ async function activateMode(nextMode: ViewMode): Promise<void> {
   if (mode === "workflow") {
     workflowPanel.deactivate();
     systemPanel.deactivate();
-    byId("panel-kicker").textContent = "PRODUCTION WORKBENCH";
+    byId("inspector-kicker").textContent = "PIPELINE INSPECTOR";
+    byId("panel-kicker").textContent = "DATA PRODUCTION";
     byId("panel-dataset-name").textContent = "数据生产";
     byId("dataset-state").textContent = "多流水线任务与产物已载入";
     byId("metric-one-label").textContent = "PIPELINES";
@@ -3170,6 +3264,7 @@ async function activateMode(nextMode: ViewMode): Promise<void> {
   if (mode === "system") {
     workflowPanel.deactivate();
     productionPanel.deactivate();
+    byId("inspector-kicker").textContent = "SYSTEM SETTINGS";
     byId("panel-kicker").textContent = "SYSTEM CONFIGURATION";
     byId("panel-dataset-name").textContent = "系统配置";
     byId("dataset-state").textContent = "AI Provider 与 MCP Server 管理";
@@ -3308,12 +3403,6 @@ function setupStatusHelp(): void {
 
 setupStatusHelp();
 setupRemoteCoverageDialog();
-document.querySelectorAll<HTMLButtonElement>("[data-layer-layout]").forEach((button) => {
-  button.addEventListener("click", () => {
-    layerLayoutMode = button.dataset.layerLayout as SurveyLayerLayoutMode;
-    applyLayerPreferences();
-  });
-});
 byId<HTMLButtonElement>("reset-button").addEventListener("click", () => {
   if (mode === "layers") {
     if (aladinExplorer) aladinExplorer.reset();
@@ -3470,7 +3559,7 @@ async function start(): Promise<void> {
   publicSurveyResults.forEach((result) => { if (result.status === "fulfilled") publicSurveyRecordsById.set(result.value.id, result.value); });
   restoreLayerPreferences();
 
-  byId("dataset-name").textContent = "公开覆盖与用户资产";
+  byId("dataset-name").textContent = "";
   byId("panel-dataset-name").textContent = "Atlas workspace";
   buildSurveyList();
   byId("service-status").textContent = "SERVICE ONLINE";
