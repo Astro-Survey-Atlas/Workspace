@@ -16,3 +16,4 @@ source-*.tgz
 .env
 compose.local.yaml
 compose.override.yaml
+tmp/*

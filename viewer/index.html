@@ -220,17 +220,12 @@
         <div id="aladin-controls" class="aladin-controls" hidden>
           <div class="aladin-vignette" aria-hidden="true"></div>
           <div class="aladin-scanlines" aria-hidden="true"></div>
-          <div class="aladin-hud-reticle" aria-hidden="true"><i></i><b></b><span></span></div>
           <button id="aladin-asset-drawer-toggle" class="aladin-drawer-tab" type="button" aria-expanded="false" aria-label="展开用户资产抽屉" title="展开用户资产抽屉"><i data-lucide="chevron-right"></i><span>资产</span></button>
           <aside id="aladin-cockpit-rail" class="aladin-cockpit-rail" aria-label="对象资产探索舱">
-            <header class="aladin-cockpit-heading"><span class="panel-kicker">EXPLORATION DECK</span><strong>用户资产</strong><output id="aladin-cache-state">CACHE IDLE</output><small>OBJECT CHANNEL / 01</small><button id="aladin-asset-drawer-pin" class="aladin-rail-pin" type="button" aria-pressed="false" aria-label="固定用户资产抽屉" title="固定抽屉"><i data-lucide="pin"></i></button></header>
+            <header class="aladin-cockpit-heading"><span class="panel-kicker">EXPLORATION DECK</span><strong>用户资产</strong><output id="aladin-cache-state">CACHE IDLE</output><small>OBJECT CHANNEL / 01</small></header>
             <div id="aladin-asset-nav" class="aladin-asset-nav" role="group" aria-label="对象资产导航"></div>
             <div class="aladin-rail-summary"><span>VIEWPORT LOAD</span><output id="aladin-loaded-summary">--</output></div>
           </aside>
-          <div class="aladin-telemetry"><span>ALT/AZ · OBJECTS</span><output id="aladin-object-telemetry">--</output><small>LINK STABLE · TRACKING ACTIVE</small></div>
-          <div class="aladin-action-rail" aria-label="Aladin 应用操作">
-            <button id="aladin-inspector-toggle" class="aladin-action-button" type="button" aria-label="显示对象详情" title="显示对象详情"><i data-lucide="info"></i></button>
-          </div>
         </div>
         <div class="scene-hud-top">
           <div class="scene-readout">
@@ -255,15 +250,23 @@
           </div>
         </div>
         <div id="scene-background-popover" class="scene-background-popover" hidden>
-          <div class="scene-background-heading"><strong>天球背景</strong><button id="scene-background-close" class="icon-button" type="button" aria-label="关闭天球背景设置" title="关闭"><i data-lucide="x"></i></button></div>
-          <label class="scene-background-color"><span>自定义颜色</span><input id="scene-background-color" type="color" value="#aebbc1" /></label>
-          <div class="scene-background-presets" aria-label="背景颜色预设">
-            <button type="button" data-scene-background="#e8eef0" style="--swatch: #e8eef0" aria-label="浅灰背景" title="浅灰背景"></button>
-            <button type="button" data-scene-background="#aebbc1" style="--swatch: #aebbc1" aria-label="中灰背景" title="中灰背景"></button>
-            <button type="button" data-scene-background="#68757c" style="--swatch: #68757c" aria-label="深灰背景" title="深灰背景"></button>
-            <button type="button" data-scene-background="#000000" style="--swatch: #000000" aria-label="纯黑背景" title="纯黑背景"></button>
+          <div class="scene-background-heading"><strong id="scene-background-title">天球背景</strong><button id="scene-background-close" class="icon-button" type="button" aria-label="关闭天球背景设置" title="关闭"><i data-lucide="x"></i></button></div>
+          <div id="scene-background-color-controls">
+            <label class="scene-background-color"><span>自定义颜色</span><input id="scene-background-color" type="color" value="#aebbc1" /></label>
+            <div class="scene-background-presets" aria-label="背景颜色预设">
+              <button type="button" data-scene-background="#e8eef0" style="--swatch: #e8eef0" aria-label="浅灰背景" title="浅灰背景"></button>
+              <button type="button" data-scene-background="#aebbc1" style="--swatch: #aebbc1" aria-label="中灰背景" title="中灰背景"></button>
+              <button type="button" data-scene-background="#68757c" style="--swatch: #68757c" aria-label="深灰背景" title="深灰背景"></button>
+              <button type="button" data-scene-background="#000000" style="--swatch: #000000" aria-label="纯黑背景" title="纯黑背景"></button>
+            </div>
+            <button id="scene-background-reset" class="command-button secondary" type="button">恢复主题默认</button>
           </div>
-          <button id="scene-background-reset" class="command-button secondary" type="button">恢复主题默认</button>
+          <div id="scene-image-survey-controls" class="scene-image-surveys" role="group" aria-label="Aladin 天球底图" hidden>
+            <button type="button" data-aladin-survey="dss2"><span class="scene-image-survey-swatch dss2"></span><span><strong>DSS2</strong><small>可见光全天巡天</small></span></button>
+            <button type="button" data-aladin-survey="panstarrs"><span class="scene-image-survey-swatch panstarrs"></span><span><strong>Pan-STARRS DR1</strong><small>北天区深度彩色成像</small></span></button>
+            <button type="button" data-aladin-survey="2mass"><span class="scene-image-survey-swatch twomass"></span><span><strong>2MASS</strong><small>近红外全天巡天</small></span></button>
+            <button type="button" data-aladin-survey="allwise"><span class="scene-image-survey-swatch allwise"></span><span><strong>AllWISE</strong><small>中红外全天巡天</small></span></button>
+          </div>
         </div>
         <div id="scene-legend" class="distance-legend" aria-label="场景颜色图例">
           <span id="legend-min">INNER</span><i></i><span id="legend-max">OUTER</span>
@@ -340,20 +343,21 @@
           <div>
             <span class="panel-kicker">DATA PRODUCTION</span>
             <h2>数据生产</h2>
-            <p>从流水线模板创建实例，查看 DAG、参数和执行结果。</p>
+            <p>选择流水线模板，配置参数并查看每次执行的 DAG 状态与节点日志。</p>
           </div>
-          <div class="stage-primary-actions"><button id="production-new" class="primary-command compact-command" type="button"><i data-lucide="plus"></i><span>从模板开始</span></button><span id="production-status-badge" class="run-status" data-status="idle">IDLE</span></div>
+          <div class="stage-primary-actions"><span id="production-status-badge" class="run-status" data-status="idle">IDLE</span></div>
         </header>
         <div class="production-workbench-grid">
-          <section class="production-instance-section" aria-labelledby="production-instances-heading">
-            <div class="section-heading"><span id="production-instances-heading">流水线实例</span><span id="production-instance-count">0</span></div>
-            <div id="production-instance-list" class="production-instance-list"></div>
-            <div id="production-instance-empty" class="catalog-empty">还没有流水线实例，请从左侧模板开始。</div>
-          </section>
           <section class="production-dag-section" aria-labelledby="production-dag-heading">
             <div class="section-heading"><span id="production-dag-heading">DAG</span><span id="production-dag-count">--</span></div>
             <div id="production-dag-list" class="production-dag-list"></div>
             <div id="production-dag-empty" class="catalog-empty">选择一个流水线查看执行图。</div>
+          </section>
+          <section class="production-log-section" aria-labelledby="production-log-heading">
+            <div class="section-heading"><span id="production-log-heading">执行记录</span><span id="production-run-count">0</span></div>
+            <div id="production-run-list" class="production-run-list" aria-label="当前模板的执行记录"></div>
+            <div id="production-run-empty" class="catalog-empty production-run-empty">当前模板还没有执行记录。</div>
+            <div id="production-log-detail" class="production-log-detail"></div>
           </section>
         </div>
       </section>
@@ -492,27 +496,16 @@
         </form>
       </dialog>
 
-      <dialog id="production-create-dialog" class="workspace-dialog wide-dialog">
-        <form id="production-form" class="dialog-form production-form">
-          <header><div><span class="panel-kicker">NEW PRODUCTION RUN</span><h2>提交数据生产任务</h2></div><button id="production-dialog-close" class="icon-button" type="button" aria-label="关闭"><i data-lucide="x"></i></button></header>
-          <label class="field-label" for="production-pipeline-select">流水线</label><select id="production-pipeline-select" class="field-input" required></select>
-          <div id="production-overlap-fields" class="production-form-fields">
-            <div class="form-section-title">重合区域下载</div>
-            <p id="production-region-summary" class="control-note">尚未附加区域；请从 G 模式或数据覆盖右栏进入。</p>
-            <label class="field-label" for="production-export-format">区域导出格式</label><select id="production-export-format" class="field-input"><option value="json">JSON</option><option value="csv">CSV</option></select>
-            <label class="field-label" for="production-crawler">爬虫执行器</label><select id="production-crawler" class="field-input"><option value="builtin-http">内置 HTTP 爬虫</option></select>
-            <label class="field-label" for="production-concurrency">并发数</label><input id="production-concurrency" class="field-input" type="number" min="1" max="16" step="1" value="4" />
-            <label class="field-label" for="production-storage">存储位置</label><select id="production-storage" class="field-input"><option value="">Workspace 托管目录（自动创建 Connector）</option></select>
-            <p id="production-files-summary" class="control-note">尚未反查文件</p>
-          </div>
-          <div id="production-crossmatch-fields" class="production-form-fields" hidden>
-            <div class="form-section-title">对象交叉匹配</div>
-            <label class="field-label" for="production-left-asset">左表资产</label><select id="production-left-asset" class="field-input"></select>
-            <label class="field-label" for="production-right-asset">右表资产</label><select id="production-right-asset" class="field-input"></select>
-            <label class="field-label" for="production-match-radius">匹配半径（角秒）</label><input id="production-match-radius" class="field-input" type="number" min="0.01" max="60" step="0.01" value="1.5" />
-            <p id="production-crossmatch-note" class="control-note">只显示具备 RA / Dec 对象索引的 catalog 资产；MOC-only 资产不能交叉匹配。</p>
-          </div>
-          <footer><button id="production-form-cancel" class="command-button secondary" type="button">取消</button><button id="production-form-submit" class="primary-command" type="submit"><i data-lucide="play"></i><span>提交任务</span></button></footer>
+      <dialog id="production-run-dialog" class="workspace-dialog wide-dialog">
+        <form method="dialog" class="dialog-form production-run-dialog-form">
+          <header>
+            <div><span id="production-run-dialog-kicker" class="panel-kicker">RUN</span><h2 id="production-run-dialog-title">执行详情</h2></div>
+            <button id="production-run-dialog-close" class="icon-button" type="button" aria-label="关闭执行详情" title="关闭"><i data-lucide="x"></i></button>
+          </header>
+          <div id="production-run-dialog-content" class="production-run-dialog-content"></div>
+          <footer>
+            <button id="production-run-dialog-dismiss" class="command-button secondary" type="button">关闭</button>
+          </footer>
         </form>
       </dialog>
 

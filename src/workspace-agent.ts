@@ -54,7 +54,7 @@ export const WORKSPACE_AGENT_TOOLS: readonly AgentToolDescriptor[] = [
   { name: "list_data_assets", description: "列出当前 Workspace 用户资产", readOnly: true, parameters: { type: "object", properties: {} } },
   { name: "list_connectors", description: "列出当前 Workspace Connector", readOnly: true, parameters: { type: "object", properties: {} } },
   { name: "list_production_runs", description: "列出数据生产任务", readOnly: true, parameters: { type: "object", properties: {} } },
-  { name: "submit_production_run", description: "提交一个数据生产任务，需要用户确认", readOnly: false, parameters: { type: "object", required: ["pipelineKey", "region"], properties: { pipelineKey: { type: "string" }, pipelinePresetId: { type: "string" }, region: { type: "object" }, files: { type: "array" }, leftAssetId: { type: "string" }, rightAssetId: { type: "string" }, matchRadiusArcsec: { type: "number" }, exportFormat: { type: "string" }, concurrency: { type: "integer" } } } },
+  { name: "submit_production_run", description: "提交一个数据生产任务，需要用户确认", readOnly: false, parameters: { type: "object", required: ["pipelineKey", "region"], properties: { pipelineKey: { type: "string" }, region: { type: "object" }, files: { type: "array" }, leftAssetId: { type: "string" }, rightAssetId: { type: "string" }, matchRadiusArcsec: { type: "number" }, exportFormat: { type: "string" }, concurrency: { type: "integer" } } } },
 ];
 
 interface WorkspaceAgentOptions {

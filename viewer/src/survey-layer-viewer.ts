@@ -185,6 +185,8 @@ export interface SurveyLayerState {
   visibleCellCount: number;
   selectedCellCount: number;
   selectedPixels: number[];
+  explodedPixel: number | null;
+  explodedLayerCount: number;
   selectionAnchor: {
     xRatio: number;
     yRatio: number;
@@ -231,6 +233,7 @@ interface ExplodedFragment {
   material: THREE.MeshBasicMaterial;
   lineMaterial: THREE.LineBasicMaterial;
   fromScale: number;
+  offset: THREE.Vector3;
 }
 
 interface ExplosionLayerEntry {
@@ -267,8 +270,9 @@ const COVERAGE_EDGE_OPACITY = 0.22;
 // Keep surrounding layers subdued while the selected region remains readable.
 const DIMMED_OPACITY = 0.075;
 const DIMMED_EDGE_OPACITY = 0.12;
-const EXPLODED_OPACITY = 0.58;
-const EXPLODED_LAYER_STEP = 0.18;
+const EXPLODED_OPACITY = 0.82;
+const EXPLODED_LAYER_STEP = 0.26;
+const EXPLODED_TANGENT_STEP = 0.065;
 const REGION_INNER_PADDING = 0.045;
 const REGION_OUTER_PADDING = 0.065;
 const DRILL_RENDER_ORDER = 10_000;
@@ -593,6 +597,8 @@ export class SurveyLayerViewer {
       visibleCellCount: visibleCells.size,
       selectedCellCount: this.#selectedPixels.size,
       selectedPixels: [...this.#selectedPixels].sort((left, right) => left - right),
+      explodedPixel: this.#explodedPixel,
+      explodedLayerCount: this.#explodedPixel == null ? 0 : this.#explodedFragments.length,
       selectionAnchor: this.#selectionAnchor(),
       visibleSurveyIds: [...this.#visibleSurveyIds],
       visibleAssetIds: [...this.#visibleAssetIds],
@@ -1123,10 +1129,15 @@ export class SurveyLayerViewer {
   }
 
   #workspaceLayerVisible(layer: WorkspaceCoverageLayer): boolean {
+    const key = this.#workspaceLayerKey(layer);
+    // Explicit MOC layers have their own visibility toggle even when the
+    // coverage payload records the source asset as well.
+    if (key.startsWith("moc:") || key.startsWith("warehouse:")) {
+      return this.#visibleWorkspaceLayerKeys.has(key);
+    }
     const assetIds = this.#workspaceLayerAssetIds(layer);
     if (assetIds.length) return assetIds.some((assetId) => this.#visibleAssetIds.has(assetId));
-    const key = this.#workspaceLayerKey(layer);
-    if (layer.source === "warehouse" || key.startsWith("warehouse:") || key.startsWith("moc:")) {
+    if (layer.source === "warehouse") {
       return this.#visibleWorkspaceLayerKeys.has(key);
     }
     return this.#visibleSurveyIds.has(layer.surveyId ?? "__unassigned__");
@@ -1137,9 +1148,9 @@ export class SurveyLayerViewer {
   }
 
   #workspaceLayerKey(layer: WorkspaceCoverageLayer): string {
+    if (layer.key?.startsWith("warehouse:") || layer.key?.startsWith("moc:")) return layer.key;
     const assetId = this.#workspaceLayerAssetIds(layer)[0];
     if (assetId) return `asset:${assetId}`;
-    if (layer.key?.startsWith("warehouse:") || layer.key?.startsWith("moc:")) return layer.key;
     if (layer.source === "warehouse") return `warehouse:${layer.layerId ?? layer.key ?? "layer"}`;
     if (layer.artifactId) return `moc:${layer.artifactId}`;
     if (layer.key) return layer.key;
@@ -1181,7 +1192,12 @@ export class SurveyLayerViewer {
   }
 
   #visibleWorkspaceLayerAssetIds(layer: WorkspaceCoverageLayer): string[] {
-    return this.#workspaceLayerAssetIds(layer).filter((assetId) => this.#visibleAssetIds.has(assetId));
+    const assetIds = this.#workspaceLayerAssetIds(layer);
+    // A visible explicit MOC is itself an intentional user-layer selection;
+    // expose its associated assets to inspection and Aladin even if the
+    // corresponding aggregate asset card remains opt-in.
+    if (this.#workspaceLayerKey(layer).startsWith("moc:")) return assetIds;
+    return assetIds.filter((assetId) => this.#visibleAssetIds.has(assetId));
   }
 
   #workspaceDisplayLayers(depthByKey = new Map(this.#displayDepths().map((depth) => [depth.key, depth]))): Array<{ layer: WorkspaceCoverageLayer; radius: number; color: THREE.Color; renderOrder: number }> {
@@ -1198,7 +1214,28 @@ export class SurveyLayerViewer {
           ? deterministicWorkspaceColor(assetIds[0]!)
           : layer.surveyId ? this.#colorBySurvey.get(layer.surveyId) ?? WORKSPACE_COLOR : WORKSPACE_COLOR;
       return { layer, radius: depth.radius, color, renderOrder: depth.renderOrder };
-    }).filter((entry): entry is { layer: WorkspaceCoverageLayer; radius: number; color: THREE.Color; renderOrder: number } => entry !== null);
+      }).filter((entry): entry is { layer: WorkspaceCoverageLayer; radius: number; color: THREE.Color; renderOrder: number } => entry !== null);
+  }
+
+  #colorForLayerKey(key: string): THREE.Color {
+    if (key.startsWith("public-survey:")) {
+      return this.#colorBySurvey.get(key.slice("public-survey:".length))?.clone() ?? BASE_COLOR.clone();
+    }
+    const layer = this.#workspaceLayers.get(key);
+    const assetIds = layer ? this.#workspaceLayerAssetIds(layer) : [];
+    return layer?.color
+      ? new THREE.Color(layer.color)
+      : assetIds.length
+        ? deterministicWorkspaceColor(assetIds[0]!)
+        : layer?.surveyId ? this.#colorBySurvey.get(layer.surveyId)?.clone() ?? WORKSPACE_COLOR.clone() : WORKSPACE_COLOR.clone();
+  }
+
+  #highlightExplosionColor(source: THREE.Color): THREE.Color {
+    const color = source.clone();
+    const hsl = { h: 0, s: 0, l: 0 };
+    color.getHSL(hsl);
+    color.setHSL(hsl.h, Math.max(0.78, hsl.s), Math.max(0.48, hsl.l));
+    return color;
   }
 
   #drillCellColor(cell: SurveyDrillCell): THREE.Color {
@@ -1333,19 +1370,20 @@ export class SurveyLayerViewer {
   }
 
   #applyFocus(): void {
+    const dimmed = this.#drillFocusActive || this.#explodedPixel != null;
     for (const [surveyId, mesh] of this.#meshBySurvey) {
-      mesh.material.opacity = this.#drillFocusActive || this.#selectedPixels.size > 0 || this.#explodedPixel != null
+      mesh.material.opacity = dimmed
         ? DIMMED_OPACITY
         : this.#focusedSurveyId === surveyId ? 0.24 : COVERAGE_OPACITY;
     }
     this.#workspaceCoverageGroup.traverse((child) => {
       if (!(child instanceof THREE.Mesh) || !(child.material instanceof THREE.MeshBasicMaterial)) return;
       const assetId = child.userData.assetId;
-      child.material.opacity = this.#drillFocusActive || this.#selectedPixels.size > 0 || this.#explodedPixel != null
+      child.material.opacity = dimmed
         ? DIMMED_OPACITY
         : this.#focusedAssetId && assetId === this.#focusedAssetId ? 0.28 : 0.14;
     });
-    const edgeOpacity = this.#drillFocusActive || this.#selectedPixels.size > 0 || this.#explodedPixel != null ? DIMMED_EDGE_OPACITY : COVERAGE_EDGE_OPACITY;
+    const edgeOpacity = dimmed ? DIMMED_EDGE_OPACITY : COVERAGE_EDGE_OPACITY;
     this.#coverageEdgeMaterials.forEach((material) => { material.opacity = edgeOpacity; });
     this.#requestRender();
   }
@@ -1468,7 +1506,7 @@ export class SurveyLayerViewer {
       centerDecDeg: center.decDeg,
       workspaceAvailable,
     });
-    void rotateCamera;
+    this.#explodeInspection(nside, pixel, membership, rotateCamera);
   }
 
   #select(event: PointerCoordinates, additive: boolean): void {
@@ -1511,6 +1549,40 @@ export class SurveyLayerViewer {
     const radii = depths.map((depth) => depth.radius);
     const minimumRadius = Math.max(0.05, Math.min(...radii) - REGION_INNER_PADDING);
     const maximumRadius = Math.max(...radii) + REGION_OUTER_PADDING;
+    // Only paint source sheets when the selected cell is actually covered by
+    // that source. The fallback depth list is still useful for sizing the
+    // white selection volume, but must not fabricate coverage in empty cells.
+    const sheetDepths = [...selectionDepths].sort((left, right) => left.radius - right.radius);
+    sheetDepths.forEach((depth, index) => {
+      const color = this.#highlightExplosionColor(this.#colorForLayerKey(depth.key));
+      const cells = selected.map((pixel) => ({
+        nside: this.#manifest.nside,
+        pixel,
+        radius: depth.radius + 0.003 + index * 0.0015,
+        color,
+        inset: 0.028,
+      }));
+      const sheet = new THREE.Mesh(buildSphericalCellSheetGeometry(cells), new THREE.MeshBasicMaterial({
+        vertexColors: true,
+        transparent: true,
+        opacity: 0.28,
+        side: THREE.DoubleSide,
+        depthTest: false,
+        depthWrite: false,
+        toneMapped: false,
+      }));
+      sheet.renderOrder = SELECTION_RENDER_ORDER - 10 + index * 2;
+      const sheetEdges = new THREE.LineSegments(buildSphericalCellEdges(cells), new THREE.LineBasicMaterial({
+        vertexColors: true,
+        transparent: true,
+        opacity: 0.92,
+        depthTest: false,
+        depthWrite: false,
+        toneMapped: false,
+      }));
+      sheetEdges.renderOrder = SELECTION_RENDER_ORDER - 9 + index * 2;
+      this.#selectionGroup.add(sheet, sheetEdges);
+    });
     const edgeCells = selected.map((pixel) => ({
       nside: this.#manifest.nside,
       pixel,
@@ -1561,7 +1633,7 @@ export class SurveyLayerViewer {
     this.#canvas.dataset.selectionVolume = "outline";
     this.#canvas.dataset.selectionDepthKeys = depths.map((depth) => depth.key).join(",");
     this.#canvas.dataset.selectionDepthRadii = depths.map((depth) => depth.radius.toFixed(4)).join(",");
-    this.#canvas.dataset.selectionEdgeLayers = "1";
+    this.#canvas.dataset.selectionEdgeLayers = String(sheetDepths.length);
 
     this.#requestRender();
   }
@@ -1669,8 +1741,6 @@ export class SurveyLayerViewer {
 
   #explodeInspection(nside: number, pixel: number, membership: CoverageCellMembership, rotateCamera: boolean): void {
     this.#clearExplosion(false);
-    this.#explodedPixel = pixel;
-    this.#explodedNside = nside;
     const depths = new Map(this.#displayDepths().map((depth) => [depth.key, depth]));
     const entries: ExplosionLayerEntry[] = [];
     for (const surveyId of membership.surveyIds) {
@@ -1707,26 +1777,42 @@ export class SurveyLayerViewer {
         existingKeys.add(key);
       }
     }
+    // A hit can come from an interaction-only or stale coverage cell. Do not
+    // dim the whole sphere when there is no actual layer to present.
+    if (!entries.length) {
+      this.#applyFocus();
+      return;
+    }
+    this.#explodedPixel = pixel;
+    this.#explodedNside = nside;
     const midpoint = (entries.length - 1) / 2;
+    const normal = this.#pixelDirectionAt(nside, [pixel]);
+    const reference = Math.abs(normal.y) < 0.82
+      ? new THREE.Vector3(0, 1, 0)
+      : new THREE.Vector3(1, 0, 0);
+    const tangent = new THREE.Vector3().crossVectors(reference, normal).normalize();
     this.#explodedFragments = entries.map((entry, index) => {
       const targetRadius = 1 + (index - midpoint) * EXPLODED_LAYER_STEP;
       const root = new THREE.Group();
       root.scale.setScalar(entry.sourceRadius / targetRadius);
+      const offset = tangent.clone().multiplyScalar((index - midpoint) * EXPLODED_TANGENT_STEP);
+      root.position.copy(offset).multiplyScalar(entry.sourceRadius / targetRadius);
       const cell: SphericalCellSheetGeometryInput = {
         nside: entry.nside,
         pixel: entry.pixel,
         radius: targetRadius,
-        color: entry.color,
-        inset: entry.nside === this.#manifest.nside ? 0.018 : 0.006,
+        color: this.#highlightExplosionColor(entry.color),
+        inset: entry.nside === this.#manifest.nside ? 0.032 : 0.012,
       };
       const material = fragmentMaterial(0);
+      material.depthTest = false;
       const mesh = new THREE.Mesh(buildSphericalCellSheetGeometry([cell]), material);
       mesh.renderOrder = EXPLOSION_RENDER_ORDER + index * 2;
       const lineMaterial = new THREE.LineBasicMaterial({
         vertexColors: true,
         transparent: true,
         opacity: 0,
-        depthTest: true,
+        depthTest: false,
         depthWrite: false,
         toneMapped: false,
       });
@@ -1734,7 +1820,7 @@ export class SurveyLayerViewer {
       edges.renderOrder = EXPLOSION_RENDER_ORDER + index * 2 + 1;
       root.add(mesh, edges);
       this.#explosionGroup.add(root);
-      return { root, material, lineMaterial, fromScale: entry.sourceRadius / targetRadius };
+      return { root, material, lineMaterial, fromScale: entry.sourceRadius / targetRadius, offset };
     });
     this.#setCoverageOpacity(true);
     this.#explosionTransition = {
@@ -1838,9 +1924,10 @@ export class SurveyLayerViewer {
       const opacity = transition.direction === "in" ? eased : 1 - eased;
       transition.root.scale.setScalar(transition.direction === "in" ? THREE.MathUtils.lerp(0.94, 1, eased) : THREE.MathUtils.lerp(1, 0.96, eased));
       const overlap = transition.root.children.some((child) => child instanceof THREE.Mesh && child.userData.surveyId === "__overlap__");
-      const coverageOpacity = overlap ? 0.86 : this.#explodedPixel == null ? COVERAGE_OPACITY : DIMMED_OPACITY;
-      const edgeOpacity = overlap ? 0.72 : this.#selectedPixels.size === 0 && this.#explodedPixel == null ? COVERAGE_EDGE_OPACITY : DIMMED_EDGE_OPACITY;
-      const fragmentOpacity = overlap ? coverageOpacity : this.#selectedPixels.size === 0 && this.#explodedPixel == null ? coverageOpacity : DIMMED_OPACITY;
+      const dimmed = this.#drillFocusActive || this.#explodedPixel != null;
+      const coverageOpacity = overlap ? 0.86 : dimmed ? DIMMED_OPACITY : COVERAGE_OPACITY;
+      const edgeOpacity = overlap ? 0.72 : dimmed ? DIMMED_EDGE_OPACITY : COVERAGE_EDGE_OPACITY;
+      const fragmentOpacity = overlap ? coverageOpacity : dimmed ? DIMMED_OPACITY : coverageOpacity;
       transition.meshMaterials.forEach((material) => { material.opacity = opacity * fragmentOpacity; });
       transition.lineMaterials.forEach((material) => { material.opacity = opacity * edgeOpacity; });
       if (progress < 1) continue;
@@ -1862,6 +1949,7 @@ export class SurveyLayerViewer {
         ? THREE.MathUtils.lerp(fragment.fromScale, 1, eased)
         : THREE.MathUtils.lerp(1, fragment.fromScale, eased);
       fragment.root.scale.setScalar(scale);
+      fragment.root.position.copy(fragment.offset).multiplyScalar(scale);
       fragment.material.opacity = (transition.direction === "in" ? eased : 1 - eased) * EXPLODED_OPACITY;
       fragment.lineMaterial.opacity = (transition.direction === "in" ? eased : 1 - eased) * 0.96;
     });

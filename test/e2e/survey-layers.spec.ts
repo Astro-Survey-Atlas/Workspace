@@ -751,8 +751,8 @@ test("keeps a public Assets MOC and a user MOC on one ICRS/NESTED cell", async (
     nativeOrders: [8],
     maxOrder: 8,
     pixels: [0],
-    assetIds: [],
-    byAsset: [],
+    assetIds: [userAssetId],
+    byAsset: [{ key: userAssetId, assetId: userAssetId, objectCount: 1 }],
   };
   await openFresh(page, async () => {
     await page.route("**/api/capabilities", async (route) => {
@@ -862,6 +862,9 @@ test("keeps a public Assets MOC and a user MOC on one ICRS/NESTED cell", async (
 
   const point = await findCanvasPoint(page, (state) => state.pixel === 0 && state.covered && state.selectable);
   await canvas.click({ position: point });
+  await expect(canvas).toHaveAttribute("data-exploded-pixel", "0");
+  await expect.poll(async () => Number(await canvas.getAttribute("data-exploded-layer-count")), { timeout: 3_000 }).toBeGreaterThan(1);
+  await canvas.screenshot({ path: testInfo.outputPath("public-user-moc-selected.png") });
   await expect(page.locator("#inspector-content")).toContainText("Public Assets Fixture");
   await expect(page.locator("#inspector-content .coverage-workspace-layer")).toContainText("USER ASSET");
   await expect(page.locator("#inspector-content .coverage-workspace-layer")).toContainText("User MOC Fixture");
@@ -955,17 +958,16 @@ test("sphere selection enters Aladin with an exact region snapshot", async ({ pa
   const resetPoint = await findSelectedCanvasPoint(page, Number(selectedPixels));
   await canvas.click({ button: "right", position: resetPoint });
   await expect(page.locator("#coverage-context-menu")).toBeVisible();
+  await expect(page.locator("#coverage-hover")).toBeHidden();
   await expect(page.locator("#coverage-enter-flat")).toHaveText("在 Aladin 中探索");
   await page.locator("#coverage-enter-flat").click();
   const aladin = page.locator("#aladin-explorer");
   await expect(aladin).toBeVisible();
   await expect(page.locator("#aladin-controls")).toBeVisible();
-  await expect(page.locator("#aladin-cockpit-rail")).toBeHidden();
+  await expect(page.locator("#aladin-cockpit-rail")).toBeVisible();
   await expect(page.locator(".aladin-sector-banner")).toHaveCount(0);
   await expect(page.locator("#aladin-asset-drawer-toggle")).toBeVisible();
-  await page.locator("#aladin-asset-drawer-toggle").click();
-  await expect(page.locator("#aladin-cockpit-rail")).toBeVisible();
-  await expect(page.locator(".aladin-hud-reticle")).toBeVisible();
+  await expect(page.locator(".aladin-hud-reticle, .aladin-telemetry, .aladin-action-rail, #aladin-asset-drawer-pin")).toHaveCount(0);
   await expect(page.locator("#aladin-loaded-summary")).toBeVisible();
   await expect(page.locator("#aladin-cache-state")).toContainText(/CACHE|FETCH/);
   await expect(page.locator("#aladin-fullscreen")).toBeVisible();
@@ -983,6 +985,16 @@ test("sphere selection enters Aladin with an exact region snapshot", async ({ pa
   await expect(aladin).toHaveAttribute("data-nside", "16");
   await expect(aladin).toHaveAttribute("data-pixels", selectedPixels!);
   await expect(aladin).toHaveAttribute("data-initial-fov-deg");
+  await expect(aladin).toHaveAttribute("data-image-survey-id", "2mass");
+  await page.locator("#scene-background-settings").click();
+  await expect(page.locator("#scene-image-survey-controls")).toBeVisible();
+  await expect(page.locator("#scene-background-color-controls")).toBeHidden();
+  await expect(page.locator('[data-aladin-survey="2mass"]')).toHaveClass(/active/);
+  await page.locator('[data-aladin-survey="allwise"]').click();
+  await expect(aladin).toHaveAttribute("data-image-survey-id", "allwise");
+  await expect(page.locator('[data-aladin-survey="allwise"]')).toHaveClass(/active/);
+  await expect.poll(() => page.evaluate(() => localStorage.getItem("astro-workspace:aladin-image-survey:v1"))).toBe("allwise");
+  await page.locator("#scene-background-close").click();
   await expect.poll(() => objectRequests.length, { timeout: 15_000 }).toBeGreaterThan(0);
   expect(objectRequests[0]!.region?.nside).toBe(16);
   expect(objectRequests[0]!.region?.pixels).toEqual(selectedPixels!.split(",").map(Number));
@@ -1116,7 +1128,6 @@ test("Aladin queries the current RA/Dec viewport for lightweight objects", async
   await expect(page.locator("#aladin-explorer")).toBeVisible();
   await expect.poll(() => requests.length, { timeout: 15_000 }).toBeGreaterThan(0);
   await expect(page.locator("#aladin-asset-nav .aladin-asset-button")).toHaveCount(1);
-  await page.locator("#aladin-asset-drawer-toggle").click();
   await expect(page.locator("#aladin-explorer")).toHaveAttribute("data-object-returned", "2000", { timeout: 15_000 });
   await expect(page.locator("#workspace-notification-deck .workspace-notification").filter({ hasText: "2,000 个对象已载入" })).toBeVisible();
   expect(requests[0]!.region?.ordering).toBe("NESTED");

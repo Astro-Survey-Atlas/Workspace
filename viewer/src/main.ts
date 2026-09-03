@@ -1,4 +1,4 @@
-import { ChevronLeft, ChevronRight, createIcons, Download, Globe2, GripVertical, Info, Layers3, Maximize2, MessageSquare, Minimize2, Moon, Pin, PinOff, Play, Plus, RefreshCw, RotateCcw, Send, Settings2, SlidersHorizontal, Sun, Undo2, X } from "lucide";
+import { ChevronLeft, ChevronRight, createIcons, Download, Globe2, GripVertical, Info, Layers3, Maximize2, MessageSquare, Minimize2, Moon, Play, Plus, RefreshCw, RotateCcw, Send, Settings2, SlidersHorizontal, Sun, Undo2, X } from "lucide";
 
 import "./styles.css";
 import {
@@ -295,13 +295,13 @@ function renderProductionInspector(view: ProductionInspectorView | null): void {
 function renderProductionSummary(summary: ProductionSummary): void {
   const values: Array<[string, string, string]> = [
     ["metric-one", "TEMPLATES", String(summary.templates)],
-    ["metric-two", "INSTANCES", String(summary.instances)],
-    ["metric-three", "RUNS", String(summary.runs)],
-    ["metric-four", "ACTIVE", String(summary.activeRuns)],
+    ["metric-two", "RUNS", String(summary.runs)],
+    ["metric-three", "ACTIVE", String(summary.activeRuns)],
+    ["metric-four", "SUCCEEDED", String(summary.succeededRuns)],
     ["metric-five", "ARTIFACTS", String(summary.artifacts)],
   ];
   values.forEach(([valueId, label, value]) => { byId(`${valueId}-label`).textContent = label; byId(valueId).textContent = value; });
-  byId("dataset-state").textContent = summary.activeRuns ? `${summary.activeRuns} 个生产任务正在执行` : "流水线模板与实例已载入";
+  byId("dataset-state").textContent = summary.activeRuns ? `${summary.activeRuns} 个生产任务正在执行` : "流水线模板与执行记录已载入";
   byId("object-status").textContent = summary.executors === "--" ? "NO ACTIVE EXECUTOR" : summary.executors;
 }
 
@@ -385,8 +385,6 @@ let aladinSnapshot: AladinExplorerSnapshot | null = null;
 let latestAladinStatus: AladinExplorerStatus | null = null;
 let aladinFullscreen = false;
 let aladinAssetDrawerOpen = false;
-let aladinAssetDrawerPinned = false;
-let aladinAssetDrawerTimer: ReturnType<typeof setTimeout> | null = null;
 let aladinEntryGeneration = 0;
 let aladinEntryAbort: AbortController | null = null;
 let mode: ViewMode = "layers";
@@ -650,15 +648,25 @@ const PREVIOUS_LAYER_PREFERENCES_KEY = "astro-workspace:survey-layer-preferences
 const LEGACY_LAYER_PREFERENCES_KEY = "astro-workspace:survey-layer-preferences:v1";
 const THEME_PREFERENCE_KEY = "astro-workspace:theme:v1";
 const SCENE_BACKGROUND_PREFERENCE_KEY = "astro-workspace:scene-background:v1";
+const ALADIN_SURVEY_PREFERENCE_KEY = "astro-workspace:aladin-image-survey:v1";
+const ALADIN_IMAGE_SURVEYS = {
+  dss2: { label: "DSS2", url: "https://alasky.cds.unistra.fr/DSS/DSSColor" },
+  panstarrs: { label: "Pan-STARRS DR1", url: "https://alasky.cds.unistra.fr/Pan-STARRS/DR1/color-z-zg-g" },
+  "2mass": { label: "2MASS", url: "https://alasky.cds.unistra.fr/2MASS/Color" },
+  allwise: { label: "AllWISE", url: "https://alasky.cds.unistra.fr/AllWISE/RGB-W4-W2-W1" },
+} as const;
+type AladinImageSurveyId = keyof typeof ALADIN_IMAGE_SURVEYS;
 type WorkspaceTheme = "light" | "dark";
 
-createIcons({ icons: { ChevronLeft, ChevronRight, Download, Globe2, GripVertical, Info, Layers3, Maximize2, MessageSquare, Minimize2, Moon, Pin, PinOff, Play, Plus, RefreshCw, RotateCcw, Send, Settings2, SlidersHorizontal, Sun, Undo2, X } });
+createIcons({ icons: { ChevronLeft, ChevronRight, Download, Globe2, GripVertical, Info, Layers3, Maximize2, MessageSquare, Minimize2, Moon, Play, Plus, RefreshCw, RotateCcw, Send, Settings2, SlidersHorizontal, Sun, Undo2, X } });
 
 const themeQuery = window.matchMedia("(prefers-color-scheme: dark)");
 const themeToggle = byId<HTMLButtonElement>("theme-toggle");
 const sceneBackgroundSettings = byId<HTMLButtonElement>("scene-background-settings");
 const sceneBackgroundPopover = byId<HTMLDivElement>("scene-background-popover");
 const sceneBackgroundColor = byId<HTMLInputElement>("scene-background-color");
+const sceneBackgroundColorControls = byId<HTMLDivElement>("scene-background-color-controls");
+const sceneImageSurveyControls = byId<HTMLDivElement>("scene-image-survey-controls");
 
 function normalizedSceneBackground(value: string | null): string | null {
   return value && /^#[0-9a-f]{6}$/i.test(value) ? value.toLowerCase() : null;
@@ -680,6 +688,37 @@ function applySceneBackground(color: string | null): void {
   layerViewer?.setBackgroundColor(color);
   sceneBackgroundColor.value = color ?? defaultSceneBackground();
   sceneBackgroundSettings.dataset.customized = color ? "true" : "false";
+}
+
+function storedAladinImageSurvey(): AladinImageSurveyId {
+  try {
+    const value = localStorage.getItem(ALADIN_SURVEY_PREFERENCE_KEY);
+    if (value && value in ALADIN_IMAGE_SURVEYS) return value as AladinImageSurveyId;
+  } catch {}
+  return "2mass";
+}
+
+function renderSceneBackgroundControls(): void {
+  const inAladin = Boolean(aladinExplorer || aladinSnapshot);
+  sceneBackgroundColorControls.hidden = inAladin;
+  sceneImageSurveyControls.hidden = !inAladin;
+  byId("scene-background-title").textContent = inAladin ? "Aladin 天球底图" : "天球背景";
+  const selected = storedAladinImageSurvey();
+  sceneImageSurveyControls.querySelectorAll<HTMLButtonElement>("[data-aladin-survey]").forEach((button) => {
+    const active = button.dataset.aladinSurvey === selected;
+    button.classList.toggle("active", active);
+    button.setAttribute("aria-pressed", String(active));
+  });
+}
+
+function applyAladinImageSurvey(id: AladinImageSurveyId): void {
+  try { localStorage.setItem(ALADIN_SURVEY_PREFERENCE_KEY, id); } catch {}
+  const survey = ALADIN_IMAGE_SURVEYS[id];
+  aladinExplorer?.setImageSurvey(survey.url);
+  const host = byId("aladin-explorer");
+  host.dataset.imageSurveyId = id;
+  host.dataset.imageSurvey = survey.url;
+  renderSceneBackgroundControls();
 }
 
 function storedTheme(): WorkspaceTheme | null {
@@ -722,7 +761,11 @@ themeQuery.addEventListener("change", (event) => {
 
 sceneBackgroundSettings.addEventListener("click", () => {
   sceneBackgroundPopover.hidden = !sceneBackgroundPopover.hidden;
-  if (!sceneBackgroundPopover.hidden) sceneBackgroundColor.focus();
+  if (!sceneBackgroundPopover.hidden) {
+    renderSceneBackgroundControls();
+    if (aladinExplorer || aladinSnapshot) sceneImageSurveyControls.querySelector<HTMLButtonElement>(".active")?.focus();
+    else sceneBackgroundColor.focus();
+  }
 });
 byId<HTMLButtonElement>("scene-background-close").addEventListener("click", () => {
   sceneBackgroundPopover.hidden = true;
@@ -744,6 +787,12 @@ document.querySelectorAll<HTMLButtonElement>("[data-scene-background]").forEach(
 byId<HTMLButtonElement>("scene-background-reset").addEventListener("click", () => {
   try { localStorage.removeItem(SCENE_BACKGROUND_PREFERENCE_KEY); } catch {}
   applySceneBackground(null);
+});
+sceneImageSurveyControls.querySelectorAll<HTMLButtonElement>("[data-aladin-survey]").forEach((button) => {
+  button.addEventListener("click", () => {
+    const id = button.dataset.aladinSurvey;
+    if (id && id in ALADIN_IMAGE_SURVEYS) applyAladinImageSurvey(id as AladinImageSurveyId);
+  });
 });
 document.addEventListener("pointerdown", (event) => {
   if (sceneBackgroundPopover.hidden) return;
@@ -776,22 +825,12 @@ function cancelAladinEntry(): void {
   aladinEntryAbort = null;
 }
 
-const ALADIN_ASSET_DRAWER_TIMEOUT_MS = 30_000;
-
-function clearAladinAssetDrawerTimer(): void {
-  if (aladinAssetDrawerTimer === null) return;
-  clearTimeout(aladinAssetDrawerTimer);
-  aladinAssetDrawerTimer = null;
-}
-
 function renderAladinAssetDrawerState(): void {
   const controls = byId("aladin-controls");
   const rail = byId("aladin-cockpit-rail");
   const toggle = byId<HTMLButtonElement>("aladin-asset-drawer-toggle");
-  const pin = byId<HTMLButtonElement>("aladin-asset-drawer-pin");
   controls.dataset.assetDrawer = aladinAssetDrawerOpen ? "open" : "closed";
   rail.classList.toggle("is-open", aladinAssetDrawerOpen);
-  rail.classList.toggle("is-pinned", aladinAssetDrawerPinned);
   toggle.setAttribute("aria-expanded", String(aladinAssetDrawerOpen));
   toggle.setAttribute("aria-label", aladinAssetDrawerOpen ? "收起用户资产抽屉" : "展开用户资产抽屉");
   toggle.title = aladinAssetDrawerOpen ? "收起用户资产抽屉" : "展开用户资产抽屉";
@@ -801,31 +840,12 @@ function renderAladinAssetDrawerState(): void {
   const toggleLabel = document.createElement("span");
   toggleLabel.textContent = "资产";
   toggle.append(toggleIcon, toggleLabel);
-  pin.setAttribute("aria-pressed", String(aladinAssetDrawerPinned));
-  pin.setAttribute("aria-label", aladinAssetDrawerPinned ? "取消固定用户资产抽屉" : "固定用户资产抽屉");
-  pin.title = aladinAssetDrawerPinned ? "取消固定" : "固定抽屉";
-  pin.replaceChildren();
-  const pinIcon = document.createElement("i");
-  pinIcon.dataset.lucide = aladinAssetDrawerPinned ? "pin-off" : "pin";
-  pin.append(pinIcon);
-  createIcons({ icons: { ChevronLeft, ChevronRight, Pin, PinOff }, attrs: { "aria-hidden": "true" } });
+  createIcons({ icons: { ChevronLeft, ChevronRight }, attrs: { "aria-hidden": "true" } });
 }
 
-function scheduleAladinAssetDrawerCollapse(): void {
-  clearAladinAssetDrawerTimer();
-  if (!aladinAssetDrawerOpen || aladinAssetDrawerPinned || !aladinExplorer) return;
-  aladinAssetDrawerTimer = setTimeout(() => {
-    aladinAssetDrawerTimer = null;
-    aladinAssetDrawerOpen = false;
-    renderAladinAssetDrawerState();
-  }, ALADIN_ASSET_DRAWER_TIMEOUT_MS);
-}
-
-function setAladinAssetDrawer(open: boolean, touch = true): void {
+function setAladinAssetDrawer(open: boolean): void {
   aladinAssetDrawerOpen = open;
-  if (!open) clearAladinAssetDrawerTimer();
   renderAladinAssetDrawerState();
-  if (touch) scheduleAladinAssetDrawerCollapse();
 }
 
 function pushAladinToast(message: string, tone: "info" | "success" | "error" = "info"): void {
@@ -840,9 +860,7 @@ function destroyViewer(): void {
   aladinExplorer = null;
   aladinSnapshot = null;
   latestAladinStatus = null;
-  clearAladinAssetDrawerTimer();
   aladinAssetDrawerOpen = false;
-  aladinAssetDrawerPinned = false;
   byId("aladin-explorer").hidden = true;
   byId("aladin-controls").hidden = true;
   byId("aladin-asset-nav").replaceChildren();
@@ -999,7 +1017,6 @@ function renderAladinAssetNavigation(targets: readonly AladinAssetTarget[], acti
     empty.className = "aladin-asset-nav-empty";
     empty.textContent = "当前视野暂无对象资产";
     nav.append(empty);
-    scheduleAladinAssetDrawerCollapse();
     return;
   }
   const addButton = (assetId: string | null, label: string, detail?: string): void => {
@@ -1042,7 +1059,6 @@ function renderAladinAssetNavigation(targets: readonly AladinAssetTarget[], acti
     addButton(null, "全部用户资产", `${formatInteger(returned)} / ${formatInteger(total)} OBJECTS`);
   }
   targets.forEach((target) => addButton(target.assetId, target.label, `${formatInteger(target.objectCount ?? target.returned ?? 0)} OBJECTS · FOV ${target.defaultFovDeg.toFixed(1)}°`));
-  scheduleAladinAssetDrawerCollapse();
 }
 
 function syncAladinView(): void {
@@ -1118,9 +1134,6 @@ function renderAladinStatus(status: AladinExplorerStatus): void {
   const loadedSummary = byId<HTMLOutputElement>("aladin-loaded-summary");
   loadedSummary.textContent = `${formatInteger(status.returned)} / ${formatInteger(status.total)} OBJECTS`;
   byId("aladin-cache-state").textContent = status.assets?.some((asset) => asset.cacheState === "cached") ? "CACHE RETAINED" : status.phase === "loading" ? "FETCHING NEW SKY" : "CACHE READY";
-  byId("aladin-object-telemetry").textContent = status.overlapCount
-    ? `${formatInteger(status.overlapCount)} OVERLAP MARKERS`
-    : `${formatInteger(status.returned)} POINTS IN VIEW`;
   if (aladinSnapshot) renderAladinAssetNavigation(aladinSnapshot.assetTargets, aladinExplorer?.getActiveAssetId() ?? null);
   syncAladinView();
 }
@@ -1137,13 +1150,12 @@ async function enterAladinExplorer(menu: SkyRegionMenu): Promise<void> {
   aladinExplorer = null;
   aladinSnapshot = null;
   latestAladinStatus = null;
-  clearAladinAssetDrawerTimer();
-  aladinAssetDrawerOpen = aladinAssetDrawerPinned;
+  aladinAssetDrawerOpen = true;
   layerViewer?.dispose();
   layerViewer = null;
 
   const selectedCandidates = userDataAssets().filter((asset) => menu.assetIds.includes(asset.id));
-  const candidates = selectedCandidates.length ? selectedCandidates : userDataAssets();
+  const candidates = selectedCandidates;
   notifyWorkspace(candidates.length ? "正在读取视野对象" : "当前没有可探索的用户资产", candidates.length ? `${candidates.length} 个用户资产` : "请先登记并扫描用户资产", { tone: candidates.length ? "info" : "warning" });
   const settled = await Promise.allSettled(candidates.map((asset) => queryAladinAssetProfile(asset, { ...menu, pixels }, profileAbort.signal)));
   if (generation !== aladinEntryGeneration || profileAbort.signal.aborted) return;
@@ -1177,6 +1189,7 @@ async function enterAladinExplorer(menu: SkyRegionMenu): Promise<void> {
     : 1.5;
   const initialFovDeg = initialTarget?.defaultFovDeg ?? Math.max(4, Math.min(12, Math.max(3, selectedRadius * 2.6)));
   const assetIds = targets.map((target) => target.assetId);
+  const imageSurveyId = storedAladinImageSurvey();
   const snapshot: AladinExplorerSnapshot = {
     nside: menu.nside,
     pixels,
@@ -1187,6 +1200,7 @@ async function enterAladinExplorer(menu: SkyRegionMenu): Promise<void> {
     centerRaDeg: initialTarget?.centerRaDeg ?? fallbackCenter.raDeg,
     centerDecDeg: initialTarget?.centerDecDeg ?? fallbackCenter.decDeg,
     initialFovDeg,
+    imageSurveyUrl: ALADIN_IMAGE_SURVEYS[imageSurveyId].url,
   };
   aladinSnapshot = snapshot;
   mode = "layers";
@@ -1205,6 +1219,8 @@ async function enterAladinExplorer(menu: SkyRegionMenu): Promise<void> {
   host.dataset.centerDecDeg = snapshot.centerDecDeg.toFixed(6);
   host.dataset.initialFovDeg = initialFovDeg.toFixed(4);
   host.dataset.assetIds = assetIds.join(",");
+  host.dataset.imageSurveyId = imageSurveyId;
+  host.dataset.imageSurvey = snapshot.imageSurveyUrl;
   host.dataset.coverageSourceKeys = [...new Set(menu.surveyIds.map((surveyId) => `public-survey:${surveyId}`))].join(",");
   byId("aladin-controls").hidden = false;
   renderAladinFullscreenState();
@@ -1275,9 +1291,7 @@ async function leaveAladinExplorer(): Promise<void> {
   aladinExplorer = null;
   aladinSnapshot = null;
   latestAladinStatus = null;
-  clearAladinAssetDrawerTimer();
   aladinAssetDrawerOpen = false;
-  aladinAssetDrawerPinned = false;
   byId("aladin-explorer").hidden = true;
   byId("aladin-controls").hidden = true;
   renderAladinFullscreenState();
@@ -1285,7 +1299,6 @@ async function leaveAladinExplorer(): Promise<void> {
   byId("aladin-asset-nav").replaceChildren();
   byId("aladin-loaded-summary").textContent = "--";
   byId("aladin-cache-state").textContent = "CACHE IDLE";
-  byId("aladin-object-telemetry").textContent = "--";
   canvas.hidden = false;
   delete canvas.dataset.aladinPixels;
   delete canvas.dataset.aladinSourceKeys;
@@ -1303,10 +1316,22 @@ function renderSurveyContextMenu(menu: SkyRegionMenu): void {
   const buildDownload = byId<HTMLButtonElement>("coverage-build-download");
   const buildCrossmatch = byId<HTMLButtonElement>("coverage-build-crossmatch");
   const stage = byId("scene-stage").getBoundingClientRect();
-  contextMenu.style.left = `${Math.max(8, Math.min(menu.clientX - stage.left, stage.width - 190))}px`;
-  contextMenu.style.top = `${Math.max(8, Math.min(menu.clientY - stage.top, stage.height - 132))}px`;
+  cancelWorkspaceHoverQuery();
+  activeWorkspaceHover = null;
+  if (hoverDismissTimer) clearTimeout(hoverDismissTimer);
+  hoverDismissTimer = null;
+  const hover = byId("coverage-hover");
+  hover.hidden = true;
+  hover.replaceChildren();
+  contextMenu.style.visibility = "hidden";
   contextMenu.hidden = false;
   contextMenu.classList.add("visible");
+  const menuBounds = contextMenu.getBoundingClientRect();
+  const maximumLeft = Math.max(8, stage.width - menuBounds.width - 8);
+  const maximumTop = Math.max(8, stage.height - menuBounds.height - 8);
+  contextMenu.style.left = `${Math.max(8, Math.min(menu.clientX - stage.left, maximumLeft))}px`;
+  contextMenu.style.top = `${Math.max(8, Math.min(menu.clientY - stage.top, maximumTop))}px`;
+  contextMenu.style.visibility = "";
   enter.onclick = () => {
     contextMenu.hidden = true;
     contextMenu.classList.remove("visible");
@@ -1355,6 +1380,13 @@ function renderLayerState(state: SurveyLayerState): void {
   canvas.dataset.layerOrder = state.layerOrder.join(",");
   canvas.dataset.layerDepths = JSON.stringify(state.layerDepths);
   canvas.dataset.selectedPixels = state.selectedPixels.join(",");
+  if (state.explodedPixel !== null) {
+    canvas.dataset.explodedPixel = String(state.explodedPixel);
+    canvas.dataset.explodedLayerCount = String(state.explodedLayerCount);
+  } else {
+    delete canvas.dataset.explodedPixel;
+    delete canvas.dataset.explodedLayerCount;
+  }
   if (state.selectionAnchor) {
     canvas.dataset.selectionBounds = [
       state.selectionAnchor.bounds.leftRatio,
@@ -1884,7 +1916,7 @@ function userDataAssets(): DataAssetRecord[] {
   return dataAssets;
 }
 
-function coverageLayerAssetIds(layer: WorkspaceAssetCoverageLayer): string[] {
+function coverageLayerAssetIds(layer: { assetIds?: readonly string[]; assetId?: string }): string[] {
   return [...new Set([...(layer.assetIds ?? []), ...(layer.assetId ? [layer.assetId] : [])])];
 }
 
@@ -2020,7 +2052,10 @@ async function loadWorkspaceAssetCoverage(scannedAssetId?: string): Promise<void
   workspaceExtraLayers.clear();
   for (const layer of extraCoverage?.layers ?? []) {
     const normalized = { ...layer, nside } as WorkspaceCoverageLayer;
-    if (layerBelongsToAsset(normalized, assets)) continue;
+    // An explicitly keyed MOC is its own selectable layer even when the
+    // coverage response also records the source asset. Asset-backed warehouse
+    // layers continue to collapse into the asset card to avoid duplicates.
+    if (layerBelongsToAsset(normalized, assets) && !normalized.key?.startsWith("moc:")) continue;
     const key = workspaceExtraLayerKey(normalized);
     if (!key) continue;
     workspaceExtraLayers.set(key, { ...normalized, key, pixels: [...new Set(normalized.pixels)].sort((a, b) => a - b) });
@@ -2148,6 +2183,7 @@ function renderSurveyHover(hover: SurveyLayerHover | null): void {
     }, 110);
     return;
   }
+  if (!byId("coverage-context-menu").hidden) return;
   activeWorkspaceHover = hover;
   requestWorkspaceHoverSummary(hover);
   if (hoverDismissTimer) clearTimeout(hoverDismissTimer);
@@ -3078,7 +3114,11 @@ function buildSurveyList(): void {
       if (event.key === "Enter" || event.key === " ") { event.preventDefault(); activate(); }
     });
     const name = document.createElement("span");
-    name.textContent = survey?.name ?? asset?.name ?? (workspaceLayer?.key?.startsWith("warehouse:") ? `Warehouse · ${workspaceLayer.productId ?? workspaceLayer.layerId ?? "用户层"}` : workspaceLayer ? `MOC · ${workspaceLayer.productId ?? workspaceLayer.layerId ?? "用户层"}` : "未设置巡天标签");
+    const workspaceAsset = workspaceLayer
+      ? dataAssets.find((candidate) => coverageLayerAssetIds(workspaceLayer).includes(candidate.id))
+      : undefined;
+    const workspaceLabel = workspaceLayer?.assetName ?? workspaceAsset?.name ?? workspaceLayer?.productId ?? workspaceLayer?.layerId ?? "用户层";
+    name.textContent = survey?.name ?? asset?.name ?? (workspaceLayer?.key?.startsWith("warehouse:") ? `Warehouse · ${workspaceLabel}` : workspaceLayer ? `MOC · ${workspaceLabel}` : "未设置巡天标签");
     const count = document.createElement("b");
     const metadata = document.createElement("small");
     if (survey) {
@@ -3412,19 +3452,6 @@ byId<HTMLButtonElement>("reset-button").addEventListener("click", () => {
 byId<HTMLButtonElement>("aladin-fullscreen").addEventListener("click", () => void toggleAladinFullscreen());
 byId<HTMLButtonElement>("aladin-asset-drawer-toggle").addEventListener("click", () => {
   setAladinAssetDrawer(!aladinAssetDrawerOpen);
-});
-byId<HTMLButtonElement>("aladin-asset-drawer-pin").addEventListener("click", () => {
-  aladinAssetDrawerPinned = !aladinAssetDrawerPinned;
-  aladinAssetDrawerOpen = true;
-  renderAladinAssetDrawerState();
-  scheduleAladinAssetDrawerCollapse();
-});
-byId("aladin-cockpit-rail").addEventListener("pointerenter", () => scheduleAladinAssetDrawerCollapse());
-byId("aladin-cockpit-rail").addEventListener("focusin", () => scheduleAladinAssetDrawerCollapse());
-byId<HTMLButtonElement>("aladin-inspector-toggle").addEventListener("click", () => {
-  const panel = byId("inspector-panel");
-  panel.classList.add("mobile-open");
-  panel.scrollIntoView({ block: "nearest", inline: "nearest" });
 });
 renderAladinAssetDrawerState();
 document.addEventListener("fullscreenchange", () => {

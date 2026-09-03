@@ -14,6 +14,7 @@ export interface AladinExplorerSnapshot {
   centerRaDeg: number;
   centerDecDeg: number;
   initialFovDeg: number;
+  imageSurveyUrl: string;
   assetTargets: AladinAssetTarget[];
   initialAssetId?: string;
 }
@@ -310,7 +311,7 @@ export class AladinExplorer {
 
     const selector = this.host.id ? `#${this.host.id}` : this.host;
     this.aladin = A.aladin(selector, {
-       survey: "https://alasky.cds.unistra.fr/2MASS/Color",
+      survey: this.snapshot.imageSurveyUrl,
       fov: this.snapshot.initialFovDeg,
       cooFrame: "ICRS",
       projection: "AIT",
@@ -410,6 +411,12 @@ export class AladinExplorer {
 
   getView(): AladinExplorerView {
     return this.getCurrentView();
+  }
+
+  setImageSurvey(url: string): void {
+    if (!this.aladin || this.disposed) return;
+    this.aladin.setImageSurvey?.(url);
+    this.host.dataset.imageSurvey = url;
   }
 
   getActiveAssetId(): string | null {

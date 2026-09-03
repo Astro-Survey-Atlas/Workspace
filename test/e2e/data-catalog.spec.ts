@@ -382,7 +382,8 @@ test("workspace notifications share one mobile deck with dedupe, cap, and expiry
   await expect(firstNotification).toContainText("本地文件表头已读取");
   await expect(firstNotification.locator("strong")).toHaveCount(1);
   await expect(firstNotification.locator("small")).toHaveCount(1);
-  await expect(firstNotification.evaluate((element) => [...element.children].map((child) => child.tagName))).resolves.toEqual(["STRONG", "SMALL"]);
+  await expect(firstNotification.locator(".workspace-notification-close")).toHaveCount(1);
+  await expect(firstNotification.evaluate((element) => [...element.children].map((child) => child.tagName))).resolves.toEqual(["STRONG", "SMALL", "BUTTON"]);
   const mobileDeck = await page.locator("#workspace-notification-deck").boundingBox();
   expect(mobileDeck).not.toBeNull();
   expect(mobileDeck!.width).toBeLessThanOrEqual(374);
@@ -398,10 +399,12 @@ test("workspace notifications share one mobile deck with dedupe, cap, and expiry
   }
   await expect(page.locator("#workspace-notification-deck .workspace-notification")).toHaveCount(5);
   await expect(page.locator("#catalog-dialog-close")).toBeVisible();
-  await expect(page.locator("#workspace-notification-deck .workspace-notification")).toHaveCount(0, { timeout: 12_000 });
+  await page.locator("#workspace-notification-deck .workspace-notification").last().locator(".workspace-notification-close").click();
+  await expect(page.locator("#workspace-notification-deck .workspace-notification")).toHaveCount(4, { timeout: 1_000 });
+  await expect(page.locator("#workspace-notification-deck .workspace-notification")).toHaveCount(0, { timeout: 7_000 });
 });
 
-test("data production exposes templates, DAG previews, saved copies, and run entrypoints", async ({ page }) => {
+test("data production exposes template-driven DAG runs and requires sky context", async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
   await page.goto("/");
   await waitForWorkspace(page);
@@ -409,14 +412,38 @@ test("data production exposes templates, DAG previews, saved copies, and run ent
   await expect(page.locator('[data-mode="workflow"]')).toHaveClass(/active/);
   await expect(page.locator("#production-stage")).toBeVisible();
   await expect(page.locator("#production-template-list .production-template-card")).toHaveCount(3);
-  await expect(page.locator("#production-instance-list .production-instance-card")).toHaveCount(0);
+  await expect(page.locator("#production-instance-list, .production-instance-card")).toHaveCount(0);
   await page.locator("#production-template-list .production-template-card").nth(1).click();
   await expect(page.locator("#production-dag-list .production-dag-node")).toHaveCount(3);
+  await expect(page.locator("#production-dag-list .dag-connector")).toHaveCount(2);
+  await expect(page.locator("#production-dag-list .dag-connector svg[data-lucide='arrow-right']")).toHaveCount(2);
   await expect(page.locator("#inspector-kicker")).toHaveText("PIPELINE TEMPLATE");
-  await expect(page.locator("#inspector-content")).toContainText("从模板创建实例");
   await expect(page.locator("#inspector-content")).toContainText("流水线参数");
+  await expect(page.locator("#inspector-content")).toContainText("未附加天区");
+  await expect(page.locator("#production-execute")).toBeDisabled();
+  await expect(page.locator("#production-log-detail")).toBeHidden();
+  await page.locator("#production-dag-list .production-dag-node").nth(1).click();
+  await expect(page.locator("#production-log-detail")).toContainText("最近邻球面匹配 · 节点日志");
   await expect(page.locator("#production-pipeline-detail")).toHaveCount(0);
   await expect(page.locator("#production-dag-list")).toContainText("对象");
+  const workbenchBounds = await page.evaluate(() => {
+    const stage = document.querySelector("#production-stage")?.getBoundingClientRect();
+    const dag = document.querySelector("#production-dag-list")?.getBoundingClientRect();
+    const logs = document.querySelector("#production-log-detail")?.getBoundingClientRect();
+    if (!stage || !dag || !logs) throw new Error("Missing production workbench bounds");
+    return {
+      stageTop: stage.top,
+      stageBottom: stage.bottom,
+      dagTop: dag.top,
+      dagBottom: dag.bottom,
+      logsTop: logs.top,
+      logsBottom: logs.bottom,
+    };
+  });
+  expect(workbenchBounds.dagTop).toBeGreaterThanOrEqual(workbenchBounds.stageTop);
+  expect(workbenchBounds.dagBottom).toBeLessThanOrEqual(workbenchBounds.stageBottom);
+  expect(workbenchBounds.logsTop).toBeGreaterThanOrEqual(workbenchBounds.stageTop);
+  expect(workbenchBounds.logsBottom).toBeLessThanOrEqual(workbenchBounds.stageBottom);
 });
 
 test("connector view exposes S3, local path, and JDBC registration without scan parameter controls", async ({ page }) => {

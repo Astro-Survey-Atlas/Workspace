@@ -11,7 +11,7 @@ import type { UserMocArtifact } from "../../src/user-moc-artifacts";
 import type { CoverageJobSpec } from "../../src/coverage-jobs";
 import type { DataAssetCoverageState, DataAssetNextAction, DataAssetObjectState, DataAssetOperationalStatus } from "../../src/data-asset-status";
 import type { SkyOverlapComponent, SkyOverlapSource } from "../../src/sky-overlap";
-import type { ProductionPipelineDefinition, ProductionPipelinePreset, ProductionPipelinePresetInput, ProductionRun, ProductionRunInput } from "../../src/production";
+import type { ProductionPipelineDefinition, ProductionRun, ProductionRunInput } from "../../src/production";
 import type { AiProviderInput, AiProviderRecord, McpServerInput, McpServerRecord } from "../../src/system-config";
 import type { WorkspaceAgentSession } from "../../src/workspace-agent";
 import type {
@@ -426,21 +426,6 @@ export const workspaceApi = {
   },
   async productionRuns(): Promise<ProductionRun[]> {
     return (await getJson<{ runs: ProductionRun[] }>("/api/production-runs")).runs;
-  },
-  async productionPresets(): Promise<ProductionPipelinePreset[]> {
-    try {
-      return (await getJson<{ presets: ProductionPipelinePreset[] }>("/api/production-pipeline-presets")).presets;
-    } catch {
-      // Older Workspace servers did not expose presets; templates remain usable.
-      return [];
-    }
-  },
-  async saveProductionPreset(input: ProductionPipelinePresetInput): Promise<ProductionPipelinePreset> {
-    if (input.id) return (await putJson<{ preset: ProductionPipelinePreset }>(`/api/production-pipeline-presets/${encodeURIComponent(input.id)}`, input)).preset;
-    return (await postJson<{ preset: ProductionPipelinePreset }>("/api/production-pipeline-presets", input)).preset;
-  },
-  async deleteProductionPreset(id: string): Promise<void> {
-    await deleteRequest(`/api/production-pipeline-presets/${encodeURIComponent(id)}`);
   },
   async productionRun(id: string): Promise<ProductionRun> {
     return (await getJson<{ run: ProductionRun }>(`/api/production-runs/${encodeURIComponent(id)}`)).run;

@@ -33,10 +33,17 @@ export interface ProductionArtifact {
 export interface ProductionStep {
   id: string;
   title: string;
-  status: "pending" | "running" | "succeeded" | "failed" | "skipped";
+  status: "pending" | "running" | "succeeded" | "failed" | "cancelled" | "skipped";
   detail?: string;
   startedAt?: string;
   completedAt?: string;
+  logs: ProductionStepLogEntry[];
+}
+
+export interface ProductionStepLogEntry {
+  timestamp: string;
+  level: "info" | "warning" | "error";
+  message: string;
 }
 
 export interface ProductionPipelineDefinition {
@@ -67,28 +74,9 @@ export interface ProductionPipelineParameter {
   options?: string[];
 }
 
-export interface ProductionPipelinePreset {
-  id: string;
-  pipelineKey: string;
-  title: string;
-  config: Record<string, unknown>;
-  pinned: boolean;
-  createdAt: string;
-  updatedAt: string;
-}
-
-export interface ProductionPipelinePresetInput {
-  id?: string;
-  pipelineKey: string;
-  title?: string;
-  config?: Record<string, unknown>;
-  pinned?: boolean;
-}
-
 export interface ProductionRun {
   id: string;
   pipelineKey: string;
-  pipelinePresetId?: string;
   status: ProductionRunStatus;
   createdAt: string;
   updatedAt: string;
@@ -105,7 +93,6 @@ export interface ProductionRun {
 
 export interface ProductionRunInput {
   pipelineKey: string;
-  pipelinePresetId?: string;
   region?: unknown;
   files?: readonly CoverageDownloadFile[];
   exportFormat?: "json" | "csv";
@@ -181,6 +168,7 @@ export const PRODUCTION_PIPELINES: readonly ProductionPipelineDefinition[] = [
 ];
 
 const MAX_STATE_RUNS = 200;
+const MAX_STEP_LOGS = 200;
 const MAX_PIXELS = 4096;
 const MAX_MATCH_ROWS = 10_000;
 
@@ -190,6 +178,24 @@ function now(): string {
 
 function clone<T>(value: T): T {
   return structuredClone(value);
+}
+
+function stepLog(timestamp: string, level: ProductionStepLogEntry["level"], message: string): ProductionStepLogEntry {
+  return { timestamp, level, message: message.slice(0, 2_000) };
+}
+
+function normalizeStep(step: ProductionStep): ProductionStep {
+  const logs = Array.isArray(step.logs)
+    ? step.logs.filter((entry) => entry && typeof entry.timestamp === "string" && typeof entry.message === "string")
+      .map((entry) => stepLog(entry.timestamp, entry.level === "warning" || entry.level === "error" ? entry.level : "info", entry.message))
+      .slice(-MAX_STEP_LOGS)
+    : [];
+  if (!logs.length && step.status !== "pending") {
+    const timestamp = step.completedAt ?? step.startedAt ?? now();
+    const level = step.status === "failed" ? "error" : step.status === "cancelled" ? "warning" : "info";
+    logs.push(stepLog(timestamp, level, step.detail ?? `节点状态：${step.status}`));
+  }
+  return { ...step, logs };
 }
 
 function text(value: unknown, name: string, maximum = 180): string {
@@ -277,14 +283,12 @@ interface ProductionServiceOptions {
 export class ProductionService {
   readonly #root: string;
   readonly #statePath: string;
-  readonly #presetStatePath: string;
   readonly #downloads: CoverageDownloadService;
   readonly #connectors: ConnectorRegistry;
   readonly #dataCatalog: DataCatalogRegistry;
   readonly #objectIndex: AstroObjectIndexService;
   readonly #localRoots: LocalConnectorRootsPolicy;
   readonly #runs = new Map<string, ProductionRun>();
-  readonly #presets = new Map<string, ProductionPipelinePreset>();
   readonly #writes = new Map<string, Promise<void>>();
   #initialized = false;
   #initializationPromise: Promise<void> | null = null;
@@ -293,7 +297,6 @@ export class ProductionService {
     if (!path.isAbsolute(options.root)) throw new RangeError("production root must be absolute");
     this.#root = path.resolve(options.root);
     this.#statePath = path.join(this.#root, "production-runs.json");
-    this.#presetStatePath = path.join(this.#root, "production-pipeline-presets.json");
     this.#downloads = options.downloads;
     this.#connectors = options.connectors;
     this.#dataCatalog = options.dataCatalog;
@@ -321,12 +324,24 @@ export class ProductionService {
       if (!Array.isArray(parsed)) throw new Error("production state must be an array");
       for (const entry of parsed) {
         if (!entry || typeof entry !== "object" || typeof (entry as ProductionRun).id !== "string") continue;
-        const run = entry as ProductionRun;
+        const legacyRun = clone(entry as ProductionRun & { pipelinePresetId?: unknown });
+        delete legacyRun.pipelinePresetId;
+        const run: ProductionRun = {
+          ...legacyRun,
+          steps: Array.isArray(legacyRun.steps) ? legacyRun.steps.map(normalizeStep) : [],
+        };
         if (run.status === "queued" || run.status === "running") {
           run.status = "failed";
           run.error = "服务重启前生产任务尚未完成";
           run.completedAt = now();
           run.updatedAt = run.completedAt;
+          const active = run.steps.find((step) => step.status === "running") ?? run.steps.find((step) => step.status === "pending");
+          if (active) {
+            active.status = "failed";
+            active.completedAt = run.completedAt;
+            active.detail = run.error;
+            active.logs = [...active.logs, stepLog(run.completedAt, "error", run.error)].slice(-MAX_STEP_LOGS);
+          }
         }
         this.#runs.set(run.id, clone(run));
       }
@@ -334,76 +349,10 @@ export class ProductionService {
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") console.warn("Ignoring invalid production state", error);
     }
-    try {
-      const parsed = JSON.parse(await readFile(this.#presetStatePath, "utf8")) as unknown;
-      if (!Array.isArray(parsed)) throw new Error("production preset state must be an array");
-      for (const entry of parsed) {
-        if (!entry || typeof entry !== "object") continue;
-        const preset = entry as ProductionPipelinePreset;
-        if (typeof preset.id !== "string" || typeof preset.pipelineKey !== "string" || typeof preset.title !== "string") continue;
-        if (!PRODUCTION_PIPELINES.some((pipeline) => pipeline.key === preset.pipelineKey)) continue;
-        this.#presets.set(preset.id, {
-          id: preset.id,
-          pipelineKey: preset.pipelineKey,
-          title: preset.title,
-          config: preset.config && typeof preset.config === "object" && !Array.isArray(preset.config) ? clone(preset.config) : {},
-          pinned: preset.pinned === true,
-          createdAt: typeof preset.createdAt === "string" ? preset.createdAt : now(),
-          updatedAt: typeof preset.updatedAt === "string" ? preset.updatedAt : now(),
-        });
-      }
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "ENOENT") console.warn("Ignoring invalid production preset state", error);
-    }
   }
 
   listPipelines(): ProductionPipelineDefinition[] {
     return PRODUCTION_PIPELINES.map(clone);
-  }
-
-  async listPresets(): Promise<ProductionPipelinePreset[]> {
-    await this.initialize();
-    return [...this.#presets.values()]
-      .map(clone)
-      .sort((left, right) => Number(right.pinned) - Number(left.pinned) || right.updatedAt.localeCompare(left.updatedAt));
-  }
-
-  async upsertPreset(inputValue: unknown): Promise<ProductionPipelinePreset> {
-    await this.initialize();
-    if (!inputValue || typeof inputValue !== "object" || Array.isArray(inputValue)) throw new RangeError("production preset input must be an object");
-    const input = inputValue as ProductionPipelinePresetInput;
-    const pipelineKey = text(input.pipelineKey, "pipelineKey");
-    const pipeline = PRODUCTION_PIPELINES.find((candidate) => candidate.key === pipelineKey);
-    if (!pipeline) throw new RangeError(`Unknown production pipeline: ${pipelineKey}`);
-    if (pipeline.availability !== "available") throw new RangeError("该流水线尚未开放配置");
-    const existing = input.id === undefined ? undefined : this.#presets.get(text(input.id, "preset id"));
-    if (input.id !== undefined && !existing) throw new Error(`Production preset not found: ${input.id}`);
-    if (existing && existing.pipelineKey !== pipelineKey) throw new RangeError("preset pipelineKey cannot be changed");
-    const config = input.config === undefined ? existing?.config ?? {} : input.config;
-    if (!config || typeof config !== "object" || Array.isArray(config)) throw new RangeError("preset.config must be an object");
-    const serializedConfig = JSON.stringify(config);
-    if (serializedConfig.length > 32_000) throw new RangeError("preset.config is too large");
-    if (input.pinned !== undefined && typeof input.pinned !== "boolean") throw new RangeError("preset.pinned must be a boolean");
-    const timestamp = now();
-    const preset: ProductionPipelinePreset = {
-      id: existing?.id ?? `ppp_${timestamp.replace(/[-:.TZ]/g, "").slice(0, 14)}_${randomUUID().slice(0, 8)}`,
-      pipelineKey,
-      title: input.title === undefined ? existing?.title ?? pipeline.title : text(input.title, "title", 120),
-      config: clone(config),
-      pinned: input.pinned ?? existing?.pinned ?? false,
-      createdAt: existing?.createdAt ?? timestamp,
-      updatedAt: timestamp,
-    };
-    this.#presets.set(preset.id, preset);
-    await this.#persistPresets();
-    return clone(preset);
-  }
-
-  async deletePreset(id: string): Promise<void> {
-    await this.initialize();
-    const key = text(id, "preset id");
-    if (!this.#presets.delete(key)) throw new Error(`Production preset not found: ${key}`);
-    await this.#persistPresets();
   }
 
   async listRuns(): Promise<ProductionRun[]> {
@@ -426,14 +375,8 @@ export class ProductionService {
     const pipeline = PRODUCTION_PIPELINES.find((candidate) => candidate.key === pipelineKey);
     if (!pipeline) throw new RangeError(`Unknown production pipeline: ${pipelineKey}`);
     if (pipeline.availability !== "available") throw new RangeError("该流水线尚未开放提交");
-    const pipelinePresetId = input.pipelinePresetId === undefined ? undefined : text(input.pipelinePresetId, "pipelinePresetId");
-    if (pipelinePresetId) {
-      const preset = this.#presets.get(pipelinePresetId);
-      if (!preset) throw new RangeError(`Production preset not found: ${pipelinePresetId}`);
-      if (preset.pipelineKey !== pipelineKey) throw new RangeError("pipelinePresetId does not match pipelineKey");
-    }
     const region = regionSnapshot(input.region);
-    const normalized: Record<string, unknown> = { pipelineKey, region, ...(pipelinePresetId ? { pipelinePresetId } : {}) };
+    const normalized: Record<string, unknown> = { pipelineKey, region };
     const steps: ProductionStep[] = [];
     if (pipeline.id === "overlap-download") {
       if (!Array.isArray(input.files) || input.files.length < 1) throw new RangeError("overlap-download requires a non-empty files list");
@@ -447,7 +390,11 @@ export class ProductionService {
       normalized.crawlerId = crawlerId;
       normalized.concurrency = concurrency;
       if (input.storageConnectorId !== undefined) normalized.storageConnectorId = text(input.storageConnectorId, "storageConnectorId");
-      steps.push({ id: "region", title: "固定重合区域快照", status: "pending" }, { id: "download", title: "爬虫下载与校验", status: "pending" }, { id: "connector", title: "登记结果 Connector", status: "pending" });
+      steps.push(
+        { id: "region", title: "固定重合区域快照", status: "pending", logs: [] },
+        { id: "download", title: "爬虫下载与校验", status: "pending", logs: [] },
+        { id: "connector", title: "登记结果 Connector", status: "pending", logs: [] },
+      );
     } else {
       if (!input.leftAssetId || !input.rightAssetId) throw new RangeError("object-crossmatch requires two assets");
       const leftAssetId = text(input.leftAssetId, "leftAssetId");
@@ -462,13 +409,16 @@ export class ProductionService {
       normalized.rightAssetId = rightAssetId;
       normalized.matchRadiusArcsec = matchRadiusArcsec;
       normalized.limit = limit;
-      steps.push({ id: "query", title: "读取两个对象索引", status: "pending" }, { id: "match", title: "最近邻球面匹配", status: "pending" }, { id: "export", title: "导出结果与血缘", status: "pending" });
+      steps.push(
+        { id: "query", title: "读取两个对象索引", status: "pending", logs: [] },
+        { id: "match", title: "最近邻球面匹配", status: "pending", logs: [] },
+        { id: "export", title: "导出结果与血缘", status: "pending", logs: [] },
+      );
     }
     const createdAt = now();
     const run: ProductionRun = {
       id: `prd_${createdAt.replace(/[-:.TZ]/g, "").slice(0, 14)}_${randomUUID().slice(0, 8)}`,
       pipelineKey,
-      ...(pipelinePresetId ? { pipelinePresetId } : {}),
       status: "queued",
       createdAt,
       updatedAt: createdAt,
@@ -489,6 +439,8 @@ export class ProductionService {
       run.status = "cancelled";
       run.completedAt = now();
       run.error = "用户取消任务";
+      const first = run.steps.find((step) => step.status === "pending");
+      if (first) this.updateStep(first, "cancelled", run.error, "warning");
       await this.#save(run);
       return run;
     }
@@ -498,6 +450,8 @@ export class ProductionService {
       run.status = "cancelled";
       run.completedAt = now();
       run.error = "用户取消任务";
+      const active = run.steps.find((step) => step.status === "running");
+      if (active) this.updateStep(active, "cancelled", run.error, "warning");
       await this.#save(run);
     }
     return clone(run);
@@ -532,9 +486,12 @@ export class ProductionService {
       run.completedAt = now();
       await this.#save(run);
     } catch (error) {
-      run.status = (run.status as ProductionRunStatus) === "cancelled" ? "cancelled" : "failed";
+      const cancelled = (run.status as ProductionRunStatus) === "cancelled";
+      run.status = cancelled ? "cancelled" : "failed";
       run.error = error instanceof Error ? error.message.slice(0, 2_000) : String(error).slice(0, 2_000);
       run.completedAt = now();
+      const active = run.steps.find((step) => step.status === "running") ?? run.steps.find((step) => step.status === "pending");
+      if (active && active.status !== "cancelled") this.updateStep(active, cancelled ? "cancelled" : "failed", run.error, cancelled ? "warning" : "error");
       await this.#save(run);
     }
   }
@@ -544,10 +501,10 @@ export class ProductionService {
     const exportFormat = run.input.exportFormat === "csv" ? "csv" : "json";
     const regionName = exportFormat === "csv" ? "region.csv" : "region.json";
     const regionContent = exportFormat === "csv" ? regionCsv(region) : `${JSON.stringify(region, null, 2)}\n`;
-    this.setStep(run, "region", "running");
+    await this.setStep(run, "region", "running", `准备 ${region.pixels.length} 个 HEALPix 单元`);
     await this.writeArtifact(run, regionName, exportFormat === "csv" ? "text/csv; charset=utf-8" : "application/json", regionContent);
-    this.setStep(run, "region", "succeeded");
-    this.setStep(run, "download", "running");
+    await this.setStep(run, "region", "succeeded", `已生成 ${regionName}`);
+    await this.setStep(run, "download", "running", `使用 ${String(run.input.crawlerId)}，并发数 ${Number(run.input.concurrency)}`);
     const storageConnectorId = typeof run.input.storageConnectorId === "string" ? run.input.storageConnectorId : undefined;
     let outputRoot: string | undefined;
     if (storageConnectorId) {
@@ -566,22 +523,29 @@ export class ProductionService {
       ...(outputRoot ? { outputRoot, outputPrefix: run.id } : { outputPrefix: run.id }),
     });
     run.summary = { ...run.summary, downloadJobId: download.id, files: download.totalFiles };
+    this.appendStepLog(run, "download", "info", `下载任务 ${download.id} 已提交，共 ${download.totalFiles} 个文件`);
     await this.#save(run);
     let current = download;
+    let loggedFiles = current.downloadedFiles;
     for (let attempt = 0; attempt < 1_200; attempt += 1) {
       if (current.status === "completed" || current.status === "failed" || current.status === "cancelled") break;
       await new Promise((resolve) => setTimeout(resolve, 500));
       current = await this.#downloads.get(download.id);
       run.summary = { ...run.summary, downloadedFiles: current.downloadedFiles, downloadedBytes: current.downloadedBytes };
+      if (current.downloadedFiles !== loggedFiles) {
+        loggedFiles = current.downloadedFiles;
+        this.appendStepLog(run, "download", "info", `已下载 ${current.downloadedFiles}/${current.totalFiles} 个文件，${current.downloadedBytes} bytes`);
+      }
       await this.#save(run);
     }
     if (current.status === "cancelled") { run.status = "cancelled"; throw new Error(current.error ?? "下载已取消"); }
     if (current.status !== "completed") throw new Error(current.error ?? "下载任务超时");
     run.outputConnectorId = current.outputConnectorId;
     run.outputPath = current.outputPath;
-    this.setStep(run, "download", "succeeded", `${current.downloadedFiles} 个文件`);
-    this.setStep(run, "connector", "succeeded", current.outputConnectorId ?? "已登记");
+    await this.setStep(run, "download", "succeeded", `${current.downloadedFiles} 个文件下载完成`);
+    await this.setStep(run, "connector", "running", "正在登记下载结果");
     await this.writeArtifact(run, "download-manifest.json", "application/json", `${JSON.stringify({ region, crawlerId: run.input.crawlerId, files: run.input.files, job: current }, null, 2)}\n`);
+    await this.setStep(run, "connector", "succeeded", current.outputConnectorId ?? "已登记");
   }
 
   async #executeCrossmatch(run: ProductionRun): Promise<void> {
@@ -589,7 +553,7 @@ export class ProductionService {
     const leftAssetId = String(run.input.leftAssetId);
     const rightAssetId = String(run.input.rightAssetId);
     const matchRadius = Number(run.input.matchRadiusArcsec);
-    this.setStep(run, "query", "running");
+    await this.setStep(run, "query", "running", `读取资产 ${leftAssetId} 与 ${rightAssetId}`);
     const query = {
       region: { nside: region.nside, pixels: region.pixels, coordinateFrame: "ICRS", ordering: "NESTED" },
       includeAttributes: false,
@@ -601,8 +565,8 @@ export class ProductionService {
     ]);
     if (left.status !== "ready" || right.status !== "ready") throw new Error(left.message ?? right.message ?? "对象索引不可用，请先完成资产扫描");
     if (!left.objects.length || !right.objects.length) throw new Error("选定区域内没有可匹配的对象");
-    this.setStep(run, "query", "succeeded", `${left.objects.length} + ${right.objects.length} 个对象`);
-    this.setStep(run, "match", "running");
+    await this.setStep(run, "query", "succeeded", `${left.objects.length} + ${right.objects.length} 个对象`);
+    await this.setStep(run, "match", "running", `匹配半径 ${matchRadius} 角秒`);
     const rows: Array<Record<string, unknown>> = [];
     for (const source of left.objects) {
       let best: { object: AstroObjectRecord; separation: number } | undefined;
@@ -624,21 +588,36 @@ export class ProductionService {
       });
       if (rows.length >= Number(run.input.limit ?? MAX_MATCH_ROWS)) break;
     }
-    this.setStep(run, "match", "succeeded", `${rows.length} 个匹配`);
-    this.setStep(run, "export", "running");
+    await this.setStep(run, "match", "succeeded", `${rows.length} 个匹配`);
+    await this.setStep(run, "export", "running", "写出 CSV、JSON 和输入血缘");
     run.summary = { ...run.summary, leftRows: left.objects.length, rightRows: right.objects.length, matchRows: rows.length, matchRadiusArcsec: matchRadius };
     await this.writeArtifact(run, "crossmatch.csv", "text/csv; charset=utf-8", crossmatchCsv(rows));
     await this.writeArtifact(run, "crossmatch.json", "application/json", `${JSON.stringify({ region, summary: run.summary, rows }, null, 2)}\n`);
-    this.setStep(run, "export", "succeeded", "CSV + JSON");
+    await this.setStep(run, "export", "succeeded", "CSV + JSON");
   }
 
-  private setStep(run: ProductionRun, id: string, status: ProductionStep["status"], detail?: string): void {
-    const step = run.steps.find((candidate) => candidate.id === id);
-    if (!step) return;
-    if (status === "running") step.startedAt = now();
-    if (["succeeded", "failed", "skipped"].includes(status)) step.completedAt = now();
+  private updateStep(step: ProductionStep, status: ProductionStep["status"], detail?: string, level?: ProductionStepLogEntry["level"]): void {
+    const timestamp = now();
+    if (status === "running" && !step.startedAt) step.startedAt = timestamp;
+    if (["succeeded", "failed", "cancelled", "skipped"].includes(status)) step.completedAt = timestamp;
     step.status = status;
     if (detail) step.detail = detail;
+    const resolvedLevel = level ?? (status === "failed" ? "error" : status === "cancelled" ? "warning" : "info");
+    const message = detail ?? (status === "running" ? `${step.title}开始执行` : `${step.title}：${status}`);
+    step.logs = [...step.logs, stepLog(timestamp, resolvedLevel, message)].slice(-MAX_STEP_LOGS);
+  }
+
+  private appendStepLog(run: ProductionRun, id: string, level: ProductionStepLogEntry["level"], message: string): void {
+    const step = run.steps.find((candidate) => candidate.id === id);
+    if (!step) return;
+    step.logs = [...step.logs, stepLog(now(), level, message)].slice(-MAX_STEP_LOGS);
+  }
+
+  private async setStep(run: ProductionRun, id: string, status: ProductionStep["status"], detail?: string): Promise<void> {
+    const step = run.steps.find((candidate) => candidate.id === id);
+    if (!step) return;
+    this.updateStep(step, status, detail);
+    await this.#save(run);
   }
 
   private async writeArtifact(run: ProductionRun, name: string, mediaType: string, content: string): Promise<void> {
@@ -668,18 +647,6 @@ export class ProductionService {
     try { await current; } finally { if (this.#writes.get("state") === current) this.#writes.delete("state"); }
   }
 
-  async #persistPresets(): Promise<void> {
-    const snapshot = [...this.#presets.values()]
-      .sort((left, right) => Number(right.pinned) - Number(left.pinned) || right.updatedAt.localeCompare(left.updatedAt));
-    const previous = this.#writes.get("presets") ?? Promise.resolve();
-    const current = previous.catch(() => undefined).then(async () => {
-      const temporary = `${this.#presetStatePath}.${randomUUID()}.tmp`;
-      await writeFile(temporary, `${JSON.stringify(snapshot, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
-      await rename(temporary, this.#presetStatePath);
-    });
-    this.#writes.set("presets", current);
-    try { await current; } finally { if (this.#writes.get("presets") === current) this.#writes.delete("presets"); }
-  }
 }
 
 export type { CoverageDownloadFile, CoverageDownloadJob };
