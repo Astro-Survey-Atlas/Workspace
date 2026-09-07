@@ -113,6 +113,8 @@ Completion criterion: build and tests pass, screenshots show the shared ASA visu
 
 验收时间：2026-09-04。施工范围限定为 Viewer presentation layer：`viewer/src/styles.css`、主题色同步（`viewer/index.html`、`viewer/src/main.ts`）、深色 Workspace mark、Atlas 字体资源，以及本计划要求的基线和截图文档。未改动 API、数据 schema、DOM id、事件监听、localStorage key、六个工作模式或 Coverage Canvas 交互。
 
+复查时间：2026-09-07（workspace cleanup，见 `workspace-cleanup-plan.md`）。全量重新采集上图 18 张双主题截图；drill 主题重绘、Production run 显式选中态、Logo 首帧主题源与 CSS 级联收敛后，双主题截图验收结论不变。
+
 ### Screenshot Index
 
 截图使用 `ASTRO_API_URL=http://astro.workspace.dev.72602.space:32080` 的 Vite preview 采集，所有 PNG 保持浏览器视口原尺寸。

@@ -361,6 +361,8 @@ workspace-notification-deck
 
 记录时间：2026-09-04。视觉施工完成后，以同一套 E2E API 和 Vite preview 重新采集截图；截图索引和改动说明见 [`assets-style-workspace-redesign.md`](assets-style-workspace-redesign.md#implementation-handoff)。
 
+复查时间：2026-09-07（workspace cleanup）。2026-09-04 的视觉验收在 cleanup（drill 主题重绘、Production run 显式选中态、Logo 首帧主题源、CSS 级联收敛、删除无消费者 class toggle）之后按同一矩阵全量复验通过；截图随仓库提交，忽略规则 `docs/screenshots/*` 已移除。
+
 | 主题 | 视口 | 覆盖范围 | 结果 |
 | --- | --- | --- | --- |
 | dark / light | 1440x900 | 六个 `button[data-mode]`：packages、connectors、catalog、layers、workflow、system | 每个模式均能激活；三列 shell、左右侧栏、Stage、Inspector 和状态/列表区域保持稳定 |

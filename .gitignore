@@ -17,4 +17,3 @@ source-*.tgz
 compose.local.yaml
 compose.override.yaml
 tmp/*
-docs/screenshots/*

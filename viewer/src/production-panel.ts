@@ -108,6 +108,7 @@ export class ProductionPanel {
   private active = false;
   private context: ProductionContext | null = null;
   private selectedRun: ProductionRun | null = null;
+  private explicitSelectedRunId: string | null = null;
   private selectedPipelineKey: string | null = null;
   private selectedNodeId: string | null = null;
   private nodeLogVisible = false;
@@ -217,7 +218,9 @@ export class ProductionPanel {
       draft.leftAssetId ??= this.context.assetIds[0];
       draft.rightAssetId ??= this.context.assetIds[1];
     }
+    // First run is detail context only; `.active` marks an explicit user selection.
     this.selectedRun = this.runsForPipeline(pipeline.key)[0] ?? null;
+    this.explicitSelectedRunId = null;
     this.selectedNodeId = defaultNodeId(this.selectedRun, pipeline);
     this.nodeLogVisible = false;
     this.renderAll();
@@ -226,6 +229,7 @@ export class ProductionPanel {
 
   private selectRun(run: ProductionRun): void {
     this.selectedRun = run;
+    this.explicitSelectedRunId = run.id;
     const pipeline = this.selectedPipeline();
     this.selectedNodeId = pipeline ? defaultNodeId(run, pipeline) : null;
     this.nodeLogVisible = false;
@@ -235,6 +239,11 @@ export class ProductionPanel {
   }
 
   private syncSelectedRun(): void {
+    if (this.explicitSelectedRunId && !this.runs.some((run) => run.id === this.explicitSelectedRunId)) {
+      // The explicitly selected record vanished; keep detail context but
+      // never fabricate an `.active` state for it.
+      this.explicitSelectedRunId = null;
+    }
     const selected = this.selectedRun ? this.runs.find((run) => run.id === this.selectedRun?.id) : undefined;
     this.selectedRun = selected ?? this.runsForPipeline()[0] ?? null;
     const pipeline = this.selectedPipeline();
@@ -346,7 +355,7 @@ export class ProductionPanel {
       select.type = "button";
       select.className = "production-run-chip";
       select.dataset.status = run.status;
-      select.classList.toggle("active", run.id === this.selectedRun?.id);
+      select.classList.toggle("active", run.id === this.explicitSelectedRunId);
       select.title = `选择执行记录 ${shortId(run.id)}`;
       const status = document.createElement("strong");
       status.textContent = STATUS_LABELS[run.status] ?? run.status;
@@ -733,6 +742,7 @@ export class ProductionPanel {
     const run = await workspaceApi.submitProductionRun(input);
     this.runs = [run, ...this.runs.filter((candidate) => candidate.id !== run.id)];
     this.selectedRun = run;
+    this.explicitSelectedRunId = run.id;
     this.selectedNodeId = defaultNodeId(run, pipeline);
     this.nodeLogVisible = false;
     this.renderAll();
@@ -766,6 +776,7 @@ export class ProductionPanel {
       const cancelled = await workspaceApi.cancelProductionRun(run.id);
       this.runs = this.runs.map((candidate) => candidate.id === run.id ? cancelled : candidate);
       this.selectedRun = cancelled;
+      this.explicitSelectedRunId = cancelled.id;
       this.renderAll();
     } catch (error) { this.showError(error); }
   }
@@ -775,6 +786,7 @@ export class ProductionPanel {
       const retried = await workspaceApi.retryProductionRun(run.id);
       this.runs = [retried, ...this.runs];
       this.selectedRun = retried;
+      this.explicitSelectedRunId = retried.id;
       const pipeline = this.selectedPipeline();
       this.selectedNodeId = pipeline ? defaultNodeId(retried, pipeline) : null;
       this.nodeLogVisible = false;

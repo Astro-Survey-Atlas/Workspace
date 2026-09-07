@@ -25,7 +25,7 @@
       <div id="workspace-notification-deck" class="workspace-notification-deck" aria-live="polite" aria-atomic="false"></div>
       <header class="topbar">
         <div class="brand-lockup">
-          <img class="brand-logo brand-mark" src="/icon_without_name_lon_web.svg" alt="Astro Survey Atlas" width="72" height="28" data-theme-logo="light" />
+          <img class="brand-logo brand-mark" src="/icon_without_name_lon_web.svg" alt="Astro Survey Atlas Workspace" width="72" height="28" data-theme-logo="light" />
           <span class="brand-wordmark"><strong>Astro Survey Atlas</strong><small>公共天空数据 · 工作区</small></span>
           <span id="dataset-name" class="sr-only">用户资产与公开覆盖</span>
         </div>
@@ -543,6 +543,18 @@
         <span id="object-status" class="statusbar-legacy" aria-hidden="true">0 OBJECTS</span>
       </footer>
     </main>
+    <script>
+      // First-paint logo sync: reads the theme resolved by the head boot
+      // script so dark users never flash the light logo. Runtime theme
+      // switches stay owned by applyThemeLogo() in main.ts.
+      (() => {
+        const theme = document.documentElement.dataset.theme === "light" ? "light" : "dark";
+        document.querySelectorAll(".brand-logo").forEach((logo) => {
+          logo.src = theme === "dark" ? "/icon_without_name_lon_web_dark.svg" : "/icon_without_name_lon_web.svg";
+          logo.dataset.themeLogo = theme;
+        });
+      })();
+    </script>
     <script type="module" src="/src/main.ts"></script>
   </body>
 </html>

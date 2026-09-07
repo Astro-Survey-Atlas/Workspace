@@ -571,6 +571,7 @@ export class SurveyLayerViewer {
     (this.#starField.material as THREE.PointsMaterial).color.setHex(theme === "light" ? 0x879ca8 : 0x71808b);
     (this.#starField.material as THREE.PointsMaterial).opacity = theme === "light" ? 0.34 : 0.28;
     if (this.#overlapMode) this.#rebuildVisible(false);
+    if (this.#drillCells.size) this.#rebuildDrillCells();
     this.#requestRender();
   }
 
@@ -631,7 +632,16 @@ export class SurveyLayerViewer {
     // double-click, even though they do not get a numeric label.
     const visible = cells.filter((cell) => Number.isInteger(cell.pixel) && cell.pixel >= 0 && cell.pixel < 12 * nside ** 2);
     this.#drillCells = new Map(visible.map((cell) => [cell.pixel, cell]));
+    this.#rebuildDrillCells();
+  }
+
+  // Single authority for drill scene construction. Drill colors are baked
+  // into vertex-colored geometry, so setTheme() re-runs this to re-tint the
+  // mesh and edges against the active theme.
+  #rebuildDrillCells(): void {
     clearGroup(this.#drillGroup);
+    const nside = this.#drillNside;
+    const visible = [...this.#drillCells.values()];
     if (!visible.length) {
       this.#requestRender();
       return;

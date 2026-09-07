@@ -67,12 +67,9 @@
   --asa-magenta: #ff6b8d;
   --asa-magenta-strong: #ff8ca6;
   --asa-magenta-soft: #4a1327;
-  --ui-accent: var(--asa-indigo);
-  --ui-accent-strong: var(--asa-indigo-strong);
   --survey-accent: #42d4c6;
   /* Legacy name retained for UI rules; scientific colors use explicit data values. */
   --cyan: var(--survey-accent);
-  --magenta: var(--asa-magenta);
   --amber: #f2cf62;
   --coral: #f07768;
   --green: #6fd69b;
@@ -118,12 +115,9 @@ html[data-theme="light"] {
   --asa-magenta: #f01951;
   --asa-magenta-strong: #c70f3e;
   --asa-magenta-soft: #fff0f4;
-  --ui-accent: var(--asa-indigo);
-  --ui-accent-strong: var(--asa-indigo-strong);
   --survey-accent: #087d78;
   /* Legacy name retained for UI rules; scientific colors use explicit data values. */
   --cyan: var(--survey-accent);
-  --magenta: var(--asa-magenta);
   --amber: #906f09;
   --coral: #b54034;
   --green: #27784d;
@@ -372,7 +366,7 @@ input {
 .level-button.active,
 .representation-button.active {
   color: var(--on-accent);
-  background: var(--cyan);
+  background: var(--asa-indigo);
   font-weight: 700;
 }
 
@@ -1224,12 +1218,12 @@ input {
 
 .catalog-row {
   width: 100%;
-  min-height: 58px;
+  min-height: 56px;
   padding: 8px 14px;
-  border: 1px solid #1e2830;
-  border-radius: 4px;
-  color: #bdc7ce;
-  background: #090e12;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  color: var(--text);
+  background: var(--row);
   text-align: left;
   cursor: pointer;
   transition: border-color 130ms ease, background 130ms ease;
@@ -1237,8 +1231,8 @@ input {
 
 .catalog-row:hover,
 .catalog-row.selected {
-  border-color: #3f6e72;
-  background: #0c1418;
+  border-color: var(--asa-indigo);
+  background: var(--row-hover);
 }
 
 .catalog-row.selected {
@@ -2969,10 +2963,11 @@ html[data-theme="light"] .scene-background-color {
   z-index: 20;
   min-width: 168px;
   padding: 4px;
-  border: 1px solid rgba(82, 105, 114, 0.9);
-  border-radius: 5px;
-  background: rgba(7, 13, 17, 0.96);
-  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.34);
+  border: 1px solid var(--border-strong);
+  border-radius: 3px;
+  color: var(--text);
+  background: color-mix(in srgb, var(--surface-raised) 92%, transparent);
+  box-shadow: 0 12px 30px var(--shadow);
 }
 
 .coverage-context-menu[hidden] {
@@ -5736,8 +5731,8 @@ html[data-theme="light"] .coverage-context-menu button:focus-visible { color: va
   height: 34px;
   gap: 8px;
   padding: 0 9px;
-  border: 1px solid var(--border);
-  border-radius: 4px;
+  border: 1px solid transparent;
+  border-radius: 3px;
   color: var(--text);
   background: var(--row);
   text-align: left;
@@ -5746,7 +5741,7 @@ html[data-theme="light"] .coverage-context-menu button:focus-visible { color: va
 
 .production-run-chip:hover,
 .production-run-chip:focus-visible,
-.production-run-chip.active { border-color: var(--cyan); background: var(--row-hover); outline: none; }
+.production-run-chip.active { border-color: var(--asa-indigo); background: var(--row-hover); outline: none; }
 .production-run-chip strong { color: var(--text-strong); font-size: 9px; }
 .production-run-chip time,
 .production-run-chip span { overflow: hidden; color: var(--muted); font: 8px var(--font-mono); text-overflow: ellipsis; white-space: nowrap; }
@@ -5870,7 +5865,7 @@ html[data-theme="light"] .coverage-context-menu button:focus-visible { color: va
 html[data-theme="light"] .production-stage,
 html[data-theme="light"] .system-stage { background: var(--stage); }
 html[data-theme="light"] .production-template-card,
-html[data-theme="light"] .production-run-chip { border-color: var(--border); color: var(--text); background: var(--row); }
+html[data-theme="light"] .production-run-chip { border-color: transparent; color: var(--text); background: var(--row); }
 html[data-theme="light"] .production-template-card:hover,
 html[data-theme="light"] .production-template-card:focus-visible,
 html[data-theme="light"] .production-template-card.active,
@@ -5922,12 +5917,10 @@ html[data-theme="light"] .production-run-actions .command-button.secondary {
  */
 :root {
   --focus-ring: var(--asa-magenta);
-  --surface-alt: #0f172a;
   --line-subtle: color-mix(in srgb, var(--border) 72%, transparent);
 }
 
 html[data-theme="light"] {
-  --surface-alt: #ffffff;
   --line-subtle: color-mix(in srgb, var(--border) 82%, transparent);
 }
 
@@ -5945,19 +5938,6 @@ textarea {
 .workspace-shell *,
 .workspace-shell *::before,
 .workspace-shell *::after {
-  letter-spacing: 0;
-}
-
-html,
-body {
-  color: var(--text);
-  background: var(--page);
-}
-
-button,
-input,
-select,
-textarea {
   letter-spacing: 0;
 }
 
@@ -5993,9 +5973,6 @@ a:focus-visible {
   flex-basis: 72px;
 }
 
-html[data-theme="light"] .brand-logo { content: url("/icon_without_name_lon_web.svg"); }
-html[data-theme="dark"] .brand-logo { content: url("/icon_without_name_lon_web_dark.svg"); }
-
 .brand-wordmark {
   flex: 0 1 auto;
   min-width: 0;
@@ -6003,14 +5980,6 @@ html[data-theme="dark"] .brand-logo { content: url("/icon_without_name_lon_web_d
 
 .brand-lockup strong {
   font-family: var(--font-sans);
-}
-
-.brand-wordmark strong {
-  color: var(--text-strong);
-}
-
-.brand-wordmark small {
-  color: var(--muted);
 }
 
 .mode-control,
@@ -6021,73 +5990,26 @@ html[data-theme="dark"] .brand-logo { content: url("/icon_without_name_lon_web_d
   background: var(--surface-inset);
 }
 
-.mode-button,
-.level-button,
-.representation-button,
-.panel-kicker,
-.section-heading,
-.metric-grid dt,
-.statusbar,
-.scene-readout,
-.distance-legend,
-.cutaway-badge,
-.catalog-summary dt,
-.catalog-columns,
-.connector-columns,
-.connector-history-columns,
-.resource-package-columns,
-.resource-package-group-heading,
-.resource-filter-group legend,
-.status-help-tooltip,
-.connector-location,
-.connector-row small,
-.connector-row > span:nth-child(2),
-.connector-run-status,
-.resource-package-version,
-.resource-package-status,
-.catalog-row small,
-.catalog-row-survey,
-.catalog-kind,
-.catalog-status,
-.asset-detail-section dt,
-.release-row strong,
-.release-row span,
-.release-row a,
-.inspector-content h2,
-.inspector-content dd,
-.form-section-title,
-.field-input,
-.scene-coordinate-readout,
-.scene-tool kbd,
-.production-action strong,
-.production-action em,
-.run-status,
-.workflow-steps .step-index,
-.workflow-steps small,
-.step-state,
-.result-table,
-.agent-message > span,
 .agent-collapsed-form input,
-.settings-tab,
+.agent-message > span,
+.connector-history-columns,
+.connector-run-status,
+.form-section-title,
+.pipeline-card-copy em,
+.production-dag-node small,
+.production-log-empty,
+.production-log-heading > div > span:first-child,
+.production-log-stream,
+.production-run-chip span,
+.production-run-chip time,
+.production-run-detail-meta dd,
+.production-run-detail-meta dt,
 .settings-record header span,
 .settings-record p,
 .settings-sidebar-summary dd,
-.pipeline-card-copy em,
-.production-dag-node small,
-.production-run-chip time,
-.production-run-chip span,
-.production-log-heading > div > span:first-child,
-.production-log-empty,
-.production-log-stream,
-.production-run-detail-meta dt,
-.production-run-detail-meta dd {
+.settings-tab,
+.status-help-tooltip {
   font-family: var(--font-mono);
-}
-
-.mode-button,
-.level-button,
-.representation-button {
-  color: var(--muted);
 }
 
 .mode-button:hover,
@@ -6095,14 +6017,6 @@ html[data-theme="dark"] .brand-logo { content: url("/icon_without_name_lon_web_d
 .representation-button:hover {
   color: var(--text-strong);
   background: color-mix(in srgb, var(--asa-indigo) 10%, transparent);
-}
-
-.mode-button.active,
-.level-button.active,
-.representation-button.active {
-  border-color: var(--asa-indigo);
-  color: var(--on-accent);
-  background: var(--asa-indigo);
 }
 
 .mode-button:disabled,
@@ -6161,12 +6075,10 @@ html[data-theme="dark"] .brand-logo { content: url("/icon_without_name_lon_web_d
   line-height: 1.2;
 }
 
-.controls-panel h1,
-.inspector-content h2,
-.catalog-stage-header h2,
-.workflow-stage-header h2,
 .agent-heading h2,
-.workflow-gate h3 {
+.catalog-stage-header h2,
+.workflow-gate h3,
+.workflow-stage-header h2 {
   color: var(--text-strong);
 }
 
@@ -6176,19 +6088,18 @@ html[data-theme="dark"] .brand-logo { content: url("/icon_without_name_lon_web_d
   font-weight: 700;
 }
 
-.dataset-state,
-.control-note,
-.checkbox-control,
-.catalog-empty,
-.catalog-stage-footer,
-.inspector-summary,
 .asset-detail-placeholder,
 .asset-detail-section dd,
 .asset-detail-section ul,
-.workflow-run-summary dd,
+.catalog-empty,
+.catalog-stage-footer,
+.checkbox-control,
+.control-note,
+.dataset-state,
+.inspector-summary,
 .production-action-copy,
 .settings-record small,
-.settings-sidebar-summary dt {
+.workflow-run-summary dd {
   color: var(--muted);
 }
 
@@ -6212,12 +6123,6 @@ html[data-theme="dark"] .brand-logo { content: url("/icon_without_name_lon_web_d
   background: var(--surface-raised);
 }
 
-.metric-grid dd,
-.catalog-summary dd,
-.settings-sidebar-summary dd {
-  color: var(--text-strong);
-}
-
 .control-section,
 .layer-survey-section,
 .catalog-stage-footer,
@@ -6226,16 +6131,13 @@ html[data-theme="dark"] .brand-logo { content: url("/icon_without_name_lon_web_d
   border-top-color: var(--border);
 }
 
-.section-heading,
-.catalog-summary dt,
-.catalog-columns,
-.connector-columns,
-.connector-history-columns,
-.resource-package-columns,
-.resource-filter-group legend,
-.field-label,
 .asset-detail-section dt,
-.inspector-content dt {
+.connector-columns,
+.field-label,
+.inspector-content dt,
+.resource-filter-group legend,
+.resource-package-columns,
+.section-heading {
   color: var(--quiet);
 }
 
@@ -6272,9 +6174,8 @@ html[data-theme="dark"] .brand-logo { content: url("/icon_without_name_lon_web_d
   box-shadow: 0 0 0 1px color-mix(in srgb, var(--asa-indigo) 28%, transparent);
 }
 
-.field-input:disabled,
 .command-button:disabled,
-.primary-command:disabled {
+.field-input:disabled {
   border-color: var(--border);
   color: var(--button-disabled-text);
   background: var(--button-disabled);
@@ -6334,8 +6235,6 @@ html[data-theme="dark"] .brand-logo { content: url("/icon_without_name_lon_web_d
 }
 
 .catalog-stage,
-.production-stage,
-.system-stage,
 .workflow-stage {
   color: var(--text);
   background: var(--stage);
@@ -6397,7 +6296,6 @@ html[data-theme="dark"] .brand-logo { content: url("/icon_without_name_lon_web_d
   padding: 14px 12px 7px;
 }
 
-.catalog-row,
 .connector-row,
 .connector-history-row,
 .resource-package-row,
@@ -6409,7 +6307,6 @@ html[data-theme="dark"] .brand-logo { content: url("/icon_without_name_lon_web_d
 .connector-run-row,
 .production-action,
 .production-template-card,
-.production-run-chip,
 .production-dag-node,
 .settings-record,
 .workflow-steps li,
@@ -6420,15 +6317,12 @@ html[data-theme="dark"] .brand-logo { content: url("/icon_without_name_lon_web_d
   background: var(--row);
 }
 
-.catalog-row,
 .connector-row,
 .connector-history-row,
 .resource-package-row {
   min-height: 56px;
 }
 
-.catalog-row:hover,
-.catalog-row.selected,
 .connector-row:hover,
 .connector-row.selected,
 .connector-history-row:hover,
@@ -6442,9 +6336,6 @@ html[data-theme="dark"] .brand-logo { content: url("/icon_without_name_lon_web_d
 .production-template-card:hover,
 .production-template-card:focus-visible,
 .production-template-card.active,
-.production-run-chip:hover,
-.production-run-chip:focus-visible,
-.production-run-chip.active,
 .production-dag-node:hover,
 .production-dag-node:focus-visible,
 .production-dag-node.active,
@@ -6462,48 +6353,39 @@ html[data-theme="dark"] .brand-logo { content: url("/icon_without_name_lon_web_d
   box-shadow: inset 2px 0 0 var(--asa-indigo);
 }
 
-.catalog-row strong,
-.connector-row strong,
-.resource-package-row strong,
 .asset-detail-section h3,
-.connector-detail h3,
+.catalog-row strong,
 .connector-detail dd,
-.catalog-summary dd,
-.release-row strong,
-.resource-release-choices strong,
-.workflow-steps strong,
+.connector-detail h3,
+.connector-row strong,
 .production-action span,
-.settings-record header strong,
-.pipeline-card-copy strong,
-.production-dag-node strong,
 .production-log-heading strong,
-.production-run-detail-meta dd {
+.release-row strong,
+.resource-package-row strong,
+.resource-release-choices strong,
+.workflow-steps strong {
   color: var(--text-strong);
 }
 
+.asset-detail-placeholder,
+.catalog-detail-copy,
+.catalog-kind,
 .catalog-row small,
 .catalog-row-survey,
-.catalog-kind,
-.connector-row small,
-.connector-location,
-.resource-package-row p,
-.resource-package-version,
-.asset-detail-placeholder,
 .connector-detail p,
-.catalog-detail-copy,
+.connector-location,
+.connector-row small,
 .inspector-summary,
-.release-row p,
-.resource-release-copy p,
-.resource-release-choices small,
 .production-action small,
 .production-action-copy,
-.workflow-steps small,
-.step-state,
+.release-row p,
+.resource-package-row p,
+.resource-package-version,
+.resource-release-choices small,
+.resource-release-copy p,
 .result-empty,
-.production-run-chip time,
-.production-run-chip span,
-.production-log-empty,
-.settings-record p {
+.step-state,
+.workflow-steps small {
   color: var(--muted);
 }
 
@@ -6663,18 +6545,13 @@ html[data-theme="dark"] .brand-logo { content: url("/icon_without_name_lon_web_d
   box-shadow: 0 12px 28px var(--shadow);
 }
 
-.workspace-notification-success { border-left-color: var(--green); }
-.workspace-notification-warning { border-left-color: var(--amber); }
-.workspace-notification-error { border-left-color: var(--coral); }
-
 .scene-readout,
 .distance-legend,
 .cutaway-badge,
 .loading-indicator,
 .coverage-hover,
 .region-scene-legend,
-.scene-background-popover,
-.coverage-context-menu {
+.scene-background-popover {
   border-color: var(--border-strong);
   border-radius: 3px;
   color: var(--text);
@@ -6755,10 +6632,7 @@ html[data-theme="dark"] .brand-logo { content: url("/icon_without_name_lon_web_d
 }
 
 .production-action,
-.production-template-card,
-.production-dag-node,
-.production-run-chip,
-.settings-record {
+.production-dag-node {
   background: var(--row);
 }
 
@@ -6884,21 +6758,19 @@ html[data-theme="dark"] .brand-logo { content: url("/icon_without_name_lon_web_d
   color: var(--asa-indigo-strong);
 }
 
-html[data-theme="light"] .catalog-row,
-html[data-theme="light"] .connector-row,
-html[data-theme="light"] .connector-history-row,
-html[data-theme="light"] .resource-package-row,
-html[data-theme="light"] .survey-card,
-html[data-theme="light"] .release-row,
-html[data-theme="light"] .resource-release-choice,
+html[data-theme="light"] .agent-message,
 html[data-theme="light"] .asset-detail-section,
+html[data-theme="light"] .catalog-row,
 html[data-theme="light"] .connector-detail,
+html[data-theme="light"] .connector-history-row,
+html[data-theme="light"] .connector-row,
 html[data-theme="light"] .production-action,
-html[data-theme="light"] .production-template-card,
-html[data-theme="light"] .production-run-chip,
 html[data-theme="light"] .production-dag-node,
+html[data-theme="light"] .release-row,
+html[data-theme="light"] .resource-package-row,
+html[data-theme="light"] .resource-release-choice,
 html[data-theme="light"] .settings-record,
-html[data-theme="light"] .agent-message {
+html[data-theme="light"] .survey-card {
   border-color: var(--border);
   color: var(--text);
   background: var(--row);
@@ -7013,16 +6885,9 @@ html[data-theme="light"] .coverage-context-menu {
   border-color: var(--border);
 }
 
-.aladin-cockpit-heading,
-.aladin-cockpit-heading strong,
-.aladin-cockpit-heading output,
-.aladin-cockpit-heading small,
-.aladin-rail-summary,
 .aladin-asset-button,
-.aladin-asset-button strong,
-.aladin-asset-button small,
 .aladin-asset-nav-empty,
-.aladin-drawer-tab {
+.aladin-cockpit-heading {
   letter-spacing: 0;
 }
 
@@ -7425,10 +7290,6 @@ input[type="checkbox"] {
   accent-color: var(--survey-accent);
 }
 
-.resource-package-row[data-loadable="false"] > input {
-  accent-color: var(--quiet);
-}
-
 .catalog-stage-footer {
   border-top-color: var(--line-strong);
   color: var(--muted);
@@ -7508,21 +7369,4 @@ html[data-theme="light"] .dag-connector svg {
    space to avoid layout shift and reveal the state only on interaction. */
 .production-run-row {
   border: 0;
-}
-
-.production-run-chip,
-html[data-theme="light"] .production-run-chip {
-  border-color: transparent;
-}
-
-.production-run-chip:hover,
-.production-run-chip:focus-visible,
-.production-run-chip.active {
-  border-color: var(--asa-indigo);
-}
-
-html[data-theme="light"] .production-run-chip:hover,
-html[data-theme="light"] .production-run-chip:focus-visible,
-html[data-theme="light"] .production-run-chip.active {
-  border-color: var(--asa-indigo);
 }

@@ -3197,10 +3197,6 @@ async function activateMode(nextMode: ViewMode): Promise<void> {
   byId("region-scene-legend").hidden = mode !== "layers";
   byId<HTMLButtonElement>("drill-back-button").disabled = true;
   byId("context-summary").hidden = false;
-  document.querySelector<HTMLElement>(".workspace-shell")?.classList.toggle("workflow-active", mode === "workflow");
-  document.querySelector<HTMLElement>(".workspace-shell")?.classList.toggle("system-active", mode === "system");
-  document.querySelector<HTMLElement>(".workspace-shell")?.classList.toggle("catalog-active", mode === "catalog");
-  document.querySelector<HTMLElement>(".workspace-shell")?.classList.toggle("connector-active", mode === "connectors");
   byId("inspector-panel").classList.remove("mobile-open");
   inspectorRows("", []);
   loadingIndicator.classList.add("visible");

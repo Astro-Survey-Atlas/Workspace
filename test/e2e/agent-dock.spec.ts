@@ -214,7 +214,7 @@ test("workspace uses the supplied Atlas Workspace brand asset", async ({ page })
   const logo = page.locator(".brand-logo");
   await expect(logo).toHaveClass(/brand-mark/);
   await expect(logo).toHaveAttribute("src", "/icon_without_name_lon_web.svg");
-  await expect(logo).toHaveAttribute("alt", "Astro Survey Atlas");
+  await expect(logo).toHaveAttribute("alt", "Astro Survey Atlas Workspace");
   await expect(logo).toHaveAttribute("width", "72");
   await expect(logo).toHaveAttribute("height", "28");
   await expect(logo).toHaveAttribute("data-theme-logo", "light");

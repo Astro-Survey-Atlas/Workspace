@@ -461,6 +461,7 @@ test("data production exposes template-driven DAG runs and requires sky context"
   if (await runChips.count()) {
     const runChipStyle = await runChips.first().evaluate((element) => getComputedStyle(element).borderColor);
     expect(runChipStyle).toBe("rgba(0, 0, 0, 0)");
+    await expect(runChips.first()).not.toHaveClass(/active/);
   }
   await expect(page.locator("#production-dag-list .production-dag-node")).toHaveCount(3);
   await expect(page.locator("#production-dag-list .dag-connector")).toHaveCount(2);
@@ -492,6 +493,12 @@ test("data production exposes template-driven DAG runs and requires sky context"
   expect(workbenchBounds.dagBottom).toBeLessThanOrEqual(workbenchBounds.stageBottom);
   expect(workbenchBounds.logsTop).toBeGreaterThanOrEqual(workbenchBounds.stageTop);
   expect(workbenchBounds.logsBottom).toBeLessThanOrEqual(workbenchBounds.stageBottom);
+  if (await runChips.count()) {
+    await runChips.first().click();
+    await expect(runChips.first()).toHaveClass(/active/);
+    await page.locator("#production-template-list .production-template-card").nth(1).click();
+    await expect(page.locator("#production-stage .production-run-chip").first()).not.toHaveClass(/active/);
+  }
 });
 
 test("connector view exposes S3, local path, and JDBC registration without scan parameter controls", async ({ page }) => {
