@@ -657,6 +657,8 @@ const ALADIN_IMAGE_SURVEYS = {
 } as const;
 type AladinImageSurveyId = keyof typeof ALADIN_IMAGE_SURVEYS;
 type WorkspaceTheme = "light" | "dark";
+const LIGHT_THEME_LOGO_SRC = "/icon_without_name_lon_web.svg";
+const DARK_THEME_LOGO_SRC = "/icon_without_name_lon_web_dark.svg";
 
 createIcons({ icons: { ChevronLeft, ChevronRight, Download, Globe2, GripVertical, Info, Layers3, Maximize2, MessageSquare, Minimize2, Moon, Play, Plus, RefreshCw, RotateCcw, Send, Settings2, SlidersHorizontal, Sun, Undo2, X } });
 
@@ -730,9 +732,18 @@ function storedTheme(): WorkspaceTheme | null {
   }
 }
 
+function applyThemeLogo(theme: WorkspaceTheme): void {
+  const source = theme === "dark" ? DARK_THEME_LOGO_SRC : LIGHT_THEME_LOGO_SRC;
+  document.querySelectorAll<HTMLImageElement>(".brand-logo").forEach((logo) => {
+    logo.src = source;
+    logo.dataset.themeLogo = theme;
+  });
+}
+
 function applyTheme(theme: WorkspaceTheme, source: "initial" | "user" | "system"): void {
   document.documentElement.dataset.theme = theme;
-  document.querySelector<HTMLMetaElement>('meta[name="theme-color"]')?.setAttribute("content", theme === "dark" ? "#080b0f" : "#f4f7f8");
+  applyThemeLogo(theme);
+  document.querySelector<HTMLMetaElement>('meta[name="theme-color"]')?.setAttribute("content", theme === "dark" ? "#030712" : "#eef0f2");
   const target = theme === "dark" ? "light" : "dark";
   const targetLabel = target === "light" ? "浅色" : "深色";
   themeToggle.setAttribute("aria-label", `切换到${targetLabel}主题`);
@@ -3487,6 +3498,8 @@ window.addEventListener("keydown", (event) => {
     return;
   }
   if (event.key !== "Escape" || event.metaKey || event.ctrlKey || event.altKey) return;
+  // Native dialogs own Escape so their cancel handler can close the modal.
+  if (document.querySelector<HTMLDialogElement>("dialog[open]")) return;
   if (aladinExplorer || aladinSnapshot) {
     event.preventDefault();
     void leaveAladinExplorer().catch(showFatal);

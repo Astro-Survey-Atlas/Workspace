@@ -189,10 +189,19 @@ test("workspace uses the supplied Atlas Workspace brand asset", async ({ page })
   await page.goto("/");
   await waitForWorkspace(page);
   await expect(page).toHaveTitle("Astro Survey Atlas Workspace");
-  const logo = page.locator(".brand-mark");
-  await expect(logo).toHaveAttribute("src", "/astro-survey-atlas-workspace.svg");
+  const logo = page.locator(".brand-logo");
+  await expect(logo).toHaveClass(/brand-mark/);
+  await expect(logo).toHaveAttribute("src", "/icon_without_name_lon_web.svg");
+  await expect(logo).toHaveAttribute("alt", "Astro Survey Atlas");
+  await expect(logo).toHaveAttribute("width", "72");
+  await expect(logo).toHaveAttribute("height", "28");
+  await expect(logo).toHaveAttribute("data-theme-logo", "light");
   await expect.poll(() => logo.evaluate((element) => (element as HTMLImageElement).naturalWidth)).toBeGreaterThan(0);
-  await expect(page.locator(".brand-lockup strong")).toHaveText("Astro Survey Atlas Workspace");
-  await expect(page.locator(".brand-wordmark")).toHaveText("Workspace");
+  await expect(page.locator(".brand-wordmark strong")).toHaveText("Astro Survey Atlas");
+  await expect(page.locator(".brand-wordmark small")).toHaveText("公共天空数据 · 工作区");
   await expect(page.locator(".brand-wordmark")).toBeVisible();
+
+  await page.locator("#theme-toggle").click();
+  await expect(logo).toHaveAttribute("src", "/icon_without_name_lon_web_dark.svg");
+  await expect(logo).toHaveAttribute("data-theme-logo", "dark");
 });

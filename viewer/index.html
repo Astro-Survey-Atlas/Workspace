@@ -3,7 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <meta name="theme-color" content="#080b0f" />
+    <meta name="theme-color" content="#030712" />
     <script>
       (() => {
         const key = "astro-workspace:theme:v1";
@@ -15,7 +15,7 @@
           ? stored
           : matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
         document.documentElement.dataset.theme = theme;
-        document.querySelector('meta[name="theme-color"]').content = theme === "dark" ? "#080b0f" : "#f4f7f8";
+        document.querySelector('meta[name="theme-color"]').content = theme === "dark" ? "#030712" : "#eef0f2";
       })();
     </script>
     <title>Astro Survey Atlas Workspace</title>
@@ -25,9 +25,8 @@
       <div id="workspace-notification-deck" class="workspace-notification-deck" aria-live="polite" aria-atomic="false"></div>
       <header class="topbar">
         <div class="brand-lockup">
-          <img class="brand-mark" src="/astro-survey-atlas-workspace.svg" alt="Astro Survey Atlas Workspace" />
-          <span class="brand-wordmark">Workspace</span>
-          <strong class="sr-only">Astro Survey Atlas Workspace</strong>
+          <img class="brand-logo brand-mark" src="/icon_without_name_lon_web.svg" alt="Astro Survey Atlas" width="72" height="28" data-theme-logo="light" />
+          <span class="brand-wordmark"><strong>Astro Survey Atlas</strong><small>公共天空数据 · 工作区</small></span>
           <span id="dataset-name" class="sr-only">用户资产与公开覆盖</span>
         </div>
         <div class="mode-control" role="group" aria-label="视图模式">
@@ -84,12 +83,13 @@
         </div>
 
         <div id="connector-controls" hidden>
-          <section class="control-section">
+          <section class="control-section connector-filter-section">
             <div class="section-heading"><span>Connector 筛选</span><output id="connector-filter-count">--</output></div>
-            <label class="field-label" for="connector-kind-filter">类型</label><select id="connector-kind-filter" class="field-input"><option value="all">全部类型</option><option value="s3">S3 / OSS</option><option value="local">本地路径</option><option value="jdbc">JDBC 数据库</option></select>
-            <label class="field-label" for="connector-status-filter">连接状态</label><select id="connector-status-filter" class="field-input"><option value="all">全部状态</option><option value="draft">未检测</option><option value="ready">可用</option><option value="disabled">已停用</option></select>
-            <label class="field-label" for="connector-survey-filter">巡天</label><select id="connector-survey-filter" class="field-input"><option value="all">全部巡天</option></select>
+            <label class="field-label" for="connector-kind-filter">类型</label><select id="connector-kind-filter" class="field-input" aria-describedby="connector-filter-disabled-note"><option value="all">全部类型</option><option value="s3">S3 / OSS</option><option value="local">本地路径</option><option value="jdbc">JDBC 数据库</option></select>
+            <label class="field-label" for="connector-status-filter">连接状态</label><select id="connector-status-filter" class="field-input" aria-describedby="connector-filter-disabled-note"><option value="all">全部状态</option><option value="draft">未检测</option><option value="ready">可用</option><option value="disabled">已停用</option></select>
+            <label class="field-label" for="connector-survey-filter">巡天</label><select id="connector-survey-filter" class="field-input" aria-describedby="connector-filter-disabled-note"><option value="all">全部巡天</option></select>
             <p class="control-note">筛选只改变 Connector list；新增 Connector 在中栏完成，检测、执行扫描、编辑和删除位于右栏，运行状态统一在“扫描记录”查看。</p>
+            <p id="connector-filter-disabled-note" class="control-note connector-filter-disabled-note" hidden>扫描记录视图：左侧这些筛选仅适用于 Connector list。</p>
           </section>
         </div>
 
@@ -365,14 +365,12 @@
       <section id="system-stage" class="system-stage" aria-label="系统配置" hidden>
         <header class="catalog-stage-header">
           <div><span class="panel-kicker">WORKSPACE SETTINGS</span><h2>系统配置</h2><p>注册 AI Provider 与 MCP Server，连接测试结果会保留在工作区。</p></div>
-          <div class="stage-header-right">
-            <dl class="catalog-summary">
-              <div><dt>AI Provider</dt><dd id="system-provider-count">0</dd></div>
-              <div><dt>MCP Server</dt><dd id="system-mcp-count">0</dd></div>
-              <div><dt>已连接</dt><dd id="system-connected-count">0</dd></div>
-            </dl>
-            <div class="stage-primary-actions"><span id="system-status-badge" class="run-status" data-status="idle">READY</span></div>
-          </div>
+          <dl class="catalog-summary">
+            <div><dt>AI Provider</dt><dd id="system-provider-count">0</dd></div>
+            <div><dt>MCP Server</dt><dd id="system-mcp-count">0</dd></div>
+            <div><dt>已连接</dt><dd id="system-connected-count">0</dd></div>
+          </dl>
+          <div class="stage-primary-actions"><span id="system-status-badge" class="run-status" data-status="idle">READY</span></div>
         </header>
         <div class="settings-tabs" role="tablist" aria-label="系统配置视图">
           <button type="button" class="settings-tab active" role="tab" aria-selected="true" data-settings-tab="ai">AI Provider</button>

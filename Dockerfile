@@ -20,7 +20,7 @@ COPY tsconfig.json tsconfig.viewer.json vite.config.ts ./
 COPY src ./src
 COPY viewer ./viewer
 COPY packages ./packages
-RUN npm run build && npm prune --omit=dev
+RUN npm run build && npm prune --omit=dev --ignore-scripts --no-audit --no-fund --offline
 
 FROM node:22.22.1-bookworm-slim AS runtime
 

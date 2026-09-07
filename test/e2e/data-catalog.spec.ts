@@ -71,7 +71,7 @@ test("theme follows the system until a choice is persisted", async ({ page }) =>
   await page.emulateMedia({ colorScheme: "light" });
   await page.goto("/");
   await expect(page.locator("html")).toHaveAttribute("data-theme", "light");
-  await expect(page.locator('meta[name="theme-color"]')).toHaveAttribute("content", "#f4f7f8");
+  await expect(page.locator('meta[name="theme-color"]')).toHaveAttribute("content", "#eef0f2");
   await expect(page.locator("#theme-toggle")).toHaveAttribute("aria-label", "切换到深色主题");
 
   await page.locator("#theme-toggle").click();
@@ -104,7 +104,7 @@ test("light theme keeps metrics, actions, overlays, and scroll regions legible",
   });
   expect(lightStyles.metric).not.toBe("rgb(255, 255, 255)");
   expect(lightStyles.summary).not.toBe("rgb(255, 255, 255)");
-  expect(lightStyles.stage).not.toBe("rgb(7, 11, 15)");
+  expect(lightStyles.stage).toBe("rgb(229, 231, 235)");
   expect(lightStyles.overlay).toMatch(/^rgba?\(255, 255, 255/);
   expect(lightStyles.shadow).not.toBe("");
 
@@ -122,6 +122,43 @@ test("light theme keeps metrics, actions, overlays, and scroll regions legible",
   await stage.hover();
   await expect.poll(() => stage.evaluate((element) => getComputedStyle(element).scrollbarColor))
     .not.toBe("rgba(0, 0, 0, 0) rgba(0, 0, 0, 0)");
+});
+
+test("system header metrics share the catalog summary baseline", async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto("/");
+  await waitForWorkspace(page);
+
+  const measure = async (mode: "connectors" | "system") => {
+    await page.locator(`button[data-mode="${mode}"]`).click();
+    const stage = page.locator(`#${mode === "connectors" ? "connector" : "system"}-stage`);
+    await expect(stage).toBeVisible();
+    return await stage.evaluate((element) => {
+      const bounds = (selector: string) => {
+        const node = element.querySelector<HTMLElement>(selector);
+        const rect = node?.getBoundingClientRect();
+        if (!rect) throw new Error(`Missing ${selector} bounds`);
+        return { top: rect.top, bottom: rect.bottom, right: rect.right, width: rect.width, height: rect.height };
+      };
+      return {
+        header: bounds(":scope > .catalog-stage-header"),
+        summary: bounds(":scope > .catalog-stage-header > .catalog-summary"),
+        badge: element.querySelector<HTMLElement>(":scope > .catalog-stage-header > .stage-primary-actions")
+          ? bounds(":scope > .catalog-stage-header > .stage-primary-actions")
+          : null,
+      };
+    });
+  };
+
+  const connector = await measure("connectors");
+  const system = await measure("system");
+  expect(Math.abs(system.summary.top - connector.summary.top)).toBeLessThan(0.5);
+  expect(Math.abs(system.summary.bottom - connector.summary.bottom)).toBeLessThan(0.5);
+  expect(system.summary.width).toBe(connector.summary.width);
+  expect(system.header.height).toBe(connector.header.height);
+  expect(system.badge).not.toBeNull();
+  expect(Math.abs(system.badge!.top - system.header.top)).toBeLessThan(0.5);
+  expect(Math.abs(system.badge!.right - system.header.right)).toBeLessThan(0.5);
 });
 
 test("status explanations are available where records are evaluated", async ({ page }) => {
@@ -590,6 +627,11 @@ test("connector actions and unified scan history expose only supported execution
   await page.getByRole("tab", { name: "扫描记录" }).click();
   await expect(page.locator("#connector-history-view")).toBeVisible();
   await expect(page.locator("#connector-list-view")).toBeHidden();
+  for (const id of ["connector-kind-filter", "connector-status-filter", "connector-survey-filter"]) {
+    await expect(page.locator(`#${id}`)).toBeDisabled();
+  }
+  await expect(page.locator(".connector-filter-disabled-note")).toBeVisible();
+  await expect(page.locator(".connector-filter-disabled-note")).toContainText("仅适用于 Connector list");
   await expect(page.locator("#connector-history-list .connector-history-row")).toHaveCount(4);
   await expect(page.locator("#connector-history-list")).toContainText("flink-ingest");
   await expect(page.locator("#connector-history-list")).toContainText("local-filesystem");
@@ -606,6 +648,12 @@ test("connector actions and unified scan history expose only supported execution
   await expect(page.locator("#connector-history-list")).toContainText("JDBC science database");
 
   await page.getByRole("tab", { name: "Connector list" }).click();
+  for (const id of ["connector-kind-filter", "connector-status-filter", "connector-survey-filter"]) {
+    await expect(page.locator(`#${id}`)).toBeEnabled();
+  }
+  await expect(page.locator(".connector-filter-disabled-note")).toBeHidden();
+  const connectorTabUnderline = await page.locator("#connector-list-tab").evaluate((button) => getComputedStyle(button, "::after").backgroundColor);
+  expect(connectorTabUnderline).not.toBe("rgb(66, 212, 198)");
   await page.locator("#connector-list .connector-row", { hasText: "Local mounted catalog" }).click();
   await expect(inspector.getByRole("button", { name: "执行扫描" })).toBeDisabled();
   await expect(inspector).toContainText("本地路径扫描执行器尚未接入");

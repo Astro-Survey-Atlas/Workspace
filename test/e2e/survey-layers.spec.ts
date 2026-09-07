@@ -550,6 +550,29 @@ test("sky layer order persists and drives the Three display depth", async ({ pag
   await expect.poll(() => cards.count()).toBeGreaterThan(0);
   if (await cards.count() < 2) return;
 
+  const layerLayout = await page.locator("#sky-layer-list").evaluate((list) => {
+    const card = list.querySelector<HTMLElement>(".survey-card");
+    const handle = card?.querySelector<HTMLElement>(".layer-drag-handle");
+    const heading = document.querySelector<HTMLElement>(".layer-survey-section .section-heading");
+    return {
+      listClientWidth: list.clientWidth,
+      listWidth: list.getBoundingClientRect().width,
+      headingWidth: heading?.getBoundingClientRect().width ?? 0,
+      cardWidth: card?.offsetWidth ?? 0,
+      gridColumns: card ? getComputedStyle(card).gridTemplateColumns : "",
+      handleWidth: handle?.getBoundingClientRect().width ?? 0,
+      controlsOverflowY: getComputedStyle(document.querySelector<HTMLElement>("#controls-panel")!).overflowY,
+      listOverflowY: getComputedStyle(list).overflowY,
+    };
+  });
+  expect(layerLayout.listWidth).toBe(layerLayout.headingWidth + 10);
+  expect(layerLayout.cardWidth).toBe(layerLayout.headingWidth);
+  expect(layerLayout.gridColumns).toMatch(/^\S+ \S+ /);
+  expect(layerLayout.gridColumns).not.toMatch(/^32px 36px /);
+  expect(layerLayout.handleWidth).toBeGreaterThan(0);
+  expect(layerLayout.controlsOverflowY).toBe("hidden");
+  expect(layerLayout.listOverflowY).toBe("auto");
+
   const firstKey = await cards.nth(0).getAttribute("data-layer-key");
   const secondKey = await cards.nth(1).getAttribute("data-layer-key");
   await expect(cards.nth(0).locator(".layer-reorder-actions")).toHaveCount(0);
@@ -1163,6 +1186,22 @@ test("mobile controls keep the sphere free of legacy tool controls", async ({ pa
   await openFresh(page);
   await page.locator("#controls-toggle").click();
   await expect(page.locator("#controls-panel")).toHaveClass(/mobile-open/);
+  const mobileLayerLayout = await page.locator("#sky-layer-list").evaluate((list) => {
+    const card = list.querySelector<HTMLElement>(".survey-card");
+    const heading = document.querySelector<HTMLElement>(".layer-survey-section .section-heading");
+    return {
+      listClientWidth: list.clientWidth,
+      listWidth: list.getBoundingClientRect().width,
+      headingWidth: heading?.getBoundingClientRect().width ?? 0,
+      cardWidth: card?.offsetWidth ?? 0,
+      controlsOverflowY: getComputedStyle(document.querySelector<HTMLElement>("#controls-panel")!).overflowY,
+      listOverflowY: getComputedStyle(list).overflowY,
+    };
+  });
+  expect(mobileLayerLayout.listWidth).toBe(mobileLayerLayout.headingWidth + 10);
+  expect(mobileLayerLayout.cardWidth).toBe(mobileLayerLayout.headingWidth);
+  expect(mobileLayerLayout.controlsOverflowY).toBe("hidden");
+  expect(mobileLayerLayout.listOverflowY).toBe("auto");
   await page.locator(".survey-card", { hasText: "SDSS" }).locator("input").check();
   await expect(page.locator("#layer-visible-output")).toHaveText(/^\d+ SOURCES · [\d,]+ CELLS$/);
   await expect(page.locator("[data-layer-interaction]")).toHaveCount(0);

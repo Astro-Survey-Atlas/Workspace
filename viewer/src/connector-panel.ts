@@ -147,9 +147,12 @@ export class ConnectorPanel {
     byId("connector-history-view").hidden = this.#view !== "history";
     byId("connector-list-search").hidden = this.#view !== "list";
     byId("connector-history-search").hidden = this.#view !== "history";
-    byId<HTMLSelectElement>("connector-kind-filter").disabled = this.#view === "history";
-    byId<HTMLSelectElement>("connector-status-filter").disabled = this.#view === "history";
-    byId<HTMLSelectElement>("connector-survey-filter").disabled = this.#view === "history";
+    const connectorFiltersDisabled = this.#view === "history";
+    byId<HTMLSelectElement>("connector-kind-filter").disabled = connectorFiltersDisabled;
+    byId<HTMLSelectElement>("connector-status-filter").disabled = connectorFiltersDisabled;
+    byId<HTMLSelectElement>("connector-survey-filter").disabled = connectorFiltersDisabled;
+    const connectorFilterDisabledNote = document.querySelector<HTMLElement>(".connector-filter-disabled-note");
+    if (connectorFilterDisabledNote) connectorFilterDisabledNote.hidden = !connectorFiltersDisabled;
     const facetCount = document.getElementById("connector-filter-count");
     byId("connector-count").textContent = String(this.#records.length);
     byId("connector-draft-count").textContent = String(this.#records.filter((record) => record.status === "draft").length);
