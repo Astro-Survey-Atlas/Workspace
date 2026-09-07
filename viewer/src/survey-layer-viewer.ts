@@ -261,7 +261,11 @@ interface CameraTransition {
 }
 
 const BASE_COLOR = new THREE.Color("#168f89");
-const OVERLAP_COLOR = new THREE.Color("#b88e22");
+// G/overlap is a UI mode, so keep it on the ASA indigo scale rather than
+// reusing the amber data/status color. The light canvas needs the darker
+// indigo variant to retain contrast against its neutral background.
+const OVERLAP_COLOR_DARK = new THREE.Color("#6974d5");
+const OVERLAP_COLOR_LIGHT = new THREE.Color("#2c3792");
 const SELECTION_COLOR = new THREE.Color("#9fe7e0");
 const SELECTION_EDGE_COLOR = new THREE.Color("#e7fffb");
 const WORKSPACE_COLOR = new THREE.Color("#d69b4e");
@@ -491,6 +495,12 @@ export class SurveyLayerViewer {
   #overlapComponents: SurveyLayerOverlapComponent[] = [];
   #activeOverlapComponentId: string | null = null;
 
+  #overlapColor(): THREE.Color {
+    return (this.#canvas.dataset.theme ?? document.documentElement.dataset.theme) === "light"
+      ? OVERLAP_COLOR_LIGHT
+      : OVERLAP_COLOR_DARK;
+  }
+
   constructor(
     canvas: HTMLCanvasElement,
     manifest: SurveyFootprintManifest,
@@ -556,9 +566,11 @@ export class SurveyLayerViewer {
 
   setTheme(theme: "light" | "dark"): void {
     this.#canvas.dataset.theme = theme;
+    this.#canvas.dataset.overlapColor = `#${this.#overlapColor().getHexString()}`;
     this.#renderer.setClearColor(this.#backgroundColor ?? (theme === "light" ? 0xaebbc1 : 0x000000), 1);
     (this.#starField.material as THREE.PointsMaterial).color.setHex(theme === "light" ? 0x879ca8 : 0x71808b);
     (this.#starField.material as THREE.PointsMaterial).opacity = theme === "light" ? 0.34 : 0.28;
+    if (this.#overlapMode) this.#rebuildVisible(false);
     this.#requestRender();
   }
 
@@ -1064,7 +1076,7 @@ export class SurveyLayerViewer {
     const nside = this.#overlapNside ?? this.#manifest.nside;
     const pixels = this.#overlapPixels ?? (selectedSurveyCount > 1 ? [...counts.entries()].filter(([, count]) => count === selectedSurveyCount).map(([pixel]) => pixel).sort((left, right) => left - right) : []);
     const radius = Math.max(1.02, this.#outerRadius + 0.012);
-    const cells = pixels.map((pixel) => ({ nside, pixel, radius, color: OVERLAP_COLOR, inset: nside === this.#manifest.nside ? 0.028 : 0.008 }));
+    const cells = pixels.map((pixel) => ({ nside, pixel, radius, color: this.#overlapColor(), inset: nside === this.#manifest.nside ? 0.028 : 0.008 }));
     if (cells.length) this.#addFragmentLayer("__overlap__", pixels, cells, animated, SELECTION_RENDER_ORDER - 1);
     this.#rebuildOverlapLabels(nside, pixels, radius);
   }
@@ -1244,7 +1256,7 @@ export class SurveyLayerViewer {
     if (dominant?.assetId) return deterministicWorkspaceColor(dominant.assetId);
     if (dominant?.surveyId) return this.#colorBySurvey.get(dominant.surveyId) ?? BASE_COLOR;
     const ratio = Math.min(1, cell.count / Math.max(1, ...[...this.#drillCells.values()].map((candidate) => candidate.count)));
-    return BASE_COLOR.clone().lerp(OVERLAP_COLOR, ratio);
+    return BASE_COLOR.clone().lerp(this.#overlapColor(), ratio);
   }
 
   #objectPointAt(event: PointerCoordinates): SurveyObjectPoint | null {

@@ -538,6 +538,12 @@ test("sky layers default to radial depth and G toggles transient overlap", async
   await expect(page.locator("#scene-canvas")).toHaveAttribute("data-layout-mode", "layers");
   await page.keyboard.press("g");
   await expect(page.locator("#scene-canvas")).toHaveAttribute("data-layout-mode", "overlap");
+  await expect(page.locator("#scene-canvas")).toHaveAttribute("data-overlap-color", "#6974d5");
+  await page.locator("#theme-toggle").click();
+  await expect(page.locator("html")).toHaveAttribute("data-theme", "light");
+  await expect(page.locator("#scene-canvas")).toHaveAttribute("data-overlap-color", "#2c3792");
+  await page.locator("#theme-toggle").click();
+  await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
   await page.keyboard.press("g");
   await expect(page.locator("#scene-canvas")).toHaveAttribute("data-layout-mode", "layers");
 });
@@ -982,6 +988,14 @@ test("sphere selection enters Aladin with an exact region snapshot", async ({ pa
   await canvas.click({ button: "right", position: resetPoint });
   await expect(page.locator("#coverage-context-menu")).toBeVisible();
   await expect(page.locator("#coverage-hover")).toBeHidden();
+  const contextAction = page.locator("#coverage-enter-flat");
+  await contextAction.hover();
+  const contextHoverColors = await contextAction.evaluate((element) => {
+    const style = getComputedStyle(element);
+    return { color: style.color, background: style.backgroundColor };
+  });
+  expect(contextHoverColors.background).toBe("rgb(105, 116, 213)");
+  expect(contextHoverColors.background).not.toBe("rgb(66, 212, 198)");
   await expect(page.locator("#coverage-enter-flat")).toHaveText("在 Aladin 中探索");
   await page.locator("#coverage-enter-flat").click();
   const aladin = page.locator("#aladin-explorer");

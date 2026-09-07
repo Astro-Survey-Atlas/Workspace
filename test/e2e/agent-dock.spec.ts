@@ -96,6 +96,28 @@ test("agent dock has one input and pushes the workspace content", async ({ page 
   await expect(page.locator("#agent-expanded-form")).toHaveCount(0);
   await expect(page.locator("form:visible")).toHaveCount(1);
   await expect(page.locator("#agent-collapse")).toHaveAttribute("aria-label", "关闭 Agent");
+  const agentInput = page.locator("#agent-collapsed-input");
+  await expect(agentInput).toBeEnabled();
+  await agentInput.focus();
+  await expect(agentInput).toBeFocused();
+  const inputFocus = await agentInput.evaluate((element) => {
+    const style = getComputedStyle(element);
+    return { outlineStyle: style.outlineStyle, boxShadow: style.boxShadow };
+  });
+  const focusColors = await page.evaluate(() => {
+    const probe = document.createElement("span");
+    document.body.append(probe);
+    const read = (name: string): string => {
+      probe.style.color = `var(${name})`;
+      return getComputedStyle(probe).color;
+    };
+    const colors = { indigo: read("--asa-indigo"), magenta: read("--asa-magenta") };
+    probe.remove();
+    return colors;
+  });
+  expect(inputFocus.outlineStyle).toBe("none");
+  expect(inputFocus.boxShadow).toContain(focusColors.indigo);
+  expect(inputFocus.boxShadow).not.toContain(focusColors.magenta);
   const closeColors = await page.locator("#agent-collapse").evaluate((element) => {
     const style = getComputedStyle(element);
     return { color: style.color, background: style.backgroundColor };

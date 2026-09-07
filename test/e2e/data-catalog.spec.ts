@@ -448,9 +448,20 @@ test("data production exposes template-driven DAG runs and requires sky context"
   await page.locator('[data-mode="workflow"]').click();
   await expect(page.locator('[data-mode="workflow"]')).toHaveClass(/active/);
   await expect(page.locator("#production-stage")).toBeVisible();
+  const workbenchStyle = await page.locator("#production-stage .production-workbench-grid").evaluate((element) => {
+    const style = getComputedStyle(element);
+    return { borderStyle: style.borderStyle, borderWidth: style.borderWidth };
+  });
+  expect(workbenchStyle.borderStyle).toBe("none");
+  expect(workbenchStyle.borderWidth).toBe("0px");
   await expect(page.locator("#production-template-list .production-template-card")).toHaveCount(3);
   await expect(page.locator("#production-instance-list, .production-instance-card")).toHaveCount(0);
   await page.locator("#production-template-list .production-template-card").nth(1).click();
+  const runChips = page.locator("#production-stage .production-run-chip");
+  if (await runChips.count()) {
+    const runChipStyle = await runChips.first().evaluate((element) => getComputedStyle(element).borderColor);
+    expect(runChipStyle).toBe("rgba(0, 0, 0, 0)");
+  }
   await expect(page.locator("#production-dag-list .production-dag-node")).toHaveCount(3);
   await expect(page.locator("#production-dag-list .dag-connector")).toHaveCount(2);
   await expect(page.locator("#production-dag-list .dag-connector svg[data-lucide='arrow-right']")).toHaveCount(2);

@@ -2993,8 +2993,8 @@ html[data-theme="light"] .scene-background-color {
 
 .coverage-context-menu button:hover,
 .coverage-context-menu button:focus-visible {
-  color: #06110f;
-  background: var(--cyan);
+  color: var(--on-accent);
+  background: var(--asa-indigo);
   outline: none;
 }
 
@@ -5512,7 +5512,7 @@ html[data-theme="light"] .coverage-context-menu {
 }
 html[data-theme="light"] .coverage-context-menu button { color: var(--text-soft); }
 html[data-theme="light"] .coverage-context-menu button:hover,
-html[data-theme="light"] .coverage-context-menu button:focus-visible { color: var(--on-accent); background: var(--cyan); }
+html[data-theme="light"] .coverage-context-menu button:focus-visible { color: var(--on-accent); background: var(--asa-indigo); }
 
 /* Agent history is a conversation, not a flat activity list. */
 .agent-messages { display: flex; flex-direction: column; gap: 8px; }
@@ -7440,7 +7440,7 @@ html[data-theme="light"] .catalog-stage-footer {
 }
 
 .production-workbench-grid {
-  border-color: var(--line-strong);
+  border: 0;
 }
 
 .production-dag-section {
@@ -7485,4 +7485,44 @@ html[data-theme="light"] .catalog-stage-footer {
 
 html[data-theme="light"] .dag-connector svg {
   background: transparent;
+}
+
+/* The input bar is a single status surface. Keep keyboard focus visible as a
+   quiet indigo underline instead of the global magenta outline around the
+   whole text field. */
+.agent-collapsed-form:focus-within {
+  background: color-mix(in srgb, var(--control) 92%, var(--asa-indigo));
+  box-shadow: inset 0 -1px 0 var(--asa-indigo);
+}
+
+.agent-collapsed-form input:focus,
+.agent-collapsed-form input:focus-visible {
+  outline: none;
+}
+
+.agent-collapsed-form input:focus-visible {
+  box-shadow: inset 0 -2px 0 var(--asa-indigo);
+}
+
+/* Run entries are rows in the log, not selected cards. Reserve the border
+   space to avoid layout shift and reveal the state only on interaction. */
+.production-run-row {
+  border: 0;
+}
+
+.production-run-chip,
+html[data-theme="light"] .production-run-chip {
+  border-color: transparent;
+}
+
+.production-run-chip:hover,
+.production-run-chip:focus-visible,
+.production-run-chip.active {
+  border-color: var(--asa-indigo);
+}
+
+html[data-theme="light"] .production-run-chip:hover,
+html[data-theme="light"] .production-run-chip:focus-visible,
+html[data-theme="light"] .production-run-chip.active {
+  border-color: var(--asa-indigo);
 }
