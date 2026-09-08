@@ -17,3 +17,7 @@ source-*.tgz
 compose.local.yaml
 compose.override.yaml
 tmp/*
+desktop/node_modules/
+desktop/build/
+desktop/release/
+desktop/resources/python/

@@ -1,0 +1,36 @@
+appId: space.dev72602.astro-survey-atlas.workspace
+productName: Astro Survey Atlas Workspace
+copyright: MIT License
+
+directories:
+  output: release
+  buildResources: build
+
+files:
+  - src/**/*
+  - package.json
+
+extraResources:
+  - from: build/server.mjs
+    to: server.mjs
+  - from: build/viewer
+    to: viewer
+  - from: resources/wizard.html
+    to: wizard.html
+  - from: resources/python
+    to: python
+
+win:
+  target:
+    - nsis
+
+nsis:
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+  artifactName: ${productName}-${version}-setup.exe
+
+publish:
+  provider: github
+  owner: Astro-Survey-Atlas
+  repo: Workspace

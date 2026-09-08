@@ -1,21 +1,22 @@
 {
   "model": "openai/gpt-5.6-sol",
-  "small_model": "openai/gpt-5.6-sol",
+  "small_model": "openai/gpt-5.6-luna",
   "yolo": true,
   "provider": {
     "openai": {
       "options": {
-        "baseURL": "https://token.72602.space/v1",
-        "apiKey": "{env:OPENAI_API_KEY}",
+        "baseURL": "{env:OPENAI_BASE_URL}/v1",
+        "apiKey": "{env:LINGSU_OPENAI_API_KEY}",
         "headerTimeout": 60000,
         "timeout": 600000,
         "chunkTimeout": 120000
       },
+      "name": "OpenAI via Sub2API",
       "models": {
         "gpt-5.6-terra": {
           "name": "GPT-5.6-Terra",
           "limit": {
-            "context": 1050000,
+            "context": 272000,
             "output": 128000
           },
           "options": {
@@ -31,7 +32,7 @@
         "gpt-5.6-luna": {
           "name": "GPT-5.6-Luna",
           "limit": {
-            "context": 1050000,
+            "context": 272000,
             "output": 128000
           },
           "options": {
@@ -47,7 +48,7 @@
         "gpt-5.6-sol": {
           "name": "GPT-5.6-Sol",
           "limit": {
-            "context": 1050000,
+            "context": 272000,
             "output": 128000
           },
           "options": {
@@ -80,24 +81,10 @@
             "output": 128000
           }
         },
-        "grok-4.3": {
-          "name": "Grok 4.3",
+        "grok-4.6": {
+          "name": "Grok 4.6",
           "limit": {
             "context": 1000000,
-            "output": 128000
-          }
-        },
-        "grok-build-0.1": {
-          "name": "Grok Build 0.1",
-          "limit": {
-            "context": 256000,
-            "output": 128000
-          }
-        },
-        "grok-composer-2.5-fast": {
-          "name": "Grok Composer 2.5 Fast",
-          "limit": {
-            "context": 500000,
             "output": 128000
           }
         }
@@ -115,7 +102,7 @@
         "gpt-5.6-terra": {
           "name": "GPT-5.6-Terra",
           "limit": {
-            "context": 1050000,
+            "context": 272000,
             "output": 128000
           },
           "options": {
@@ -131,7 +118,7 @@
         "gpt-5.6-luna": {
           "name": "GPT-5.6-Luna",
           "limit": {
-            "context": 1050000,
+            "context": 272000,
             "output": 128000
           },
           "options": {
@@ -147,7 +134,7 @@
         "gpt-5.6-sol": {
           "name": "GPT-5.6-Sol",
           "limit": {
-            "context": 1050000,
+            "context": 272000,
             "output": 128000
           },
           "options": {

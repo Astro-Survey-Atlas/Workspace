@@ -1,0 +1,135 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+  packages: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  ALIYUN_REGISTRY: crpi-wixjy6gci86ms14e.cn-hongkong.personal.cr.aliyuncs.com
+  ALIYUN_NAMESPACE_IMAGE: ay-dev/astro-data-workspace-mcp
+  GHCR_IMAGE: ghcr.io/astro-survey-atlas/astro-data-workspace
+  CHART_OCI: oci://ghcr.io/astro-survey-atlas/charts
+
+jobs:
+  validate:
+    name: Validate tag matches package.json
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      image_tag: ${{ steps.version.outputs.image_tag }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: version
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          PKG_VERSION="$(node -p "require('./package.json').version")"
+          if [ "${VERSION}" != "${PKG_VERSION}" ]; then
+            echo "tag v${VERSION} != package.json ${PKG_VERSION}" >&2
+            exit 1
+          fi
+          IMAGE_TAG="${VERSION}-$(date -u +%Y%m%d-%H%M%S)"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "image_tag=${IMAGE_TAG}" >> "$GITHUB_OUTPUT"
+
+  docker:
+    name: Docker image → GHCR + Aliyun CR
+    runs-on: ubuntu-latest
+    needs: validate
+    # linux/amd64 first; arm64 deferred until a build host is justified.
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Login GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Login Aliyun CR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.ALIYUN_REGISTRY }}
+          username: ${{ secrets.ALIYUN_REGISTRY_USERNAME }}
+          password: ${{ secrets.ALIYUN_REGISTRY_PASSWORD }}
+      - name: Build & push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          platforms: linux/amd64
+          tags: |
+            ${{ env.GHCR_IMAGE }}:${{ needs.validate.outputs.version }}
+            ${{ env.GHCR_IMAGE }}:${{ needs.validate.outputs.image_tag }}
+            ${{ env.GHCR_IMAGE }}:latest
+            ${{ env.ALIYUN_REGISTRY }}/${{ env.ALIYUN_NAMESPACE_IMAGE }}:${{ needs.validate.outputs.image_tag }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  chart:
+    name: Helm chart → GHCR OCI
+    runs-on: ubuntu-latest
+    needs: [validate, docker]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/setup-helm@v4
+        with:
+          version: v3.16.3
+      - name: Pin chart + app version and image reference
+        working-directory: charts/astro-data-workspace
+        run: |
+          VERSION="${{ needs.validate.outputs.version }}"
+          IMAGE_TAG="${{ needs.validate.outputs.image_tag }}"
+          sed -i "s/^version: .*/version: ${VERSION}/" Chart.yaml
+          sed -i "s/^appVersion: .*/appVersion: \"${VERSION}\"/" Chart.yaml
+          sed -i "s|^  repository: .*|  repository: ${{ env.GHCR_IMAGE }}|" values.yaml
+          sed -i "s/^  tag: .*/  tag: ${IMAGE_TAG}/" values.yaml
+          grep -E "^(version|appVersion):" Chart.yaml
+          grep -A2 "^image:" values.yaml
+      - name: helm lint & package
+        run: |
+          helm lint charts/astro-data-workspace --strict
+          helm package charts/astro-data-workspace -d dist-chart
+      - name: Push chart to GHCR OCI
+        run: |
+          helm registry login ghcr.io -u ${{ github.actor }} -p ${{ secrets.GITHUB_TOKEN }}
+          helm push dist-chart/*.tgz ${{ env.CHART_OCI }}
+
+  desktop:
+    name: Windows installer → GitHub Releases
+    runs-on: windows-latest
+    needs: validate
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: npm ci
+      - run: npm run build
+      - name: Install desktop deps
+        working-directory: desktop
+        run: npm ci
+      - name: Prepare server + viewer resources
+        working-directory: desktop
+        run: npm run prepare:server
+      - name: Prepare embedded python + moc-core
+        working-directory: desktop
+        run: npm run prepare:python
+      - name: Build & publish installer
+        working-directory: desktop
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: "false"
+        run: npx electron-builder --win --publish always

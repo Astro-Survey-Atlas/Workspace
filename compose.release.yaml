@@ -1,0 +1,106 @@
+# Release distribution compose file.
+#
+# Unlike compose.yaml (developer flow, builds the image locally), this file
+# only pulls published images, so end users never need the source tree:
+#
+#   ASTRO_PORT=8080 docker compose -f compose.release.yaml up -d
+#
+# The workspace image defaults to the public GitHub Container Registry tag.
+# Pin a specific released version instead of `latest` for reproducibility:
+#
+#   ASTRO_WORKSPACE_IMAGE=ghcr.io/astro-survey-atlas/astro-data-workspace:0.10.38 \
+#     docker compose -f compose.release.yaml up -d
+#
+# Data lives in the named volumes `astro-data-workspace-state` (sqlite and
+# derived state) and `astro-data-workspace-search` (Elasticsearch index data);
+# both survive `down` and are only removed with `down -v`.
+services:
+  workspace-elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.18.0
+    environment:
+      discovery.type: single-node
+      xpack.security.enabled: "false"
+      ES_JAVA_OPTS: -Xms512m -Xmx512m
+    volumes:
+      - type: volume
+        source: search
+        target: /usr/share/elasticsearch/data
+    ports:
+      - "${ASTRO_ES_PORT:-9200}:9200"
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          curl --silent --fail
+          'http://127.0.0.1:9200/_cluster/health?wait_for_status=yellow&timeout=1s'
+          >/dev/null
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 30s
+
+  workspace:
+    image: ${ASTRO_WORKSPACE_IMAGE:-ghcr.io/astro-survey-atlas/astro-data-workspace:latest}
+    pull_policy: missing
+    depends_on:
+      workspace-elasticsearch:
+        condition: service_healthy
+    user: "10001:10001"
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    environment:
+      HOST: 0.0.0.0
+      PORT: "3000"
+      ASTRO_DATA_WAREHOUSE_ENABLED: "false"
+      ASTRO_LOCAL_SCAN_ENABLED: "false"
+      ASTRO_LOCAL_CONNECTOR_ROOTS: /state/coverage-downloads
+      ASTRO_COVERAGE_DOWNLOAD_ROOT: /state/coverage-downloads
+      # Workspace always owns this search service. Warehouse, when enabled,
+      # uses the separate ASTRO_WAREHOUSE_ES_URL endpoint below.
+      ASTRO_ES_URL: http://workspace-elasticsearch:9200
+      ASTRO_ES_ASTRO_INDEX: astro_file_index_v1
+      ASTRO_ES_OBJECT_INDEX: astro_object_index_v1
+      ASTRO_ES_COVERAGE_INDEX: astro_coverage_index_v1
+      ASTRO_WAREHOUSE_ES_URL: ""
+      ASTRO_WAREHOUSE_LAYER_INDEX: ast_layer_index_v1
+      ASTRO_WAREHOUSE_FILE_INDEX: ast_file_index_v1
+      ASTRO_WAREHOUSE_COVERAGE_INDEX: ast_coverage_index_v1
+      ASTRO_METADATA_STORE: sqlite
+      ASTRO_SQLITE_PATH: /state/workspace.sqlite
+      ASTRO_STATE_ROOT: /state
+      ASTRO_DATA_CATALOG_STATE: /state/data-catalog.json
+      ASTRO_SURVEY_REGISTRY_STATE: /state/survey-registrations.json
+      ASTRO_CONNECTOR_STATE: /state/connectors.json
+      ASTRO_CONNECTOR_RUN_STATE: /state/connector-ingest-runs.json
+      ASTRO_WORKFLOW_ROOT: /state/workflow-runs
+      ASTRO_RESOURCE_PACKAGE_ROOT: /state/resource-packages
+      ASTRO_RESOURCE_PACKAGE_STATE: /state/resource-package-state.json
+    ports:
+      - "${ASTRO_PORT:-3000}:3000"
+    volumes:
+      - type: volume
+        source: state
+        target: /state
+    tmpfs:
+      - /tmp
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - >-
+          fetch("http://127.0.0.1:3000/healthz").then((response) =>
+          process.exit(response.ok ? 0 : 1)).catch(() => process.exit(1))
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+
+volumes:
+  state:
+    name: astro-data-workspace-state
+  search:
+    name: astro-data-workspace-search

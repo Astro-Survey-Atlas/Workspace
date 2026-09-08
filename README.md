@@ -125,9 +125,62 @@ Open `http://localhost:5173` in your browser.
 
 ---
 
+## 🖥️ Windows Desktop (installer)
+
+Download `Astro Survey Atlas Workspace-<version>-setup.exe` from
+[GitHub Releases](https://github.com/Astro-Survey-Atlas/Workspace/releases) and run it
+(Windows 10/11 x64, desktop only — no mobile). The installer bundles the API server,
+the Viewer, and an embedded Python 3.11 with the MOC Core wheel, so no Node.js,
+Python, or Elasticsearch expertise is required.
+
+First launch opens a setup wizard:
+
+1. **数据目录** — where the Workspace keeps its SQLite metadata and state (defaults to `%APPDATA%`).
+2. **搜索后端（必选其一）**
+   - **外部 Elasticsearch** — paste the ES URL and use 测试连接 to verify; or
+   - **本地 Docker** — the launcher auto-detects Docker (manual path override available) and
+     manages a dedicated `astro-workspace-search` container (Elasticsearch 8.18.0 + named volume).
+
+Configuration is saved to `astro-workspace-desktop.json` in the app data folder; later
+launches skip the wizard. Updates are delivered automatically via `electron-updater`
+(GitHub Releases). Notes:
+
+* The installer is not code-signed yet — SmartScreen may show a warning; choose
+  「更多信息 → 仍要运行」.
+* MOC generation uses the bundled Python; no system Python is needed.
+* Logs: `%APPDATA%/astro-survey-atlas-workspace-desktop/logs/workspace-server.log`.
+
+---
+
 ## 🐳 Docker Compose Deployment
 
 The Compose stack spins up the Express server (SQLite) along with a dedicated, isolated Workspace Elasticsearch.
+
+### End users (published image, no source tree needed)
+
+Run the release stack straight from the public GitHub Container Registry —
+nothing is built locally and only Docker is required:
+
+```bash
+ASTRO_PORT=8080 docker compose -f compose.release.yaml up -d
+
+# Verify
+curl http://127.0.0.1:8080/healthz
+```
+
+Then open `http://127.0.0.1:8080/`. Pin a released version instead of
+`latest` for reproducibility:
+
+```bash
+ASTRO_WORKSPACE_IMAGE=ghcr.io/astro-survey-atlas/astro-data-workspace:<version> \
+  docker compose -f compose.release.yaml up -d
+```
+
+Data persists in the named volumes `astro-data-workspace-state` (SQLite and
+derived state) and `astro-data-workspace-search` (Elasticsearch data); both
+survive `docker compose down` and are only removed with `down -v`.
+
+### Developers (build from source)
 
 ### 1. Configure Local Data Bind
 Copy the local compose override and set the absolute path to your local scientific datasets:
@@ -143,6 +196,30 @@ export ASTRO_LOCAL_DATA_ROOT=/srv/astro-data
 docker compose -f compose.yaml -f compose.local.yaml up -d
 ```
 *The container runs as UID/GID `10001` with a read-only root filesystem and drops all Linux capabilities for maximum security.*
+
+---
+
+## ⎈ Helm
+
+The chart under `charts/astro-data-workspace` is published to GHCR OCI on every
+release tag and supports three metadata-store modes (`sqlite`, `bundled-postgresql`,
+`external-postgresql`) and bundled or external Elasticsearch:
+
+```bash
+# Install into a clean namespace (bundled SQLite + bundled Elasticsearch)
+helm install workspace oci://ghcr.io/astro-survey-atlas/charts/astro-data-workspace \
+  --namespace astro-workspace --create-namespace
+
+# Watch the rollout, then check health
+kubectl -n astro-workspace rollout status deployment/workspace-astro-data-workspace
+kubectl -n astro-workspace port-forward svc/workspace-astro-data-workspace 3000:3000
+curl http://127.0.0.1:3000/healthz
+```
+
+External dependencies (managed PostgreSQL / Elasticsearch) are wired via
+`metadataStore.mode=external-postgresql` and `search.mode=external` with
+`existingSecret` references — see `charts/astro-data-workspace/README.md` and
+`values.schema.json` for the full contract.
 
 ---
 

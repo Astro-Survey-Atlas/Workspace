@@ -1,0 +1,166 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<title>Astro Survey Atlas Workspace — 初始设置</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; font-family: "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
+    background: #0b0f14; color: #dbe4ec; padding: 28px 32px; font-size: 14px;
+  }
+  h1 { font-size: 18px; margin: 0 0 4px; color: #67e8f9; }
+  p.lede { margin: 0 0 24px; color: #8fa3b5; }
+  section { border: 1px solid #223140; border-radius: 6px; padding: 16px 18px; margin-bottom: 18px; }
+  section h2 { font-size: 14px; margin: 0 0 10px; color: #b8c7d6; }
+  label { display: block; margin: 10px 0 6px; color: #9fb3c4; }
+  input[type="text"] {
+    width: 100%; padding: 8px 10px; border-radius: 4px; border: 1px solid #2d4356;
+    background: #0f1720; color: #dbe4ec; font-family: Consolas, monospace; font-size: 13px;
+  }
+  input[type="radio"] { accent-color: #22d3ee; }
+  button {
+    padding: 8px 14px; border-radius: 4px; border: 1px solid #2d4356; cursor: pointer;
+    background: #132030; color: #dbe4ec; font-size: 13px;
+  }
+  button.primary { background: #0e7490; border-color: #0e7490; color: #fff; }
+  button:disabled { opacity: 0.5; cursor: default; }
+  .row { display: flex; gap: 10px; align-items: center; }
+  .status { margin-top: 8px; font-size: 12.5px; min-height: 16px; }
+  .status.ok { color: #4ade80; }
+  .status.err { color: #f87171; }
+  .status.info { color: #67e8f9; }
+  footer { display: flex; justify-content: flex-end; gap: 12px; margin-top: 8px; }
+  .hint { color: #64798c; font-size: 12px; margin-top: 6px; }
+</style>
+</head>
+<body>
+<h1>初始设置</h1>
+<p class="lede">完成以下两项配置即可开始使用工作区。配置仅保存在本机。</p>
+
+<section>
+  <h2>1. 数据目录</h2>
+  <div class="row">
+    <input type="text" id="dataDir" readonly />
+    <button id="browse">浏览…</button>
+  </div>
+  <p class="hint">星表登记、扫描结果与工作流记录将保存在此目录。</p>
+</section>
+
+<section>
+  <h2>2. 搜索服务（必选其一）</h2>
+  <label>
+    <input type="radio" name="esMode" value="external" />
+    使用外部 Elasticsearch（填写地址，例如 http://es.internal:9200）
+  </label>
+  <div class="row" id="externalRow" style="padding-left: 22px;">
+    <input type="text" id="externalUrl" placeholder="http://host:9200" />
+    <button id="testExternal">测试连接</button>
+  </div>
+  <div class="status" id="externalStatus"></div>
+
+  <label style="margin-top:18px;">
+    <input type="radio" name="esMode" value="docker" />
+    由应用管理本地 Docker Elasticsearch（需要本机已安装并运行 Docker）
+  </label>
+  <div class="row" id="dockerRow" style="padding-left: 22px;">
+    <button id="detectDocker">检测 Docker</button>
+    <input type="text" id="dockerPath" placeholder="（可选）docker 程序完整路径" style="flex:1;" />
+  </div>
+  <div class="status" id="dockerStatus"></div>
+</section>
+
+<footer>
+  <button id="finish" class="primary" disabled>完成并启动</button>
+</footer>
+
+<script>
+  const state = {
+    docker: null,
+    esReady: false,
+    externalOk: false
+  };
+
+  const $ = (id) => document.getElementById(id);
+  function setStatus(id, message, kind) {
+    const node = $(id);
+    node.textContent = message || "";
+    node.className = "status " + (kind || "");
+  }
+  function selectedMode() {
+    return document.querySelector('input[name="esMode"]:checked')?.value || null;
+  }
+  function refresh() {
+    const mode = selectedMode();
+    $("finish").disabled = !(mode === "external" ? state.externalOk : mode === "docker" && state.esReady);
+  }
+
+  window.wizard.onProgress((message) => setStatus("dockerStatus", message, "info"));
+
+  window.wizard.init().then(({ config }) => {
+    $("dataDir").value = config.dataDir;
+    if (config.search.externalUrl) $("externalUrl").value = config.search.externalUrl;
+  });
+
+  $("browse").addEventListener("click", async () => {
+    const result = await window.wizard.chooseDataDir();
+    if (result.path) $("dataDir").value = result.path;
+  });
+
+  document.querySelectorAll('input[name="esMode"]').forEach((node) => {
+    node.addEventListener("change", refresh);
+  });
+
+  $("testExternal").addEventListener("click", async () => {
+    setStatus("externalStatus", "正在测试连接…", "info");
+    state.externalOk = false;
+    refresh();
+    const result = await window.wizard.testExternalEs($("externalUrl").value);
+    state.externalOk = result.ok;
+    setStatus("externalStatus", result.message, result.ok ? "ok" : "err");
+    refresh();
+  });
+
+  $("detectDocker").addEventListener("click", async () => {
+    setStatus("dockerStatus", "正在检测 Docker…", "info");
+    const result = await window.wizard.detectDocker($("dockerPath").value);
+    if (result.ok) {
+      state.docker = result.dockerPath;
+      setStatus("dockerStatus", `已找到 Docker ${result.version}（${result.dockerPath}）`, "ok");
+      $("detectDocker").disabled = true;
+      $("dockerPath").disabled = true;
+      await prepareEs();
+    } else {
+      setStatus("dockerStatus", result.message, "err");
+    }
+  });
+
+  async function prepareEs() {
+    setStatus("dockerStatus", "准备 Elasticsearch…", "info");
+    state.esReady = false;
+    refresh();
+    const result = await window.wizard.prepareDockerEs({
+      dockerPath: state.docker,
+      containerName: "astro-workspace-search",
+      port: 9207
+    });
+    state.esReady = result.ok;
+    setStatus("dockerStatus", result.message, result.ok ? "ok" : "err");
+    refresh();
+  }
+
+  $("finish").addEventListener("click", async () => {
+    $("finish").disabled = true;
+    await window.wizard.complete({
+      dataDir: $("dataDir").value,
+      search: {
+        mode: selectedMode(),
+        externalUrl: $("externalUrl").value.trim(),
+        docker: { containerName: "astro-workspace-search", port: 9207 }
+      }
+    });
+  });
+</script>
+</body>
+</html>

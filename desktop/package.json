@@ -1,0 +1,24 @@
+{
+  "name": "astro-survey-atlas-workspace-desktop",
+  "productName": "Astro Survey Atlas Workspace",
+  "version": "0.10.38",
+  "private": true,
+  "description": "Desktop distribution of the Astro Survey Atlas workspace.",
+  "main": "src/main.cjs",
+  "scripts": {
+    "prepare:server": "node scripts/prepare-server.cjs",
+    "prepare:python": "node scripts/prepare-python.cjs",
+    "smoke": "node scripts/smoke-main.mjs",
+    "dev": "electron .",
+    "dist:dir": "npm run prepare:server && electron-builder --dir",
+    "dist": "npm run prepare:server && electron-builder --win nsis"
+  },
+  "dependencies": {
+    "electron-updater": "^6.3.9"
+  },
+  "devDependencies": {
+    "electron": "^33.2.0",
+    "electron-builder": "^25.1.8",
+    "esbuild": "^0.24.0"
+  }
+}

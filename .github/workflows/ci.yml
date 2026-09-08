@@ -1,0 +1,83 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  node:
+    name: Build & test (node)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - run: npm test
+
+  desktop:
+    name: Desktop smoke (no GUI)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: desktop/package-lock.json
+      - run: npm ci
+      - run: npm run build
+      - name: Install desktop deps (skip electron download)
+        working-directory: desktop
+        run: npm ci --ignore-scripts
+      - name: Prepare server bundle
+        working-directory: desktop
+        run: npm run prepare:server
+      - name: Run desktop smoke harness
+        working-directory: desktop
+        run: node scripts/smoke-main.cjs
+
+  helm:
+    name: Helm lint & render
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/setup-helm@v4
+        with:
+          version: v3.16.3
+      - name: helm lint
+        run: helm lint charts/astro-data-workspace --strict
+      - name: helm template (bundled modes)
+        run: helm template workspace charts/astro-data-workspace > /dev/null
+      - name: helm template (external modes)
+        run: |
+          helm template workspace charts/astro-data-workspace \
+            --set postgresql.enabled=false \
+            --set elasticsearch.enabled=false \
+            --set metadataStore.mode=external-postgresql \
+            --set metadataStore.external.existingSecret=workspace-connections \
+            --set search.mode=external \
+            --set search.external.existingSecret=workspace-connections \
+            > /dev/null
+
+  docker:
+    name: Docker build (no push)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          tags: astro-data-workspace:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

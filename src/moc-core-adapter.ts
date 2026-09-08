@@ -249,8 +249,9 @@ export class MocCoreCliAdapter implements MocCoreAdapter {
 
   async #runBuild(specPath: string, outputPath: string): Promise<string> {
     try {
-      const [program, ...prefixArgs] = this.#command.split(/\s+/);
-      const { stdout } = await execFileAsync(program!, [...prefixArgs, "build", "--spec", specPath, "--output", outputPath, "--base-dir", "/"], {
+      const [program, ...prefixArgs] = this.#command.match(/(?:[^\s"]+|"[^"]*")+/g) ?? [];
+      const unquoted = prefixArgs.map((arg) => arg.replaceAll('"', ""));
+      const { stdout } = await execFileAsync(program!, [...unquoted, "build", "--spec", specPath, "--output", outputPath, "--base-dir", "/"], {
         timeout: this.#timeoutMs,
         maxBuffer: 2 * 1024 * 1024,
       });
