@@ -190,6 +190,100 @@ test("status explanations are available where records are evaluated", async ({ p
   await expect(page.locator(`#${await workflowHelp.getAttribute("aria-describedby")}`)).toContainText("等待输入");
 });
 
+test("package rows expose release details in the inspector", async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto("/");
+  await waitForWorkspace(page);
+
+  // The public coverage heading is gone while the filters remain functional.
+  await page.locator('[data-mode="packages"]').click();
+  const controls = page.locator("#resource-package-controls");
+  await expect(controls).toBeVisible();
+  await expect(controls.locator(".section-heading")).toHaveCount(0);
+  await expect(controls.locator("#resource-package-filters")).toBeVisible();
+
+  // The dataset state keeps its text but no longer renders a status dot.
+  await expect(page.locator("#context-summary .dataset-state > span")).toHaveCount(1);
+
+  const remoteRow = page.locator('[data-resource-group="remote"] .resource-package-row').first();
+  await remoteRow.waitFor({ state: "visible" });
+  const rowHeading = await remoteRow.locator("strong").first().textContent();
+  await remoteRow.locator(".resource-package-version").click();
+  await expect(page.locator("#inspector-content h2")).toHaveText(rowHeading ?? "");
+  const releaseCards = page.locator("#inspector-content .resource-release-choice");
+  await expect(releaseCards.first()).toBeVisible();
+  const releaseCount = await releaseCards.count();
+  expect(releaseCount).toBeGreaterThan(0);
+
+  // Uninstalled packages must not render an empty inspector actions container.
+  await expect(page.locator("#inspector-content .resource-inspector-actions")).toHaveCount(0);
+
+  // Availability is a borderless status pinned to each card's top-right.
+  const availabilityStyles = await releaseCards.first().locator(".resource-release-availability").evaluate((element) => {
+    const style = getComputedStyle(element);
+    return { borderWidth: style.borderTopWidth, position: style.position };
+  });
+  expect(availabilityStyles.borderWidth).toBe("0px");
+  expect(availabilityStyles.position).toBe("absolute");
+
+  // Release cards open a detail view and return to the package inspector.
+  await releaseCards.first().locator(".resource-release-detail-button").click();
+  const backButton = page.locator("#inspector-content .resource-release-back");
+  await expect(backButton).toContainText(`返回 ${rowHeading}`);
+  await expect(page.locator("#inspector-content .resource-release-section .section-heading span").first()).toHaveText("数据产品");
+  await expect(page.locator("#inspector-content .resource-release-choices .resource-release-product").first()).toBeVisible();
+  await backButton.click();
+  await expect(page.locator("#inspector-content h2")).toHaveText(rowHeading ?? "");
+  await expect(page.locator("#inspector-content .resource-release-choice")).toHaveCount(releaseCount);
+
+  // Keyboard activation selects another package row.
+  const secondRow = page.locator('[data-resource-group="remote"] .resource-package-row').nth(1);
+  if (await secondRow.count()) {
+    const secondHeading = await secondRow.locator("strong").first().textContent();
+    await secondRow.focus();
+    await page.keyboard.press("Enter");
+    await expect(page.locator("#inspector-content h2")).toHaveText(secondHeading ?? "");
+    await expect(secondRow).toHaveAttribute("data-selected", "true");
+  }
+});
+
+test("system settings expose read-only runtime data services", async ({ page }) => {
+  // Registered after the shared API proxy so it takes precedence for this route.
+  await page.route("**/api/system-config/runtime", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        readOnly: true,
+        catalog: { endpoint: "https://assets.example/catalog.json", configured: true, available: true, syncedAt: "2026-09-08T00:00:00.000Z", adminConfigured: true, source: "environment" },
+        workspaceSearch: { endpoint: "http://127.0.0.1:9200", configured: true, indices: { file: "astro_file_index_v1", object: "astro_object_index_v1", coverage: "astro_coverage_index_v1" }, source: "environment" },
+        warehouseSearch: { enabled: false, endpoint: "", configured: false, indices: { layer: "ast_layer_index_v1", file: "ast_file_index_v1", coverage: "ast_coverage_index_v1" }, source: "environment" },
+      }),
+    });
+  });
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto("/");
+  await waitForWorkspace(page);
+
+  await page.locator('[data-mode="system"]').click();
+  await expect(page.locator("#system-stage")).toBeVisible();
+  await page.locator('[data-settings-tab="runtime"]').click();
+  await expect(page.locator("#settings-runtime-view")).toBeVisible();
+
+  const records = page.locator("#runtime-service-list .settings-record");
+  await expect(records).toHaveCount(3);
+  await expect(records.nth(0)).toContainText("公开巡天目录");
+  await expect(records.nth(1)).toContainText("Workspace 搜索");
+  await expect(records.nth(2)).toContainText("Warehouse 搜索");
+  const endpoints = await records.evaluateAll((nodes) => nodes.map((node) => node.querySelector("p")?.textContent ?? ""));
+  expect(endpoints.join("\n")).not.toContain("@");
+
+  // The editable catalog settings entry point is gone from the package list.
+  await page.locator('[data-mode="packages"]').click();
+  await expect(page.locator("#resource-package-settings")).toHaveCount(0);
+  await expect(page.locator("#resource-package-sync")).toBeVisible();
+});
+
 test("user assets remain reachable from the workspace navigation", async ({ page }) => {
   const { assets } = await apiJson<{ assets: Array<{ name: string; origin: string; status: string }> }>("/api/data-assets");
   const catalogRequests: string[] = [];

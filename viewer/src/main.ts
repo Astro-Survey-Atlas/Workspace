@@ -34,7 +34,7 @@ import {
   type SurveyLayerOverlapComponent,
   type WorkspaceCoverageLayer,
 } from "./survey-layer-viewer";
-import type { AssetsSurveyRelease, PublicResourcePackage, ResourceCatalogStatus } from "../../src/resource-packages";
+import type { AssetsSurveyProduct, AssetsSurveyRelease, PublicResourcePackage, ResourceCatalogStatus } from "../../src/resource-packages";
 import type { SurveyModality, SurveyRegistrationInput } from "../../src/survey-registry";
 import type { ConnectorPublicRecord } from "../../src/connectors";
 import type { CoverageCoordinateUnits, CoverageJobMode, CoverageJobSpec } from "../../src/coverage-jobs";
@@ -556,26 +556,17 @@ const resourcePackagePanel = new ResourcePackagePanel(
   (before, after) => refreshActiveFootprints(before, after),
   (record, draftReleaseIds, callbacks) => renderResourcePackageDetails(record, draftReleaseIds, callbacks),
   (error) => notifyWorkspaceError(error, "资源包操作失败"),
-  () => openResourceCatalogSettings(true),
+  () => openResourceCatalogSync(),
 );
 let resourceAdminToken = "";
-let resourceCatalogSyncPending = false;
 
-function resourceCatalogSettingsFeedback(summary: string, detail = "", status: "" | "error" | "success" = ""): void {
-  if (summary === "正在保存…") {
-    notifyWorkspace("正在保存公开目录配置", detail, { tone: "info" });
-  } else if (status === "error" || summary.includes("失败") || summary.includes("无法")) {
-    notifyWorkspace(summary, detail, { tone: "error" });
-  } else if (status === "success") {
-    notifyWorkspace(summary, detail, { tone: "success" });
-  } else if (summary) {
-    notifyWorkspace(summary, detail, { tone: "info" });
-  }
+function resourceCatalogSyncFeedback(summary: string, detail = "", tone: "info" | "success" | "error" = "info"): void {
+  notifyWorkspace(summary, detail, { tone });
 }
 
 async function syncResourceCatalog(): Promise<void> {
   if (!resourceAdminToken) {
-    openResourceCatalogSettings(true);
+    openResourceCatalogSync();
     return;
   }
   const syncButton = byId<HTMLButtonElement>("resource-package-sync");
@@ -586,63 +577,53 @@ async function syncResourceCatalog(): Promise<void> {
     const result = await workspaceApi.syncResourceCatalog(resourceAdminToken);
     resourcePackagePanel.setCatalogStatus(result.catalog);
     await refreshPublicCatalogData();
-    resourceCatalogSettingsFeedback("同步完成", `已载入 ${result.packages.length} 个可下载资源包。`, "success");
+    resourceCatalogSyncFeedback("同步完成", `已载入 ${result.packages.length} 个可下载资源包。`, "success");
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    resourceCatalogSettingsFeedback("同步失败", message, "error");
+    resourceCatalogSyncFeedback("同步失败", message, "error");
   } finally {
     syncButton.disabled = false;
     syncButton.dataset.busy = "false";
   }
 }
 
-function openResourceCatalogSettings(syncAfterSave = false): void {
-  if (syncAfterSave && resourceAdminToken) {
-    void syncResourceCatalog();
-    return;
-  }
-  resourceCatalogSyncPending = syncAfterSave;
-  const dialog = byId<HTMLDialogElement>("resource-catalog-settings-dialog");
-  const form = byId<HTMLFormElement>("resource-catalog-settings-form");
-    void workspaceApi.resourceCatalogConfig().then((config) => {
-    byId<HTMLInputElement>("resource-catalog-url").value = config.catalogUrl;
+function openResourceCatalogSync(): void {
+  const dialog = byId<HTMLDialogElement>("resource-catalog-sync-dialog");
+  const tokenInput = byId<HTMLInputElement>("resource-catalog-sync-token");
+  const submit = byId<HTMLButtonElement>("resource-catalog-sync-submit");
+  const url = byId<HTMLElement>("resource-catalog-sync-url");
+  tokenInput.value = "";
+  tokenInput.disabled = false;
+  submit.disabled = false;
+  url.textContent = "--";
+  void workspaceApi.resourceCatalogConfig().then((config) => {
+    url.textContent = config.catalogUrl || "--";
     resourcePackagePanel.setCatalogStatus(config);
-    resourceCatalogSettingsFeedback(config.available ? "当前目录可用" : "当前目录不可用", config.unavailableReason ?? "");
-    }).catch((error) => {
-      resourceCatalogSettingsFeedback("无法读取目录状态", error instanceof Error ? error.message : String(error), "error");
+    const adminReady = Boolean(config.adminConfigured);
+    tokenInput.disabled = !adminReady;
+    submit.disabled = !adminReady;
+    tokenInput.placeholder = adminReady ? "仅保存在当前页面内存" : "服务器未配置资源管理员 token，无法同步";
+    if (!config.available) resourceCatalogSyncFeedback("当前目录不可用", config.unavailableReason ?? "", "error");
+  }).catch((error) => {
+    resourceCatalogSyncFeedback("无法读取目录状态", error instanceof Error ? error.message : String(error), "error");
   });
   if (!dialog.open) dialog.showModal();
-  (form.elements.namedItem("resource-catalog-admin-token") as HTMLInputElement | null)?.focus();
+  tokenInput.focus();
 }
 
-async function saveResourceCatalogConfig(andSync: boolean): Promise<void> {
-  const catalogUrl = byId<HTMLInputElement>("resource-catalog-url").value.trim();
-  const token = byId<HTMLInputElement>("resource-catalog-admin-token").value.trim() || resourceAdminToken;
-  if (!token) throw new Error("请输入资源管理员 token");
-  resourceCatalogSettingsFeedback("正在保存…");
-  const config = await workspaceApi.setResourceCatalogConfig(catalogUrl, token);
-  resourceAdminToken = token;
-  resourcePackagePanel.setCatalogStatus(config);
-  resourceCatalogSettingsFeedback("配置已保存", "不会自动下载资源包。", "success");
-  if (andSync || resourceCatalogSyncPending) {
-    resourceCatalogSyncPending = false;
-    await syncResourceCatalog();
-  } else {
-    byId<HTMLDialogElement>("resource-catalog-settings-dialog").close();
-  }
-}
-
-byId<HTMLButtonElement>("resource-package-settings").addEventListener("click", () => openResourceCatalogSettings(false));
-byId<HTMLButtonElement>("resource-catalog-settings-close").addEventListener("click", () => byId<HTMLDialogElement>("resource-catalog-settings-dialog").close());
-byId<HTMLButtonElement>("resource-catalog-settings-cancel").addEventListener("click", () => byId<HTMLDialogElement>("resource-catalog-settings-dialog").close());
-byId<HTMLFormElement>("resource-catalog-settings-form").addEventListener("submit", (event) => {
+byId<HTMLButtonElement>("resource-catalog-sync-close").addEventListener("click", () => byId<HTMLDialogElement>("resource-catalog-sync-dialog").close());
+byId<HTMLButtonElement>("resource-catalog-sync-cancel").addEventListener("click", () => byId<HTMLDialogElement>("resource-catalog-sync-dialog").close());
+byId<HTMLFormElement>("resource-catalog-sync-form").addEventListener("submit", (event) => {
   event.preventDefault();
-  void saveResourceCatalogConfig(false).catch((error) => resourceCatalogSettingsFeedback("保存失败", error instanceof Error ? error.message : String(error), "error"));
+  const token = byId<HTMLInputElement>("resource-catalog-sync-token").value.trim() || resourceAdminToken;
+  if (!token) {
+    resourceCatalogSyncFeedback("请输入资源管理员 token", "", "error");
+    return;
+  }
+  resourceAdminToken = token;
+  byId<HTMLDialogElement>("resource-catalog-sync-dialog").close();
+  void syncResourceCatalog();
 });
-byId<HTMLButtonElement>("resource-catalog-settings-sync").addEventListener("click", () => {
-  void saveResourceCatalogConfig(true).catch((error) => resourceCatalogSettingsFeedback("同步失败", error instanceof Error ? error.message : String(error), "error"));
-});
-byId<HTMLDialogElement>("resource-catalog-settings-dialog").addEventListener("cancel", () => { resourceCatalogSyncPending = false; });
 const LAYER_PREFERENCES_KEY = "astro-workspace:survey-layer-preferences:v4";
 const PREVIOUS_LAYER_PREFERENCES_KEY = "astro-workspace:survey-layer-preferences:v3";
 const LEGACY_LAYER_PREFERENCES_KEY = "astro-workspace:survey-layer-preferences:v1";
@@ -2440,15 +2421,86 @@ async function refreshPublicCatalogData(): Promise<void> {
   if (mode === "packages") await resourcePackagePanel.reload();
 }
 
+const RELEASE_KIND_LABELS: Record<AssetsSurveyRelease["kind"], string> = {
+  public_release: "正式发布",
+  quick_release: "快速发布",
+  early_release: "早期发布",
+  science_results: "科学成果",
+  archive_snapshot: "归档快照",
+  planned: "计划中",
+};
+
+const SURVEY_MODALITY_LABELS: Record<AssetsSurveyProduct["modality"], string> = {
+  imaging: "图像",
+  spectroscopy: "光谱",
+  photometry: "测光",
+  "time-domain": "时域",
+  "integral-field": "积分场",
+  ultraviolet: "紫外",
+  infrared: "红外",
+  catalog: "目录",
+  simulation: "仿真",
+};
+
+const ASSETS_PRODUCT_STATUS_LABELS: Record<AssetsSurveyProduct["status"], string> = {
+  acquired: "已收录",
+  overview_only: "仅有官方概览",
+  awaiting_geometry: "等待几何校验",
+  not_applicable: "不适用",
+};
+
+let resourceReleaseDetailId: string | null = null;
+let resourcePackageInspectorContext: {
+  record: PublicResourcePackage;
+  draftReleaseIds: ReadonlySet<string>;
+  callbacks: ResourcePackageSelectionCallbacks;
+} | null = null;
+
+function renderResourcePackageInspector(): void {
+  const context = resourcePackageInspectorContext;
+  if (!context) return;
+  renderResourcePackageDetails(context.record, context.draftReleaseIds, context.callbacks);
+}
+
+function renderAssetsReleaseProductLink(url: string, label: string): HTMLAnchorElement {
+  const link = document.createElement("a");
+  link.className = "resource-release-detail-link";
+  link.href = url;
+  link.target = "_blank";
+  link.rel = "noreferrer";
+  link.textContent = label;
+  return link;
+}
+
 function renderResourcePackageDetails(
   record: PublicResourcePackage,
   draftReleaseIds: ReadonlySet<string>,
   callbacks: ResourcePackageSelectionCallbacks,
 ): void {
+  resourcePackageInspectorContext = { record, draftReleaseIds, callbacks };
   const empty = byId("inspector-empty");
   const content = byId("inspector-content");
   empty.hidden = true;
   content.hidden = false;
+  const loadableReleaseIds = [...new Set(record.releases)];
+  const fallbackModality = (record.modalities[0] as AssetsSurveyRelease["modalities"][number] | undefined) ?? "catalog";
+  const publicReleases: AssetsSurveyRelease[] = record.publicReleases?.length
+    ? [...new Map(record.publicReleases.map((release) => [release.id, release])).values()]
+    : loadableReleaseIds.map((id) => ({
+      id,
+      label: record.releaseLabels[id] ?? id,
+      kind: "public_release",
+      modalities: [fallbackModality],
+      products: [{ name: record.productTypes[0] ?? record.name, modality: fallbackModality, description: record.description, status: "acquired" }],
+    }));
+  if (resourceReleaseDetailId && !publicReleases.some((release) => release.id === resourceReleaseDetailId)) {
+    resourceReleaseDetailId = null;
+  }
+  if (resourceReleaseDetailId) {
+    const release = publicReleases.find((entry) => entry.id === resourceReleaseDetailId)!;
+    renderAssetsReleaseDetail(content, record, release, loadableReleaseIds.includes(release.id));
+    return;
+  }
   const heading = document.createElement("h2");
   heading.textContent = record.name;
   const summary = document.createElement("p");
@@ -2476,17 +2528,6 @@ function renderResourcePackageDetails(
   const releaseTitle = document.createElement("span");
   releaseTitle.textContent = "公开版本";
   const releaseCount = document.createElement("output");
-  const loadableReleaseIds = [...new Set(record.releases)];
-  const fallbackModality = (record.modalities[0] as AssetsSurveyRelease["modalities"][number] | undefined) ?? "catalog";
-  const publicReleases: AssetsSurveyRelease[] = record.publicReleases?.length
-    ? [...new Map(record.publicReleases.map((release) => [release.id, release])).values()]
-    : loadableReleaseIds.map((id) => ({
-      id,
-      label: record.releaseLabels[id] ?? id,
-      kind: "public_release",
-      modalities: [fallbackModality],
-      products: [{ name: record.productTypes[0] ?? record.name, modality: fallbackModality, description: record.description, status: "acquired" }],
-    }));
   releaseCount.textContent = `${publicReleases.length} 个公开版本 · ${loadableReleaseIds.length} 个可应用`;
   releaseHeading.append(releaseTitle, releaseCount);
   const releaseChoices = document.createElement("div");
@@ -2537,7 +2578,16 @@ function renderResourcePackageDetails(
       ? `${source.authority} · ${source.label}`
       : product?.description ?? releaseId;
     copy.append(header, detail);
-    choice.append(checkbox, copy);
+    const detailButton = document.createElement("button");
+    detailButton.type = "button";
+    detailButton.className = "resource-release-detail-button";
+    detailButton.setAttribute("aria-label", `查看 ${label} 版本详情`);
+    detailButton.append(copy);
+    detailButton.addEventListener("click", () => {
+      resourceReleaseDetailId = releaseId;
+      renderResourcePackageInspector();
+    });
+    choice.append(checkbox, detailButton);
     releaseChoices.append(choice);
   }
   const releaseBulk = document.createElement("div");
@@ -2556,9 +2606,10 @@ function renderResourcePackageDetails(
   releaseBulk.append(selectAll, clearAll);
   releaseSection.append(releaseHeading, releaseChoices, releaseBulk);
 
-  const actions = document.createElement("div");
-  actions.className = "inspector-actions resource-inspector-actions";
+  const children: Array<HTMLElement> = [heading, summary, metadata, releaseSection];
   if (record.installedVersion) {
+    const actions = document.createElement("div");
+    actions.className = "inspector-actions resource-inspector-actions";
     const remove = document.createElement("button");
     remove.type = "button";
     remove.className = "command-button danger";
@@ -2566,8 +2617,91 @@ function renderResourcePackageDetails(
     remove.title = "从天球移除并删除当前服务器中的公开覆盖文件";
     remove.addEventListener("click", () => void callbacks.remove().catch((error) => notifyWorkspace("资源包卸载失败", error instanceof Error ? error.message : String(error), { tone: "error" })));
     actions.append(remove);
+    children.push(actions);
   }
-  content.replaceChildren(heading, summary, metadata, releaseSection, actions);
+  content.replaceChildren(...children);
+}
+
+function renderAssetsReleaseDetail(
+  content: HTMLElement,
+  record: PublicResourcePackage,
+  release: AssetsSurveyRelease,
+  loadable: boolean,
+): void {
+  const back = document.createElement("button");
+  back.type = "button";
+  back.className = "command-button secondary resource-release-back";
+  back.textContent = `返回 ${record.name}`;
+  back.addEventListener("click", () => {
+    resourceReleaseDetailId = null;
+    renderResourcePackageInspector();
+  });
+  const heading = document.createElement("h2");
+  heading.textContent = release.label;
+  const summary = document.createElement("p");
+  summary.className = "inspector-summary";
+  summary.textContent = `${record.name} · ${RELEASE_KIND_LABELS[release.kind]}${release.releasedYear ? ` · ${release.releasedYear} 年发布` : ""}`;
+  const metadata = document.createElement("dl");
+  const rows: Array<[string, string]> = [
+    ["巡天 / 望远镜", record.facilities.join(" / ") || "—"],
+    ["发布年份", release.releasedYear ? String(release.releasedYear) : "未标注"],
+    ["发布类型", RELEASE_KIND_LABELS[release.kind]],
+    ["观测模态", release.modalities.map((modality) => SURVEY_MODALITY_LABELS[modality] ?? modality).join(" / ") || "—"],
+    ["覆盖状态", loadable ? "天空覆盖已收录，可应用到天球" : "暂无可应用的覆盖几何"],
+  ];
+  for (const [label, value] of rows) {
+    const row = document.createElement("div");
+    const term = document.createElement("dt"); term.textContent = label;
+    const detail = document.createElement("dd"); detail.textContent = value;
+    row.append(term, detail);
+    metadata.append(row);
+  }
+  const productSection = document.createElement("section");
+  productSection.className = "resource-release-section";
+  const productHeading = document.createElement("div");
+  productHeading.className = "section-heading";
+  const productTitle = document.createElement("span");
+  productTitle.textContent = "数据产品";
+  const productCount = document.createElement("output");
+  productCount.textContent = `${release.products.length} 个产品`;
+  productHeading.append(productTitle, productCount);
+  const productList = document.createElement("div");
+  productList.className = "resource-release-choices";
+  for (const product of release.products) {
+    const card = document.createElement("div");
+    card.className = "resource-release-choice resource-release-product";
+    card.dataset.coverageAvailable = String(product.status === "acquired");
+    const copy = document.createElement("span");
+    copy.className = "resource-release-copy";
+    const header = document.createElement("span");
+    header.className = "resource-release-header";
+    const title = document.createElement("strong");
+    title.textContent = product.name;
+    const status = document.createElement("small");
+    status.className = "resource-release-availability";
+    status.dataset.available = String(product.status === "acquired");
+    status.textContent = ASSETS_PRODUCT_STATUS_LABELS[product.status];
+    header.append(title, status);
+    const detail = document.createElement("small");
+    detail.textContent = product.description;
+    copy.append(header, detail);
+    if (product.sourceUrl || product.geometrySourceUrl) {
+      const links = document.createElement("span");
+      links.className = "resource-release-links";
+      if (product.sourceUrl) links.append(renderAssetsReleaseProductLink(product.sourceUrl, "数据来源"));
+      if (product.geometrySourceUrl) links.append(renderAssetsReleaseProductLink(product.geometrySourceUrl, "几何说明"));
+      copy.append(links);
+    }
+    if (product.reason || product.manualStep) {
+      const note = document.createElement("small");
+      note.textContent = product.reason ?? product.manualStep ?? "";
+      copy.append(note);
+    }
+    card.append(copy);
+    productList.append(card);
+  }
+  productSection.append(productHeading, productList);
+  content.replaceChildren(back, heading, summary, metadata, productSection);
 }
 
 function applyLayerPreferences(): void {

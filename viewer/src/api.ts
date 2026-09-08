@@ -166,6 +166,33 @@ export interface ResourceCatalogConfig extends ResourceCatalogStatus {
   updatedAt?: string;
 }
 
+/** Effective, read-only runtime endpoints provisioned by the deployment environment. */
+export interface RuntimeDataServices {
+  readOnly: boolean;
+  catalog: {
+    endpoint: string;
+    configured: boolean;
+    available: boolean;
+    unavailableReason?: string;
+    syncedAt?: string;
+    adminConfigured: boolean;
+    source: string;
+  };
+  workspaceSearch: {
+    endpoint: string;
+    configured: boolean;
+    indices: { file: string; object: string; coverage: string };
+    source: string;
+  };
+  warehouseSearch: {
+    enabled: boolean;
+    endpoint: string;
+    configured: boolean;
+    indices: { layer: string; file: string; coverage: string };
+    source: string;
+  };
+}
+
 /** Browser-safe input for a Workspace-owned remote coverage scan. The server
  * adds the route asset id and keeps credentials in its namespace Secret. */
 export interface RemoteCoverageScanInput {
@@ -337,8 +364,8 @@ export const workspaceApi = {
   async resourceCatalogConfig(): Promise<ResourceCatalogConfig> {
     return (await getJson<{ config: ResourceCatalogConfig }>("/api/resource-packages/config")).config;
   },
-  async setResourceCatalogConfig(catalogUrl: string, token: string): Promise<ResourceCatalogConfig> {
-    return (await adminRequest<{ config: ResourceCatalogConfig }>("/api/resource-packages/config", "PUT", token, { catalogUrl })).config;
+  async runtimeDataServices(): Promise<RuntimeDataServices> {
+    return getJson<RuntimeDataServices>("/api/system-config/runtime");
   },
   async syncResourceCatalog(token: string): Promise<{ catalog: ResourceCatalogStatus; packages: PublicResourcePackage[] }> {
     return adminRequest<{ catalog: ResourceCatalogStatus; packages: PublicResourcePackage[] }>("/api/resource-packages/sync", "POST", token, {});

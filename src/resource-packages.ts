@@ -770,12 +770,6 @@ export class ResourcePackageManager {
 
   get catalogUrl(): string { return this.#catalogUrl.href; }
 
-  setCatalogUrl(value: string): string {
-    this.#catalogUrl = validateResourceCatalogUrl(value, [...this.#allowedOrigins], false);
-    if (!this.#surveyCatalogUrlExplicit) this.#surveyCatalogUrl = deriveSurveyCatalogUrl(this.#catalogUrl);
-    return this.#catalogUrl.href;
-  }
-
   catalogStatus(): ResourceCatalogStatus {
     return {
       catalogUrl: this.#catalogUrl.href,

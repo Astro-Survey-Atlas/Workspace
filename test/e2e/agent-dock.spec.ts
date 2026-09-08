@@ -220,7 +220,7 @@ test("workspace uses the supplied Atlas Workspace brand asset", async ({ page })
   await expect(logo).toHaveAttribute("data-theme-logo", "light");
   await expect.poll(() => logo.evaluate((element) => (element as HTMLImageElement).naturalWidth)).toBeGreaterThan(0);
   await expect(page.locator(".brand-wordmark strong")).toHaveText("Astro Survey Atlas");
-  await expect(page.locator(".brand-wordmark small")).toHaveText("公共天空数据 · 工作区");
+  await expect(page.locator(".brand-wordmark small")).toHaveText("ASA·用户数据工作区");
   await expect(page.locator(".brand-wordmark")).toBeVisible();
 
   await page.locator("#theme-toggle").click();

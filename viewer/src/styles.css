@@ -482,7 +482,6 @@ input {
   font-size: 11px;
 }
 
-.dataset-state > span:first-child,
 .status-light {
   display: inline-block;
   width: 6px;
@@ -1849,6 +1848,7 @@ input {
   color: #bdc7ce;
   background: #090e12;
   text-align: left;
+  cursor: pointer;
 }
 
 .resource-package-row[data-selected="true"] {
@@ -3834,6 +3834,7 @@ select.field-input {
 }
 
 .resource-release-choice {
+  position: relative;
   display: grid;
   grid-template-columns: 18px minmax(0, 1fr);
   align-items: start;
@@ -3876,25 +3877,53 @@ select.field-input {
   gap: 5px;
 }
 
+.resource-release-product {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.resource-release-links {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.resource-release-detail-link {
+  color: var(--cyan);
+  font-size: 9px;
+  text-underline-offset: 2px;
+}
+
+.resource-release-back {
+  margin-bottom: 10px;
+}
+
+.resource-catalog-sync-url {
+  display: block;
+  overflow-wrap: anywhere;
+  user-select: text;
+}
+
 .resource-release-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 8px;
+  padding-right: 72px;
 }
 
 .resource-release-availability {
-  padding: 2px 4px;
-  border: 1px solid #315e47;
-  border-radius: 3px;
-  color: #8ce2af;
+  position: absolute;
+  top: 7px;
+  right: 8px;
+  padding: 0;
+  border: 0;
+  color: var(--green);
   font: 8px var(--font-mono);
   white-space: nowrap;
 }
 
 .resource-release-availability[data-available="false"] {
-  border-color: #4b555c;
-  color: #8b989f;
+  color: var(--muted);
 }
 
 .resource-release-copy p {
@@ -4760,8 +4789,7 @@ html[data-theme="light"] .connector-run-status[data-status="running"] { border-c
 html[data-theme="light"] .catalog-status[data-status="ready"],
 html[data-theme="light"] .catalog-status[data-status="deliverable"],
 html[data-theme="light"] .connector-status[data-status="ready"],
-html[data-theme="light"] .resource-package-row[data-status="active"] .resource-package-status,
-html[data-theme="light"] .resource-release-availability {
+html[data-theme="light"] .resource-package-row[data-status="active"] .resource-package-status {
   border-color: #63a47d;
   color: #176239;
 }
@@ -6103,7 +6131,6 @@ a:focus-visible {
   color: var(--muted);
 }
 
-.dataset-state > span:first-child,
 .status-light {
   background: var(--green);
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--green) 15%, transparent), 0 0 10px color-mix(in srgb, var(--green) 60%, transparent);
@@ -6393,7 +6420,6 @@ a:focus-visible {
 .connector-status,
 .connector-run-status,
 .resource-package-status,
-.resource-release-availability,
 .run-status {
   border-color: var(--border-strong);
   border-radius: 2px;
@@ -6406,7 +6432,6 @@ a:focus-visible {
 .connector-status[data-status="ready"],
 .connector-run-status[data-status="succeeded"],
 .resource-package-row[data-status="active"] .resource-package-status,
-.resource-release-availability[data-available="true"],
 .run-status[data-status="succeeded"],
 .production-detail-steps li[data-status="succeeded"] span {
   border-color: color-mix(in srgb, var(--green) 72%, var(--border));

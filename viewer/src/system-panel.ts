@@ -1,4 +1,5 @@
 import { workspaceApi } from "./api";
+import type { RuntimeDataServices } from "./api";
 import type { AiProviderRecord, McpServerRecord } from "../../src/system-config";
 import { notifyWorkspace } from "./notifications";
 
@@ -10,15 +11,24 @@ function byId<T extends HTMLElement>(id: string): T {
 
 function statusLabel(status?: string): string { return status === "ok" ? "已连接" : status === "failed" ? "连接失败" : "未测试"; }
 
+function cardStatus(row: HTMLElement, healthy: boolean): void { row.dataset.status = healthy ? "ok" : "unknown"; }
+
 export interface SystemSummary {
   providers: number;
   servers: number;
   connected: number;
 }
 
+type SystemSection = "ai" | "mcp" | "runtime";
+
+function settingsSection(value: string | undefined): SystemSection {
+  return value === "mcp" || value === "runtime" ? value : "ai";
+}
+
 export class SystemPanel {
   private providers: AiProviderRecord[] = [];
   private servers: McpServerRecord[] = [];
+  private runtime: RuntimeDataServices | null = null;
   private initialized = false;
   private editingProvider: AiProviderRecord | null = null;
   private editingServer: McpServerRecord | null = null;
@@ -34,22 +44,31 @@ export class SystemPanel {
     byId<HTMLFormElement>("mcp-server-form").addEventListener("submit", (event) => { event.preventDefault(); void this.saveServer().catch((error) => this.fail(error)); });
     byId<HTMLButtonElement>("ai-provider-test").addEventListener("click", () => void this.testProvider().catch((error) => this.fail(error)));
     byId<HTMLButtonElement>("mcp-server-test").addEventListener("click", () => void this.testServer().catch((error) => this.fail(error)));
-    document.querySelectorAll<HTMLButtonElement>("[data-settings-tab]").forEach((button) => button.addEventListener("click", () => this.selectSection(button.dataset.settingsTab === "mcp" ? "mcp" : "ai")));
-    document.querySelectorAll<HTMLButtonElement>("[data-settings-section]").forEach((button) => button.addEventListener("click", () => this.selectSection(button.dataset.settingsSection === "mcp" ? "mcp" : "ai")));
+    document.querySelectorAll<HTMLButtonElement>("[data-settings-tab]").forEach((button) => button.addEventListener("click", () => this.selectSection(settingsSection(button.dataset.settingsTab))));
+    document.querySelectorAll<HTMLButtonElement>("[data-settings-section]").forEach((button) => button.addEventListener("click", () => this.selectSection(settingsSection(button.dataset.settingsSection))));
   }
 
   async activate(): Promise<void> {
     if (!this.initialized) {
-      [this.providers, this.servers] = await Promise.all([workspaceApi.aiProviders(), workspaceApi.mcpServers()]);
+      await this.refresh();
       this.initialized = true;
     } else await this.refresh();
-    this.renderProviders(); this.renderServers(); this.emitSummary();
+    this.renderProviders(); this.renderServers(); this.renderRuntime(); this.emitSummary();
   }
 
   deactivate(): void {}
-  debugState(): Record<string, unknown> { return { aiProviders: this.providers.length, mcpServers: this.servers.length }; }
+  debugState(): Record<string, unknown> { return { aiProviders: this.providers.length, mcpServers: this.servers.length, runtime: this.runtime ? "loaded" : "unavailable" }; }
 
-  private async refresh(): Promise<void> { [this.providers, this.servers] = await Promise.all([workspaceApi.aiProviders(), workspaceApi.mcpServers()]); }
+  private async refresh(): Promise<void> {
+    const [providers, servers, runtime] = await Promise.all([
+      workspaceApi.aiProviders(),
+      workspaceApi.mcpServers(),
+      workspaceApi.runtimeDataServices().catch((error: unknown) => { this.fail(error); return null; }),
+    ]);
+    this.providers = providers;
+    this.servers = servers;
+    this.runtime = runtime;
+  }
 
   private emitSummary(): void {
     this.onSummary({
@@ -59,11 +78,43 @@ export class SystemPanel {
     });
   }
 
-  private selectSection(section: "ai" | "mcp"): void {
+  private selectSection(section: SystemSection): void {
     document.querySelectorAll<HTMLButtonElement>("[data-settings-tab]").forEach((button) => { const active = button.dataset.settingsTab === section; button.classList.toggle("active", active); button.setAttribute("aria-selected", String(active)); });
     document.querySelectorAll<HTMLButtonElement>("[data-settings-section]").forEach((button) => button.classList.toggle("active", button.dataset.settingsSection === section));
     byId("settings-ai-view").hidden = section !== "ai";
     byId("settings-mcp-view").hidden = section !== "mcp";
+    byId("settings-runtime-view").hidden = section !== "runtime";
+  }
+
+  private renderRuntime(): void {
+    const list = byId("runtime-service-list");
+    const runtime = this.runtime;
+    if (!runtime) {
+      list.replaceChildren();
+      return;
+    }
+    const catalogRow = document.createElement("article"); catalogRow.className = "settings-record"; cardStatus(catalogRow, runtime.catalog.available);
+    const catalogHeading = document.createElement("header"); const catalogTitle = document.createElement("strong"); catalogTitle.textContent = "公开巡天目录（Assets Catalog）"; const catalogBadge = document.createElement("span"); catalogBadge.textContent = runtime.catalog.available ? "可用" : "不可用"; catalogHeading.append(catalogTitle, catalogBadge);
+    const catalogMeta = document.createElement("p"); catalogMeta.textContent = runtime.catalog.endpoint || "未配置（使用内置本地目录）";
+    const catalogDetail = document.createElement("small");
+    const catalogParts = [`最近同步：${runtime.catalog.syncedAt ? new Date(runtime.catalog.syncedAt).toLocaleString() : "尚未同步"}`, `管理员 token：${runtime.catalog.adminConfigured ? "已配置" : "未配置"}`];
+    if (runtime.catalog.unavailableReason) catalogParts.push(`原因：${runtime.catalog.unavailableReason}`);
+    catalogDetail.textContent = catalogParts.join(" · ");
+    catalogRow.append(catalogHeading, catalogMeta, catalogDetail);
+
+    const searchRow = document.createElement("article"); searchRow.className = "settings-record"; cardStatus(searchRow, runtime.workspaceSearch.configured);
+    const searchHeading = document.createElement("header"); const searchTitle = document.createElement("strong"); searchTitle.textContent = "Workspace 搜索（Elasticsearch）"; const searchBadge = document.createElement("span"); searchBadge.textContent = runtime.workspaceSearch.configured ? "已配置" : "未配置"; searchHeading.append(searchTitle, searchBadge);
+    const searchMeta = document.createElement("p"); searchMeta.textContent = runtime.workspaceSearch.endpoint || "未配置（对象索引与覆盖概览不可用）";
+    const searchDetail = document.createElement("small"); searchDetail.textContent = `索引：${runtime.workspaceSearch.indices.file} / ${runtime.workspaceSearch.indices.object} / ${runtime.workspaceSearch.indices.coverage}`;
+    searchRow.append(searchHeading, searchMeta, searchDetail);
+
+    const warehouseRow = document.createElement("article"); warehouseRow.className = "settings-record"; cardStatus(warehouseRow, runtime.warehouseSearch.enabled && runtime.warehouseSearch.configured);
+    const warehouseHeading = document.createElement("header"); const warehouseTitle = document.createElement("strong"); warehouseTitle.textContent = "Warehouse 搜索（可选远程数据面）"; const warehouseBadge = document.createElement("span"); warehouseBadge.textContent = runtime.warehouseSearch.enabled ? (runtime.warehouseSearch.configured ? "已启用" : "未配置") : "未启用"; warehouseHeading.append(warehouseTitle, warehouseBadge);
+    const warehouseMeta = document.createElement("p"); warehouseMeta.textContent = runtime.warehouseSearch.enabled ? runtime.warehouseSearch.endpoint || "已启用但未配置端点" : "当前部署未启用 Warehouse 数据面";
+    const warehouseDetail = document.createElement("small"); warehouseDetail.textContent = `索引：${runtime.warehouseSearch.indices.layer} / ${runtime.warehouseSearch.indices.file} / ${runtime.warehouseSearch.indices.coverage}`;
+    warehouseRow.append(warehouseHeading, warehouseMeta, warehouseDetail);
+
+    list.replaceChildren(catalogRow, searchRow, warehouseRow);
   }
 
   private openProvider(record?: AiProviderRecord): void {

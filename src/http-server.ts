@@ -66,7 +66,6 @@ const resourcePackageRoot = process.env.ASTRO_RESOURCE_PACKAGE_ROOT ?? path.join
 const resourcePackageStatePath = process.env.ASTRO_RESOURCE_PACKAGE_STATE ?? path.join(stateRoot, "resource-package-state.json");
 const resourceCatalogUrl = process.env.ASTRO_RESOURCE_CATALOG_URL ?? pathToFileURL(path.join(stateRoot, "assets-current", "catalog.json")).href;
 const resourceSnapshotRoot = process.env.ASTRO_RESOURCE_SNAPSHOT_ROOT ?? stateRoot;
-const resourceCatalogConfigPath = process.env.ASTRO_RESOURCE_CATALOG_CONFIG_STATE ?? path.join(stateRoot, "resource-catalog-config.json");
 const resourceCatalogAllowedOrigins = (process.env.ASTRO_RESOURCE_CATALOG_ALLOWED_ORIGINS ?? "")
   .split(",")
   .map((value) => value.trim())
@@ -307,29 +306,18 @@ function sendApiError(response: Response, error: unknown): void {
   response.status(status).json({ error: message });
 }
 
-interface ResourceCatalogConfigState {
-  schemaVersion: 1;
-  catalogUrl: string;
-  updatedAt: string;
-}
-
-async function loadResourceCatalogConfig(): Promise<void> {
+function sanitizeEndpointForDisplay(value: string): string {
+  if (!value) return "";
   try {
-    const parsed = JSON.parse(await readFile(resourceCatalogConfigPath, "utf8")) as Partial<ResourceCatalogConfigState>;
-    if (parsed.schemaVersion !== 1 || typeof parsed.catalogUrl !== "string") throw new Error("resource catalog config has an unsupported schema");
-    resourcePackages.setCatalogUrl(parsed.catalogUrl);
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "ENOENT") console.warn("Ignoring invalid resource catalog config", error);
+    const url = new URL(value);
+    url.username = "";
+    url.password = "";
+    url.search = "";
+    url.hash = "";
+    return url.href;
+  } catch {
+    return "";
   }
-}
-
-async function persistResourceCatalogConfig(catalogUrl: string): Promise<ResourceCatalogConfigState> {
-  const state: ResourceCatalogConfigState = { schemaVersion: 1, catalogUrl, updatedAt: new Date().toISOString() };
-  await mkdir(path.dirname(resourceCatalogConfigPath), { recursive: true });
-  const temporary = `${resourceCatalogConfigPath}.${process.pid}.${randomUUID()}.tmp`;
-  await writeFile(temporary, `${JSON.stringify(state, null, 2)}\n`, { encoding: "utf8", mode: 0o600, flag: "wx" });
-  await rename(temporary, resourceCatalogConfigPath);
-  return state;
 }
 
 function requireResourceAdmin(request: Request, response: Response): boolean {
@@ -785,15 +773,40 @@ app.get("/api/resource-packages/config", (_request: Request, response: Response)
   response.json({ config: { ...resourcePackages.catalogStatus(), adminConfigured: Boolean(resourceAdminToken) } });
 });
 
-app.put("/api/resource-packages/config", async (request: Request, response: Response) => {
-  if (!requireResourceAdmin(request, response)) return;
-  try {
-    const catalogUrl = resourcePackages.setCatalogUrl(String(request.body?.catalogUrl ?? ""));
-    const config = await persistResourceCatalogConfig(catalogUrl);
-    response.json({ config: { ...resourcePackages.catalogStatus(), adminConfigured: true, updatedAt: config.updatedAt } });
-  } catch (error) {
-    sendApiError(response, error);
-  }
+// Effective endpoints are provisioned by the deployment environment (env vars /
+// bundled defaults) and are intentionally read-only from the browser.
+app.get("/api/system-config/runtime", (_request: Request, response: Response) => {
+  response.set("Cache-Control", "no-store");
+  const catalog = resourcePackages.catalogStatus();
+  response.json({
+    readOnly: true,
+    catalog: {
+      endpoint: sanitizeEndpointForDisplay(catalog.catalogUrl),
+      configured: Boolean(catalog.catalogUrl),
+      available: catalog.available,
+      unavailableReason: catalog.unavailableReason,
+      syncedAt: catalog.syncedAt,
+      adminConfigured: Boolean(resourceAdminToken),
+      source: "environment",
+    },
+    workspaceSearch: {
+      endpoint: sanitizeEndpointForDisplay(astroEsUrl),
+      configured: astroIndex.configured,
+      indices: {
+        file: process.env.ASTRO_ES_ASTRO_INDEX ?? ASTRO_FILE_INDEX,
+        object: astroObjectIndex.objectIndex,
+        coverage: astroObjectIndex.coverageIndex,
+      },
+      source: "environment",
+    },
+    warehouseSearch: {
+      enabled: warehouseEnabled,
+      endpoint: warehouseEnabled ? sanitizeEndpointForDisplay(warehouseEsUrl) : "",
+      configured: warehouseIndex.configured,
+      indices: { layer: warehouseEsLayerIndex, file: warehouseEsFileIndex, coverage: warehouseEsCoverageIndex },
+      source: "environment",
+    },
+  });
 });
 
 app.post("/api/resource-packages/sync", async (request: Request, response: Response) => {
@@ -2000,7 +2013,6 @@ async function start(): Promise<void> {
   await workspaceAgent.initialize();
   const recoveredLocalScans = await localCsvScans.recoverInterruptedRuns();
   if (recoveredLocalScans) console.warn(`Marked ${recoveredLocalScans} interrupted local CSV scan(s) as failed`);
-  await loadResourceCatalogConfig();
   await resourcePackages.initialize();
   warehouseScans.start();
 

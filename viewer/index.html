@@ -26,7 +26,7 @@
       <header class="topbar">
         <div class="brand-lockup">
           <img class="brand-logo brand-mark" src="/icon_without_name_lon_web.svg" alt="Astro Survey Atlas Workspace" width="72" height="28" data-theme-logo="light" />
-          <span class="brand-wordmark"><strong>Astro Survey Atlas</strong><small>公共天空数据 · 工作区</small></span>
+          <span class="brand-wordmark"><strong>Astro Survey Atlas</strong><small>ASA·用户数据工作区</small></span>
           <span id="dataset-name" class="sr-only">用户资产与公开覆盖</span>
         </div>
         <div class="mode-control" role="group" aria-label="视图模式">
@@ -51,7 +51,7 @@
         <div id="context-summary">
             <div class="panel-kicker" id="panel-kicker">DATA COVERAGE</div>
             <h1 id="panel-dataset-name">数据覆盖</h1>
-          <div class="dataset-state"><span></span><span id="dataset-state">索引载入中</span></div>
+          <div class="dataset-state"><span id="dataset-state">索引载入中</span></div>
 
           <dl id="metric-grid" class="metric-grid">
             <div><dt id="metric-one-label">PUBLIC</dt><dd id="metric-one">0</dd></div>
@@ -75,7 +75,6 @@
 
         <div id="resource-package-controls" hidden>
           <section class="control-section">
-            <div class="section-heading"><span>公开覆盖筛选</span><span>PUBLIC COVERAGE</span></div>
             <div class="filter-summary"><output id="resource-package-filter-summary">全部公开资源</output><button id="resource-package-filter-clear" class="text-command" type="button" disabled>清除</button></div>
             <div id="resource-package-filters" class="resource-package-filters"></div>
             <p class="control-note">同类标签取并集，不同维度取交集。这里筛选的是公开数据产品的天空覆盖，不是科学数据文件。</p>
@@ -161,7 +160,6 @@
           <label class="sr-only" for="resource-package-search">搜索巡天资源</label>
           <input id="resource-package-search" class="field-input" type="search" placeholder="搜索名称、设施、波段、发布或产品" />
           <button id="resource-package-sync" class="icon-button compact-icon-command" type="button" aria-label="同步公开巡天目录" title="同步公开巡天目录"><i data-lucide="refresh-cw"></i></button>
-          <button id="resource-package-settings" class="icon-button compact-icon-command" type="button" aria-label="配置公开巡天目录" title="配置公开巡天目录"><i data-lucide="settings-2"></i></button>
           <button id="resource-package-apply" class="primary-command compact-command" type="button" disabled><span>应用到天球</span></button>
          </div>
           <div class="resource-package-columns"><span></span><span>巡天</span><span>已收录覆盖 <button class="status-help" type="button" aria-label="已收录覆盖说明"><i data-lucide="info" aria-hidden="true"></i><span class="sr-only">已收录覆盖说明</span><span class="status-help-tooltip" role="tooltip"><span><strong>真实覆盖：</strong>已有验证过的像素几何，可以加载到 3D 天球。</span><span><strong>官方概览：</strong>只有大致范围说明，不能当作精确覆盖。</span><span><strong>待补充几何：</strong>已有官方资料，但还没有可验证的像素几何。</span><span><strong>未收录：</strong>当前没有可用的公开覆盖制品。</span></span></button></span><span>服务器状态 <button class="status-help" type="button" aria-label="服务器状态说明"><i data-lucide="info" aria-hidden="true"></i><span class="sr-only">服务器状态说明</span><span class="status-help-tooltip" role="tooltip"><span><strong>未下载：</strong>当前服务器还没有覆盖包。</span><span><strong>下载中：</strong>正在把覆盖包保存到当前服务器。</span><span><strong>已下载：</strong>覆盖包已保存，但还没有显示到天球。</span><span><strong>已应用：</strong>覆盖正在“数据覆盖”天球中显示。</span><span><strong>可更新：</strong>目录有比本地更近的覆盖包版本。</span><span><strong>失败：</strong>下载或校验没有完成，可以再次点击“应用到天球”。</span></span></button></span></div>
@@ -364,7 +362,7 @@
 
       <section id="system-stage" class="system-stage" aria-label="系统配置" hidden>
         <header class="catalog-stage-header">
-          <div><span class="panel-kicker">WORKSPACE SETTINGS</span><h2>系统配置</h2><p>注册 AI Provider 与 MCP Server，连接测试结果会保留在工作区。</p></div>
+          <div><span class="panel-kicker">WORKSPACE SETTINGS</span><h2>系统配置</h2><p>注册 AI Provider 与 MCP Server，并查看由部署环境统一配置的数据服务端点。</p></div>
           <dl class="catalog-summary">
             <div><dt>AI Provider</dt><dd id="system-provider-count">0</dd></div>
             <div><dt>MCP Server</dt><dd id="system-mcp-count">0</dd></div>
@@ -375,6 +373,7 @@
         <div class="settings-tabs" role="tablist" aria-label="系统配置视图">
           <button type="button" class="settings-tab active" role="tab" aria-selected="true" data-settings-tab="ai">AI Provider</button>
           <button type="button" class="settings-tab" role="tab" aria-selected="false" data-settings-tab="mcp">MCP Server</button>
+          <button type="button" class="settings-tab" role="tab" aria-selected="false" data-settings-tab="runtime">数据服务</button>
         </div>
         <section id="settings-ai-view" class="settings-view" role="tabpanel">
           <div class="settings-view-header"><div><span class="panel-kicker">OPENAI-COMPATIBLE</span><h3>AI Provider</h3></div><button id="ai-provider-new" class="primary-command compact-command" type="button"><i data-lucide="plus"></i><span>注册 Provider</span></button></div>
@@ -383,6 +382,11 @@
         <section id="settings-mcp-view" class="settings-view" role="tabpanel" hidden>
           <div class="settings-view-header"><div><span class="panel-kicker">REMOTE TOOLS</span><h3>MCP Server</h3></div><button id="mcp-server-new" class="primary-command compact-command" type="button"><i data-lucide="plus"></i><span>注册 Server</span></button></div>
           <div id="mcp-server-list" class="settings-record-list"></div>
+        </section>
+        <section id="settings-runtime-view" class="settings-view" role="tabpanel" hidden>
+          <div class="settings-view-header"><div><span class="panel-kicker">READ-ONLY</span><h3>数据服务</h3></div></div>
+          <p class="control-note">以下端点由部署环境（环境变量或内置默认值）统一配置，此处只读展示，不能在页面中修改。</p>
+          <div id="runtime-service-list" class="settings-record-list"></div>
         </section>
       </section>
 
@@ -474,14 +478,15 @@
         </form>
       </dialog>
 
-      <dialog id="resource-catalog-settings-dialog" class="workspace-dialog compact-dialog">
-        <form id="resource-catalog-settings-form" class="dialog-form">
-          <header><div><span class="panel-kicker">ASSETS CATALOG</span><h2>配置公开巡天目录</h2></div><button id="resource-catalog-settings-close" class="icon-button" type="button" aria-label="关闭"><i data-lucide="x"></i></button></header>
-          <label class="field-label" for="resource-catalog-url">Assets catalog URL</label>
-          <input id="resource-catalog-url" class="field-input" type="url" required />
-          <label class="field-label" for="resource-catalog-admin-token">资源管理员 token</label>
-          <input id="resource-catalog-admin-token" class="field-input" type="password" autocomplete="off" placeholder="仅保存在当前页面内存" required />
-          <footer><button id="resource-catalog-settings-cancel" class="command-button secondary" type="button">取消</button><button id="resource-catalog-settings-save" class="command-button" type="submit">保存配置</button><button id="resource-catalog-settings-sync" class="primary-command" type="button"><i data-lucide="refresh-cw"></i><span>保存并同步</span></button></footer>
+      <dialog id="resource-catalog-sync-dialog" class="workspace-dialog compact-dialog">
+        <form id="resource-catalog-sync-form" class="dialog-form">
+          <header><div><span class="panel-kicker">ASSETS CATALOG</span><h2>同步公开巡天目录</h2></div><button id="resource-catalog-sync-close" class="icon-button" type="button" aria-label="关闭"><i data-lucide="x"></i></button></header>
+          <p class="control-note">目录地址由部署环境统一配置，只能在“系统配置 · 数据服务”中查看，不能在页面中修改。</p>
+          <label class="field-label">当前目录地址</label>
+          <output id="resource-catalog-sync-url" class="field-input resource-catalog-sync-url">--</output>
+          <label class="field-label" for="resource-catalog-sync-token">资源管理员 token</label>
+          <input id="resource-catalog-sync-token" class="field-input" type="password" autocomplete="off" placeholder="仅保存在当前页面内存" required />
+          <footer><button id="resource-catalog-sync-cancel" class="command-button secondary" type="button">取消</button><button id="resource-catalog-sync-submit" class="primary-command" type="submit"><i data-lucide="refresh-cw"></i><span>立即同步</span></button></footer>
         </form>
       </dialog>
 

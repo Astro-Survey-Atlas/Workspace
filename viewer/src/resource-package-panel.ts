@@ -278,13 +278,29 @@ export class ResourcePackagePanel {
       section.append(...group.records.map((record) => {
       const row = document.createElement("article");
       row.className = "resource-package-row";
+      row.dataset.id = record.id;
       row.dataset.status = record.status;
       row.dataset.selected = String(record.id === this.#selectedId);
       row.dataset.dirty = String(this.#packageIsDirty(record.id));
+      row.setAttribute("role", "button");
+      row.tabIndex = 0;
+      row.setAttribute("aria-label", `查看 ${record.name} 的公开版本`);
+      const selectRow = () => {
+        this.#selectedId = record.id;
+        for (const element of list.querySelectorAll<HTMLElement>(".resource-package-row")) {
+          element.dataset.selected = String(element.dataset.id === record.id);
+        }
+        this.#showSelected();
+      };
       row.addEventListener("click", (event) => {
         if ((event.target as HTMLElement).closest("input")) return;
-        this.#selectedId = record.id;
-        this.#showSelected();
+        selectRow();
+      });
+      row.addEventListener("keydown", (event) => {
+        if (event.target instanceof HTMLElement && event.target.closest("input")) return;
+        if (event.key !== "Enter" && event.key !== " ") return;
+        event.preventDefault();
+        selectRow();
       });
 
       const draft = this.#draftReleases.get(record.id) ?? new Set<string>();
