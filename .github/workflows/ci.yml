@@ -54,12 +54,12 @@ jobs:
         with:
           version: v3.16.3
       - name: helm lint
-        run: helm lint charts/astro-data-workspace --strict
+        run: helm lint charts/asa-workspace --strict
       - name: helm template (bundled modes)
-        run: helm template workspace charts/astro-data-workspace > /dev/null
+        run: helm template workspace charts/asa-workspace > /dev/null
       - name: helm template (external modes)
         run: |
-          helm template workspace charts/astro-data-workspace \
+          helm template workspace charts/asa-workspace \
             --set postgresql.enabled=false \
             --set elasticsearch.enabled=false \
             --set metadataStore.mode=external-postgresql \
@@ -78,6 +78,6 @@ jobs:
         with:
           context: .
           push: false
-          tags: astro-data-workspace:ci
+          tags: asa-workspace:ci
           cache-from: type=gha
           cache-to: type=gha,mode=max

@@ -326,7 +326,7 @@ export function buildWorkspaceScanRequest(value: ScanRequestBuildInput): Record<
     evidence: { outputPath: `${evidenceMountPath.replace(/\/+$/, "")}/${batchId}` },
   };
   const labels: Record<string, string> = {
-    "app.kubernetes.io/managed-by": "astro-data-workspace",
+    "app.kubernetes.io/managed-by": "asa-workspace",
     "astro.zhejianglab.org/atlas-task": "true",
     "astro.zhejianglab.org/atlas-task-kind": coverage ? "user_coverage" : "user_scan",
     "astro.zhejianglab.org/asset": asset.id,
@@ -583,7 +583,7 @@ export class WarehouseScanService {
 
   async #createSecret(name: string, credentials: StoredConnectorCredentials, endpoint: string, batchId: string, warehouseCredentials?: { username: string; password: string }): Promise<void> {
     const body = {
-      metadata: { name, namespace: this.#namespace, labels: { "app.kubernetes.io/managed-by": "astro-data-workspace", "atlas.zhejianglab.org/track-caller": "workspace", "atlas.zhejianglab.org/track-batch": batchId } },
+      metadata: { name, namespace: this.#namespace, labels: { "app.kubernetes.io/managed-by": "asa-workspace", "atlas.zhejianglab.org/track-caller": "workspace", "atlas.zhejianglab.org/track-batch": batchId } },
       type: "Opaque",
       stringData: {
         "access-key": credentials.accessKeyId,

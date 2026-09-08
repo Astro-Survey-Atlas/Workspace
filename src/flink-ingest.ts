@@ -436,7 +436,7 @@ export class FlinkScanService {
         name,
         namespace: this.#secretNamespace,
         labels: {
-          "app.kubernetes.io/managed-by": "astro-data-workspace",
+          "app.kubernetes.io/managed-by": "asa-workspace",
           "astro.zhejianglab.org/scan-secret": "true",
           "astro.zhejianglab.org/scan-token": token,
         },
@@ -605,12 +605,12 @@ export class FlinkScanService {
     if (!this.#client || connector.kind !== "s3") return;
     const source = {
       apiVersion: "org.zhejianglab.astro.metadata/v1alpha1", kind: "AstroDataSource",
-      metadata: { name: connector.id, namespace: this.#namespace, labels: { "app.kubernetes.io/managed-by": "astro-data-workspace" } },
+      metadata: { name: connector.id, namespace: this.#namespace, labels: { "app.kubernetes.io/managed-by": "asa-workspace" } },
       spec: { type: "s3", endpoint: connector.config.endpoint, bucket: connector.config.bucket, prefix: connector.config.prefix ?? "", credentialSecretRef: { name: secretName } },
     };
     await this.#upsertAstroDataSource(connector.id, source);
     const sinkName = `${connector.id}-sink`.slice(0, 63).replace(/-+$/g, "");
-    const sink = { apiVersion: "org.zhejianglab.astro.metadata/v1alpha1", kind: "AstroDataSource", metadata: { name: sinkName, namespace: this.#namespace, labels: { "app.kubernetes.io/managed-by": "astro-data-workspace" } }, spec: { type: "elasticsearch", endpoint: this.#esUrl } };
+    const sink = { apiVersion: "org.zhejianglab.astro.metadata/v1alpha1", kind: "AstroDataSource", metadata: { name: sinkName, namespace: this.#namespace, labels: { "app.kubernetes.io/managed-by": "asa-workspace" } }, spec: { type: "elasticsearch", endpoint: this.#esUrl } };
     await this.#upsertAstroDataSource(sinkName, sink);
   }
 

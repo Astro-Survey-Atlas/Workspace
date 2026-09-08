@@ -27,7 +27,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    image: astro-data-workspace:local
+    image: asa-workspace:local
     depends_on:
       workspace-elasticsearch:
         condition: service_healthy
@@ -87,6 +87,6 @@ services:
 
 volumes:
   state:
-    name: astro-data-workspace-state
+    name: asa-workspace-state
   search:
-    name: astro-data-workspace-search
+    name: asa-workspace-search

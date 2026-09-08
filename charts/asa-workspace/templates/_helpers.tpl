@@ -1,19 +1,19 @@
-{{- define "astro-data-workspace.name" -}}
+{{- define "asa-workspace.name" -}}
 {{- default .Chart.Name .Values.nameOverride | trunc 63 | trimSuffix "-" }}
 {{- end }}
-{{- define "astro-data-workspace.fullname" -}}
-{{- if .Values.fullnameOverride }}{{ .Values.fullnameOverride | trunc 63 | trimSuffix "-" }}{{- else }}{{ include "astro-data-workspace.name" . }}{{- end }}
+{{- define "asa-workspace.fullname" -}}
+{{- if .Values.fullnameOverride }}{{ .Values.fullnameOverride | trunc 63 | trimSuffix "-" }}{{- else }}{{ include "asa-workspace.name" . }}{{- end }}
 {{- end }}
-{{- define "astro-data-workspace.labels" -}}
-app.kubernetes.io/name: {{ include "astro-data-workspace.name" . }}
+{{- define "asa-workspace.labels" -}}
+app.kubernetes.io/name: {{ include "asa-workspace.name" . }}
 app.kubernetes.io/instance: {{ .Release.Name }}
 app.kubernetes.io/managed-by: {{ .Release.Service }}
 helm.sh/chart: {{ .Chart.Name }}-{{ .Chart.Version | replace "+" "_" }}
 {{- end }}
-{{- define "astro-data-workspace.serviceAccountName" -}}
-{{- if .Values.serviceAccount.create }}{{ default (include "astro-data-workspace.fullname" .) .Values.serviceAccount.name }}{{- else }}{{ required "serviceAccount.name is required when serviceAccount.create is false" .Values.serviceAccount.name }}{{- end }}
+{{- define "asa-workspace.serviceAccountName" -}}
+{{- if .Values.serviceAccount.create }}{{ default (include "asa-workspace.fullname" .) .Values.serviceAccount.name }}{{- else }}{{ required "serviceAccount.name is required when serviceAccount.create is false" .Values.serviceAccount.name }}{{- end }}
 {{- end }}
-{{- define "astro-data-workspace.postgresqlFullname" -}}
+{{- define "asa-workspace.postgresqlFullname" -}}
 {{- if .Values.postgresql.fullnameOverride -}}
 {{- .Values.postgresql.fullnameOverride | trunc 63 | trimSuffix "-" -}}
 {{- else if .Values.postgresql.nameOverride -}}
@@ -22,10 +22,10 @@ helm.sh/chart: {{ .Chart.Name }}-{{ .Chart.Version | replace "+" "_" }}
 {{- printf "%s-postgresql" .Release.Name | trunc 63 | trimSuffix "-" -}}
 {{- end -}}
 {{- end }}
-{{- define "astro-data-workspace.elasticsearchName" -}}
+{{- define "asa-workspace.elasticsearchName" -}}
 {{- default "elasticsearch" .Values.elasticsearch.nameOverride | trunc 63 | trimSuffix "-" -}}
 {{- end }}
-{{- define "astro-data-workspace.elasticsearchFullname" -}}
+{{- define "asa-workspace.elasticsearchFullname" -}}
 {{- if .Values.elasticsearch.fullnameOverride -}}
 {{- .Values.elasticsearch.fullnameOverride | trunc 63 | trimSuffix "-" -}}
 {{- else if .Values.elasticsearch.nameOverride -}}
@@ -34,16 +34,16 @@ helm.sh/chart: {{ .Chart.Name }}-{{ .Chart.Version | replace "+" "_" }}
 {{- printf "%s-elasticsearch" .Release.Name | trunc 63 | trimSuffix "-" -}}
 {{- end -}}
 {{- end }}
-{{- define "astro-data-workspace.elasticsearchUrl" -}}
-{{- printf "http://%s:9200" (include "astro-data-workspace.elasticsearchFullname" .) -}}
+{{- define "asa-workspace.elasticsearchUrl" -}}
+{{- printf "http://%s:9200" (include "asa-workspace.elasticsearchFullname" .) -}}
 {{- end }}
-{{- define "astro-data-workspace.warehouseEvidenceClaim" -}}
+{{- define "asa-workspace.warehouseEvidenceClaim" -}}
 {{- if .Values.dataWarehouse.evidence.existingClaim -}}
 {{- .Values.dataWarehouse.evidence.existingClaim -}}
 {{- else -}}
-{{- printf "%s-evidence" (include "astro-data-workspace.fullname" .) | trunc 63 | trimSuffix "-" -}}
+{{- printf "%s-evidence" (include "asa-workspace.fullname" .) | trunc 63 | trimSuffix "-" -}}
 {{- end -}}
 {{- end }}
-{{- define "astro-data-workspace.warehouseNamespace" -}}
+{{- define "asa-workspace.warehouseNamespace" -}}
 {{- default .Release.Namespace .Values.dataWarehouse.namespace -}}
 {{- end }}

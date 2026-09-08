@@ -20,7 +20,7 @@ function asToolError(error: unknown) {
 
 /** Read-only MCP surface for Atlas-owned user assets. */
 export function createAstroMcpServer(dataCatalog: DataCatalogRegistry): McpServer {
-  const server = new McpServer({ name: "astro-data-workspace", version: "0.10.38" });
+  const server = new McpServer({ name: "asa-workspace", version: "0.10.38" });
 
   server.registerTool(
     "list_user_assets",

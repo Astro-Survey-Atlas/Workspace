@@ -1,19 +1,19 @@
 apiVersion: v1
 kind: Namespace
 metadata:
-  name: astro-data-workspace
+  name: asa-workspace
 ---
 apiVersion: v1
 kind: ServiceAccount
 metadata:
-  name: astro-data-workspace-mcp
-  namespace: astro-data-workspace
+  name: asa-workspace-mcp
+  namespace: asa-workspace
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
   name: connector-credential-manager
-  namespace: astro-data-workspace
+  namespace: asa-workspace
 rules:
   - apiGroups: [""]
     resources: ["secrets"]
@@ -29,21 +29,21 @@ apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
   name: connector-credential-manager
-  namespace: astro-data-workspace
+  namespace: asa-workspace
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role
   name: connector-credential-manager
 subjects:
   - kind: ServiceAccount
-    name: astro-data-workspace-mcp
-    namespace: astro-data-workspace
+    name: asa-workspace-mcp
+    namespace: asa-workspace
 ---
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
   name: registry-state
-  namespace: astro-data-workspace
+  namespace: asa-workspace
 spec:
   accessModes:
     - ReadWriteOnce
@@ -56,7 +56,7 @@ apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
   name: workspace-metadata
-  namespace: astro-data-workspace
+  namespace: asa-workspace
 spec:
   accessModes:
     - ReadWriteOnce
@@ -69,7 +69,7 @@ apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
   name: resource-packages
-  namespace: astro-data-workspace
+  namespace: asa-workspace
 spec:
   accessModes:
     - ReadWriteOnce
@@ -82,7 +82,7 @@ apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
   name: workspace-evidence
-  namespace: astro-data-workspace
+  namespace: asa-workspace
   labels:
     atlas.zhejianglab.org/evidence: "true"
 spec:
@@ -97,7 +97,7 @@ apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
   name: workspace-search-data
-  namespace: astro-data-workspace
+  namespace: asa-workspace
 spec:
   accessModes:
     - ReadWriteOnce
@@ -109,21 +109,21 @@ spec:
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: astro-data-workspace-elasticsearch
-  namespace: astro-data-workspace
+  name: asa-workspace-elasticsearch
+  namespace: asa-workspace
   labels:
-    app.kubernetes.io/name: astro-data-workspace-elasticsearch
+    app.kubernetes.io/name: asa-workspace-elasticsearch
 spec:
   replicas: 1
   strategy:
     type: Recreate
   selector:
     matchLabels:
-      app.kubernetes.io/name: astro-data-workspace-elasticsearch
+      app.kubernetes.io/name: asa-workspace-elasticsearch
   template:
     metadata:
       labels:
-        app.kubernetes.io/name: astro-data-workspace-elasticsearch
+        app.kubernetes.io/name: asa-workspace-elasticsearch
     spec:
       securityContext:
         fsGroup: 1001
@@ -150,6 +150,13 @@ spec:
               containerPort: 9200
             - name: transport
               containerPort: 9300
+          startupProbe:
+            exec:
+              command:
+                - /opt/bitnami/scripts/elasticsearch/healthcheck.sh
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 60
           readinessProbe:
             exec:
               command:
@@ -193,13 +200,13 @@ spec:
 apiVersion: v1
 kind: Service
 metadata:
-  name: astro-data-workspace-elasticsearch
-  namespace: astro-data-workspace
+  name: asa-workspace-elasticsearch
+  namespace: asa-workspace
   labels:
-    app.kubernetes.io/name: astro-data-workspace-elasticsearch
+    app.kubernetes.io/name: asa-workspace-elasticsearch
 spec:
   selector:
-    app.kubernetes.io/name: astro-data-workspace-elasticsearch
+    app.kubernetes.io/name: asa-workspace-elasticsearch
   ports:
     - name: http
       port: 9200
@@ -211,10 +218,10 @@ spec:
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: astro-data-workspace-search-init
-  namespace: astro-data-workspace
+  name: asa-workspace-search-init
+  namespace: asa-workspace
   labels:
-    app.kubernetes.io/name: astro-data-workspace-search-init
+    app.kubernetes.io/name: asa-workspace-search-init
 spec:
   backoffLimit: 3
   activeDeadlineSeconds: 900
@@ -222,7 +229,7 @@ spec:
   template:
     metadata:
       labels:
-        app.kubernetes.io/name: astro-data-workspace-search-init
+        app.kubernetes.io/name: asa-workspace-search-init
     spec:
       automountServiceAccountToken: false
       restartPolicy: OnFailure
@@ -237,7 +244,7 @@ spec:
           imagePullPolicy: IfNotPresent
           env:
             - name: ASTRO_ES_URL
-              value: http://astro-data-workspace-elasticsearch.astro-data-workspace.svc.cluster.local:9200
+              value: http://asa-workspace-elasticsearch.asa-workspace.svc.cluster.local:9200
             - name: FILE_INDEX
               value: astro_file_index_v1
             - name: OBJECT_INDEX
@@ -361,21 +368,21 @@ spec:
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: astro-data-workspace-mcp
-  namespace: astro-data-workspace
+  name: asa-workspace-mcp
+  namespace: asa-workspace
 spec:
   replicas: 1
   strategy:
     type: Recreate
   selector:
     matchLabels:
-      app.kubernetes.io/name: astro-data-workspace-mcp
+      app.kubernetes.io/name: asa-workspace-mcp
   template:
     metadata:
       labels:
-        app.kubernetes.io/name: astro-data-workspace-mcp
+        app.kubernetes.io/name: asa-workspace-mcp
     spec:
-      serviceAccountName: astro-data-workspace-mcp
+      serviceAccountName: asa-workspace-mcp
       nodeSelector:
         kubernetes.io/hostname: eva7028
       imagePullSecrets:
@@ -385,7 +392,7 @@ spec:
         fsGroupChangePolicy: OnRootMismatch
       containers:
         - name: mcp
-          image: crpi-wixjy6gci86ms14e.cn-hongkong.personal.cr.aliyuncs.com/ay-dev/astro-data-workspace-mcp:0.10.38-20260907-164814
+          image: crpi-wixjy6gci86ms14e.cn-hongkong.personal.cr.aliyuncs.com/ay-dev/asa-workspace-mcp:0.10.38-20260908-014209
           imagePullPolicy: Always
           ports:
             - name: http
@@ -428,7 +435,7 @@ spec:
             - name: ASTRO_RESOURCE_ADMIN_TOKEN
               valueFrom:
                 secretKeyRef:
-                  name: astro-data-workspace-resource-admin
+                  name: asa-workspace-resource-admin
                   key: admin-token
             - name: ASTRO_RESOURCE_SNAPSHOT_ROOT
               value: /state
@@ -443,7 +450,7 @@ spec:
             # Independent search service for local object and coverage indices.
             # Keep this inside the cluster; the public NodePort is for the workspace API only.
             - name: ASTRO_ES_URL
-              value: http://astro-data-workspace-elasticsearch.astro-data-workspace.svc.cluster.local:9200
+              value: http://asa-workspace-elasticsearch.asa-workspace.svc.cluster.local:9200
             - name: ASTRO_ES_ASTRO_INDEX
               value: astro_file_index_v1
             - name: ASTRO_ES_OBJECT_INDEX
@@ -455,7 +462,7 @@ spec:
             - name: ASTRO_ES_OVERVIEW_CACHE_MS
               value: "60000"
             - name: ASTRO_WAREHOUSE_NAMESPACE
-              value: astro-data-workspace
+              value: asa-workspace
             - name: ASTRO_WAREHOUSE_POLL_MS
               value: "5000"
             - name: ASTRO_WAREHOUSE_ES_URL
@@ -473,14 +480,24 @@ spec:
             - name: ASTRO_WAREHOUSE_SCANNER_IMAGE
               value: crpi-wixjy6gci86ms14e.cn-hongkong.personal.cr.aliyuncs.com/ay-dev/astro-atlas-scanner:0.2.0-20260826-shutdownfix1
             - name: ASTRO_ALLOWED_HOSTS
-              value: localhost,127.0.0.1,10.15.49.212,10.15.51.75,astro.workspace.dev.72602.space,astro-data-workspace-mcp,astro-data-workspace-mcp.astro-data-workspace,astro-data-workspace-mcp.astro-data-workspace.svc,astro-data-workspace-mcp.astro-data-workspace.svc.cluster.local
+              value: localhost,127.0.0.1,10.15.49.212,10.15.51.75,astro.workspace.dev.72602.space,asa-workspace-mcp,asa-workspace-mcp.asa-workspace,asa-workspace-mcp.asa-workspace.svc,asa-workspace-mcp.asa-workspace.svc.cluster.local
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: http
+              httpHeaders:
+                - name: Host
+                  value: asa-workspace-mcp
+            periodSeconds: 5
+            timeoutSeconds: 5
+            failureThreshold: 60
           readinessProbe:
             httpGet:
               path: /healthz
               port: http
               httpHeaders:
                 - name: Host
-                  value: astro-data-workspace-mcp
+                  value: asa-workspace-mcp
             initialDelaySeconds: 2
             periodSeconds: 5
             timeoutSeconds: 5
@@ -491,7 +508,7 @@ spec:
               port: http
               httpHeaders:
                 - name: Host
-                  value: astro-data-workspace-mcp
+                  value: asa-workspace-mcp
             initialDelaySeconds: 5
             periodSeconds: 15
             timeoutSeconds: 5
@@ -544,11 +561,11 @@ spec:
 apiVersion: v1
 kind: Service
 metadata:
-  name: astro-data-workspace-mcp
-  namespace: astro-data-workspace
+  name: asa-workspace-mcp
+  namespace: asa-workspace
 spec:
   selector:
-    app.kubernetes.io/name: astro-data-workspace-mcp
+    app.kubernetes.io/name: asa-workspace-mcp
   ports:
     - name: http
       port: 3000
@@ -559,8 +576,8 @@ spec:
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
-  name: astro-data-workspace
-  namespace: astro-data-workspace
+  name: asa-workspace
+  namespace: asa-workspace
   annotations:
     nginx.ingress.kubernetes.io/proxy-read-timeout: "480"
     nginx.ingress.kubernetes.io/proxy-send-timeout: "480"
@@ -574,6 +591,6 @@ spec:
             pathType: Prefix
             backend:
               service:
-                name: astro-data-workspace-mcp
+                name: asa-workspace-mcp
                 port:
                   name: http

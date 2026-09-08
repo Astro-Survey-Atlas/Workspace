@@ -8,11 +8,11 @@
 # The workspace image defaults to the public GitHub Container Registry tag.
 # Pin a specific released version instead of `latest` for reproducibility:
 #
-#   ASTRO_WORKSPACE_IMAGE=ghcr.io/astro-survey-atlas/astro-data-workspace:0.10.38 \
+#   ASTRO_WORKSPACE_IMAGE=ghcr.io/astro-survey-atlas/asa-workspace:0.10.38 \
 #     docker compose -f compose.release.yaml up -d
 #
-# Data lives in the named volumes `astro-data-workspace-state` (sqlite and
-# derived state) and `astro-data-workspace-search` (Elasticsearch index data);
+# Data lives in the named volumes `asa-workspace-state` (sqlite and
+# derived state) and `asa-workspace-search` (Elasticsearch index data);
 # both survive `down` and are only removed with `down -v`.
 services:
   workspace-elasticsearch:
@@ -40,7 +40,7 @@ services:
       start_period: 30s
 
   workspace:
-    image: ${ASTRO_WORKSPACE_IMAGE:-ghcr.io/astro-survey-atlas/astro-data-workspace:latest}
+    image: ${ASTRO_WORKSPACE_IMAGE:-ghcr.io/astro-survey-atlas/asa-workspace:latest}
     pull_policy: missing
     depends_on:
       workspace-elasticsearch:
@@ -101,6 +101,6 @@ services:
 
 volumes:
   state:
-    name: astro-data-workspace-state
+    name: asa-workspace-state
   search:
-    name: astro-data-workspace-search
+    name: asa-workspace-search

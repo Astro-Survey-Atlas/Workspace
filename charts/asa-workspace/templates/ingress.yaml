@@ -2,9 +2,9 @@
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
-  name: {{ include "astro-data-workspace.fullname" . }}
+  name: {{ include "asa-workspace.fullname" . }}
   labels:
-    {{- include "astro-data-workspace.labels" . | nindent 4 }}
+    {{- include "asa-workspace.labels" . | nindent 4 }}
   {{- with .Values.ingress.annotations }}
   annotations: {{ toYaml . | nindent 4 }}
   {{- end }}

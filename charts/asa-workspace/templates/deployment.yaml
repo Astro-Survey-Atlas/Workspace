@@ -1,28 +1,28 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: {{ include "astro-data-workspace.fullname" . }}
+  name: {{ include "asa-workspace.fullname" . }}
   labels:
-    {{- include "astro-data-workspace.labels" . | nindent 4 }}
+    {{- include "asa-workspace.labels" . | nindent 4 }}
 spec:
   replicas: {{ .Values.replicaCount }}
   strategy:
     type: Recreate
   selector:
     matchLabels:
-      app.kubernetes.io/name: {{ include "astro-data-workspace.name" . }}
+      app.kubernetes.io/name: {{ include "asa-workspace.name" . }}
       app.kubernetes.io/instance: {{ .Release.Name }}
   template:
     metadata:
       labels:
-        {{- include "astro-data-workspace.labels" . | nindent 8 }}
+        {{- include "asa-workspace.labels" . | nindent 8 }}
     spec:
       automountServiceAccountToken: {{ .Values.dataWarehouse.enabled }}
       {{- with .Values.imagePullSecrets }}
       imagePullSecrets: {{ toYaml . | nindent 8 }}
       {{- end }}
       {{- if .Values.dataWarehouse.enabled }}
-      serviceAccountName: {{ include "astro-data-workspace.serviceAccountName" . }}
+      serviceAccountName: {{ include "asa-workspace.serviceAccountName" . }}
       {{- end }}
       {{- if gt (len .Values.localData.nodeSelector) 0 }}
       nodeSelector: {{ toYaml .Values.localData.nodeSelector | nindent 8 }}
@@ -78,10 +78,10 @@ spec:
             - name: ASTRO_DATABASE_PASSWORD
               valueFrom:
                 secretKeyRef:
-                  name: {{ default (include "astro-data-workspace.postgresqlFullname" .) .Values.postgresql.auth.existingSecret | quote }}
+                  name: {{ default (include "asa-workspace.postgresqlFullname" .) .Values.postgresql.auth.existingSecret | quote }}
                   key: {{ .Values.postgresql.auth.secretKeys.userPasswordKey | quote }}
             - name: ASTRO_DATABASE_URL
-              value: {{ printf "postgresql://%s:$(ASTRO_DATABASE_PASSWORD)@%s:5432/%s" .Values.postgresql.auth.username (include "astro-data-workspace.postgresqlFullname" .) .Values.postgresql.auth.database | quote }}
+              value: {{ printf "postgresql://%s:$(ASTRO_DATABASE_PASSWORD)@%s:5432/%s" .Values.postgresql.auth.username (include "asa-workspace.postgresqlFullname" .) .Values.postgresql.auth.database | quote }}
             {{- else }}
             - name: ASTRO_DATABASE_URL
               valueFrom:
@@ -91,7 +91,7 @@ spec:
             {{- end }}
             - name: ASTRO_ES_URL
               {{- if eq .Values.search.mode "bundled" }}
-              value: {{ include "astro-data-workspace.elasticsearchUrl" . | quote }}
+              value: {{ include "asa-workspace.elasticsearchUrl" . | quote }}
               {{- else }}
               valueFrom:
                 secretKeyRef:
@@ -114,7 +114,7 @@ spec:
               value: /state/user-mocs
             {{- if .Values.dataWarehouse.enabled }}
             - name: ASTRO_WAREHOUSE_NAMESPACE
-              value: {{ include "astro-data-workspace.warehouseNamespace" . | quote }}
+              value: {{ include "asa-workspace.warehouseNamespace" . | quote }}
             - name: ASTRO_WAREHOUSE_POLL_MS
               value: {{ .Values.dataWarehouse.pollIntervalMs | quote }}
             - name: ASTRO_WAREHOUSE_ES_URL
@@ -133,7 +133,7 @@ spec:
             - name: ASTRO_WAREHOUSE_COVERAGE_INDEX
               value: {{ .Values.dataWarehouse.elasticsearch.coverageIndex | quote }}
             - name: ASTRO_WAREHOUSE_EVIDENCE_CLAIM
-              value: {{ include "astro-data-workspace.warehouseEvidenceClaim" . | quote }}
+              value: {{ include "asa-workspace.warehouseEvidenceClaim" . | quote }}
             - name: ASTRO_WAREHOUSE_EVIDENCE_MOUNT_PATH
               value: {{ .Values.dataWarehouse.evidence.mountPath | quote }}
             - name: ASTRO_WAREHOUSE_SCANNER_IMAGE
@@ -203,7 +203,7 @@ spec:
             claimName: {{ .Values.persistence.existingClaim }}
           {{- else if .Values.persistence.enabled }}
           persistentVolumeClaim:
-            claimName: {{ include "astro-data-workspace.fullname" . }}-state
+            claimName: {{ include "asa-workspace.fullname" . }}-state
           {{- else }}
           emptyDir: {}
           {{- end }}
@@ -212,7 +212,7 @@ spec:
         {{- if .Values.dataWarehouse.enabled }}
         - name: warehouse-evidence
           persistentVolumeClaim:
-            claimName: {{ include "astro-data-workspace.warehouseEvidenceClaim" . | quote }}
+            claimName: {{ include "asa-workspace.warehouseEvidenceClaim" . | quote }}
         {{- end }}
         {{- if .Values.localData.enabled }}
         - name: local-data

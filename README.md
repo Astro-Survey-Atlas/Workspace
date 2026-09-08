@@ -172,12 +172,12 @@ Then open `http://127.0.0.1:8080/`. Pin a released version instead of
 `latest` for reproducibility:
 
 ```bash
-ASTRO_WORKSPACE_IMAGE=ghcr.io/astro-survey-atlas/astro-data-workspace:<version> \
+ASTRO_WORKSPACE_IMAGE=ghcr.io/astro-survey-atlas/asa-workspace:<version> \
   docker compose -f compose.release.yaml up -d
 ```
 
-Data persists in the named volumes `astro-data-workspace-state` (SQLite and
-derived state) and `astro-data-workspace-search` (Elasticsearch data); both
+Data persists in the named volumes `asa-workspace-state` (SQLite and
+derived state) and `asa-workspace-search` (Elasticsearch data); both
 survive `docker compose down` and are only removed with `down -v`.
 
 ### Developers (build from source)
@@ -201,41 +201,41 @@ docker compose -f compose.yaml -f compose.local.yaml up -d
 
 ## ⎈ Helm
 
-The chart under `charts/astro-data-workspace` is published to GHCR OCI on every
+The chart under `charts/asa-workspace` is published to GHCR OCI on every
 release tag and supports three metadata-store modes (`sqlite`, `bundled-postgresql`,
 `external-postgresql`) and bundled or external Elasticsearch:
 
 ```bash
 # Install into a clean namespace (bundled SQLite + bundled Elasticsearch)
-helm install workspace oci://ghcr.io/astro-survey-atlas/charts/astro-data-workspace \
+helm install workspace oci://ghcr.io/astro-survey-atlas/charts/asa-workspace \
   --namespace astro-workspace --create-namespace
 
 # Watch the rollout, then check health
-kubectl -n astro-workspace rollout status deployment/workspace-astro-data-workspace
-kubectl -n astro-workspace port-forward svc/workspace-astro-data-workspace 3000:3000
+kubectl -n astro-workspace rollout status deployment/workspace-asa-workspace
+kubectl -n astro-workspace port-forward svc/workspace-asa-workspace 3000:3000
 curl http://127.0.0.1:3000/healthz
 ```
 
 External dependencies (managed PostgreSQL / Elasticsearch) are wired via
 `metadataStore.mode=external-postgresql` and `search.mode=external` with
-`existingSecret` references — see `charts/astro-data-workspace/README.md` and
+`existingSecret` references — see `charts/asa-workspace/README.md` and
 `values.schema.json` for the full contract.
 
 ---
 
 ## ☸️ Kubernetes (k3s) Deployment
 
-The production deployment manifest targets k3s under the `astro-data-workspace` namespace.
+The production deployment manifest targets k3s under the `asa-workspace` namespace.
 
 ```bash
 # 1. Build the Docker image
-docker build -t ay-dev/astro-data-workspace-mcp:latest .
+docker build -t ay-dev/asa-workspace-mcp:latest .
 
 # 2. Apply the manifest
 kubectl apply -f deploy/k3s.yaml
 
 # 3. Wait for the roll-out to complete
-kubectl -n astro-data-workspace rollout status deployment/astro-data-workspace-mcp
+kubectl -n asa-workspace rollout status deployment/asa-workspace-mcp
 ```
 * **Ingress endpoint**: `http://astro.workspace.dev.72602.space:32080/`
 * **Direct NodePort access**: Port `32082` (maps directly to container port `3000`)

@@ -137,7 +137,7 @@ evidence 或 HTTP 响应。
 `atlas-task*` labels 仍作为兼容字段保留）：
 
 ```yaml
-app.kubernetes.io/managed-by: astro-data-workspace
+app.kubernetes.io/managed-by: asa-workspace
 atlas.zhejianglab.org/track-caller: workspace
 atlas.zhejianglab.org/track-task-kind: user-scan | user-coverage
 atlas.zhejianglab.org/track-asset: <asset-id>

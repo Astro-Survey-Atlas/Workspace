@@ -155,7 +155,7 @@ export class PostgresMetadataStore implements MetadataStore {
     const client = await this.pool.connect();
     try {
       await client.query("BEGIN");
-      await client.query("SELECT pg_advisory_xact_lock(hashtext($1))", [`astro-data-workspace:${this.schema}:migrations`]);
+      await client.query("SELECT pg_advisory_xact_lock(hashtext($1))", [`asa-workspace:${this.schema}:migrations`]);
       await client.query(`CREATE SCHEMA IF NOT EXISTS ${this.quotedSchema}`);
       await client.query(`CREATE TABLE IF NOT EXISTS ${this.quotedSchema}.schema_migrations (
         version integer PRIMARY KEY, applied_at timestamptz NOT NULL

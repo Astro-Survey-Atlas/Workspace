@@ -42,7 +42,7 @@ export class MemoryConnectorCredentialStore implements ConnectorCredentialStore 
   readonly #namespace: string;
   readonly #values = new Map<string, StoredConnectorCredentials>();
 
-  constructor(namespace = "astro-data-workspace") {
+  constructor(namespace = "asa-workspace") {
     this.#namespace = namespace;
   }
 
@@ -113,7 +113,7 @@ export class KubernetesConnectorCredentialStore implements ConnectorCredentialSt
     const path = `/api/v1/namespaces/${encodeURIComponent(namespace)}/secrets/${encodeURIComponent(name)}`;
     const current = await this.#request("GET", path);
     const body = {
-      metadata: { name, namespace, labels: { "app.kubernetes.io/managed-by": "astro-data-workspace", "astro.zhejianglab.org/connector-credential": "true" } },
+      metadata: { name, namespace, labels: { "app.kubernetes.io/managed-by": "asa-workspace", "astro.zhejianglab.org/connector-credential": "true" } },
       type: "Opaque",
       stringData: {
         "access-key": credentials.accessKeyId,
@@ -150,7 +150,7 @@ export class KubernetesConnectorCredentialStore implements ConnectorCredentialSt
 }
 
 export function createConnectorCredentialStore(): ConnectorCredentialStore {
-  const namespace = process.env.POD_NAMESPACE ?? "astro-data-workspace";
+  const namespace = process.env.POD_NAMESPACE ?? "asa-workspace";
   if (!process.env.KUBERNETES_SERVICE_HOST) return new MemoryConnectorCredentialStore(namespace);
   const host = process.env.KUBERNETES_SERVICE_HOST;
   const port = process.env.KUBERNETES_SERVICE_PORT_HTTPS ?? process.env.KUBERNETES_SERVICE_PORT ?? "443";

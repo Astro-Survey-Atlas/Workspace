@@ -2,13 +2,13 @@
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
-  name: {{ include "astro-data-workspace.fullname" . }}-search
+  name: {{ include "asa-workspace.fullname" . }}-search
   labels:
-    {{- include "astro-data-workspace.labels" . | nindent 4 }}
+    {{- include "asa-workspace.labels" . | nindent 4 }}
 spec:
   podSelector:
     matchLabels:
-      app.kubernetes.io/name: {{ include "astro-data-workspace.elasticsearchName" . }}
+      app.kubernetes.io/name: {{ include "asa-workspace.elasticsearchName" . }}
       app.kubernetes.io/instance: {{ .Release.Name }}
       app.kubernetes.io/component: master
   policyTypes:
@@ -17,7 +17,7 @@ spec:
     - from:
         - podSelector:
             matchLabels:
-              app.kubernetes.io/name: {{ include "astro-data-workspace.name" . }}
+              app.kubernetes.io/name: {{ include "asa-workspace.name" . }}
               app.kubernetes.io/instance: {{ .Release.Name }}
       ports:
         - port: 9200
@@ -25,7 +25,7 @@ spec:
     - from:
         - podSelector:
             matchLabels:
-              app.kubernetes.io/name: {{ include "astro-data-workspace.elasticsearchName" . }}
+              app.kubernetes.io/name: {{ include "asa-workspace.elasticsearchName" . }}
               app.kubernetes.io/instance: {{ .Release.Name }}
               app.kubernetes.io/component: master
       ports:

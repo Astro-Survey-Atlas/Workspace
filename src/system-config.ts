@@ -244,7 +244,7 @@ export class SystemConfigStore {
     const token = record.tokenRef ? this.#secrets.values[record.tokenRef] : undefined;
     const headers = token ? { Authorization: `Bearer ${token}` } : undefined;
     try {
-      const client = new Client({ name: "astro-data-workspace", version: "0.10.38" });
+      const client = new Client({ name: "asa-workspace", version: "0.10.38" });
       const endpoint = new URL(record.url);
       const requestInit = { headers, signal: AbortSignal.timeout(15_000) };
       const transports = record.transport === "sse"

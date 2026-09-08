@@ -2,7 +2,7 @@ apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
   name: workspace-metadata
-  namespace: astro-data-workspace
+  namespace: asa-workspace
 spec:
   accessModes:
     - ReadWriteOnce

@@ -14,8 +14,8 @@ concurrency:
 
 env:
   ALIYUN_REGISTRY: crpi-wixjy6gci86ms14e.cn-hongkong.personal.cr.aliyuncs.com
-  ALIYUN_NAMESPACE_IMAGE: ay-dev/astro-data-workspace-mcp
-  GHCR_IMAGE: ghcr.io/astro-survey-atlas/astro-data-workspace
+  ALIYUN_NAMESPACE_IMAGE: ay-dev/asa-workspace-mcp
+  GHCR_IMAGE: ghcr.io/astro-survey-atlas/asa-workspace
   CHART_OCI: oci://ghcr.io/astro-survey-atlas/charts
 
 jobs:
@@ -83,7 +83,7 @@ jobs:
         with:
           version: v3.16.3
       - name: Pin chart + app version and image reference
-        working-directory: charts/astro-data-workspace
+        working-directory: charts/asa-workspace
         run: |
           VERSION="${{ needs.validate.outputs.version }}"
           IMAGE_TAG="${{ needs.validate.outputs.image_tag }}"
@@ -95,8 +95,8 @@ jobs:
           grep -A2 "^image:" values.yaml
       - name: helm lint & package
         run: |
-          helm lint charts/astro-data-workspace --strict
-          helm package charts/astro-data-workspace -d dist-chart
+          helm lint charts/asa-workspace --strict
+          helm package charts/asa-workspace -d dist-chart
       - name: Push chart to GHCR OCI
         run: |
           helm registry login ghcr.io -u ${{ github.actor }} -p ${{ secrets.GITHUB_TOKEN }}

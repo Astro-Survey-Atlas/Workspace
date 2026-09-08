@@ -77,7 +77,7 @@ export class McpCatalogQueryClient implements CatalogQueryClient {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(timeoutError(this.timeoutMs)), this.timeoutMs);
     const endpoint = new URL(this.url);
-    const client = new Client({ name: "astro-data-workspace", version: "0.6.0" });
+    const client = new Client({ name: "asa-workspace", version: "0.6.0" });
     const transports = endpoint.pathname.endsWith("/sse")
       ? [new SSEClientTransport(endpoint, { requestInit: { signal: controller.signal } }), new StreamableHTTPClientTransport(endpoint, { requestInit: { signal: controller.signal } })]
       : [new StreamableHTTPClientTransport(endpoint, { requestInit: { signal: controller.signal } }), new SSEClientTransport(endpoint, { requestInit: { signal: controller.signal } })];

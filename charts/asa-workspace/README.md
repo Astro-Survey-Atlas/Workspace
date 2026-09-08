@@ -13,14 +13,14 @@ Warehouse installation.
 `external-postgresql`.
 
 ```bash
-helm install workspace ./charts/astro-data-workspace
-helm install workspace ./charts/astro-data-workspace \
+helm install workspace ./charts/asa-workspace
+helm install workspace ./charts/asa-workspace \
   --set metadataStore.mode=bundled-postgresql \
   --set postgresql.enabled=true
-helm install workspace ./charts/astro-data-workspace \
+helm install workspace ./charts/asa-workspace \
   --set metadataStore.mode=external-postgresql \
   --set metadataStore.external.existingSecret=workspace-database
-helm install workspace ./charts/astro-data-workspace \
+helm install workspace ./charts/asa-workspace \
   --set search.mode=external \
   --set elasticsearch.enabled=false \
   --set search.external.existingSecret=workspace-search
@@ -36,7 +36,7 @@ key must match `postgresql.auth.secretKeys.userPasswordKey` (`password` by
 default).
 
 The dependency archive and `Chart.lock` are vendored for reproducible source
-installs. Run `helm dependency build charts/astro-data-workspace` when updating
+installs. Run `helm dependency build charts/asa-workspace` when updating
 or verifying the dependency.
 
 ## Controlled local data mount
@@ -94,7 +94,7 @@ adapters. It has `before-hook-creation` cleanup, so a Helm upgrade reruns the
 check after a mapping or image change. The one-shot Job in `deploy/k3s.yaml`
 has the same reconciliation responsibility; because Kubernetes Job pod
 templates are immutable, remove its completed
-`astro-data-workspace-search-init` object
+`asa-workspace-search-init` object
 before reapplying that static manifest after changing the script or mappings.
 
 ## Warehouse integration
@@ -121,7 +121,7 @@ Secrets and `ScanRequest` resources in its own release namespace; it has no
 permissions in the Warehouse namespace.
 
 The Warehouse Operator must watch the Workspace release namespace (for example,
-`WATCH_NAMESPACES=atlas-warehouse,astro-data-workspace`). Warehouse may keep its
+`WATCH_NAMESPACES=atlas-warehouse,asa-workspace`). Warehouse may keep its
 Elasticsearch in `atlas-warehouse`, but the ScanRequest, source Secret and
 evidence Claim are namespace-local to Workspace. The canonical task labels are
 `atlas.zhejianglab.org/track-caller=workspace` with
@@ -138,8 +138,8 @@ browser's initial request.
 Install into the Workspace namespace when enabling the integration:
 
 ```bash
-helm install workspace ./charts/astro-data-workspace \
-  --namespace astro-data-workspace --create-namespace \
+helm install workspace ./charts/asa-workspace \
+  --namespace asa-workspace --create-namespace \
   --set dataWarehouse.enabled=true \
   --set dataWarehouse.elasticsearch.url=http://atlas-warehouse-elasticsearch.atlas-warehouse.svc.cluster.local:9200
 ```

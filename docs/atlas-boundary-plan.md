@@ -58,7 +58,7 @@ Workspace 请求使用如下 labels：
 ```yaml
 metadata:
   labels:
-    app.kubernetes.io/managed-by: astro-data-workspace
+    app.kubernetes.io/managed-by: asa-workspace
     atlas.zhejianglab.org/track-caller: workspace
     atlas.zhejianglab.org/track-task-kind: user-scan | user-coverage
     atlas.zhejianglab.org/track-asset: <asset-id>
@@ -106,7 +106,7 @@ evidence 不可用时，任务状态和 MOC 状态必须显式为 `unavailable`/
 `ScanRequest`、短期 source Secret 和 evidence Claim 必须位于 Workspace 的
 release namespace。Workspace ServiceAccount 只拥有该 namespace 的
 Secret/ScanRequest 权限；Warehouse Operator 需要以 cluster-scope watch
-Workspace namespace（例如 `WATCH_NAMESPACES=atlas-warehouse,astro-data-workspace`）。
+Workspace namespace（例如 `WATCH_NAMESPACES=atlas-warehouse,asa-workspace`）。
 Warehouse ES 服务可以位于 `atlas-warehouse`，但不改变上述 namespace-local
 资源约束。
 

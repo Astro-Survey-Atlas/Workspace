@@ -45,9 +45,9 @@ test("managed connector credentials round-trip through the Kubernetes Secret API
   const tokenPath = path.join(directory, "token");
   await writeFile(tokenPath, "test-token\n", "utf8");
   try {
-    const store = new KubernetesConnectorCredentialStore({ namespace: "astro-data-workspace", apiUrl: `http://127.0.0.1:${address.port}`, tokenPath });
+    const store = new KubernetesConnectorCredentialStore({ namespace: "asa-workspace", apiUrl: `http://127.0.0.1:${address.port}`, tokenPath });
     const reference = store.managedReference("connector-12345678-abcd-4abc-8abc-1234567890ab");
-    assert.equal(reference, "astro-data-workspace/astro-connector-12345678-abcd-4abc-8abc-1234567890ab");
+    assert.equal(reference, "asa-workspace/astro-connector-12345678-abcd-4abc-8abc-1234567890ab");
     assert.equal(await store.get(reference), undefined);
 
     await store.put(reference, { accessKeyId: "saved-access", secretAccessKey: "saved-secret", endpoint: "https://s3.example" });

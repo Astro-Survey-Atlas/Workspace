@@ -36,7 +36,7 @@ Warehouse is designed strictly as an **asynchronous scan executor**. It has no u
 
 ## ✨ Features
 
-* **☸️ Custom Kubernetes Operator**: Automatically listens for `ScanRequest` objects across active namespaces (e.g. `atlas-warehouse`, `astro-data-workspace`) and manages life cycle state machines.
+* **☸️ Custom Kubernetes Operator**: Automatically listens for `ScanRequest` objects across active namespaces (e.g. `atlas-warehouse`, `asa-workspace`) and manages life cycle state machines.
 * **⚡ High-throughput Object Scanner**: Performs distributed file listing and reads range headers for FITS files over S3, Ali OSS, or compatible object stores.
 * **🪐 HEALPix Coordinate Compiler**: Parses coordinate metadata (RA, Dec, Frame, Units) from tabular files, maps celestial geometries, and yields spatial indices without storing full file rows.
 * **🔒 Strict Namespace Security**: Executes scanning jobs inside the caller's namespace, using namespace-scoped service accounts and temporary volume mounts for scanning evidence (Evidence PVC).
@@ -69,9 +69,9 @@ apiVersion: atlas.zhejianglab.org/v1alpha1
 kind: ScanRequest
 metadata:
   name: user-asset-scan-sample
-  namespace: astro-data-workspace
+  namespace: asa-workspace
   labels:
-    app.kubernetes.io/managed-by: astro-data-workspace
+    app.kubernetes.io/managed-by: asa-workspace
     atlas.zhejianglab.org/track-caller: workspace
     atlas.zhejianglab.org/track-task-kind: user-scan
     atlas.zhejianglab.org/track-asset: user-asset-123
@@ -107,7 +107,7 @@ kubectl apply -f deploy/crds/atlas.zhejianglab.org_scanrequests.yaml
 Set environment variables and launch the controller loop:
 ```bash
 # Watch the development namespace
-export WATCH_NAMESPACES=astro-data-workspace
+export WATCH_NAMESPACES=asa-workspace
 
 # Run the controller loop (written in Go / Python)
 go run cmd/operator/main.go
@@ -123,6 +123,6 @@ kubectl apply -f test/fixtures/mock-scanrequest.yaml
 kubectl logs -l app=astro-warehouse-operator
 
 # Check spawned scanner pods
-kubectl get pods -n astro-data-workspace -w
+kubectl get pods -n asa-workspace -w
 ```
 Once the scan completes successfully, the Operator updates the `ScanRequest` status to `Completed`, writes evidence logs, and records progress in the `ast_*` Elasticsearch indexes.

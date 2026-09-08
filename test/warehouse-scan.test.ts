@@ -57,7 +57,7 @@ function request(coverage?: CoverageJobSnapshot, selectedConnector: ConnectorRec
     taskName: "workspace-scan-user-asset-1-ab12cd34",
     batchId: "workspace-scan-ab12cd34",
     secretName: "workspace-scan-user-asset-1-ab12cd34",
-    namespace: "astro-data-workspace",
+    namespace: "asa-workspace",
     warehouseEsUrl: "http://warehouse-es:9200",
     evidenceClaimName: "workspace-evidence",
     evidenceMountPath: "/var/lib/atlas-evidence",
@@ -73,7 +73,7 @@ function requestWithWarehouseEndpoint(warehouseEsUrl: string): Record<string, un
     taskName: "workspace-scan-user-asset-1-ab12cd34",
     batchId: "workspace-scan-ab12cd34",
     secretName: "workspace-scan-user-asset-1-ab12cd34",
-    namespace: "astro-data-workspace",
+    namespace: "asa-workspace",
     warehouseEsUrl,
     evidenceClaimName: "workspace-evidence",
     evidenceMountPath: "/var/lib/atlas-evidence",
@@ -101,7 +101,7 @@ test("builds a ScanRequest v2 with distinct Workspace tracking labels", () => {
   assert.equal(body.apiVersion, "atlas.zhejianglab.org/v1alpha1");
   assert.equal(body.kind, "ScanRequest");
   const metadata = body.metadata as { namespace: string; labels: Record<string, string> };
-  assert.equal(metadata.namespace, "astro-data-workspace");
+  assert.equal(metadata.namespace, "asa-workspace");
   assert.equal(metadata.labels[WORKSPACE_TRACK_LABELS.caller], "workspace");
   assert.equal(metadata.labels[WORKSPACE_TRACK_LABELS.taskKind], "user-coverage");
   assert.equal(metadata.labels[WORKSPACE_TRACK_LABELS.asset], asset.id);
@@ -134,7 +134,7 @@ test("keeps Warehouse endpoint credentials in the temporary Secret", () => {
     taskName: "workspace-scan-user-asset-1-ab12cd34",
     batchId: "workspace-scan-ab12cd34",
     secretName: "workspace-scan-user-asset-1-ab12cd34",
-    namespace: "astro-data-workspace",
+    namespace: "asa-workspace",
     warehouseEsUrl: "https://super-secret-user:super-secret-pass@warehouse-es:9200",
     warehouseSinkCredentials: {
       secretName: "workspace-scan-user-asset-1-ab12cd34",
@@ -214,7 +214,7 @@ test("ordinary HEALPix scans require an explicit source order", () => {
     taskName: "workspace-scan-user-asset-1-ab12cd34",
     batchId: "workspace-scan-ab12cd34",
     secretName: "workspace-scan-user-asset-1-ab12cd34",
-    namespace: "astro-data-workspace",
+    namespace: "asa-workspace",
     warehouseEsUrl: "http://warehouse-es:9200",
     evidenceClaimName: "workspace-evidence",
     evidenceMountPath: "/var/lib/atlas-evidence",
@@ -233,7 +233,7 @@ test("ordinary HEALPix scans require an explicit source order", () => {
     taskName: "workspace-scan-user-asset-1-ab12cd34",
     batchId: "workspace-scan-ab12cd34",
     secretName: "workspace-scan-user-asset-1-ab12cd34",
-    namespace: "astro-data-workspace",
+    namespace: "asa-workspace",
     warehouseEsUrl: "http://warehouse-es:9200",
     evidenceClaimName: "workspace-evidence",
     evidenceMountPath: "/var/lib/atlas-evidence",
@@ -310,7 +310,7 @@ test("disabled Warehouse submissions fail before reading or registering local me
     } as unknown as DataCatalogRegistry,
     credentials: new MemoryConnectorCredentialStore(),
     runs,
-    namespace: "astro-data-workspace",
+    namespace: "asa-workspace",
     warehouseEsUrl: "http://warehouse-es:9200",
     pollMs: 1000,
   });
@@ -430,7 +430,7 @@ async function warehouseFixture(
     dataCatalog,
     credentials: credentialStore,
     runs,
-    namespace: "astro-data-workspace",
+    namespace: "asa-workspace",
     warehouseEsUrl,
     pollMs: 1000,
     evidenceMountPath: directory,
@@ -512,9 +512,9 @@ test("submits a direct Connector self-scan through the Workspace Warehouse contr
 
     const secretRequest = fixture.requests.find((request) => request.method === "POST" && request.path.endsWith("/secrets"));
     assert.ok(secretRequest);
-    assert.equal(secretRequest.path, "/api/v1/namespaces/astro-data-workspace/secrets");
+    assert.equal(secretRequest.path, "/api/v1/namespaces/asa-workspace/secrets");
     const secretBody = secretRequest.body as Record<string, any>;
-    assert.equal(secretBody.metadata.namespace, "astro-data-workspace");
+    assert.equal(secretBody.metadata.namespace, "asa-workspace");
     assert.equal(secretBody.metadata.labels[WORKSPACE_TRACK_LABELS.caller], "workspace");
     assert.equal(secretBody.metadata.labels[WORKSPACE_TRACK_LABELS.batch], run.batchId);
     assert.deepEqual(secretBody.stringData, {
@@ -525,11 +525,11 @@ test("submits a direct Connector self-scan through the Workspace Warehouse contr
 
     const scanRequest = fixture.requests.find((request) => request.method === "POST" && request.path.endsWith("/scanrequests"));
     assert.ok(scanRequest);
-    assert.equal(scanRequest.path, "/apis/atlas.zhejianglab.org/v1alpha1/namespaces/astro-data-workspace/scanrequests");
+    assert.equal(scanRequest.path, "/apis/atlas.zhejianglab.org/v1alpha1/namespaces/asa-workspace/scanrequests");
     const scanBody = scanRequest.body as Record<string, any>;
     assert.equal(scanBody.apiVersion, "atlas.zhejianglab.org/v1alpha1");
     assert.equal(scanBody.kind, "ScanRequest");
-    assert.equal(scanBody.metadata.namespace, "astro-data-workspace");
+    assert.equal(scanBody.metadata.namespace, "asa-workspace");
     assert.equal(scanBody.metadata.name, run.jobId);
     assert.equal(scanBody.metadata.labels[WORKSPACE_TRACK_LABELS.caller], "workspace");
     assert.equal(scanBody.metadata.labels[WORKSPACE_TRACK_LABELS.taskKind], "user-scan");
@@ -577,7 +577,7 @@ test("normalizes the historical wildcard to Warehouse's automatic file-type filt
     taskName: "workspace-scan-user-asset-1-ab12cd34",
     batchId: "workspace-scan-ab12cd34",
     secretName: "workspace-scan-user-asset-1-ab12cd34",
-    namespace: "astro-data-workspace",
+    namespace: "asa-workspace",
     warehouseEsUrl: "http://warehouse-es:9200",
     evidenceClaimName: "workspace-evidence",
     evidenceMountPath: "/var/lib/atlas-evidence",
@@ -592,7 +592,7 @@ test("normalizes the historical wildcard to Warehouse's automatic file-type filt
     taskName: "workspace-scan-user-asset-1-ab12cd34",
     batchId: "workspace-scan-ab12cd34",
     secretName: "workspace-scan-user-asset-1-ab12cd34",
-    namespace: "astro-data-workspace",
+    namespace: "asa-workspace",
     warehouseEsUrl: "http://warehouse-es:9200",
     evidenceClaimName: "workspace-evidence",
     evidenceMountPath: "/var/lib/atlas-evidence",

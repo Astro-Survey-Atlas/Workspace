@@ -5,32 +5,32 @@ Build dependencies before running the checks:
 ```bash
 # When Helm is not installed locally, use the pinned validation image instead:
 podman run --rm -v "$PWD:/work:ro" -w /work \
-  docker.io/alpine/helm:3.18.4 lint charts/astro-data-workspace
+  docker.io/alpine/helm:3.18.4 lint charts/asa-workspace
 
-helm dependency build charts/astro-data-workspace
-helm lint charts/astro-data-workspace
-helm template workspace charts/astro-data-workspace --namespace astro-data-workspace
-helm template workspace charts/astro-data-workspace --namespace astro-data-workspace \
+helm dependency build charts/asa-workspace
+helm lint charts/asa-workspace
+helm template workspace charts/asa-workspace --namespace asa-workspace
+helm template workspace charts/asa-workspace --namespace asa-workspace \
   --set metadataStore.mode=bundled-postgresql \
   --set postgresql.enabled=true
-helm template workspace charts/astro-data-workspace --namespace astro-data-workspace \
+helm template workspace charts/asa-workspace --namespace asa-workspace \
   --set metadataStore.mode=external-postgresql \
   --set metadataStore.external.existingSecret=workspace-database
-helm template workspace charts/astro-data-workspace --namespace astro-data-workspace \
+helm template workspace charts/asa-workspace --namespace asa-workspace \
   --set search.mode=external \
   --set elasticsearch.enabled=false \
   --set search.external.existingSecret=search-secret
-helm template workspace charts/astro-data-workspace --namespace astro-data-workspace \
+helm template workspace charts/asa-workspace --namespace asa-workspace \
   --set dataWarehouse.enabled=true \
   --set dataWarehouse.elasticsearch.url=http://atlas-warehouse-elasticsearch.atlas-warehouse.svc.cluster.local:9200
-helm template workspace charts/astro-data-workspace --namespace astro-data-workspace \
+helm template workspace charts/asa-workspace --namespace asa-workspace \
   --set localData.enabled=true \
   --set localData.existingClaim=local-data
-helm template workspace charts/astro-data-workspace --namespace astro-data-workspace \
+helm template workspace charts/asa-workspace --namespace asa-workspace \
   --set localData.enabled=true \
   --set localData.nfs.server=nas.example.test \
   --set localData.nfs.path=/exports/astro
-helm template workspace charts/astro-data-workspace --namespace astro-data-workspace \
+helm template workspace charts/asa-workspace --namespace asa-workspace \
   --set localData.enabled=true \
   --set localData.hostPath.path=/srv/astro \
   --set 'localData.nodeSelector.kubernetes\.io/hostname=node-a'

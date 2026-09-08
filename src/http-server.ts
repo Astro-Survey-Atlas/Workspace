@@ -46,7 +46,7 @@ const stateRoot = path.resolve(process.env.ASTRO_STATE_ROOT
   ?? (process.env.ASTRO_SQLITE_PATH ? path.dirname(process.env.ASTRO_SQLITE_PATH) : path.join(projectRoot, "data")));
 const allowedHosts = (
   process.env.ASTRO_ALLOWED_HOSTS ??
-  "localhost,127.0.0.1,astro-data-workspace-mcp,astro-data-workspace-mcp.astro-data-workspace,astro-data-workspace-mcp.astro-data-workspace.svc,astro-data-workspace-mcp.astro-data-workspace.svc.cluster.local"
+  "localhost,127.0.0.1,asa-workspace-mcp,asa-workspace-mcp.asa-workspace,asa-workspace-mcp.asa-workspace.svc,asa-workspace-mcp.asa-workspace.svc.cluster.local"
 )
   .split(",")
   .map((value) => value.trim())
@@ -74,7 +74,7 @@ const resourceCatalogAllowedOrigins = (process.env.ASTRO_RESOURCE_CATALOG_ALLOWE
 const resourceAdminToken = process.env.ASTRO_RESOURCE_ADMIN_TOKEN;
 const catalogMcpUrl = process.env.ASTRO_CATALOG_MCP_URL ?? "http://eva24002-entrance.lab.zverse.space:30082/mcp";
 const catalogMcpTimeoutMs = Number(process.env.ASTRO_CATALOG_MCP_TIMEOUT_MS ?? "15000");
-const warehouseNamespace = process.env.ASTRO_WAREHOUSE_NAMESPACE ?? process.env.POD_NAMESPACE ?? "astro-data-workspace";
+const warehouseNamespace = process.env.ASTRO_WAREHOUSE_NAMESPACE ?? process.env.POD_NAMESPACE ?? "asa-workspace";
 const warehousePollMs = Number(process.env.ASTRO_WAREHOUSE_POLL_MS ?? "5000");
 const astroEsUrl = process.env.ASTRO_ES_URL ?? "";
 const warehouseEsUrl = process.env.ASTRO_WAREHOUSE_ES_URL ?? "";
@@ -143,7 +143,7 @@ const app = createMcpExpressApp({ host, allowedHosts });
 app.use("/api", express.json({ limit: "64kb" }));
 
 app.get("/healthz", (_request: Request, response: Response) => {
-  response.json({ status: "ok", service: "astro-data-workspace", version: "0.10.38" });
+  response.json({ status: "ok", service: "asa-workspace", version: "0.10.38" });
 });
 
 app.get("/api/capabilities", async (_request: Request, response: Response) => {
@@ -2005,12 +2005,12 @@ async function start(): Promise<void> {
   warehouseScans.start();
 
   httpServer = app.listen(port, host, () => {
-    console.log(`astro-data-workspace listening on http://${host}:${port}`);
+    console.log(`asa-workspace listening on http://${host}:${port}`);
   });
 }
 
 void start().catch(async (error) => {
-  console.error("Failed to start astro-data-workspace", error);
+  console.error("Failed to start asa-workspace", error);
   await metadataStore.close().catch(() => undefined);
   process.exit(1);
 });

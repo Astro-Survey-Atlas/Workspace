@@ -175,7 +175,7 @@ operate on the same public/user layer set.
 
 ## Deployment isolation
 
-- Namespace: `astro-data-workspace`
+- Namespace: `asa-workspace`
 - Runtime state: dedicated PVC or Compose state volume
 - Workspace search: dedicated Elasticsearch service and persistent volume
 - Local data: one controlled read-only mount when enabled

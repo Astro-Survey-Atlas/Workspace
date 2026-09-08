@@ -1,9 +1,9 @@
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: {{ include "astro-data-workspace.fullname" . }}-search-init
+  name: {{ include "asa-workspace.fullname" . }}-search-init
   labels:
-    {{- include "astro-data-workspace.labels" . | nindent 4 }}
+    {{- include "asa-workspace.labels" . | nindent 4 }}
   annotations:
     helm.sh/hook: post-install,post-upgrade
     helm.sh/hook-weight: "10"
@@ -15,7 +15,7 @@ spec:
   template:
     metadata:
       labels:
-        {{- include "astro-data-workspace.labels" . | nindent 8 }}
+        {{- include "asa-workspace.labels" . | nindent 8 }}
     spec:
       automountServiceAccountToken: false
       restartPolicy: Never
@@ -34,7 +34,7 @@ spec:
           env:
             - name: ASTRO_ES_URL
               {{- if eq .Values.search.mode "bundled" }}
-              value: {{ include "astro-data-workspace.elasticsearchUrl" . | quote }}
+              value: {{ include "asa-workspace.elasticsearchUrl" . | quote }}
               {{- else }}
               valueFrom:
                 secretKeyRef:

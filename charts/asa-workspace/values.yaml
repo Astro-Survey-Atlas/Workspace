@@ -7,7 +7,7 @@ global:
     allowInsecureImages: true
 
 image:
-  repository: ghcr.io/astro-survey-atlas/astro-data-workspace
+  repository: ghcr.io/astro-survey-atlas/asa-workspace
   tag: "0.10.38-20260907-164814"
   pullPolicy: IfNotPresent
 
@@ -28,7 +28,7 @@ ingress:
   className: ""
   annotations: {}
   hosts:
-    - host: astro-data-workspace.local
+    - host: asa-workspace.local
       paths:
         - path: /
           pathType: Prefix

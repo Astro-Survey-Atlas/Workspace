@@ -13,7 +13,7 @@ function textPayload(result: unknown): unknown {
 }
 
 const endpoint = new URL(process.env.MCP_URL ?? "http://127.0.0.1:3000/mcp");
-const client = new Client({ name: "astro-data-workspace-smoke", version: "0.1.0" });
+const client = new Client({ name: "asa-workspace-smoke", version: "0.1.0" });
 const transport = new StreamableHTTPClientTransport(endpoint);
 
 try {
