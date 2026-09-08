@@ -21,3 +21,6 @@ desktop/node_modules/
 desktop/build/
 desktop/release/
 desktop/resources/python/
+
+# local bare-metal dev state root (server default ./data when ASTRO_STATE_ROOT unset)
+data/
