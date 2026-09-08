@@ -146,6 +146,9 @@ spec:
             httpGet:
               path: /healthz
               port: http
+              httpHeaders:
+                - name: Host
+                  value: {{ include "asa-workspace.fullname" . | quote }}
             periodSeconds: 5
             timeoutSeconds: 2
             failureThreshold: 30
@@ -166,7 +169,7 @@ spec:
                   endpoint.pathname = `${endpoint.pathname.replace(/\/+$/, "")}/_cluster/health`;
                   endpoint.search = "wait_for_status=yellow&timeout=1s";
                   Promise.all([
-                    fetch("http://127.0.0.1:3000/healthz", { signal: AbortSignal.timeout(1500) }),
+                    fetch("http://127.0.0.1:3000/healthz", { headers: { Host: process.env.ASTRO_PROBE_HOST ?? "127.0.0.1" }, signal: AbortSignal.timeout(1500) }),
                     fetch(endpoint, { headers, signal: AbortSignal.timeout(1500) }),
                   ]).then(([app, search]) => process.exit(app.ok && search.ok ? 0 : 1)).catch(() => process.exit(1));
             periodSeconds: 5
@@ -176,6 +179,9 @@ spec:
             httpGet:
               path: /healthz
               port: http
+              httpHeaders:
+                - name: Host
+                  value: {{ include "asa-workspace.fullname" . | quote }}
             initialDelaySeconds: 10
             periodSeconds: 10
             timeoutSeconds: 5

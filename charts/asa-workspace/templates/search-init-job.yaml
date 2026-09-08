@@ -97,6 +97,31 @@ spec:
                 esac
               }
 
+              apply_mapping() {
+                index="$1"
+                mapping="$2"
+                attempt=0
+                while :; do
+                  attempt=$((attempt + 1))
+                  if ! status="$(request_status PUT "/$index/_mapping" "$mapping")"; then
+                    fail_response "Elasticsearch request failed: PUT /$index/_mapping"
+                  fi
+                  case "$status" in
+                    2??) return 0 ;;
+                    5??|000)
+                      # Slow storage can exceed the master's 30s ack window while
+                      # the change still lands; retry and confirm via GET below.
+                      if [ "$attempt" -ge "$MAX_ATTEMPTS" ]; then
+                        fail_response "Elasticsearch returned HTTP $status while updating mapping: $index after $MAX_ATTEMPTS attempts"
+                      fi
+                      echo "Mapping update for $index got HTTP $status (attempt $attempt/$MAX_ATTEMPTS), retrying..."
+                      sleep "$RETRY_INTERVAL_SECONDS"
+                      ;;
+                    *) fail_response "Elasticsearch returned HTTP $status: PUT /$index/_mapping" ;;
+                  esac
+                done
+              }
+
               reconcile_index() {
                 index="$1"
                 mapping="$2"
@@ -107,24 +132,38 @@ spec:
                 fi
                 case "$status" in
                   200)
-                    require_success PUT "/$index/_mapping" "$mapping"
+                    apply_mapping "$index" "$mapping"
                     ;;
                   404)
                     create_payload="{\"mappings\":$mapping}"
-                    if ! create_status="$(request_status PUT "/$index" "$create_payload")"; then
-                      fail_response "Unable to create Elasticsearch index: $index"
-                    fi
-                    case "$create_status" in
-                      2??) ;;
-                      400)
-                        response="$(tr -d '\n\r' < "$response_file")"
-                        case "$response" in
-                          *resource_already_exists_exception*) require_success PUT "/$index/_mapping" "$mapping" ;;
-                          *) fail_response "Elasticsearch returned HTTP 400 while creating index: $index" ;;
-                        esac
-                        ;;
-                      *) fail_response "Elasticsearch returned HTTP $create_status while creating index: $index" ;;
-                    esac
+                    create_attempt=0
+                    while :; do
+                      create_attempt=$((create_attempt + 1))
+                      if ! create_status="$(request_status PUT "/$index" "$create_payload")"; then
+                        fail_response "Unable to create Elasticsearch index: $index"
+                      fi
+                      case "$create_status" in
+                        2??) break ;;
+                        400)
+                          response="$(tr -d '\n\r' < "$response_file")"
+                          case "$response" in
+                            *resource_already_exists_exception*) apply_mapping "$index" "$mapping" ; break ;;
+                            *) fail_response "Elasticsearch returned HTTP 400 while creating index: $index" ;;
+                          esac
+                          ;;
+                        5??|000)
+                          # Master elections and slow storage can answer 503 with
+                          # process_cluster_event_timeout_exception; retry instead
+                          # of failing the whole job.
+                          if [ "$create_attempt" -ge "$MAX_ATTEMPTS" ]; then
+                            fail_response "Elasticsearch returned HTTP $create_status while creating index: $index after $MAX_ATTEMPTS attempts"
+                          fi
+                          echo "Index $index creation got HTTP $create_status (attempt $create_attempt/$MAX_ATTEMPTS), retrying..."
+                          sleep "$RETRY_INTERVAL_SECONDS"
+                          ;;
+                        *) fail_response "Elasticsearch returned HTTP $create_status while creating index: $index" ;;
+                      esac
+                    done
                     ;;
                   *) fail_response "Elasticsearch returned HTTP $status while inspecting index: $index" ;;
                 esac

@@ -175,7 +175,7 @@
               },
               "required": ["repository", "tag", "pullPolicy"]
             },
-            "maxAttempts": { "type": "integer", "minimum": 1, "maximum": 120 },
+            "maxAttempts": { "type": "integer", "minimum": 1, "maximum": 720 },
             "retryIntervalSeconds": { "type": "integer", "minimum": 1, "maximum": 30 },
             "resources": { "type": "object" }
           },
