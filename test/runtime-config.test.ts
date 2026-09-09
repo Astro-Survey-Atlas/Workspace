@@ -49,7 +49,6 @@ test("runtime data services are read-only, sanitized, and the catalog config rou
     ASTRO_RESOURCE_PACKAGE_ROOT: path.join(stateRoot, "resource-packages"),
     ASTRO_RESOURCE_PACKAGE_STATE: path.join(stateRoot, "resource-package-state.json"),
     ASTRO_RESOURCE_CATALOG_URL: pathToFileURL(catalogPath).href,
-    ASTRO_RESOURCE_ADMIN_TOKEN: "test-admin-token",
     ASTRO_MOC_CORE_CLI: `${path.resolve("node_modules/.bin/tsx")} ${path.resolve("test/helpers/mock-moc-core-cli.ts")}`,
     ASTRO_BUILD_COMMIT: "",
     NODE_NO_WARNINGS: "1",
@@ -68,7 +67,7 @@ test("runtime data services are read-only, sanitized, and the catalog config rou
   assert.equal(runtimeResponse.headers.get("cache-control"), "no-store");
   const runtime = await runtimeResponse.json() as {
     readOnly: boolean;
-    catalog: { endpoint: string; configured: boolean; available: boolean; source: string; adminConfigured: boolean };
+    catalog: { endpoint: string; configured: boolean; available: boolean; source: string };
     workspaceSearch: { endpoint: string; configured: boolean; indices: { file: string; object: string; coverage: string }; source: string };
     warehouseSearch: { enabled: boolean; endpoint: string; configured: boolean; indices: { layer: string; file: string; coverage: string } };
     capabilities?: Array<{ kind: string; key: string; version: number; availability: string; responsibility: string; sourcePath: string }>;
@@ -79,7 +78,7 @@ test("runtime data services are read-only, sanitized, and the catalog config rou
   assert.equal(runtime.catalog.endpoint, pathToFileURL(catalogPath).href);
   assert.equal(runtime.catalog.configured, true);
   assert.equal(runtime.catalog.source, "environment");
-  assert.equal(runtime.catalog.adminConfigured, true);
+  assert.ok(!("adminConfigured" in runtime.catalog), "admin token state must no longer be surfaced");
   // Credentials, query, and fragment must never leak to the browser.
   assert.equal(runtime.workspaceSearch.endpoint, "http://127.0.0.1:9200/ignored");
   assert.equal(runtime.workspaceSearch.configured, true);
@@ -104,12 +103,15 @@ test("runtime data services are read-only, sanitized, and the catalog config rou
   const config = await configResponse.json() as { config: { catalogUrl: string } };
   assert.equal(config.config.catalogUrl, pathToFileURL(catalogPath).href);
 
+  // Sync is a single-user operation: no admin token gate. The unreachable
+  // file:// catalog still makes the attempt fail downstream (502/503), never 401.
   const syncResponse = await fetch(`${baseUrl}/api/resource-packages/sync`, {
     method: "POST",
-    headers: { "Content-Type": "application/json", Authorization: "Bearer wrong-token" },
+    headers: { "Content-Type": "application/json" },
     body: "{}",
   });
-  assert.equal(syncResponse.status, 401);
+  assert.notEqual(syncResponse.status, 401);
+  assert.ok(syncResponse.status === 502 || syncResponse.status === 503, `expected sync to attempt the catalog read, got ${syncResponse.status}`);
 
   // Capability registry: read-only descriptors with warehouse availability reflecting this deployment.
   const overlap = runtime.capabilities?.find((capability) => capability.key === "overlap-download" && capability.kind === "pipeline");

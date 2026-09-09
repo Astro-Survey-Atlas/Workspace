@@ -9,7 +9,7 @@ import type { LocalConnectorRootsPolicy } from "./local-connector-roots.js";
 import type { CoverageDownloadFile, CoverageDownloadJob, CoverageDownloadService } from "./coverage-downloads.js";
 import {
   resolveSourceInventory, computeInventoryDigest, validateRelativePath,
-  type SourceFileInventory, type SourceInventoryFile, type SourceUnit, type SourceUnitResolution,
+  type ResolveSourceInventoryOptions, type SourceFileInventory, type SourceInventoryFile, type SourceUnit, type SourceUnitResolution,
 } from "./source-crawler.js";
 
 export type ProductionRunStatus = "queued" | "resolving" | "awaiting-approval" | "running" | "succeeded" | "failed" | "cancelled" | "rejected";
@@ -385,6 +385,7 @@ interface ProductionServiceOptions {
   objectIndex: AstroObjectIndexService;
   localRoots: LocalConnectorRootsPolicy;
   sourceResolver?: ProductionSourceResolver;
+  sourceResolveOptions?: ResolveSourceInventoryOptions;
   warehouseHandoff?: ProductionWarehouseHandoff;
 }
 
@@ -402,9 +403,12 @@ export class ProductionService {
   readonly #objectIndex: AstroObjectIndexService;
   readonly #localRoots: LocalConnectorRootsPolicy;
   readonly #sourceResolver?: ProductionSourceResolver;
+  readonly #sourceResolveOptions?: ResolveSourceInventoryOptions;
   readonly #warehouseHandoff?: ProductionWarehouseHandoff;
   readonly #runs = new Map<string, ProductionRun>();
   readonly #writes = new Map<string, Promise<void>>();
+  readonly #locks = new Map<string, Promise<unknown>>();
+  readonly #executing = new Set<string>();
   #initialized = false;
   #initializationPromise: Promise<void> | null = null;
 
@@ -418,6 +422,7 @@ export class ProductionService {
     this.#objectIndex = options.objectIndex;
     this.#localRoots = options.localRoots;
     this.#sourceResolver = options.sourceResolver;
+    this.#sourceResolveOptions = options.sourceResolveOptions;
     this.#warehouseHandoff = options.warehouseHandoff;
   }
 
@@ -581,55 +586,62 @@ export class ProductionService {
   /** Approve the pending inventory; the decision binds to the plan SHA-256. */
   async approve(id: string, planSha256: string, decidedBy: "user" | "agent" = "user"): Promise<ProductionRun> {
     await this.initialize();
-    const run = this.#runs.get(text(id, "production run id"));
-    if (!run) throw new Error(`Production run not found: ${id}`);
-    if (run.status !== "awaiting-approval") throw new ProductionStateError("只有等待审批的生产任务可以审批");
-    const expected = run.approval?.planSha256 ?? "";
-    if (typeof planSha256 !== "string" || !/^[0-9a-f]{64}$/.test(planSha256) || planSha256 !== expected) {
-      throw new ProductionStateError("清单校验值不匹配；请刷新清单后重试");
-    }
-    run.approval = { ...run.approval!, state: "approved", decidedAt: now(), decidedBy };
-    this.appendStepLog(run, "approval", "info", `已批准下载清单 ${planSha256.slice(0, 12)}…`);
-    await this.setStep(run, "approval", "succeeded", "清单已批准");
-    run.status = "queued";
-    await this.#save(run);
-    void this.#execute(run.id);
-    return clone(run);
+    return this.#locked(id, async () => {
+      const run = this.#runs.get(text(id, "production run id"));
+      if (!run) throw new Error(`Production run not found: ${id}`);
+      if (run.status !== "awaiting-approval") throw new ProductionStateError("只有等待审批的生产任务可以审批");
+      const expected = run.approval?.planSha256 ?? "";
+      if (typeof planSha256 !== "string" || !/^[0-9a-f]{64}$/.test(planSha256) || planSha256 !== expected) {
+        throw new ProductionStateError("清单校验值不匹配；请刷新清单后重试");
+      }
+      run.approval = { ...run.approval!, state: "approved", decidedAt: now(), decidedBy };
+      this.appendStepLog(run, "approval", "info", `已批准下载清单 ${planSha256.slice(0, 12)}…`);
+      await this.setStep(run, "approval", "succeeded", "清单已批准");
+      run.status = "queued";
+      await this.#save(run);
+      void this.#execute(run.id);
+      return clone(run);
+    });
   }
 
   /** Reject the pending inventory; the run terminates without any transfer. */
   async reject(id: string): Promise<ProductionRun> {
     await this.initialize();
-    const run = this.#runs.get(text(id, "production run id"));
-    if (!run) throw new Error(`Production run not found: ${id}`);
-    if (run.status !== "awaiting-approval") throw new ProductionStateError("只有等待审批的生产任务可以拒绝");
-    run.approval = { ...run.approval!, state: "rejected", decidedAt: now() };
-    run.status = "rejected";
-    run.completedAt = now();
-    const approvalStep = run.steps.find((step) => step.id === "approval");
-    if (approvalStep) this.updateStep(approvalStep, "cancelled", "用户拒绝下载清单", "warning");
-    run.steps.forEach((step) => {
-      if (step.status === "pending") this.updateStep(step, "skipped", "清单被拒绝，未执行");
+    return this.#locked(id, async () => {
+      const run = this.#runs.get(text(id, "production run id"));
+      if (!run) throw new Error(`Production run not found: ${id}`);
+      if (run.status !== "awaiting-approval") throw new ProductionStateError("只有等待审批的生产任务可以拒绝");
+      run.approval = { ...run.approval!, state: "rejected", decidedAt: now() };
+      run.status = "rejected";
+      run.completedAt = now();
+      const approvalStep = run.steps.find((step) => step.id === "approval");
+      if (approvalStep) this.updateStep(approvalStep, "cancelled", "用户拒绝下载清单", "warning");
+      run.steps.forEach((step) => {
+        if (step.status === "pending") this.updateStep(step, "skipped", "清单被拒绝，未执行");
+      });
+      await this.#save(run);
+      return clone(run);
     });
-    await this.#save(run);
-    return clone(run);
   }
 
   async cancel(id: string): Promise<ProductionRun> {
     const run = await this.getRun(id);
     if (run.status === "queued" || run.status === "resolving" || run.status === "awaiting-approval") {
-      const live = this.#runs.get(run.id)!;
-      if (live.status === "running") return this.#cancelRunning(live);
-      live.status = "cancelled";
-      live.completedAt = now();
-      live.error = "用户取消任务";
-      const first = live.steps.find((step) => step.status === "running" || step.status === "pending");
-      if (first) this.updateStep(first, "cancelled", live.error, "warning");
-      live.steps.forEach((step) => {
-        if (step.status === "pending") this.updateStep(step, "skipped", "任务已取消");
+      return this.#locked(run.id, async () => {
+        const live = this.#runs.get(run.id)!;
+        if (!live) throw new Error(`Production run not found: ${id}`);
+        if (live.status === "running") return this.#cancelRunning(live);
+        live.status = "cancelled";
+        live.completedAt = now();
+        live.error = "用户取消任务";
+        const first = live.steps.find((step) => step.status === "running" || step.status === "pending");
+        if (first) this.updateStep(first, "cancelled", live.error, "warning");
+        live.steps.forEach((step) => {
+          if (step.status === "pending") this.updateStep(step, "skipped", "任务已取消");
+        });
+        await this.#save(live);
+        return clone(live);
       });
-      await this.#save(live);
-      return clone(live);
     }
     if (run.status === "running" && run.pipelineKey === "overlap-download@1") {
       return this.#cancelRunning(this.#runs.get(run.id)!);
@@ -671,31 +683,46 @@ export class ProductionService {
   }
 
   async #execute(id: string): Promise<void> {
-    const run = this.#runs.get(id);
-    if (!run || (run.status !== "queued" && run.status !== "resolving")) return;
-    run.startedAt ??= now();
-    if (run.status === "queued") run.status = "running";
-    await this.#save(run);
+    if (this.#executing.has(id)) return;
+    this.#executing.add(id);
     try {
-      if (run.pipelineKey === "overlap-download@1") await this.#executeDownload(run);
-      else await this.#executeCrossmatch(run);
-      // Paused or terminal states set inside the execution body win.
-      const statusAfter: ProductionRunStatus = String(run.status) as ProductionRunStatus;
-      if (statusAfter === "awaiting-approval" || statusAfter === "rejected" || statusAfter === "cancelled") {
+      const run = this.#runs.get(id);
+      if (!run || (run.status !== "queued" && run.status !== "resolving")) return;
+      run.startedAt ??= now();
+      if (run.status === "queued") run.status = "running";
+      await this.#save(run);
+      try {
+        if (run.pipelineKey === "overlap-download@1") await this.#executeDownload(run);
+        else await this.#executeCrossmatch(run);
+        // Paused or terminal states set inside the execution body win. Their
+        // state is already persisted by the body (approval critical section /
+        // command mutation); saving the local snapshot here would clobber a
+        // decision recorded concurrently while the executor unwinds.
+        const statusAfter: ProductionRunStatus = String(run.status) as ProductionRunStatus;
+        if (statusAfter === "awaiting-approval" || statusAfter === "rejected" || statusAfter === "cancelled") {
+          return;
+        }
+        run.status = "succeeded";
+        run.completedAt = now();
         await this.#save(run);
-        return;
+      } catch (error) {
+        const cancelled = (run.status as ProductionRunStatus) === "cancelled";
+        run.status = cancelled ? "cancelled" : "failed";
+        run.error = error instanceof Error ? error.message.slice(0, 2_000) : String(error).slice(0, 2_000);
+        run.completedAt = now();
+        const active = run.steps.find((step) => step.status === "running") ?? run.steps.find((step) => step.status === "pending");
+        if (active && active.status !== "cancelled") this.updateStep(active, cancelled ? "cancelled" : "failed", run.error, cancelled ? "warning" : "error");
+        await this.#save(run);
       }
-      run.status = "succeeded";
-      run.completedAt = now();
-      await this.#save(run);
-    } catch (error) {
-      const cancelled = (run.status as ProductionRunStatus) === "cancelled";
-      run.status = cancelled ? "cancelled" : "failed";
-      run.error = error instanceof Error ? error.message.slice(0, 2_000) : String(error).slice(0, 2_000);
-      run.completedAt = now();
-      const active = run.steps.find((step) => step.status === "running") ?? run.steps.find((step) => step.status === "pending");
-      if (active && active.status !== "cancelled") this.updateStep(active, cancelled ? "cancelled" : "failed", run.error, cancelled ? "warning" : "error");
-      await this.#save(run);
+    } finally {
+      this.#executing.delete(id);
+      // A concurrent command (approve) may have re-queued the run while this
+      // executor was still finishing; its own #execute call would have been
+      // rejected by the single-flight guard, so restart execution here.
+      const stored = this.#runs.get(id);
+      if (stored && (stored.status === "queued" || stored.status === "resolving") && !this.#executing.has(id)) {
+        void this.#execute(id);
+      }
     }
   }
 
@@ -727,7 +754,7 @@ export class ProductionService {
         const resolution = await this.#sourceResolver.resolve(region);
         // A cancelled run must not continue past its in-flight resolution.
         if (run.status !== "resolving" && run.status !== "running") return;
-        inventory = await resolveSourceInventory(resolution.units);
+        inventory = await resolveSourceInventory(resolution.units, this.#sourceResolveOptions);
         inventory.units = [...inventory.units, ...resolution.blocked.map((entry) => ({
           sourceId: entry.sourceId,
           unitId: `blocked:${entry.sourceId}`,
@@ -776,11 +803,32 @@ export class ProductionService {
       this.appendStepLog(run, "approval", "info", "直接文件输入按兼容策略视为已审批");
       await this.setStep(run, "approval", "succeeded", "直接文件输入（免审批）");
     } else {
-      run.approval = { state: "pending", planSha256: inventory.inventorySha256 };
-      run.status = "awaiting-approval";
-      await this.setStep(run, "approval", "pending", "等待人工审批下载清单");
-      await this.#save(run);
-      return; // execution resumes through approve()
+      // Critical section: either record the pending decision, or adopt a
+      // concurrent approve()/reject()/cancel() decision that landed while the
+      // executor was persisting earlier steps. The executor's local snapshot
+      // must never clobber a recorded decision back to pending.
+      const decision = await this.#locked(run.id, async (): Promise<"pause" | "approved" | "terminal"> => {
+        const stored = this.#runs.get(run.id);
+        if (stored && stored.approval?.state === "approved" && (stored.status === "queued" || stored.status === "running")) {
+          run.approval = stored.approval;
+          run.steps = stored.steps;
+          run.status = "running";
+          return "approved";
+        }
+        if (stored && (stored.status === "rejected" || stored.status === "cancelled")) {
+          run.status = stored.status;
+          run.steps = stored.steps;
+          run.completedAt = stored.completedAt;
+          run.error = stored.error;
+          return "terminal";
+        }
+        run.approval = { state: "pending", planSha256: inventory.inventorySha256 };
+        run.status = "awaiting-approval";
+        await this.setStep(run, "approval", "pending", "等待人工审批下载清单");
+        await this.#save(run);
+        return "pause";
+      });
+      if (decision !== "approved") return; // paused or terminated; resumes through approve()
     }
 
     // --- download ---
@@ -954,6 +1002,19 @@ export class ProductionService {
     run.updatedAt = now();
     this.#runs.set(run.id, clone(run));
     await this.#persist();
+  }
+
+  /**
+   * Serialize state transitions for one run. Commands (approve/reject/cancel)
+   * and the executor's pause critical section must not interleave their
+   * read-modify-save cycles, or a stale executor snapshot can clobber a
+   * decision recorded concurrently.
+   */
+  #locked<T>(id: string, action: () => Promise<T>): Promise<T> {
+    const previous = this.#locks.get(id) ?? Promise.resolve();
+    const result = previous.then(action, action);
+    this.#locks.set(id, result.then(() => undefined, () => undefined));
+    return result;
   }
 
   async #persist(): Promise<void> {

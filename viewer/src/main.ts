@@ -556,25 +556,20 @@ const resourcePackagePanel = new ResourcePackagePanel(
   (before, after) => refreshActiveFootprints(before, after),
   (record, draftReleaseIds, callbacks) => renderResourcePackageDetails(record, draftReleaseIds, callbacks),
   (error) => notifyWorkspaceError(error, "资源包操作失败"),
-  () => openResourceCatalogSync(),
+  () => void syncResourceCatalog(),
 );
-let resourceAdminToken = "";
 
 function resourceCatalogSyncFeedback(summary: string, detail = "", tone: "info" | "success" | "error" = "info"): void {
   notifyWorkspace(summary, detail, { tone });
 }
 
 async function syncResourceCatalog(): Promise<void> {
-  if (!resourceAdminToken) {
-    openResourceCatalogSync();
-    return;
-  }
   const syncButton = byId<HTMLButtonElement>("resource-package-sync");
   syncButton.disabled = true;
   syncButton.dataset.busy = "true";
   notifyWorkspace("正在同步公开目录…", "正在读取 Assets 公共 catalog", { tone: "info" });
   try {
-    const result = await workspaceApi.syncResourceCatalog(resourceAdminToken);
+    const result = await workspaceApi.syncResourceCatalog();
     resourcePackagePanel.setCatalogStatus(result.catalog);
     await refreshPublicCatalogData();
     resourceCatalogSyncFeedback("同步完成", `已载入 ${result.packages.length} 个可下载资源包。`, "success");
@@ -587,43 +582,6 @@ async function syncResourceCatalog(): Promise<void> {
   }
 }
 
-function openResourceCatalogSync(): void {
-  const dialog = byId<HTMLDialogElement>("resource-catalog-sync-dialog");
-  const tokenInput = byId<HTMLInputElement>("resource-catalog-sync-token");
-  const submit = byId<HTMLButtonElement>("resource-catalog-sync-submit");
-  const url = byId<HTMLElement>("resource-catalog-sync-url");
-  tokenInput.value = "";
-  tokenInput.disabled = false;
-  submit.disabled = false;
-  url.textContent = "--";
-  void workspaceApi.resourceCatalogConfig().then((config) => {
-    url.textContent = config.catalogUrl || "--";
-    resourcePackagePanel.setCatalogStatus(config);
-    const adminReady = Boolean(config.adminConfigured);
-    tokenInput.disabled = !adminReady;
-    submit.disabled = !adminReady;
-    tokenInput.placeholder = adminReady ? "仅保存在当前页面内存" : "服务器未配置资源管理员 token，无法同步";
-    if (!config.available) resourceCatalogSyncFeedback("当前目录不可用", config.unavailableReason ?? "", "error");
-  }).catch((error) => {
-    resourceCatalogSyncFeedback("无法读取目录状态", error instanceof Error ? error.message : String(error), "error");
-  });
-  if (!dialog.open) dialog.showModal();
-  tokenInput.focus();
-}
-
-byId<HTMLButtonElement>("resource-catalog-sync-close").addEventListener("click", () => byId<HTMLDialogElement>("resource-catalog-sync-dialog").close());
-byId<HTMLButtonElement>("resource-catalog-sync-cancel").addEventListener("click", () => byId<HTMLDialogElement>("resource-catalog-sync-dialog").close());
-byId<HTMLFormElement>("resource-catalog-sync-form").addEventListener("submit", (event) => {
-  event.preventDefault();
-  const token = byId<HTMLInputElement>("resource-catalog-sync-token").value.trim() || resourceAdminToken;
-  if (!token) {
-    resourceCatalogSyncFeedback("请输入资源管理员 token", "", "error");
-    return;
-  }
-  resourceAdminToken = token;
-  byId<HTMLDialogElement>("resource-catalog-sync-dialog").close();
-  void syncResourceCatalog();
-});
 const LAYER_PREFERENCES_KEY = "astro-workspace:survey-layer-preferences:v4";
 const PREVIOUS_LAYER_PREFERENCES_KEY = "astro-workspace:survey-layer-preferences:v3";
 const LEGACY_LAYER_PREFERENCES_KEY = "astro-workspace:survey-layer-preferences:v1";

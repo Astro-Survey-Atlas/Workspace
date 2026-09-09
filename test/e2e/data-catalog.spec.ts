@@ -255,9 +255,15 @@ test("system settings expose read-only runtime data services", async ({ page }) 
       contentType: "application/json",
       body: JSON.stringify({
         readOnly: true,
-        catalog: { endpoint: "https://assets.example/catalog.json", configured: true, available: true, syncedAt: "2026-09-08T00:00:00.000Z", adminConfigured: true, source: "environment" },
+        catalog: { endpoint: "https://assets.example/catalog.json", configured: true, available: true, syncedAt: "2026-09-08T00:00:00.000Z", source: "environment" },
         workspaceSearch: { endpoint: "http://127.0.0.1:9200", configured: true, indices: { file: "astro_file_index_v1", object: "astro_object_index_v1", coverage: "astro_coverage_index_v1" }, source: "environment" },
         warehouseSearch: { enabled: false, endpoint: "", configured: false, indices: { layer: "ast_layer_index_v1", file: "ast_file_index_v1", coverage: "ast_coverage_index_v1" }, source: "environment" },
+        assetsApi: { endpoint: "https://assets.example", apiKeyConfigured: false },
+        build: { commit: null, sourceUrl: "https://github.com/Astro-Survey-Atlas/Workspace", permalinkBase: null },
+        capabilities: [
+          { kind: "pipeline", key: "overlap-download", version: 1, title: "公开巡天重叠下载", description: "", availability: "available", responsibility: "编排", sourcePath: "src/production.ts", sourceUrl: null },
+          { kind: "resolver", key: "desi-tile", version: 1, title: "DESI tile 目录解析", description: "", availability: "available", responsibility: "来源单元解析", sourcePath: "src/source-crawler.ts", sourceUrl: null },
+        ],
       }),
     });
   });
@@ -274,9 +280,25 @@ test("system settings expose read-only runtime data services", async ({ page }) 
   await expect(records).toHaveCount(3);
   await expect(records.nth(0)).toContainText("公开巡天目录");
   await expect(records.nth(1)).toContainText("Workspace 搜索");
-  await expect(records.nth(2)).toContainText("Warehouse 搜索");
+  await expect(records.nth(2)).toContainText("Assets 数据服务 API Key");
+  await expect(page.locator("#runtime-service-list")).not.toContainText("Warehouse 搜索");
   const endpoints = await records.evaluateAll((nodes) => nodes.map((node) => node.querySelector("p")?.textContent ?? ""));
   expect(endpoints.join("\n")).not.toContain("@");
+
+  await page.locator('[data-settings-tab="warehouse"]').click();
+  await expect(page.locator("#settings-warehouse-view")).toBeVisible();
+  const warehouseRecord = page.locator("#warehouse-info-list .settings-record");
+  await expect(warehouseRecord).toHaveCount(1);
+  await expect(warehouseRecord).toContainText("Warehouse 数据面");
+  await expect(warehouseRecord).toContainText("未启用");
+  await expect(warehouseRecord).toContainText("ast_layer_index_v1");
+
+  await page.locator('[data-settings-tab="capabilities"]').click();
+  await expect(page.locator("#settings-capabilities-view")).toBeVisible();
+  const capabilityItems = page.locator("#capability-list .settings-record");
+  await expect(capabilityItems).toHaveCount(2);
+  await expect(capabilityItems.nth(0)).toContainText("overlap-download");
+  await expect(capabilityItems.nth(1)).toContainText("desi-tile");
 
   // The editable catalog settings entry point is gone from the package list.
   await page.locator('[data-mode="packages"]').click();

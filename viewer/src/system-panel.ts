@@ -19,10 +19,10 @@ export interface SystemSummary {
   connected: number;
 }
 
-type SystemSection = "ai" | "mcp" | "runtime";
+type SystemSection = "ai" | "mcp" | "warehouse" | "runtime" | "capabilities";
 
 function settingsSection(value: string | undefined): SystemSection {
-  return value === "mcp" || value === "runtime" ? value : "ai";
+  return value === "mcp" || value === "warehouse" || value === "runtime" || value === "capabilities" ? value : "ai";
 }
 
 export class SystemPanel {
@@ -53,7 +53,7 @@ export class SystemPanel {
       await this.refresh();
       this.initialized = true;
     } else await this.refresh();
-    this.renderProviders(); this.renderServers(); this.renderRuntime(); this.emitSummary();
+    this.renderProviders(); this.renderServers(); this.renderWarehouse(); this.renderRuntime(); this.renderCapabilities(); this.emitSummary();
   }
 
   deactivate(): void {}
@@ -83,7 +83,9 @@ export class SystemPanel {
     document.querySelectorAll<HTMLButtonElement>("[data-settings-section]").forEach((button) => button.classList.toggle("active", button.dataset.settingsSection === section));
     byId("settings-ai-view").hidden = section !== "ai";
     byId("settings-mcp-view").hidden = section !== "mcp";
+    byId("settings-warehouse-view").hidden = section !== "warehouse";
     byId("settings-runtime-view").hidden = section !== "runtime";
+    byId("settings-capabilities-view").hidden = section !== "capabilities";
   }
 
   private renderRuntime(): void {
@@ -96,7 +98,7 @@ export class SystemPanel {
     const catalogRow = document.createElement("article"); catalogRow.className = "settings-record"; cardStatus(catalogRow, runtime.catalog.available);    const catalogHeading = document.createElement("header"); const catalogTitle = document.createElement("strong"); catalogTitle.textContent = "公开巡天目录（Assets Catalog）"; const catalogBadge = document.createElement("span"); catalogBadge.textContent = runtime.catalog.available ? "可用" : "不可用"; catalogHeading.append(catalogTitle, catalogBadge);
     const catalogMeta = document.createElement("p"); catalogMeta.textContent = runtime.catalog.endpoint || "未配置（使用内置本地目录）";
     const catalogDetail = document.createElement("small");
-    const catalogParts = [`最近同步：${runtime.catalog.syncedAt ? new Date(runtime.catalog.syncedAt).toLocaleString() : "尚未同步"}`, `管理员 token：${runtime.catalog.adminConfigured ? "已配置" : "未配置"}`];
+    const catalogParts = [`最近同步：${runtime.catalog.syncedAt ? new Date(runtime.catalog.syncedAt).toLocaleString() : "尚未同步"}`];
     if (runtime.catalog.unavailableReason) catalogParts.push(`原因：${runtime.catalog.unavailableReason}`);
     catalogDetail.textContent = catalogParts.join(" · ");
     catalogRow.append(catalogHeading, catalogMeta, catalogDetail);
@@ -107,13 +109,7 @@ export class SystemPanel {
     const searchDetail = document.createElement("small"); searchDetail.textContent = `索引：${runtime.workspaceSearch.indices.file} / ${runtime.workspaceSearch.indices.object} / ${runtime.workspaceSearch.indices.coverage}`;
     searchRow.append(searchHeading, searchMeta, searchDetail);
 
-    const warehouseRow = document.createElement("article"); warehouseRow.className = "settings-record"; cardStatus(warehouseRow, runtime.warehouseSearch.enabled && runtime.warehouseSearch.configured);
-    const warehouseHeading = document.createElement("header"); const warehouseTitle = document.createElement("strong"); warehouseTitle.textContent = "Warehouse 搜索（可选远程数据面）"; const warehouseBadge = document.createElement("span"); warehouseBadge.textContent = runtime.warehouseSearch.enabled ? (runtime.warehouseSearch.configured ? "已启用" : "未配置") : "未启用"; warehouseHeading.append(warehouseTitle, warehouseBadge);
-    const warehouseMeta = document.createElement("p"); warehouseMeta.textContent = runtime.warehouseSearch.enabled ? runtime.warehouseSearch.endpoint || "已启用但未配置端点" : "当前部署未启用 Warehouse 数据面";
-    const warehouseDetail = document.createElement("small"); warehouseDetail.textContent = `索引：${runtime.warehouseSearch.indices.layer} / ${runtime.warehouseSearch.indices.file} / ${runtime.warehouseSearch.indices.coverage}`;
-    warehouseRow.append(warehouseHeading, warehouseMeta, warehouseDetail);
-
-    const cards: HTMLElement[] = [catalogRow, searchRow, warehouseRow];
+    const cards: HTMLElement[] = [catalogRow, searchRow];
 
     if (runtime.assetsApi) {
       const assetsRow = document.createElement("article"); assetsRow.className = "settings-record"; cardStatus(assetsRow, true);
@@ -139,40 +135,59 @@ export class SystemPanel {
       cards.push(assetsRow);
     }
 
-    const capabilities = runtime.capabilities ?? [];
-    if (capabilities.length) {
-      const capabilityRow = document.createElement("article"); capabilityRow.className = "settings-record capability-registry"; cardStatus(capabilityRow, true);
-      const capabilityHeading = document.createElement("header");
-      const capabilityTitle = document.createElement("strong"); capabilityTitle.textContent = "生产能力注册表";
-      const capabilityBadge = document.createElement("span"); capabilityBadge.textContent = `${capabilities.length} 项 · 只读`;
-      capabilityHeading.append(capabilityTitle, capabilityBadge);
-      const commitNote = runtime.build?.commit ? `源码锚点 ${runtime.build.commit.slice(0, 12)}` : "源码锚点未注入（本地构建）";
-      const capabilityMeta = document.createElement("p"); capabilityMeta.textContent = `全部生产能力的版本与职责说明。${commitNote}`;
-      const groups = document.createElement("div"); groups.className = "capability-groups";
-      const kindLabels: Record<string, string> = { pipeline: "流水线", resolver: "来源解析器", transfer: "传输", handoff: "交接" };
-      (["pipeline", "resolver", "transfer", "handoff"] as const).forEach((kind) => {
-        const entries = capabilities.filter((capability) => capability.kind === kind);
-        if (!entries.length) return;
-        const group = document.createElement("section"); group.className = "capability-group";
-        const groupTitle = document.createElement("strong"); groupTitle.textContent = kindLabels[kind] ?? kind;
-        group.append(groupTitle);
-        entries.forEach((capability) => {
-          const item = document.createElement("div"); item.className = "capability-item"; item.dataset.availability = capability.availability;
-          const name = capability.sourceUrl
-            ? Object.assign(document.createElement("a"), { textContent: `${capability.key}`, href: capability.sourceUrl, target: "_blank", rel: "noreferrer", className: "capability-link" })
-            : Object.assign(document.createElement("span"), { textContent: `${capability.key}`, className: "capability-link" });
-          const detail = document.createElement("small");
-          detail.textContent = `${capability.title} · ${capability.responsibility}${capability.availability !== "available" ? ` · 不可用` : ""}`;
-          item.append(name, detail);
-          group.append(item);
-        });
-        groups.append(group);
-      });
-      capabilityRow.append(capabilityHeading, capabilityMeta, groups);
-      cards.push(capabilityRow);
-    }
-
     list.replaceChildren(...cards);
+  }
+
+  private renderWarehouse(): void {
+    const list = byId("warehouse-info-list");
+    const runtime = this.runtime;
+    if (!runtime) {
+      list.replaceChildren();
+      return;
+    }
+    const warehouse = runtime.warehouseSearch;
+    const row = document.createElement("article"); row.className = "settings-record"; cardStatus(row, warehouse.enabled && warehouse.configured);
+    const heading = document.createElement("header");
+    const title = document.createElement("strong"); title.textContent = "Warehouse 数据面";
+    const badge = document.createElement("span"); badge.textContent = warehouse.enabled ? (warehouse.configured ? "已启用" : "未配置") : "未启用";
+    heading.append(title, badge);
+    const meta = document.createElement("p");
+    meta.textContent = warehouse.enabled ? warehouse.endpoint || "已启用但未配置 Elasticsearch 端点" : "当前部署未启用 Warehouse 数据面（ASTRO_DATA_WAREHOUSE_ENABLED）";
+    const detail = document.createElement("small");
+    const parts = [`索引：${warehouse.indices.layer} / ${warehouse.indices.file} / ${warehouse.indices.coverage}`];
+    parts.push(warehouse.enabled ? "下载任务可在审批后提交 Warehouse 扫描" : "下载任务仅注册本地 Connector，不提交 Warehouse 扫描");
+    detail.textContent = parts.join(" · ");
+    row.append(heading, meta, detail);
+    list.replaceChildren(row);
+  }
+
+  private renderCapabilities(): void {
+    const list = byId("capability-list");
+    const runtime = this.runtime;
+    const capabilities = runtime?.capabilities ?? [];
+    if (!runtime || !capabilities.length) {
+      list.replaceChildren();
+      return;
+    }
+    const kindLabels: Record<string, string> = { pipeline: "流水线", resolver: "来源解析器", transfer: "传输", handoff: "交接" };
+    const availabilityLabels: Record<string, string> = { available: "可用", planned: "规划中", unavailable: "不可用" };
+    list.replaceChildren(...capabilities.map((capability) => {
+      const row = document.createElement("article"); row.className = "settings-record";
+      row.dataset.status = capability.availability === "available" ? "ok" : capability.availability === "unavailable" ? "failed" : "unknown";
+      const heading = document.createElement("header");
+      const title = document.createElement("strong"); title.textContent = capability.key;
+      const badge = document.createElement("span"); badge.textContent = availabilityLabels[capability.availability] ?? capability.availability;
+      heading.append(title, badge);
+      const meta = document.createElement("p"); meta.textContent = `${kindLabels[capability.kind] ?? capability.kind} · ${capability.title} · v${capability.version}`;
+      const detail = document.createElement("small");
+      detail.append(`${capability.responsibility} · `);
+      if (capability.sourceUrl) {
+        const link = document.createElement("a"); link.className = "capability-link"; link.textContent = "源码锚点"; link.href = capability.sourceUrl; link.target = "_blank"; link.rel = "noreferrer";
+        detail.append(link);
+      } else detail.append("源码锚点未注入（本地构建）");
+      row.append(heading, meta, detail);
+      return row;
+    }));
   }
 
   private async saveAssetsKey(apiKey: string | null): Promise<void> {

@@ -72,7 +72,6 @@ const resourceCatalogAllowedOrigins = (process.env.ASTRO_RESOURCE_CATALOG_ALLOWE
   .split(",")
   .map((value) => value.trim())
   .filter(Boolean);
-const resourceAdminToken = process.env.ASTRO_RESOURCE_ADMIN_TOKEN;
 const catalogMcpUrl = process.env.ASTRO_CATALOG_MCP_URL ?? "http://eva24002-entrance.lab.zverse.space:30082/mcp";
 const catalogMcpTimeoutMs = Number(process.env.ASTRO_CATALOG_MCP_TIMEOUT_MS ?? "15000");
 const warehouseNamespace = process.env.ASTRO_WAREHOUSE_NAMESPACE ?? process.env.POD_NAMESPACE ?? "asa-workspace";
@@ -388,17 +387,7 @@ function sanitizeEndpointForDisplay(value: string): string {
   }
 }
 
-function requireResourceAdmin(request: Request, response: Response): boolean {
-  if (!resourceAdminToken) {
-    response.status(503).json({ error: "Resource catalog administration is not configured" });
-    return false;
-  }
-  if (request.get("Authorization") !== `Bearer ${resourceAdminToken}`) {
-    response.status(401).json({ error: "Unauthorized" });
-    return false;
-  }
-  return true;
-}
+
 
 async function effectiveFootprints(): Promise<SurveyFootprintManifest> {
   // Public coverage is sourced only from the trusted Assets snapshot.
@@ -838,7 +827,7 @@ app.get("/api/resource-packages", (_request: Request, response: Response) => {
 
 app.get("/api/resource-packages/config", (_request: Request, response: Response) => {
   response.set("Cache-Control", "no-store");
-  response.json({ config: { ...resourcePackages.catalogStatus(), adminConfigured: Boolean(resourceAdminToken) } });
+  response.json({ config: resourcePackages.catalogStatus() });
 });
 
 // Effective endpoints are provisioned by the deployment environment (env vars /
@@ -854,7 +843,6 @@ app.get("/api/system-config/runtime", async (_request: Request, response: Respon
       available: catalog.available,
       unavailableReason: catalog.unavailableReason,
       syncedAt: catalog.syncedAt,
-      adminConfigured: Boolean(resourceAdminToken),
       source: "environment",
     },
     workspaceSearch: {
@@ -897,8 +885,7 @@ app.put("/api/system-config/assets", async (request: Request, response: Response
   } catch (error) { sendApiError(response, error); }
 });
 
-app.post("/api/resource-packages/sync", async (request: Request, response: Response) => {
-  if (!requireResourceAdmin(request, response)) return;
+app.post("/api/resource-packages/sync", async (_request: Request, response: Response) => {
   try {
     const catalog = await resourcePackages.sync();
     response.json({ catalog, packages: resourcePackages.list() });

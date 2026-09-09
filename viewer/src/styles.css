@@ -3897,12 +3897,6 @@ select.field-input {
   margin-bottom: 10px;
 }
 
-.resource-catalog-sync-url {
-  display: block;
-  overflow-wrap: anywhere;
-  user-select: text;
-}
-
 .resource-release-header {
   display: flex;
   align-items: center;
@@ -4402,9 +4396,7 @@ select.field-input {
 
 /* Shared controls for production, settings, and the global Agent dock. */
 .settings-record-list { display: grid; gap: 6px; }
-.settings-view-header,
 .settings-record header { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
-.settings-view-header h3 { margin: 0; color: var(--text-strong); font-size: 13px; }
 .production-detail-steps { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 1px; margin: 12px 0; padding: 0; list-style: none; background: var(--border); }
 .production-detail-steps li { display: grid; gap: 5px; min-width: 0; min-height: 52px; padding: 9px; background: var(--surface); }
 .production-detail-steps strong { color: var(--text); font-size: 9px; }
@@ -4418,7 +4410,7 @@ select.field-input {
 .settings-tab { padding: 10px 14px; border: 0; border-bottom: 2px solid transparent; color: var(--muted); background: transparent; font: 10px var(--font-mono); cursor: pointer; }
 .settings-tab.active { color: var(--cyan); border-bottom-color: var(--cyan); }
 .settings-view { padding: 18px; }
-.settings-view-header { margin-bottom: 12px; }
+.settings-view-actions { display: flex; justify-content: flex-end; margin-bottom: 12px; }
 .settings-record { display: grid; gap: 7px; min-width: 0; padding: 12px; border: 1px solid var(--border); border-radius: 4px; color: var(--text); background: var(--row); }
 .settings-record header strong { color: var(--text-strong); font-size: 11px; }
 .settings-record header span { color: var(--cyan); font: 8px var(--font-mono); }
@@ -4428,14 +4420,8 @@ select.field-input {
 .settings-record-actions { display: flex; flex-wrap: wrap; gap: 6px; }
 .assets-key-form { align-items: center; }
 .assets-key-form .field-input { flex: 1 1 160px; min-width: 0; }
-.capability-groups { display: grid; gap: 8px; }
-.capability-group { display: grid; gap: 4px; }
-.capability-group > strong { color: var(--quiet); font: 8px var(--font-mono); text-transform: uppercase; }
-.capability-item { display: grid; gap: 2px; padding: 5px 7px; border: 1px solid var(--line-subtle); border-radius: 3px; }
-.capability-item[data-availability="unavailable"], .capability-item[data-availability="planned"] { opacity: 0.65; }
 .capability-link { color: var(--cyan); font: 10px var(--font-mono); overflow-wrap: anywhere; }
 a.capability-link:hover { text-decoration: underline; }
-.capability-item small { color: var(--text-soft); font-size: 9px; }
 .production-approval-section { display: grid; gap: 8px; margin: 12px 0; padding: 10px; border: 1px solid var(--asa-indigo, #6366f1); border-radius: 4px; }
 .toggle-row { display: flex; align-items: center; gap: 7px; margin: 10px 0; color: var(--text-soft); font-size: 10px; }
 

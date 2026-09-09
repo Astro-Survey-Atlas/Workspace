@@ -162,7 +162,6 @@ export interface CoverageDownloadJob {
 }
 
 export interface ResourceCatalogConfig extends ResourceCatalogStatus {
-  adminConfigured: boolean;
   updatedAt?: string;
 }
 
@@ -188,7 +187,6 @@ export interface RuntimeDataServices {
     available: boolean;
     unavailableReason?: string;
     syncedAt?: string;
-    adminConfigured: boolean;
     source: string;
   };
   workspaceSearch: {
@@ -265,16 +263,6 @@ async function deleteRequest(url: string): Promise<void> {
   }
 }
 
-async function adminRequest<T>(url: string, method: "POST" | "PUT", token: string, body?: unknown): Promise<T> {
-  const headers: Record<string, string> = { Accept: "application/json", Authorization: `Bearer ${token}` };
-  if (body !== undefined) headers["Content-Type"] = "application/json";
-  const response = await fetch(url, { method, headers, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
-  if (!response.ok) {
-    const payload = (await response.json().catch(() => ({}))) as { error?: string };
-    throw new Error(payload.error ?? `Request failed: ${response.status}`);
-  }
-  return response.json() as Promise<T>;
-}
 
 export const workspaceApi = {
   async capabilities(): Promise<WorkspaceCapabilities> {
@@ -383,8 +371,8 @@ export const workspaceApi = {
   async runtimeDataServices(): Promise<RuntimeDataServices> {
     return getJson<RuntimeDataServices>("/api/system-config/runtime");
   },
-  async syncResourceCatalog(token: string): Promise<{ catalog: ResourceCatalogStatus; packages: PublicResourcePackage[] }> {
-    return adminRequest<{ catalog: ResourceCatalogStatus; packages: PublicResourcePackage[] }>("/api/resource-packages/sync", "POST", token, {});
+  async syncResourceCatalog(): Promise<{ catalog: ResourceCatalogStatus; packages: PublicResourcePackage[] }> {
+    return postJson<{ catalog: ResourceCatalogStatus; packages: PublicResourcePackage[] }>("/api/resource-packages/sync", {});
   },
   async installResourcePackage(id: string): Promise<ResourcePackageJob> {
     return (await postJson<{ job: ResourcePackageJob }>(`/api/resource-packages/${encodeURIComponent(id)}/install`, {})).job;

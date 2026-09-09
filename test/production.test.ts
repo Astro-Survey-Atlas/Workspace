@@ -67,7 +67,12 @@ function createService(root: string, options: {
       }),
     } as never,
     localRoots: { assertConfiguredPath: () => undefined } as never,
-    ...(options.sourceResolver ? { sourceResolver: options.sourceResolver } : {}),
+    ...(options.sourceResolver ? {
+      sourceResolver: options.sourceResolver,
+      // Keep the in-run resolve step hermetic: HEAD enrichment is best-effort,
+      // so an offline stub fetch still yields a resolved inventory.
+      sourceResolveOptions: { fetchImpl: async () => new Response("", { status: 404 }) },
+    } : {}),
   });
 }
 
@@ -116,7 +121,7 @@ test("production step logs persist across a service restart", async () => {
     assert.deepEqual(persisted.steps, completed.steps);
     assert.equal(persisted.artifacts.length, 2);
   } finally {
-    await rm(directory, { recursive: true, force: true });
+    await rm(directory, { recursive: true, force: true, maxRetries: 20, retryDelay: 20 });
   }
 });
 
@@ -139,7 +144,7 @@ test("failed production nodes retain errors and retry creates a distinct run", a
     await waitForTerminal(service, retried.id);
     assert.equal((await service.listRuns()).length, 2);
   } finally {
-    await rm(directory, { recursive: true, force: true });
+    await rm(directory, { recursive: true, force: true, maxRetries: 20, retryDelay: 20 });
   }
 });
 
@@ -184,7 +189,7 @@ test("cancelling a download run records a cancelled node log", async () => {
     assert.equal(cancelled.steps.find((step) => step.id === "download")?.logs.at(-1)?.level, "warning");
     await new Promise((resolve) => setTimeout(resolve, 550));
   } finally {
-    await rm(directory, { recursive: true, force: true });
+    await rm(directory, { recursive: true, force: true, maxRetries: 20, retryDelay: 20 });
   }
 });
 
@@ -217,7 +222,7 @@ test("legacy production runs drop preset references and synthesize node logs", a
     assert.equal(persisted.schemaVersion, 2);
     assert.equal("pipelinePresetId" in persisted.runs[0]!, false);
   } finally {
-    await rm(directory, { recursive: true, force: true });
+    await rm(directory, { recursive: true, force: true, maxRetries: 20, retryDelay: 20 });
   }
 });
 
@@ -320,7 +325,7 @@ test("resolves the plan inside the run and waits for approval before any transfe
     assert.ok(completed.artifacts.some((artifact) => artifact.name === "download-manifest.json"));
     assert.equal(completed.steps.find((step) => step.id === "warehouse")?.status, "skipped");
   } finally {
-    await rm(directory, { recursive: true, force: true });
+    await rm(directory, { recursive: true, force: true, maxRetries: 20, retryDelay: 20 });
   }
 });
 
@@ -350,7 +355,7 @@ test("a blocked source unit fails the whole run with structured diagnostics", as
     assert.equal(failed.steps.find((step) => step.id === "resolve")?.status, "failed");
     assert.equal(submitCalls, 0);
   } finally {
-    await rm(directory, { recursive: true, force: true });
+    await rm(directory, { recursive: true, force: true, maxRetries: 20, retryDelay: 20 });
   }
 });
 
@@ -378,7 +383,7 @@ test("rejecting a pending plan skips the remaining steps and locks the run", asy
     assert.equal(submissions.length, 0);
     await assert.rejects(() => service.approve(submitted.id, rejected.approval!.planSha256), /只有等待审批/);
   } finally {
-    await rm(directory, { recursive: true, force: true });
+    await rm(directory, { recursive: true, force: true, maxRetries: 20, retryDelay: 20 });
   }
 });
 
@@ -424,6 +429,6 @@ test("retrying a failed approved run reuses the inventory and the download stagi
     assert.equal(submissions.length, 2);
     assert.deepEqual(submissions.map((entry) => entry.requestKey), [`production:${submitted.id}`, `production:${submitted.id}`]);
   } finally {
-    await rm(directory, { recursive: true, force: true });
+    await rm(directory, { recursive: true, force: true, maxRetries: 20, retryDelay: 20 });
   }
 });

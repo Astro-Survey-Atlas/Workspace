@@ -825,7 +825,7 @@ test("keeps a public Assets MOC and a user MOC on one ICRS/NESTED cell", async (
       }) });
     });
     await page.route("**/api/resource-packages/config", async (route) => {
-      await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ config: { catalogUrl: "", available: false, adminConfigured: false } }) });
+      await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ config: { catalogUrl: "", available: false } }) });
     });
     await page.route("**/api/connectors", async (route) => {
       await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ connectors: [] }) });
