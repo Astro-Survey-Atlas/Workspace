@@ -47,7 +47,8 @@ function serverEnvironment({ stateRoot, port, esUrl, pythonCli, pythonHome, pyth
     ASTRO_SQLITE_PATH: path.join(stateRoot, "workspace.sqlite"),
     ASTRO_ES_URL: esUrl || "",
     ASTRO_WAREHOUSE_ES_URL: "",
-    ASTRO_DATA_WAREHOUSE_ENABLED: "false"
+    ASTRO_DATA_WAREHOUSE_ENABLED: "false",
+    ASTRO_INSTALL_CHANNEL: "desktop"
   };
   if (pythonCli) env.ASTRO_MOC_CORE_CLI = pythonCli;
   if (pythonHome) env.PYTHONHOME = pythonHome;

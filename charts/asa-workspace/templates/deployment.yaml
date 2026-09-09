@@ -115,6 +115,8 @@ spec:
               value: {{ .Values.search.localScanEnabled | quote }}
             - name: ASTRO_DATA_WAREHOUSE_ENABLED
               value: {{ .Values.dataWarehouse.enabled | quote }}
+            - name: ASTRO_INSTALL_CHANNEL
+              value: "helm"
             - name: ASTRO_USER_MOC_ROOT
               value: /state/user-mocs
             {{- if .Values.dataWarehouse.enabled }}

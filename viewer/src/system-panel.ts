@@ -1,5 +1,5 @@
 import { workspaceApi } from "./api";
-import type { RuntimeDataServices } from "./api";
+import type { RuntimeDataServices, WarehouseInstallationView } from "./api";
 import type { AiProviderRecord, McpServerRecord } from "../../src/system-config";
 import { notifyWorkspace } from "./notifications";
 
@@ -29,6 +29,7 @@ export class SystemPanel {
   private providers: AiProviderRecord[] = [];
   private servers: McpServerRecord[] = [];
   private runtime: RuntimeDataServices | null = null;
+  private installation: WarehouseInstallationView | null = null;
   private initialized = false;
   private editingProvider: AiProviderRecord | null = null;
   private editingServer: McpServerRecord | null = null;
@@ -53,21 +54,23 @@ export class SystemPanel {
       await this.refresh();
       this.initialized = true;
     } else await this.refresh();
-    this.renderProviders(); this.renderServers(); this.renderWarehouse(); this.renderRuntime(); this.renderCapabilities(); this.emitSummary();
+    this.renderProviders(); this.renderServers(); this.renderWarehouse(); this.renderInstallation(); this.renderRuntime(); this.renderCapabilities(); this.emitSummary();
   }
 
   deactivate(): void {}
-  debugState(): Record<string, unknown> { return { aiProviders: this.providers.length, mcpServers: this.servers.length, runtime: this.runtime ? "loaded" : "unavailable" }; }
+  debugState(): Record<string, unknown> { return { aiProviders: this.providers.length, mcpServers: this.servers.length, runtime: this.runtime ? "loaded" : "unavailable", installation: this.installation ? this.installation.observed.state : "unavailable" }; }
 
   private async refresh(): Promise<void> {
-    const [providers, servers, runtime] = await Promise.all([
+    const [providers, servers, runtime, installation] = await Promise.all([
       workspaceApi.aiProviders(),
       workspaceApi.mcpServers(),
       workspaceApi.runtimeDataServices().catch((error: unknown) => { this.fail(error); return null; }),
+      workspaceApi.warehouseInstallation().catch(() => null),
     ]);
     this.providers = providers;
     this.servers = servers;
     this.runtime = runtime;
+    this.installation = installation;
   }
 
   private emitSummary(): void {
@@ -159,6 +162,125 @@ export class SystemPanel {
     detail.textContent = parts.join(" · ");
     row.append(heading, meta, detail);
     list.replaceChildren(row);
+  }
+
+  private renderInstallation(): void {
+    const list = byId("warehouse-installation-list");
+    const installation = this.installation;
+    if (!installation) {
+      list.replaceChildren();
+      return;
+    }
+    const cards: HTMLElement[] = [];
+    const desired = installation.binding.desired;
+    if (desired && !installation.binding.aligned) {
+      const banner = document.createElement("article"); banner.className = "settings-record"; banner.dataset.status = "unknown";
+      const bannerHeading = document.createElement("header");
+      const bannerTitle = document.createElement("strong"); bannerTitle.textContent = "等待应用配置";
+      const bannerBadge = document.createElement("span"); bannerBadge.textContent = "待重启";
+      bannerHeading.append(bannerTitle, bannerBadge);
+      const bannerMeta = document.createElement("p");
+      bannerMeta.textContent = desired.enabled
+        ? `期望连接：${desired.elasticsearchUrl || "（未填写端点）"} · 命名空间 ${desired.namespace}`
+        : "期望断开 Warehouse 数据面";
+      banner.append(bannerHeading, bannerMeta);
+      const latest = installation.operations[0];
+      if (latest?.guidance.length) {
+        const steps = document.createElement("div"); steps.className = "installation-guidance";
+        latest.guidance.forEach((line) => { const code = document.createElement("code"); code.textContent = line; steps.append(code); });
+        banner.append(steps);
+      }
+      cards.push(banner);
+    }
+
+    const connectAction = installation.actions.find((action) => action.kind === "connect");
+    if (connectAction?.available) {
+      const connectRow = document.createElement("article"); connectRow.className = "settings-record";
+      const connectHeading = document.createElement("header");
+      const connectTitle = document.createElement("strong"); connectTitle.textContent = "连接已有 Warehouse";
+      const connectBadge = document.createElement("span"); connectBadge.textContent = installation.observed.state === "connected" ? "已连接" : "未连接";
+      connectHeading.append(connectTitle, connectBadge);
+      const form = document.createElement("div"); form.className = "settings-record-actions installation-form";
+      const endpointInput = document.createElement("input");
+      endpointInput.id = "warehouse-endpoint";
+      endpointInput.className = "field-input";
+      endpointInput.type = "url";
+      endpointInput.placeholder = "http://atlas-warehouse-elasticsearch.atlas-warehouse.svc.cluster.local:9200";
+      endpointInput.value = installation.binding.effective.elasticsearchUrl || "";
+      const namespaceInput = document.createElement("input");
+      namespaceInput.id = "warehouse-namespace";
+      namespaceInput.className = "field-input";
+      namespaceInput.type = "text";
+      namespaceInput.placeholder = "命名空间（默认 asa-workspace）";
+      namespaceInput.value = installation.binding.effective.namespace || "";
+      const connect = document.createElement("button"); connect.type = "button"; connect.className = "command-button secondary"; connect.textContent = "连接";
+      connect.addEventListener("click", () => void this.reconcileInstallation({ kind: "connect", elasticsearchUrl: endpointInput.value.trim(), namespace: namespaceInput.value.trim() || undefined }));
+      form.append(endpointInput, namespaceInput, connect);
+      const note = document.createElement("small"); note.textContent = "连接会记录期望配置；管理员按提示应用并滚动更新后生效。";
+      connectRow.append(connectHeading, form, note);
+      cards.push(connectRow);
+    } else if (connectAction) {
+      const blockedRow = document.createElement("article"); blockedRow.className = "settings-record"; blockedRow.dataset.status = "unknown";
+      const blockedHeading = document.createElement("header");
+      const blockedTitle = document.createElement("strong"); blockedTitle.textContent = "连接已有 Warehouse";
+      const blockedBadge = document.createElement("span"); blockedBadge.textContent = "当前渠道不可用";
+      blockedHeading.append(blockedTitle, blockedBadge);
+      const blockedMeta = document.createElement("p"); blockedMeta.textContent = connectAction.reason;
+      blockedRow.append(blockedHeading, blockedMeta);
+      cards.push(blockedRow);
+    }
+
+    const disconnectAction = installation.actions.find((action) => action.kind === "disconnect");
+    if (disconnectAction?.available) {
+      const disconnectRow = document.createElement("article"); disconnectRow.className = "settings-record";
+      const disconnectHeading = document.createElement("header");
+      const disconnectTitle = document.createElement("strong"); disconnectTitle.textContent = "断开 Warehouse";
+      const disconnectBadge = document.createElement("span"); disconnectBadge.textContent = "可操作";
+      disconnectHeading.append(disconnectTitle, disconnectBadge);
+      const actions = document.createElement("div"); actions.className = "settings-record-actions";
+      const disconnect = document.createElement("button"); disconnect.type = "button"; disconnect.className = "command-button danger"; disconnect.textContent = "断开连接";
+      disconnect.addEventListener("click", () => void this.reconcileInstallation({ kind: "disconnect" }));
+      actions.append(disconnect);
+      disconnectRow.append(disconnectHeading, actions);
+      cards.push(disconnectRow);
+    }
+
+    const installAction = installation.actions.find((action) => action.kind === "install");
+    if (installAction) {
+      const installRow = document.createElement("article"); installRow.className = "settings-record"; installRow.dataset.status = "unknown";
+      const installHeading = document.createElement("header");
+      const installTitle = document.createElement("strong"); installTitle.textContent = "安装 Warehouse";
+      const installBadge = document.createElement("span"); installBadge.textContent = installAction.available ? "可安装" : "暂不可安装";
+      installHeading.append(installTitle, installBadge);
+      const installMeta = document.createElement("p"); installMeta.textContent = installAction.reason;
+      const installActions = document.createElement("div"); installActions.className = "settings-record-actions";
+      const install = document.createElement("button"); install.type = "button"; install.className = "command-button secondary"; install.textContent = "安装"; install.disabled = !installAction.available;
+      install.addEventListener("click", () => void this.reconcileInstallation({ kind: "install" }));
+      installActions.append(install);
+      installRow.append(installHeading, installMeta, installActions);
+      if (installation.platform.notes.length) {
+        const notes = document.createElement("small"); notes.textContent = installation.platform.notes.join("；");
+        installRow.append(notes);
+      }
+      const latest = installation.operations.find((operation) => operation.intent?.kind === "install" || operation.intent?.kind === "uninstall");
+      if (latest?.guidance.length) {
+        const steps = document.createElement("div"); steps.className = "installation-guidance";
+        latest.guidance.forEach((line) => { const code = document.createElement("code"); code.textContent = line; steps.append(code); });
+        installRow.append(steps);
+      }
+      cards.push(installRow);
+    }
+
+    list.replaceChildren(...cards);
+  }
+
+  private async reconcileInstallation(intent: { kind: "connect"; elasticsearchUrl: string; namespace?: string } | { kind: "disconnect" } | { kind: "install" }): Promise<void> {
+    try {
+      const operation = await workspaceApi.reconcileWarehouseInstallation(intent);
+      this.installation = await workspaceApi.warehouseInstallation().catch(() => this.installation);
+      this.renderInstallation();
+      notifyWorkspace("Warehouse 安装操作已受理", operation.reason, { tone: operation.status === "failed" ? "error" : "success" });
+    } catch (error) { this.fail(error); }
   }
 
   private renderCapabilities(): void {

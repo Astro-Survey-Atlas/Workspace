@@ -38,6 +38,7 @@ import { discoverSourceFiles, type SourceUnit } from "./source-crawler.js";
 import { ProductionService, ProductionStateError, type ProductionSourceResolver, type ProductionWarehouseHandoff } from "./production.js";
 import { listProductionCapabilities } from "./production-capabilities.js";
 import { buildProvenance } from "./build-metadata.js";
+import { InstallationService } from "./installation.js";
 import { SystemConfigStore } from "./system-config.js";
 import { WorkspaceAgentService } from "./workspace-agent.js";
 
@@ -120,6 +121,15 @@ const warehouseScans = new WarehouseScanService({
   warehouseEsUrl,
   pollMs: warehousePollMs,
   artifacts: userMocs,
+});
+const installation = new InstallationService({
+  root: path.join(stateRoot, "installation"),
+  readEffective: () => ({
+    enabled: warehouseEnabled,
+    elasticsearchUrl: warehouseEsUrl,
+    namespace: warehouseNamespace,
+    configured: warehouseIndex.configured,
+  }),
 });
 const coverageDownloads = new CoverageDownloadService({
   root: coverageDownloadRoot,
@@ -883,6 +893,28 @@ app.put("/api/system-config/assets", async (request: Request, response: Response
     await systemConfig.setAssetsApiKey(body.apiKey);
     response.json({ assets: { apiKeyConfigured: await systemConfig.assetsApiKeyConfigured() } });
   } catch (error) { sendApiError(response, error); }
+});
+
+// Warehouse installation lifecycle. Desired binding intent is recorded here;
+// applying it (Helm values / env + restart) stays with the deployment admin.
+app.get("/api/installation/warehouse", async (_request: Request, response: Response) => {
+  try {
+    await installation.initialize();
+    response.set("Cache-Control", "no-store");
+    response.json({ installation: installation.inspect() });
+  } catch (error) {
+    sendApiError(response, error);
+  }
+});
+
+app.post("/api/installation/warehouse/reconcile", async (request: Request, response: Response) => {
+  try {
+    const body = request.body as { intent?: unknown } | null;
+    if (!body || typeof body !== "object" || Array.isArray(body)) throw new RangeError("request body must be an object");
+    response.status(202).json({ operation: await installation.reconcile(body.intent) });
+  } catch (error) {
+    sendApiError(response, error);
+  }
 });
 
 app.post("/api/resource-packages/sync", async (_request: Request, response: Response) => {
@@ -2100,6 +2132,7 @@ async function start(): Promise<void> {
   await coverageDownloads.initialize();
   await productionService.initialize();
   await systemConfig.initialize();
+  await installation.initialize();
   await workspaceAgent.initialize();
   const recoveredLocalScans = await localCsvScans.recoverInterruptedRuns();
   if (recoveredLocalScans) console.warn(`Marked ${recoveredLocalScans} interrupted local CSV scan(s) as failed`);

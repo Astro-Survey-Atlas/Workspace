@@ -267,7 +267,29 @@ test("system settings expose read-only runtime data services", async ({ page }) 
       }),
     });
   });
-  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.setViewportSize({ width: 1440, height: 900   });
+  await page.route("**/api/installation/warehouse", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        installation: {
+          packageId: "warehouse",
+          channel: "server",
+          platform: { installerKind: "none", installAvailable: false, notes: ["裸进程部署不支持由 Workspace 安装 Warehouse"] },
+          binding: { effective: { enabled: false, elasticsearchUrl: "", namespace: "asa-workspace" }, desired: null, aligned: true },
+          observed: { state: "absent", health: "unknown" },
+          actions: [
+            { kind: "connect", available: true, reason: "" },
+            { kind: "disconnect", available: false, reason: "当前未连接" },
+            { kind: "install", available: false, reason: "当前渠道暂不支持自动安装" },
+            { kind: "uninstall", available: false, reason: "当前未连接" },
+          ],
+          operations: [],
+        },
+      }),
+    });
+  });
   await page.goto("/");
   await waitForWorkspace(page);
 
@@ -292,6 +314,10 @@ test("system settings expose read-only runtime data services", async ({ page }) 
   await expect(warehouseRecord).toContainText("Warehouse 数据面");
   await expect(warehouseRecord).toContainText("未启用");
   await expect(warehouseRecord).toContainText("ast_layer_index_v1");
+  await expect(page.locator("#warehouse-installation-list")).toContainText("连接已有 Warehouse");
+  await expect(page.locator("#warehouse-endpoint")).toBeVisible();
+  await expect(page.locator("#warehouse-installation-list")).toContainText("安装 Warehouse");
+  await expect(page.locator("#warehouse-installation-list")).toContainText("暂不可安装");
 
   await page.locator('[data-settings-tab="capabilities"]').click();
   await expect(page.locator("#settings-capabilities-view")).toBeVisible();

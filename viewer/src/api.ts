@@ -207,6 +207,36 @@ export interface RuntimeDataServices {
   assetsApi?: { endpoint: string; apiKeyConfigured: boolean };
 }
 
+export type WarehouseInstallationIntent =
+  | { kind: "connect"; elasticsearchUrl: string; namespace?: string }
+  | { kind: "disconnect" }
+  | { kind: "install" }
+  | { kind: "uninstall"; deleteData?: boolean };
+
+export interface WarehouseInstallationOperation {
+  id: string;
+  packageId: string;
+  intent: Record<string, unknown>;
+  status: "succeeded" | "blocked" | "failed";
+  reason: string;
+  guidance: string[];
+  createdAt: string;
+}
+
+export interface WarehouseInstallationView {
+  packageId: string;
+  channel: string;
+  platform: { installerKind: string; installAvailable: boolean; notes: string[] };
+  binding: {
+    effective: { enabled: boolean; elasticsearchUrl: string; namespace: string };
+    desired: { enabled: boolean; elasticsearchUrl: string; namespace: string } | null;
+    aligned: boolean;
+  };
+  observed: { state: string; health: string };
+  actions: Array<{ kind: string; available: boolean; reason: string }>;
+  operations: WarehouseInstallationOperation[];
+}
+
 /** Browser-safe input for a Workspace-owned remote coverage scan. The server
  * adds the route asset id and keeps credentials in its namespace Secret. */
 export interface RemoteCoverageScanInput {
@@ -370,6 +400,12 @@ export const workspaceApi = {
   },
   async runtimeDataServices(): Promise<RuntimeDataServices> {
     return getJson<RuntimeDataServices>("/api/system-config/runtime");
+  },
+  async warehouseInstallation(): Promise<WarehouseInstallationView> {
+    return (await getJson<{ installation: WarehouseInstallationView }>("/api/installation/warehouse")).installation;
+  },
+  async reconcileWarehouseInstallation(intent: WarehouseInstallationIntent): Promise<WarehouseInstallationOperation> {
+    return (await postJson<{ operation: WarehouseInstallationOperation }>("/api/installation/warehouse/reconcile", { intent })).operation;
   },
   async syncResourceCatalog(): Promise<{ catalog: ResourceCatalogStatus; packages: PublicResourcePackage[] }> {
     return postJson<{ catalog: ResourceCatalogStatus; packages: PublicResourcePackage[] }>("/api/resource-packages/sync", {});

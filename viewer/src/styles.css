@@ -4422,6 +4422,9 @@ select.field-input {
 .assets-key-form .field-input { flex: 1 1 160px; min-width: 0; }
 .capability-link { color: var(--cyan); font: 10px var(--font-mono); overflow-wrap: anywhere; }
 a.capability-link:hover { text-decoration: underline; }
+.installation-form .field-input { flex: 1 1 180px; min-width: 0; }
+.installation-guidance { display: grid; gap: 4px; margin-top: 6px; }
+.installation-guidance code { display: block; padding: 4px 8px; border: 1px solid var(--line-subtle); border-radius: 3px; color: var(--cyan); font: 9px/1.5 var(--font-mono); overflow-wrap: anywhere; user-select: text; }
 .production-approval-section { display: grid; gap: 8px; margin: 12px 0; padding: 10px; border: 1px solid var(--asa-indigo, #6366f1); border-radius: 4px; }
 .toggle-row { display: flex; align-items: center; gap: 7px; margin: 10px 0; color: var(--text-soft); font-size: 10px; }
 

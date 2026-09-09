@@ -153,3 +153,68 @@ test("runtime data services are read-only, sanitized, and the catalog config rou
   assert.equal(clearResponse.status, 200);
   assert.deepEqual(await clearResponse.json(), { assets: { apiKeyConfigured: false } });
 });
+
+test("warehouse installation view is read-only and reconcile validates intents", async (t) => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "runtime-installation-"));
+  const catalogPath = path.join(directory, "missing-assets-catalog.json");
+  const port = 32100 + Math.floor(Math.random() * 800);
+  const baseUrl = `http://127.0.0.1:${port}`;
+  const stateRoot = path.join(directory, "state");
+  await rm(path.join(directory, "state"), { recursive: true, force: true }).catch(() => undefined);
+  let logs = "";
+  let apiProcess: ChildProcess | null = null;
+  t.after(async () => {
+    const proc = apiProcess;
+    proc?.kill("SIGTERM");
+    if (proc) await new Promise((resolve) => proc.once("exit", resolve));
+    await rm(directory, { recursive: true, force: true });
+  });
+  apiProcess = spawn(path.resolve("node_modules/.bin/tsx"), ["src/http-server.ts"], {
+    cwd: process.cwd(),
+    env: {
+      ...process.env,
+      HOST: "127.0.0.1",
+      PORT: String(port),
+      ASTRO_ALLOWED_HOSTS: "127.0.0.1,localhost",
+      ASTRO_DATA_WAREHOUSE_ENABLED: "false",
+      ASTRO_LOCAL_SCAN_ENABLED: "false",
+      ASTRO_ES_URL: "",
+      ASTRO_METADATA_STORE: "sqlite",
+      ASTRO_SQLITE_PATH: path.join(stateRoot, "workspace.sqlite"),
+      ASTRO_STATE_ROOT: stateRoot,
+      ASTRO_RESOURCE_PACKAGE_ROOT: path.join(stateRoot, "resource-packages"),
+      ASTRO_RESOURCE_PACKAGE_STATE: path.join(stateRoot, "resource-package-state.json"),
+      ASTRO_RESOURCE_CATALOG_URL: pathToFileURL(catalogPath).href,
+      ASTRO_MOC_CORE_CLI: `${path.resolve("node_modules/.bin/tsx")} ${path.resolve("test/helpers/mock-moc-core-cli.ts")}`,
+      NODE_NO_WARNINGS: "1",
+    },
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  apiProcess.stdout?.on("data", (chunk) => { logs += String(chunk); });
+  apiProcess.stderr?.on("data", (chunk) => { logs += String(chunk); });
+  await waitForHealth(baseUrl, apiProcess, () => logs);
+
+  const viewResponse = await fetch(`${baseUrl}/api/installation/warehouse`);
+  assert.equal(viewResponse.status, 200);
+  assert.equal(viewResponse.headers.get("cache-control"), "no-store");
+  const view = (await viewResponse.json()) as { installation: { channel: string; observed: { state: string }; actions: Array<{ kind: string; available: boolean }> } };
+  assert.equal(view.installation.channel, "server");
+  assert.equal(view.installation.observed.state, "absent");
+  assert.ok(view.installation.actions.length >= 4);
+
+  const badResponse = await fetch(`${baseUrl}/api/installation/warehouse/reconcile`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ intent: { kind: "connect", elasticsearchUrl: "ftp://warehouse:9200" } }),
+  });
+  assert.equal(badResponse.status, 400);
+
+  const connectResponse = await fetch(`${baseUrl}/api/installation/warehouse/reconcile`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ intent: { kind: "connect", elasticsearchUrl: "http://warehouse-es:9200" } }),
+  });
+  assert.equal(connectResponse.status, 202);
+  const payload = (await connectResponse.json()) as { operation: { status: string; intent: Record<string, unknown> } };
+  assert.equal(payload.operation.status, "failed");
+});
