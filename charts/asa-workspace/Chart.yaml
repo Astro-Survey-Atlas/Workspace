@@ -2,7 +2,7 @@ apiVersion: v2
 name: asa-workspace
 description: Lightweight deployment of the Astro Data Workspace service
 type: application
-version: 0.2.0
+version: 0.3.0
 appVersion: "0.10.38"
 dependencies:
   - name: postgresql

@@ -75,6 +75,36 @@ The persistent application state remains on `/state`. Workflow runs use
 `/state/workflow-runs`, and installed resource packages use
 `/state/resource-packages`.
 
+## Production download storage
+
+`productionData` provisions the writable root used by `overlap-download@1`
+production runs. When enabled, the chart creates a dedicated
+`ReadWriteMany` PVC (labelled `atlas.zhejianglab.org/scanner-source=true`)
+mounted at `/data/production` by default. The Deployment then sets
+`ASTRO_COVERAGE_DOWNLOAD_ROOT`, `ASTRO_PRODUCTION_DATA_MOUNT`, and appends
+the mount to `ASTRO_LOCAL_CONNECTOR_ROOTS`, so every approved run stages
+files on this claim instead of the small state volume. Supply
+`productionData.existingClaim` to reuse an existing claim; it must already
+carry the scanner-source label and `ReadWriteMany` access.
+
+When `dataWarehouse.enabled=true` at the same time, the chart also injects
+`ASTRO_WAREHOUSE_LOCAL_CLAIM` and `ASTRO_WAREHOUSE_LOCAL_SCANNER_MOUNT`. The
+Warehouse scanner Job then mounts the same claim read-only at
+`scannerMountPath` (`/data`), so `mountPath` must stay a strict subpath of
+`scannerMountPath`. This lets a completed run hand its local Connector to a
+Warehouse scan without copying bytes to object storage.
+
+```yaml
+productionData:
+  enabled: true
+  existingClaim: ""
+  storageClass: nfs-data
+  accessModes: [ReadWriteMany]
+  size: 500Gi
+  mountPath: /data/production
+  scannerMountPath: /data
+```
+
 ## Workspace search (always on)
 
 Workspace owns the search data plane independently from Warehouse. With the

@@ -34,6 +34,15 @@ helm template workspace charts/asa-workspace --namespace asa-workspace \
   --set localData.enabled=true \
   --set localData.hostPath.path=/srv/astro \
   --set 'localData.nodeSelector.kubernetes\.io/hostname=node-a'
+helm template workspace charts/asa-workspace --namespace asa-workspace \
+  --set productionData.enabled=true
+helm template workspace charts/asa-workspace --namespace asa-workspace \
+  --set productionData.enabled=true \
+  --set dataWarehouse.enabled=true \
+  --set dataWarehouse.elasticsearch.url=http://atlas-warehouse-elasticsearch.atlas-warehouse.svc.cluster.local:9200
+helm template workspace charts/asa-workspace --namespace asa-workspace \
+  --set productionData.enabled=true \
+  --set productionData.existingClaim=shared-production-data
 ```
 
 The default output must include a Deployment, Service, PVC, and bundled
@@ -58,3 +67,14 @@ Invalid local-data source combinations and a hostPath type other than
 RBAC, a shared evidence PVC/mount, and `ASTRO_WAREHOUSE_*` variables; it must
 not contain `ASTRO_FLINK_*`, the old metadata CRD, or a Role/RoleBinding in
 another namespace.
+Production-data output must create a PVC named `<release>-production-data`
+labelled `atlas.zhejianglab.org/scanner-source=true` with `ReadWriteMany`,
+mount it writable at `productionData.mountPath`, and emit
+`ASTRO_COVERAGE_DOWNLOAD_ROOT`/`ASTRO_PRODUCTION_DATA_MOUNT` equal to that
+mount plus `ASTRO_LOCAL_CONNECTOR_ROOTS` containing it; disabled output must
+omit the PVC, mount, and variables. With `dataWarehouse.enabled=true` it must
+also emit `ASTRO_WAREHOUSE_LOCAL_CLAIM` and
+`ASTRO_WAREHOUSE_LOCAL_SCANNER_MOUNT`; a `mountPath` that is not a strict
+subpath of `scannerMountPath`, access modes without `ReadWriteMany`, or
+combining `existingClaim` with `storageClass` must fail the guards. The state
+PVC must never carry the scanner-source label.

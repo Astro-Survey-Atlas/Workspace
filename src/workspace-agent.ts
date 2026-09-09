@@ -55,6 +55,8 @@ export const WORKSPACE_AGENT_TOOLS: readonly AgentToolDescriptor[] = [
   { name: "list_connectors", description: "列出当前 Workspace Connector", readOnly: true, parameters: { type: "object", properties: {} } },
   { name: "list_production_runs", description: "列出数据生产任务", readOnly: true, parameters: { type: "object", properties: {} } },
   { name: "submit_production_run", description: "提交一个数据生产任务，需要用户确认", readOnly: false, parameters: { type: "object", required: ["pipelineKey", "region"], properties: { pipelineKey: { type: "string" }, region: { type: "object" }, files: { type: "array" }, leftAssetId: { type: "string" }, rightAssetId: { type: "string" }, matchRadiusArcsec: { type: "number" }, exportFormat: { type: "string" }, concurrency: { type: "integer" } } } },
+  { name: "approve_production_run", description: "批准一个待审批的下载清单并开始下载，需要用户确认；planSha256 必须与任务的清单指纹一致", readOnly: false, parameters: { type: "object", required: ["runId", "planSha256"], properties: { runId: { type: "string" }, planSha256: { type: "string" } } } },
+  { name: "reject_production_run", description: "拒绝一个待审批的下载清单，需要用户确认", readOnly: false, parameters: { type: "object", required: ["runId"], properties: { runId: { type: "string" } } } },
 ];
 
 interface WorkspaceAgentOptions {
@@ -205,6 +207,12 @@ export class WorkspaceAgentService {
     if (name === "list_connectors") return (await this.#connectors.list()).map((connector) => ({ id: connector.id, name: connector.name, kind: connector.kind, status: connector.status, path: connector.displayPath }));
     if (name === "list_production_runs") return (await this.#production.listRuns()).slice(0, 50).map((run) => ({ id: run.id, pipelineKey: run.pipelineKey, status: run.status, createdAt: run.createdAt, summary: run.summary }));
     if (name === "submit_production_run") return this.#production.submit(args);
+    if (name === "approve_production_run") {
+      const runId = text(args.runId, "runId", 120);
+      const planSha256 = text(args.planSha256, "planSha256", 64).toLowerCase();
+      return this.#production.approve(runId, planSha256, "agent");
+    }
+    if (name === "reject_production_run") return this.#production.reject(text(args.runId, "runId", 120));
     throw new Error(`Unknown agent tool: ${name}`);
   }
 
@@ -212,6 +220,8 @@ export class WorkspaceAgentService {
     if (name === "list_data_assets") return `当前有 ${Array.isArray(result) ? result.length : 0} 个用户资产。`;
     if (name === "list_connectors") return `当前有 ${Array.isArray(result) ? result.length : 0} 个 Connector。`;
     if (name === "list_production_runs") return `当前有 ${Array.isArray(result) ? result.length : 0} 条生产任务记录。`;
+    if (name === "approve_production_run") { const run = result as { status?: string }; return `已批准下载清单，任务进入 ${run?.status ?? "执行"} 队列。`; }
+    if (name === "reject_production_run") return "已拒绝该下载清单，任务终止。";
     return `工具 ${name} 已完成。`;
   }
 

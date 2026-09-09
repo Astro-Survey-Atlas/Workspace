@@ -103,6 +103,8 @@ function publicMcp(record: PersistedConfig["mcp"][number], secrets: SecretState)
 function configDefaults(): PersistedConfig { return { version: 1, ai: [], mcp: [] }; }
 function secretDefaults(): SecretState { return { version: 1, values: {} }; }
 
+const ASSETS_API_KEY_REF = "assets-api-key";
+
 export class SystemConfigStore {
   readonly #root: string;
   readonly #configPath: string;
@@ -141,6 +143,29 @@ export class SystemConfigStore {
     const record = this.#config.ai.find((candidate) => candidate.enabled && candidate.isDefault);
     if (!record) return undefined;
     return { record: publicAi(record, this.#secrets), ...(record.apiKeyRef && this.#secrets.values[record.apiKeyRef] ? { apiKey: this.#secrets.values[record.apiKeyRef] } : {}) };
+  }
+
+  /** Instance-level Assets API key. Plaintext lives only in system-secrets.json
+   * and is never echoed back; callers see `assetsApiKeyConfigured`. */
+  async getAssetsApiKey(): Promise<string | undefined> {
+    await this.initialize();
+    const value = this.#secrets.values[ASSETS_API_KEY_REF];
+    return value && value.trim() ? value.trim() : undefined;
+  }
+
+  async setAssetsApiKey(value: string | null): Promise<void> {
+    await this.initialize();
+    if (value === null || !value.trim()) delete this.#secrets.values[ASSETS_API_KEY_REF];
+    else {
+      const trimmed = value.trim();
+      if (trimmed.length > 512) throw new RangeError("Assets API Key must contain at most 512 characters");
+      this.#secrets.values[ASSETS_API_KEY_REF] = trimmed;
+    }
+    await this.#persist();
+  }
+
+  async assetsApiKeyConfigured(): Promise<boolean> {
+    return Boolean(await this.getAssetsApiKey());
   }
 
   async upsertAiProvider(value: AiProviderInput): Promise<AiProviderRecord> {

@@ -12,6 +12,9 @@ RUN python -m pip install --no-cache-dir --ignore-installed --prefix=/opt/moc-co
 FROM node:22.22.1-bookworm-slim AS build
 
 ARG NPM_REGISTRY=https://registry.npmjs.org
+# Pinned into ASTRO_BUILD_COMMIT so the runtime capability registry can emit
+# immutable source permalinks for every production executor.
+ARG ASTRO_BUILD_COMMIT=""
 WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci --registry=${NPM_REGISTRY}
@@ -20,13 +23,15 @@ COPY tsconfig.json tsconfig.viewer.json vite.config.ts ./
 COPY src ./src
 COPY viewer ./viewer
 COPY packages ./packages
-RUN npm run build && npm prune --omit=dev --ignore-scripts --no-audit --no-fund --offline
+RUN ASTRO_BUILD_COMMIT=${ASTRO_BUILD_COMMIT} npm run build && npm prune --omit=dev --ignore-scripts --no-audit --no-fund --offline
 
 FROM node:22.22.1-bookworm-slim AS runtime
 
+ARG ASTRO_BUILD_COMMIT=""
 ENV NODE_ENV=production \
     HOST=0.0.0.0 \
     PORT=3000 \
+    ASTRO_BUILD_COMMIT=${ASTRO_BUILD_COMMIT} \
     ASTRO_DATA_WAREHOUSE_ENABLED=false \
     ASTRO_LOCAL_SCAN_ENABLED=false \
     ASTRO_METADATA_STORE=sqlite \

@@ -47,3 +47,10 @@ helm.sh/chart: {{ .Chart.Name }}-{{ .Chart.Version | replace "+" "_" }}
 {{- define "asa-workspace.warehouseNamespace" -}}
 {{- default .Release.Namespace .Values.dataWarehouse.namespace -}}
 {{- end }}
+{{- define "asa-workspace.productionDataClaim" -}}
+{{- if .Values.productionData.existingClaim -}}
+{{- .Values.productionData.existingClaim -}}
+{{- else -}}
+{{- printf "%s-production-data" (include "asa-workspace.fullname" .) | trunc 63 | trimSuffix "-" -}}
+{{- end -}}
+{{- end }}

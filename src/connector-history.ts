@@ -13,6 +13,8 @@ export interface ConnectorScanTargetSnapshot {
   uri: string;
   bucket?: string;
   prefix?: string;
+  /** Local connector normalized absolute root (local scans). */
+  rootPath?: string;
 }
 
 /** Public run history DTO. Executor credentials are deliberately excluded. */

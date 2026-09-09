@@ -93,8 +93,7 @@ export class SystemPanel {
       list.replaceChildren();
       return;
     }
-    const catalogRow = document.createElement("article"); catalogRow.className = "settings-record"; cardStatus(catalogRow, runtime.catalog.available);
-    const catalogHeading = document.createElement("header"); const catalogTitle = document.createElement("strong"); catalogTitle.textContent = "公开巡天目录（Assets Catalog）"; const catalogBadge = document.createElement("span"); catalogBadge.textContent = runtime.catalog.available ? "可用" : "不可用"; catalogHeading.append(catalogTitle, catalogBadge);
+    const catalogRow = document.createElement("article"); catalogRow.className = "settings-record"; cardStatus(catalogRow, runtime.catalog.available);    const catalogHeading = document.createElement("header"); const catalogTitle = document.createElement("strong"); catalogTitle.textContent = "公开巡天目录（Assets Catalog）"; const catalogBadge = document.createElement("span"); catalogBadge.textContent = runtime.catalog.available ? "可用" : "不可用"; catalogHeading.append(catalogTitle, catalogBadge);
     const catalogMeta = document.createElement("p"); catalogMeta.textContent = runtime.catalog.endpoint || "未配置（使用内置本地目录）";
     const catalogDetail = document.createElement("small");
     const catalogParts = [`最近同步：${runtime.catalog.syncedAt ? new Date(runtime.catalog.syncedAt).toLocaleString() : "尚未同步"}`, `管理员 token：${runtime.catalog.adminConfigured ? "已配置" : "未配置"}`];
@@ -114,7 +113,77 @@ export class SystemPanel {
     const warehouseDetail = document.createElement("small"); warehouseDetail.textContent = `索引：${runtime.warehouseSearch.indices.layer} / ${runtime.warehouseSearch.indices.file} / ${runtime.warehouseSearch.indices.coverage}`;
     warehouseRow.append(warehouseHeading, warehouseMeta, warehouseDetail);
 
-    list.replaceChildren(catalogRow, searchRow, warehouseRow);
+    const cards: HTMLElement[] = [catalogRow, searchRow, warehouseRow];
+
+    if (runtime.assetsApi) {
+      const assetsRow = document.createElement("article"); assetsRow.className = "settings-record"; cardStatus(assetsRow, true);
+      const assetsHeading = document.createElement("header");
+      const assetsTitle = document.createElement("strong"); assetsTitle.textContent = "Assets 数据服务 API Key";
+      const assetsBadge = document.createElement("span"); assetsBadge.textContent = runtime.assetsApi.apiKeyConfigured ? "已配置" : "未配置";
+      assetsHeading.append(assetsTitle, assetsBadge);
+      const assetsMeta = document.createElement("p"); assetsMeta.textContent = runtime.assetsApi.endpoint || "未配置（使用内置本地目录）";
+      const assetsForm = document.createElement("div"); assetsForm.className = "settings-record-actions assets-key-form";
+      const keyInput = document.createElement("input");
+      keyInput.id = "assets-api-key";
+      keyInput.className = "field-input";
+      keyInput.type = "password";
+      keyInput.autocomplete = "off";
+      keyInput.placeholder = runtime.assetsApi.apiKeyConfigured ? "已保存（输入新值可替换）" : "粘贴实例级 API Key";
+      const save = document.createElement("button"); save.type = "button"; save.className = "command-button secondary"; save.textContent = "保存";
+      save.addEventListener("click", () => void this.saveAssetsKey(keyInput.value || null));
+      const clear = document.createElement("button"); clear.type = "button"; clear.className = "command-button danger"; clear.textContent = "清除";
+      clear.addEventListener("click", () => void this.saveAssetsKey(null));
+      assetsForm.append(keyInput, save, clear);
+      const assetsNote = document.createElement("small"); assetsNote.textContent = "密钥仅保存在服务端密钥存储，不会写入任务、产物或日志。";
+      assetsRow.append(assetsHeading, assetsMeta, assetsForm, assetsNote);
+      cards.push(assetsRow);
+    }
+
+    const capabilities = runtime.capabilities ?? [];
+    if (capabilities.length) {
+      const capabilityRow = document.createElement("article"); capabilityRow.className = "settings-record capability-registry"; cardStatus(capabilityRow, true);
+      const capabilityHeading = document.createElement("header");
+      const capabilityTitle = document.createElement("strong"); capabilityTitle.textContent = "生产能力注册表";
+      const capabilityBadge = document.createElement("span"); capabilityBadge.textContent = `${capabilities.length} 项 · 只读`;
+      capabilityHeading.append(capabilityTitle, capabilityBadge);
+      const commitNote = runtime.build?.commit ? `源码锚点 ${runtime.build.commit.slice(0, 12)}` : "源码锚点未注入（本地构建）";
+      const capabilityMeta = document.createElement("p"); capabilityMeta.textContent = `全部生产能力的版本与职责说明。${commitNote}`;
+      const groups = document.createElement("div"); groups.className = "capability-groups";
+      const kindLabels: Record<string, string> = { pipeline: "流水线", resolver: "来源解析器", transfer: "传输", handoff: "交接" };
+      (["pipeline", "resolver", "transfer", "handoff"] as const).forEach((kind) => {
+        const entries = capabilities.filter((capability) => capability.kind === kind);
+        if (!entries.length) return;
+        const group = document.createElement("section"); group.className = "capability-group";
+        const groupTitle = document.createElement("strong"); groupTitle.textContent = kindLabels[kind] ?? kind;
+        group.append(groupTitle);
+        entries.forEach((capability) => {
+          const item = document.createElement("div"); item.className = "capability-item"; item.dataset.availability = capability.availability;
+          const name = capability.sourceUrl
+            ? Object.assign(document.createElement("a"), { textContent: `${capability.key}`, href: capability.sourceUrl, target: "_blank", rel: "noreferrer", className: "capability-link" })
+            : Object.assign(document.createElement("span"), { textContent: `${capability.key}`, className: "capability-link" });
+          const detail = document.createElement("small");
+          detail.textContent = `${capability.title} · ${capability.responsibility}${capability.availability !== "available" ? ` · 不可用` : ""}`;
+          item.append(name, detail);
+          group.append(item);
+        });
+        groups.append(group);
+      });
+      capabilityRow.append(capabilityHeading, capabilityMeta, groups);
+      cards.push(capabilityRow);
+    }
+
+    list.replaceChildren(...cards);
+  }
+
+  private async saveAssetsKey(apiKey: string | null): Promise<void> {
+    try {
+      const result = await workspaceApi.setAssetsApiKey(apiKey);
+      if (this.runtime?.assetsApi) this.runtime = { ...this.runtime, assetsApi: { ...this.runtime.assetsApi, apiKeyConfigured: result.assets.apiKeyConfigured } };
+      const input = document.getElementById("assets-api-key") as HTMLInputElement | null;
+      if (input) input.value = "";
+      this.renderRuntime();
+      notifyWorkspace("Assets API Key 已更新", result.assets.apiKeyConfigured ? "密钥已保存" : "密钥已清除", { tone: "success" });
+    } catch (error) { this.fail(error); }
   }
 
   private openProvider(record?: AiProviderRecord): void {

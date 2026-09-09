@@ -14,6 +14,24 @@ spec:
   storageClassName: {{ . | quote }}
   {{- end }}
 {{- end }}
+{{- if and .Values.productionData.enabled (not .Values.productionData.existingClaim) }}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "asa-workspace.productionDataClaim" . }}
+  labels:
+    {{- include "asa-workspace.labels" . | nindent 4 }}
+    atlas.zhejianglab.org/scanner-source: "true"
+spec:
+  accessModes: {{ toYaml .Values.productionData.accessModes | nindent 4 }}
+  resources:
+    requests:
+      storage: {{ .Values.productionData.size }}
+  {{- with .Values.productionData.storageClass }}
+  storageClassName: {{ . | quote }}
+  {{- end }}
+{{- end }}
 {{- if and .Values.dataWarehouse.enabled (not .Values.dataWarehouse.evidence.existingClaim) }}
 ---
 apiVersion: v1

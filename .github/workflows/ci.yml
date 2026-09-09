@@ -79,5 +79,7 @@ jobs:
           context: .
           push: false
           tags: asa-workspace:ci
+          build-args: |
+            ASTRO_BUILD_COMMIT=${{ github.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max

@@ -34,8 +34,10 @@ import { WarehouseIndexService, type WarehouseCoverageLayer } from "./warehouse-
 import { WarehouseScanService } from "./warehouse-scan.js";
 import { calculateSkyOverlap, type SkyOverlapSource } from "./sky-overlap.js";
 import { CoverageDownloadService, type CoverageDownloadFile } from "./coverage-downloads.js";
-import { discoverSourceFiles } from "./source-crawler.js";
-import { ProductionService } from "./production.js";
+import { discoverSourceFiles, type SourceUnit } from "./source-crawler.js";
+import { ProductionService, ProductionStateError, type ProductionSourceResolver, type ProductionWarehouseHandoff } from "./production.js";
+import { listProductionCapabilities } from "./production-capabilities.js";
+import { buildProvenance } from "./build-metadata.js";
 import { SystemConfigStore } from "./system-config.js";
 import { WorkspaceAgentService } from "./workspace-agent.js";
 
@@ -125,6 +127,69 @@ const coverageDownloads = new CoverageDownloadService({
   statePath: coverageDownloadStatePath,
   registerConnector: (input) => connectors.register(input),
 });
+/* Builtin source-unit resolver: maps an immutable region snapshot onto typed
+ * executable source units using Workspace's own coverage metadata. This seam
+ * is where a future authorized Assets source-unit API plugs in. */
+const DESI_TILE_URL_PATTERN = /^https:\/\/data\.desi\.lbl\.gov\/public\/(dr1|edr)\/spectro\/redux\/(iron|fuji)\/tiles\/cumulative\/(\d{1,6})\/(\d{8})\/$/;
+const DIRECT_FILE_URL_PATTERN = /\.(?:fits?|fits?\.gz|fz|csv|tsv|ecsv|jsonl?|parquet|zip|tgz|tar|gz|hdf5?|nc|xml|reg|txt|sha256sum)(?:$|[?#])/i;
+const productionSourceResolver: ProductionSourceResolver = {
+  async resolve(region) {
+    const sources = await overlapSources({
+      nside: region.nside,
+      ...(region.sourceIds.length ? { sourceIds: new Set(region.sourceIds) } : {}),
+      includePublic: true,
+      includeWorkspace: true,
+    });
+    const regionPixels = new Set(region.pixels);
+    const units: SourceUnit[] = [];
+    const blocked: Array<{ sourceId: string; reason: string }> = [];
+    const present = new Set(sources.map((source) => source.id));
+    region.sourceIds
+      .filter((id) => !present.has(id))
+      .forEach((id) => blocked.push({ sourceId: id, reason: "来源不存在、不可用或没有该区域的覆盖" }));
+    for (const source of sources) {
+      if (!source.pixels.some((pixel) => regionPixels.has(pixel))) {
+        blocked.push({ sourceId: source.id, reason: "来源覆盖与所选区域没有交集" });
+        continue;
+      }
+      const url = source.sourceUrl;
+      if (!url) {
+        blocked.push({ sourceId: source.id, reason: "来源没有可反查的文件 URL" });
+        continue;
+      }
+      if (!/^https?:\/\//i.test(url)) {
+        blocked.push({
+          sourceId: source.id,
+          reason: /^s3:\/\//i.test(url) ? "S3 URL 需要配置凭据后才能下载" : "仅支持公开 HTTP(S) 来源 URL",
+        });
+        continue;
+      }
+      const desi = url.match(DESI_TILE_URL_PATTERN);
+      if (desi) {
+        units.push({
+          sourceId: source.id,
+          unitId: `desi:${desi[1]}:${desi[2]}:${desi[3]}:${desi[4]}`,
+          resolver: "desi-tile@1",
+          directoryUrl: url,
+          release: desi[1]!,
+          redux: desi[2]!,
+          tileId: Number(desi[3]),
+          lastNight: desi[4]!,
+        });
+        continue;
+      }
+      if (DIRECT_FILE_URL_PATTERN.test(url)) {
+        units.push({ sourceId: source.id, unitId: `file:${source.id}`, resolver: "direct-file@1", url });
+        continue;
+      }
+      units.push({ sourceId: source.id, unitId: `dir:${source.id}`, resolver: "http-directory@1", directoryUrl: url.replace(/\/?$/, "/") });
+    }
+    return { units, blocked };
+  },
+};
+const warehouseProductionHandoff: ProductionWarehouseHandoff = {
+  submit: (input) => warehouseScans.submitProductionHandoff(input),
+};
 const productionService = new ProductionService({
   root: productionRoot,
   downloads: coverageDownloads,
@@ -132,6 +197,8 @@ const productionService = new ProductionService({
   dataCatalog,
   objectIndex: astroObjectIndex,
   localRoots: localConnectorRoots,
+  sourceResolver: productionSourceResolver,
+  ...(warehouseScans.enabled ? { warehouseHandoff: warehouseProductionHandoff } : {}),
 });
 const systemConfig = new SystemConfigStore(systemConfigRoot);
 const workspaceAgent = new WorkspaceAgentService({ root: path.join(stateRoot, "agent"), config: systemConfig, dataCatalog, connectors, production: productionService });
@@ -295,6 +362,7 @@ function sendApiError(response: Response, error: unknown): void {
     : error instanceof LocalScanPreconditionError ? error.statusCode
     : error instanceof LocalSourceInspectionCapabilityError ? error.statusCode
     : error instanceof LocalSourceInspectionError ? error.statusCode
+  : error instanceof ProductionStateError ? error.statusCode
   : error instanceof DataWarehouseDisabledError ? 503
     : error instanceof ResourceCatalogUnavailableError ? 503
     : error instanceof ResourceCatalogSyncError ? 502
@@ -775,7 +843,7 @@ app.get("/api/resource-packages/config", (_request: Request, response: Response)
 
 // Effective endpoints are provisioned by the deployment environment (env vars /
 // bundled defaults) and are intentionally read-only from the browser.
-app.get("/api/system-config/runtime", (_request: Request, response: Response) => {
+app.get("/api/system-config/runtime", async (_request: Request, response: Response) => {
   response.set("Cache-Control", "no-store");
   const catalog = resourcePackages.catalogStatus();
   response.json({
@@ -806,7 +874,27 @@ app.get("/api/system-config/runtime", (_request: Request, response: Response) =>
       indices: { layer: warehouseEsLayerIndex, file: warehouseEsFileIndex, coverage: warehouseEsCoverageIndex },
       source: "environment",
     },
+    // Read-only production capability registry pinned to this build.
+    capabilities: listProductionCapabilities({ warehouseEnabled: warehouseScans.enabled }),
+    build: buildProvenance(),
+    assetsApi: {
+      endpoint: sanitizeEndpointForDisplay(resourceCatalogUrl),
+      apiKeyConfigured: await systemConfig.assetsApiKeyConfigured().catch(() => false),
+    },
   });
+});
+
+// Instance-level Assets API key. The plaintext is stored only in
+// system-secrets.json and never appears in runs, artifacts or logs.
+app.put("/api/system-config/assets", async (request: Request, response: Response) => {
+  try {
+    const body = request.body as { apiKey?: unknown } | null;
+    if (!body || typeof body !== "object" || Array.isArray(body)) throw new RangeError("request body must be an object");
+    if (!("apiKey" in body)) throw new RangeError("apiKey is required");
+    if (body.apiKey !== null && typeof body.apiKey !== "string") throw new RangeError("apiKey must be a string or null");
+    await systemConfig.setAssetsApiKey(body.apiKey);
+    response.json({ assets: { apiKeyConfigured: await systemConfig.assetsApiKeyConfigured() } });
+  } catch (error) { sendApiError(response, error); }
 });
 
 app.post("/api/resource-packages/sync", async (request: Request, response: Response) => {
@@ -1790,10 +1878,25 @@ app.post("/api/production-runs/:id/cancel", async (request: Request, response: R
   try { response.status(202).json({ run: await productionService.cancel(datasetIdFrom(request)) }); }
   catch (error) { sendApiError(response, error); }
 });
-
 app.post("/api/production-runs/:id/retry", async (request: Request, response: Response) => {
-  try { response.status(202).json({ run: await productionService.retry(datasetIdFrom(request)) }); }
-  catch (error) { sendApiError(response, error); }
+  try {
+    response.status(202).json({ run: await productionService.retry(datasetIdFrom(request)) });
+  } catch (error) { sendApiError(response, error); }
+});
+
+app.post("/api/production-runs/:id/approve", async (request: Request, response: Response) => {
+  try {
+    const body = request.body as { planSha256?: unknown; decidedBy?: unknown } | null;
+    const planSha256 = typeof body?.planSha256 === "string" ? body.planSha256.trim() : "";
+    const decidedBy = body?.decidedBy === "agent" ? "agent" : "user";
+    response.status(202).json({ run: await productionService.approve(datasetIdFrom(request), planSha256, decidedBy) });
+  } catch (error) { sendApiError(response, error); }
+});
+
+app.post("/api/production-runs/:id/reject", async (request: Request, response: Response) => {
+  try {
+    response.status(202).json({ run: await productionService.reject(datasetIdFrom(request)) });
+  } catch (error) { sendApiError(response, error); }
 });
 
 app.get("/api/production-runs/:id/artifacts/:name", async (request: Request, response: Response) => {

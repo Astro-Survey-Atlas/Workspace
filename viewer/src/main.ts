@@ -1339,7 +1339,7 @@ function renderSurveyContextMenu(menu: SkyRegionMenu): void {
   buildCrossmatch.title = buildCrossmatch.disabled ? "需要两个已建立 RA / Dec 对象索引的 catalog 资产" : "构建对象交叉匹配任务";
   buildDownload.onclick = () => {
     closeSkyContextMenu();
-    productionPanel.setContext(context);
+    productionPanel.setContext(context, "overlap-download@1");
     void activateMode("workflow").catch(showFatal);
   };
   buildCrossmatch.onclick = () => {
@@ -1449,13 +1449,11 @@ function renderOverlapComponent(component: SurveyLayerOverlapComponent): void {
     .then((lookup) => {
       if (!overlapModeActive) return;
       const actions: HTMLButtonElement[] = [];
-      if (lookup.files.length) {
-        const download = actionButton(`构建数据下载任务（${lookup.files.length}）`, () => {
-          productionPanel.setContext({ nside: overlapResponse?.nside ?? 16, pixels: selected.cells, sourceIds, componentId: selected.id, files: lookup.files });
-          void activateMode("workflow").catch(showFatal);
-        });
-        actions.push(download);
-      }
+      const download = actionButton("构建数据下载任务", () => {
+        productionPanel.setContext({ nside: overlapResponse?.nside ?? 16, pixels: selected.cells, sourceIds, componentId: selected.id }, "overlap-download@1");
+        void activateMode("workflow").catch(showFatal);
+      });
+      actions.push(download);
       inspectorRows(`重合区块 ${selected.id}`, [
         ["模式", "G · 天区重合"],
         ["区块", selected.id],
@@ -1633,7 +1631,7 @@ function renderSurveySelection(selection: SurveyLayerSelection | null): void {
   });
   clearAction.classList.add("secondary");
   const buildAction = actionButton("交给数据生产", () => {
-    productionPanel.setContext({ nside: selection.nside, pixels: selection.pixels, sourceIds: [...selectedSurveyIds.map((id) => `public:${id}`), ...selection.assetIds.map((id) => `workspace:asset:${id}`)], assetIds: selection.assetIds });
+    productionPanel.setContext({ nside: selection.nside, pixels: selection.pixels, sourceIds: [...selectedSurveyIds.map((id) => `public:${id}`), ...selection.assetIds.map((id) => `workspace:asset:${id}`)], assetIds: selection.assetIds }, "overlap-download@1");
     void activateMode("workflow").catch(showFatal);
   });
    inspectorRows(`已选择 ${selection.pixels.length} 个天区`, [

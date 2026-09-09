@@ -156,8 +156,8 @@ function usage(): string {
     "",
     "  assets list|get ID",
     "  connectors list|get ID|check ID|scan ID",
-    "  production pipelines|list|get ID|submit --input run.json|cancel ID|retry ID",
-    "  system ai list|test ID; system mcp list|test ID",
+    "  production pipelines|list|get ID|submit --input run.json|cancel ID|retry ID|approve ID --sha256 HASH|reject ID",
+    "  system ai list|test ID; system mcp list|test ID; system runtime",
     "  agent sessions|new|send ID MESSAGE|confirm ID --approved|--rejected",
   ].join("\n");
 }
@@ -187,8 +187,15 @@ async function run(client: WorkspaceClient, args: ParsedArgs): Promise<unknown> 
     if (action === "get") return unwrap(await client.request("GET", `/api/production-runs/${id}`), "run");
     if (action === "cancel") return unwrap(await client.request("POST", `/api/production-runs/${id}/cancel`, {}), "run");
     if (action === "retry") return unwrap(await client.request("POST", `/api/production-runs/${id}/retry`, {}), "run");
+    if (action === "approve") {
+      const sha256 = option(args, "sha256", "plan-sha256");
+      if (!sha256?.trim()) throw new Error("production approve requires --sha256 <plan-sha256>");
+      return unwrap(await client.request("POST", `/api/production-runs/${id}/approve`, { planSha256: sha256.trim() }), "run");
+    }
+    if (action === "reject") return unwrap(await client.request("POST", `/api/production-runs/${id}/reject`, {}), "run");
   }
   if (domain === "system") {
+    if (action === "runtime") return client.request("GET", "/api/system-config/runtime");
     if (action === "ai" && (!identifier || identifier === "list")) return unwrap(await client.request("GET", "/api/system-config/ai-providers"), "providers");
     if (action === "mcp" && (!identifier || identifier === "list")) return unwrap(await client.request("GET", "/api/system-config/mcp-servers"), "servers");
     if (action === "ai" && identifier === "test") return unwrap(await client.request("POST", `/api/system-config/ai-providers/${encodeURIComponent(requireCommand(rest[0], "provider id"))}/test`, {}), "provider");

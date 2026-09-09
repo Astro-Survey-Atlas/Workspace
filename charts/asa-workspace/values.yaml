@@ -55,6 +55,21 @@ localData:
     type: Directory
   nodeSelector: {}
 
+# Dedicated writable storage for production download plans. Every approved
+# run stages files under this mount and registers a local Connector there.
+# When dataWarehouse is also enabled, the Warehouse scanner Job mounts the
+# same claim read-only at scannerMountPath, so accessModes must include
+# ReadWriteMany and mountPath must live under scannerMountPath.
+productionData:
+  enabled: false
+  existingClaim: ""
+  storageClass: ""
+  accessModes:
+    - ReadWriteMany
+  size: 20Gi
+  mountPath: /data/production
+  scannerMountPath: /data
+
 # Search is required independently of the optional data warehouse. In external
 # mode, the Secret value is the complete Elasticsearch base URL, including any
 # URL-encoded basic-auth credentials.

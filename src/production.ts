@@ -7,8 +7,12 @@ import type { DataCatalogRegistry, DataAssetRecord } from "./data-catalog.js";
 import type { AstroObjectIndexService, AstroObjectRecord } from "./astro-object-index.js";
 import type { LocalConnectorRootsPolicy } from "./local-connector-roots.js";
 import type { CoverageDownloadFile, CoverageDownloadJob, CoverageDownloadService } from "./coverage-downloads.js";
+import {
+  resolveSourceInventory, computeInventoryDigest, validateRelativePath,
+  type SourceFileInventory, type SourceInventoryFile, type SourceUnit, type SourceUnitResolution,
+} from "./source-crawler.js";
 
-export type ProductionRunStatus = "queued" | "running" | "succeeded" | "failed" | "cancelled";
+export type ProductionRunStatus = "queued" | "resolving" | "awaiting-approval" | "running" | "succeeded" | "failed" | "cancelled" | "rejected";
 export type ProductionPipelineAvailability = "available" | "planned";
 
 export interface RegionSnapshot {
@@ -74,6 +78,19 @@ export interface ProductionPipelineParameter {
   options?: string[];
 }
 
+/**
+ * Human approval of one immutable, checksummed download inventory. The plan
+ * SHA-256 binds the decision to exactly the file list that will transfer.
+ */
+export interface ProductionApproval {
+  state: "pending" | "approved" | "rejected";
+  planSha256: string;
+  decidedAt?: string;
+  decidedBy?: "user" | "system-legacy" | "agent";
+  /** True when a retry reused a previously approved inventory unchanged. */
+  reused?: boolean;
+}
+
 export interface ProductionRun {
   id: string;
   pipelineKey: string;
@@ -89,20 +106,63 @@ export interface ProductionRun {
   error?: string;
   outputConnectorId?: string;
   outputPath?: string;
+  approval?: ProductionApproval;
+  /** Canonical resolved inventory persisted before approval. */
+  inventory?: SourceFileInventory;
+  /** Origin run id for staging/inventory reuse across retries. */
+  retryOfRunId?: string;
 }
 
 export interface ProductionRunInput {
   pipelineKey: string;
   region?: unknown;
+  /** @deprecated Pre-expanded file list; bypasses in-run resolution and approval. */
   files?: readonly CoverageDownloadFile[];
   exportFormat?: "json" | "csv";
   crawlerId?: string;
   concurrency?: number;
   storageConnectorId?: string;
+  warehouseHandoff?: "none" | "submit";
   leftAssetId?: string;
   rightAssetId?: string;
   matchRadiusArcsec?: number;
   limit?: number;
+}
+
+/** Adapter that derives typed source units from an immutable region snapshot. */
+export interface ProductionSourceResolver {
+  resolve(region: RegionSnapshot): Promise<ProductionSourceResolution>;
+}
+
+export interface ProductionSourceResolution {
+  units: SourceUnit[];
+  /** Sources that could not be mapped to any executable unit. */
+  blocked: Array<{ sourceId: string; reason: string }>;
+}
+
+/** Adapter that hands a verified production output Connector to Warehouse. */
+export interface ProductionWarehouseHandoff {
+  submit(input: ProductionWarehouseHandoffInput): Promise<ProductionWarehouseHandoffReceipt>;
+}
+
+export interface ProductionWarehouseHandoffInput {
+  runId: string;
+  connectorId: string;
+  inventorySha256: string;
+}
+
+export interface ProductionWarehouseHandoffReceipt {
+  accepted: boolean;
+  scanRunIds: string[];
+}
+
+/** Conflict-style state errors surfaced as HTTP 409. */
+export class ProductionStateError extends Error {
+  readonly statusCode = 409;
+  constructor(message: string) {
+    super(message);
+    this.name = "ProductionStateError";
+  }
 }
 
 export const PRODUCTION_PIPELINES: readonly ProductionPipelineDefinition[] = [
@@ -111,14 +171,17 @@ export const PRODUCTION_PIPELINES: readonly ProductionPipelineDefinition[] = [
     version: 1,
     key: "overlap-download@1",
     title: "重合区域数据下载",
-    description: "从重合区域反查公开文件，按选择的爬虫下载并登记新的 Connector。",
+    description: "解析重合区域的来源单元，审批清单后流式下载并登记新的 Connector，可移交 Warehouse 扫描。",
     availability: "available",
-    inputRequirements: ["RegionSnapshot", "文件清单", "导出格式", "爬虫", "并发", "存储位置"],
-    outputs: ["区域 JSON/CSV", "下载文件清单", "新的本地 Connector"],
+    inputRequirements: ["RegionSnapshot", "来源解析", "清单审批", "并发", "存储位置", "Warehouse 提交"],
+    outputs: ["区域 JSON/CSV", "下载清单 download-plan.json", "下载账本 download-manifest.json", "新的本地 Connector"],
     dag: [
       { id: "region", title: "固定区域快照", description: "保存重合区域的 ICRS / NESTED HEALPix 快照。" },
-      { id: "download", title: "爬虫下载与校验", description: "按并发配置下载反查文件并校验内容。", dependsOn: ["region"] },
+      { id: "resolve", title: "来源单元解析", description: "把区域来源解析为 typed source units 并展开规范文件清单。", dependsOn: ["region"] },
+      { id: "approval", title: "清单审批", description: "人工确认清单内容与目标；审批绑定清单 SHA-256。", dependsOn: ["resolve"] },
+      { id: "download", title: "流式下载与校验", description: "按并发配置流式下载清单文件，支持断点续传与校验。", dependsOn: ["approval"] },
       { id: "connector", title: "登记结果 Connector", description: "把下载目录登记为新的 Workspace Connector。", dependsOn: ["download"] },
+      { id: "warehouse", title: "Warehouse 扫描提交", description: "可选：把输出 Connector 移交 Warehouse 扫描。", dependsOn: ["connector"] },
     ],
     parameters: [
       { key: "exportFormat", label: "区域导出格式", type: "select", defaultValue: "json", options: ["json", "csv"] },
@@ -171,6 +234,8 @@ const MAX_STATE_RUNS = 200;
 const MAX_STEP_LOGS = 200;
 const MAX_PIXELS = 4096;
 const MAX_MATCH_ROWS = 10_000;
+const DOWNLOAD_POLL_ATTEMPTS = 7_200;
+const DOWNLOAD_POLL_INTERVAL_MS = 500;
 
 function now(): string {
   return new Date().toISOString();
@@ -271,6 +336,47 @@ function assetSupportsObjects(asset: DataAssetRecord): boolean {
     && scan.coordinateFrame === "ICRS" && scan.coordinateUnits === "deg";
 }
 
+/** Build the canonical inventory from pre-expanded legacy files without I/O. */
+function directFilesInventory(files: readonly CoverageDownloadFile[]): SourceFileInventory {
+  const entries: SourceInventoryFile[] = files.map((file, index) => {
+    const relativePath = validateRelativePath(file.relativePath ?? file.name);
+    return {
+      sourceId: file.sourceId ?? "direct",
+      unitId: file.unitId ?? `direct-${index}`,
+      resolver: "direct-file@1",
+      relativePath,
+      url: file.url,
+      ...(file.sizeBytes !== undefined ? { sizeBytes: file.sizeBytes } : {}),
+      ...(file.sha256 ? { sha256: file.sha256 } : {}),
+      ...(file.etag ? { etag: file.etag } : {}),
+      ...(file.lastModified ? { lastModified: file.lastModified } : {}),
+    };
+  });
+  const seen = new Set<string>();
+  entries.forEach((entry) => {
+    if (seen.has(entry.relativePath)) throw new RangeError(`清单相对路径冲突: ${entry.relativePath}`);
+    seen.add(entry.relativePath);
+  });
+  entries.sort((left, right) => left.relativePath.localeCompare(right.relativePath));
+  const counts = new Map<string, number>();
+  entries.forEach((entry) => counts.set(entry.unitId, (counts.get(entry.unitId) ?? 0) + 1));
+  const unitKeys = new Map(entries.map((entry) => [entry.unitId, entry]));
+  const units: SourceUnitResolution[] = [...unitKeys.values()].map((entry) => ({
+    sourceId: entry.sourceId,
+    unitId: entry.unitId,
+    resolver: entry.resolver,
+    status: "resolved",
+    fileCount: counts.get(entry.unitId) ?? 0,
+  }));
+  return {
+    schemaVersion: 1,
+    inventorySha256: computeInventoryDigest(entries, units),
+    files: entries,
+    units,
+    truncated: false,
+  };
+}
+
 interface ProductionServiceOptions {
   root: string;
   downloads: CoverageDownloadService;
@@ -278,6 +384,13 @@ interface ProductionServiceOptions {
   dataCatalog: DataCatalogRegistry;
   objectIndex: AstroObjectIndexService;
   localRoots: LocalConnectorRootsPolicy;
+  sourceResolver?: ProductionSourceResolver;
+  warehouseHandoff?: ProductionWarehouseHandoff;
+}
+
+interface PersistedState {
+  schemaVersion: 2;
+  runs: ProductionRun[];
 }
 
 export class ProductionService {
@@ -288,6 +401,8 @@ export class ProductionService {
   readonly #dataCatalog: DataCatalogRegistry;
   readonly #objectIndex: AstroObjectIndexService;
   readonly #localRoots: LocalConnectorRootsPolicy;
+  readonly #sourceResolver?: ProductionSourceResolver;
+  readonly #warehouseHandoff?: ProductionWarehouseHandoff;
   readonly #runs = new Map<string, ProductionRun>();
   readonly #writes = new Map<string, Promise<void>>();
   #initialized = false;
@@ -302,6 +417,8 @@ export class ProductionService {
     this.#dataCatalog = options.dataCatalog;
     this.#objectIndex = options.objectIndex;
     this.#localRoots = options.localRoots;
+    this.#sourceResolver = options.sourceResolver;
+    this.#warehouseHandoff = options.warehouseHandoff;
   }
 
   async initialize(): Promise<void> {
@@ -321,8 +438,13 @@ export class ProductionService {
     await mkdir(this.#root, { recursive: true });
     try {
       const parsed = JSON.parse(await readFile(this.#statePath, "utf8")) as unknown;
-      if (!Array.isArray(parsed)) throw new Error("production state must be an array");
-      for (const entry of parsed) {
+      const entries = Array.isArray(parsed)
+        ? parsed // legacy raw array
+        : parsed && typeof parsed === "object" && Array.isArray((parsed as PersistedState).runs)
+          ? (parsed as PersistedState).runs
+          : null;
+      if (!entries) throw new Error("production state must be an array or a versioned envelope");
+      for (const entry of entries) {
         if (!entry || typeof entry !== "object" || typeof (entry as ProductionRun).id !== "string") continue;
         const legacyRun = clone(entry as ProductionRun & { pipelinePresetId?: unknown });
         delete legacyRun.pipelinePresetId;
@@ -330,9 +452,9 @@ export class ProductionService {
           ...legacyRun,
           steps: Array.isArray(legacyRun.steps) ? legacyRun.steps.map(normalizeStep) : [],
         };
-        if (run.status === "queued" || run.status === "running") {
+        if (run.status === "queued" || run.status === "running" || run.status === "resolving") {
           run.status = "failed";
-          run.error = "服务重启前生产任务尚未完成";
+          run.error = "服务重启前生产任务尚未完成；请手动重试（已验证/部分文件会被复用）";
           run.completedAt = now();
           run.updatedAt = run.completedAt;
           const active = run.steps.find((step) => step.status === "running") ?? run.steps.find((step) => step.status === "pending");
@@ -342,6 +464,17 @@ export class ProductionService {
             active.detail = run.error;
             active.logs = [...active.logs, stepLog(run.completedAt, "error", run.error)].slice(-MAX_STEP_LOGS);
           }
+        }
+        // Backfill DAG nodes introduced after the run was persisted so
+        // historical records never render phantom pending steps.
+        const pipeline = PRODUCTION_PIPELINES.find((candidate) => candidate.key === run.pipelineKey);
+        if (pipeline) {
+          pipeline.dag.forEach((node) => {
+            if (run.steps.some((step) => step.id === node.id)) return;
+            run.steps.push(normalizeStep({ id: node.id, title: node.title, status: "skipped", detail: "历史记录：该节点在任务执行后引入", logs: [] }));
+          });
+          const order = new Map(pipeline.dag.map((node, index) => [node.id, index]));
+          run.steps.sort((left, right) => (order.get(left.id) ?? 999) - (order.get(right.id) ?? 999));
         }
         this.#runs.set(run.id, clone(run));
       }
@@ -368,6 +501,10 @@ export class ProductionService {
   }
 
   async submit(inputValue: unknown): Promise<ProductionRun> {
+    return this.#submitValidated(inputValue);
+  }
+
+  async #submitValidated(inputValue: unknown, reuse?: { inventory: SourceFileInventory; approval: ProductionApproval; originId: string }): Promise<ProductionRun> {
     await this.initialize();
     if (!inputValue || typeof inputValue !== "object" || Array.isArray(inputValue)) throw new RangeError("production input must be an object");
     const input = inputValue as ProductionRunInput;
@@ -377,24 +514,27 @@ export class ProductionService {
     if (pipeline.availability !== "available") throw new RangeError("该流水线尚未开放提交");
     const region = regionSnapshot(input.region);
     const normalized: Record<string, unknown> = { pipelineKey, region };
-    const steps: ProductionStep[] = [];
+    const steps: ProductionStep[] = pipeline.dag.map((node) => ({ id: node.id, title: node.title, status: "pending", logs: [] }));
+    let initialStatus: ProductionRunStatus = "queued";
     if (pipeline.id === "overlap-download") {
-      if (!Array.isArray(input.files) || input.files.length < 1) throw new RangeError("overlap-download requires a non-empty files list");
+      const hasLegacyFiles = Array.isArray(input.files) && input.files.length > 0;
+      if (input.files !== undefined && !hasLegacyFiles) throw new RangeError("overlap-download files must be a non-empty array when provided");
       const exportFormat = input.exportFormat ?? "json";
       if (exportFormat !== "json" && exportFormat !== "csv") throw new RangeError("exportFormat must be json or csv");
       const crawlerId = input.crawlerId === undefined ? "builtin-http" : text(input.crawlerId, "crawlerId");
       const concurrency = input.concurrency === undefined ? 4 : input.concurrency;
       if (!Number.isSafeInteger(concurrency) || concurrency < 1 || concurrency > 16) throw new RangeError("concurrency must be an integer between 1 and 16");
-      normalized.files = clone(input.files);
+      if (hasLegacyFiles) normalized.files = clone(input.files);
       normalized.exportFormat = exportFormat;
       normalized.crawlerId = crawlerId;
       normalized.concurrency = concurrency;
       if (input.storageConnectorId !== undefined) normalized.storageConnectorId = text(input.storageConnectorId, "storageConnectorId");
-      steps.push(
-        { id: "region", title: "固定重合区域快照", status: "pending", logs: [] },
-        { id: "download", title: "爬虫下载与校验", status: "pending", logs: [] },
-        { id: "connector", title: "登记结果 Connector", status: "pending", logs: [] },
-      );
+      const warehouseHandoff = input.warehouseHandoff ?? "none";
+      if (warehouseHandoff !== "none" && warehouseHandoff !== "submit") throw new RangeError("warehouseHandoff must be none or submit");
+      normalized.warehouseHandoff = warehouseHandoff;
+      // Runs without pre-expanded files resolve their source units inside the
+      // run and pause at a human approval gate before any transfer.
+      if (!hasLegacyFiles) initialStatus = "resolving";
     } else {
       if (!input.leftAssetId || !input.rightAssetId) throw new RangeError("object-crossmatch requires two assets");
       const leftAssetId = text(input.leftAssetId, "leftAssetId");
@@ -409,59 +549,116 @@ export class ProductionService {
       normalized.rightAssetId = rightAssetId;
       normalized.matchRadiusArcsec = matchRadiusArcsec;
       normalized.limit = limit;
-      steps.push(
-        { id: "query", title: "读取两个对象索引", status: "pending", logs: [] },
-        { id: "match", title: "最近邻球面匹配", status: "pending", logs: [] },
-        { id: "export", title: "导出结果与血缘", status: "pending", logs: [] },
-      );
     }
     const createdAt = now();
     const run: ProductionRun = {
       id: `prd_${createdAt.replace(/[-:.TZ]/g, "").slice(0, 14)}_${randomUUID().slice(0, 8)}`,
       pipelineKey,
-      status: "queued",
+      status: initialStatus,
       createdAt,
       updatedAt: createdAt,
       input: normalized,
       steps,
       artifacts: [],
       summary: {},
+      ...(reuse ? { inventory: clone(reuse.inventory), approval: { ...clone(reuse.approval), reused: true }, retryOfRunId: reuse.originId } : {}),
     };
+    if (reuse) {
+      run.summary = {
+        ...run.summary,
+        inventorySha256: reuse.inventory.inventorySha256,
+        inventoryFiles: reuse.inventory.files.length,
+        inventoryUnits: reuse.inventory.units.length,
+      };
+      this.appendStepLog(run, "resolve", "info", `复用来源运行 ${reuse.originId} 的已审批清单`);
+    }
     this.#runs.set(run.id, run);
     await this.#persist();
     void this.#execute(run.id);
     return clone(run);
   }
 
+  /** Approve the pending inventory; the decision binds to the plan SHA-256. */
+  async approve(id: string, planSha256: string, decidedBy: "user" | "agent" = "user"): Promise<ProductionRun> {
+    await this.initialize();
+    const run = this.#runs.get(text(id, "production run id"));
+    if (!run) throw new Error(`Production run not found: ${id}`);
+    if (run.status !== "awaiting-approval") throw new ProductionStateError("只有等待审批的生产任务可以审批");
+    const expected = run.approval?.planSha256 ?? "";
+    if (typeof planSha256 !== "string" || !/^[0-9a-f]{64}$/.test(planSha256) || planSha256 !== expected) {
+      throw new ProductionStateError("清单校验值不匹配；请刷新清单后重试");
+    }
+    run.approval = { ...run.approval!, state: "approved", decidedAt: now(), decidedBy };
+    this.appendStepLog(run, "approval", "info", `已批准下载清单 ${planSha256.slice(0, 12)}…`);
+    await this.setStep(run, "approval", "succeeded", "清单已批准");
+    run.status = "queued";
+    await this.#save(run);
+    void this.#execute(run.id);
+    return clone(run);
+  }
+
+  /** Reject the pending inventory; the run terminates without any transfer. */
+  async reject(id: string): Promise<ProductionRun> {
+    await this.initialize();
+    const run = this.#runs.get(text(id, "production run id"));
+    if (!run) throw new Error(`Production run not found: ${id}`);
+    if (run.status !== "awaiting-approval") throw new ProductionStateError("只有等待审批的生产任务可以拒绝");
+    run.approval = { ...run.approval!, state: "rejected", decidedAt: now() };
+    run.status = "rejected";
+    run.completedAt = now();
+    const approvalStep = run.steps.find((step) => step.id === "approval");
+    if (approvalStep) this.updateStep(approvalStep, "cancelled", "用户拒绝下载清单", "warning");
+    run.steps.forEach((step) => {
+      if (step.status === "pending") this.updateStep(step, "skipped", "清单被拒绝，未执行");
+    });
+    await this.#save(run);
+    return clone(run);
+  }
+
   async cancel(id: string): Promise<ProductionRun> {
     const run = await this.getRun(id);
-    if (run.status === "queued") {
-      run.status = "cancelled";
-      run.completedAt = now();
-      run.error = "用户取消任务";
-      const first = run.steps.find((step) => step.status === "pending");
-      if (first) this.updateStep(first, "cancelled", run.error, "warning");
-      await this.#save(run);
-      return run;
+    if (run.status === "queued" || run.status === "resolving" || run.status === "awaiting-approval") {
+      const live = this.#runs.get(run.id)!;
+      if (live.status === "running") return this.#cancelRunning(live);
+      live.status = "cancelled";
+      live.completedAt = now();
+      live.error = "用户取消任务";
+      const first = live.steps.find((step) => step.status === "running" || step.status === "pending");
+      if (first) this.updateStep(first, "cancelled", live.error, "warning");
+      live.steps.forEach((step) => {
+        if (step.status === "pending") this.updateStep(step, "skipped", "任务已取消");
+      });
+      await this.#save(live);
+      return clone(live);
     }
     if (run.status === "running" && run.pipelineKey === "overlap-download@1") {
-      const downloadId = typeof run.summary.downloadJobId === "string" ? run.summary.downloadJobId : undefined;
-      if (downloadId) await this.#downloads.cancel(downloadId);
-      run.status = "cancelled";
-      run.completedAt = now();
-      run.error = "用户取消任务";
-      const active = run.steps.find((step) => step.status === "running");
-      if (active) this.updateStep(active, "cancelled", run.error, "warning");
-      await this.#save(run);
+      return this.#cancelRunning(this.#runs.get(run.id)!);
     }
     return clone(run);
+  }
+
+  async #cancelRunning(live: ProductionRun): Promise<ProductionRun> {
+    const downloadId = typeof live.summary.downloadJobId === "string" ? live.summary.downloadJobId : undefined;
+    if (downloadId) await this.#downloads.cancel(downloadId).catch(() => undefined);
+    live.status = "cancelled";
+    live.completedAt = now();
+    live.error = "用户取消任务";
+    const active = live.steps.find((step) => step.status === "running");
+    if (active) this.updateStep(active, "cancelled", live.error, "warning");
+    await this.#save(live);
+    return clone(live);
   }
 
   async retry(id: string): Promise<ProductionRun> {
     const run = await this.getRun(id);
     if (run.status !== "failed" && run.status !== "cancelled") throw new RangeError("Only failed or cancelled production runs can be retried");
     const input = clone(run.input);
-    return this.submit(input);
+    // Reuse the previously approved inventory and staging when it exists so a
+    // retry never re-resolves or re-downloads verified bytes.
+    if (run.inventory && run.approval?.state === "approved" && !input.files) {
+      return this.#submitValidated(input, { inventory: run.inventory, approval: run.approval, originId: run.retryOfRunId ?? run.id });
+    }
+    return this.#submitValidated(input);
   }
 
   async artifactPath(id: string, name: string): Promise<{ run: ProductionRun; artifact: ProductionArtifact; filePath: string }> {
@@ -475,13 +672,19 @@ export class ProductionService {
 
   async #execute(id: string): Promise<void> {
     const run = this.#runs.get(id);
-    if (!run || run.status !== "queued") return;
-    run.status = "running";
-    run.startedAt = now();
+    if (!run || (run.status !== "queued" && run.status !== "resolving")) return;
+    run.startedAt ??= now();
+    if (run.status === "queued") run.status = "running";
     await this.#save(run);
     try {
       if (run.pipelineKey === "overlap-download@1") await this.#executeDownload(run);
       else await this.#executeCrossmatch(run);
+      // Paused or terminal states set inside the execution body win.
+      const statusAfter: ProductionRunStatus = String(run.status) as ProductionRunStatus;
+      if (statusAfter === "awaiting-approval" || statusAfter === "rejected" || statusAfter === "cancelled") {
+        await this.#save(run);
+        return;
+      }
       run.status = "succeeded";
       run.completedAt = now();
       await this.#save(run);
@@ -498,13 +701,90 @@ export class ProductionService {
 
   async #executeDownload(run: ProductionRun): Promise<void> {
     const region = run.input.region as RegionSnapshot;
-    const exportFormat = run.input.exportFormat === "csv" ? "csv" : "json";
-    const regionName = exportFormat === "csv" ? "region.csv" : "region.json";
-    const regionContent = exportFormat === "csv" ? regionCsv(region) : `${JSON.stringify(region, null, 2)}\n`;
-    await this.setStep(run, "region", "running", `准备 ${region.pixels.length} 个 HEALPix 单元`);
-    await this.writeArtifact(run, regionName, exportFormat === "csv" ? "text/csv; charset=utf-8" : "application/json", regionContent);
-    await this.setStep(run, "region", "succeeded", `已生成 ${regionName}`);
-    await this.setStep(run, "download", "running", `使用 ${String(run.input.crawlerId)}，并发数 ${Number(run.input.concurrency)}`);
+    const originId = run.retryOfRunId ?? run.id;
+
+    // --- region ---
+    const regionStep = run.steps.find((step) => step.id === "region");
+    if (regionStep?.status !== "succeeded") {
+      const exportFormat = run.input.exportFormat === "csv" ? "csv" : "json";
+      const regionName = exportFormat === "csv" ? "region.csv" : "region.json";
+      const regionContent = exportFormat === "csv" ? regionCsv(region) : `${JSON.stringify(region, null, 2)}\n`;
+      await this.setStep(run, "region", "running", `准备 ${region.pixels.length} 个 HEALPix 单元`);
+      await this.writeArtifact(run, regionName, exportFormat === "csv" ? "text/csv; charset=utf-8" : "application/json", regionContent);
+      await this.setStep(run, "region", "succeeded", `已生成 ${regionName}`);
+    }
+
+    // --- resolve ---
+    const resolveStep = run.steps.find((step) => step.id === "resolve");
+    if (resolveStep?.status !== "succeeded" && !run.inventory) {
+      await this.setStep(run, "resolve", "running", run.input.files ? "直接文件输入，构造清单" : "解析区域来源单元");
+      let inventory: SourceFileInventory;
+      if (Array.isArray(run.input.files)) {
+        inventory = directFilesInventory(run.input.files as CoverageDownloadFile[]);
+      } else if (run.retryOfRunId) {
+        throw new Error("重试运行缺少可复用的清单；请重新提交任务");
+      } else if (this.#sourceResolver) {
+        const resolution = await this.#sourceResolver.resolve(region);
+        // A cancelled run must not continue past its in-flight resolution.
+        if (run.status !== "resolving" && run.status !== "running") return;
+        inventory = await resolveSourceInventory(resolution.units);
+        inventory.units = [...inventory.units, ...resolution.blocked.map((entry) => ({
+          sourceId: entry.sourceId,
+          unitId: `blocked:${entry.sourceId}`,
+          resolver: "direct-file@1" as const,
+          status: "unavailable" as const,
+          reason: entry.reason,
+          fileCount: 0,
+        }))];
+      } else {
+        throw new Error("当前部署未配置来源解析适配器，无法解析该区域");
+      }
+      const blocked = inventory.units.filter((unit) => unit.status === "unavailable");
+      const knownBytes = inventory.files.reduce((sum, file) => sum + (file.sizeBytes ?? 0), 0);
+      run.inventory = inventory;
+      run.summary = {
+        ...run.summary,
+        inventorySha256: inventory.inventorySha256,
+        inventoryFiles: inventory.files.length,
+        inventoryBytes: knownBytes,
+        inventoryUnits: inventory.units.length,
+        ...(blocked.length ? { blockedUnits: blocked.map((unit) => ({ sourceId: unit.sourceId, unitId: unit.unitId, reason: unit.reason ?? "未知原因" })) } : {}),
+        ...(inventory.truncated ? { inventoryTruncated: true } : {}),
+      };
+      await this.writeArtifact(run, "download-plan.json", "application/json", `${JSON.stringify({ inventory, summary: run.summary }, null, 2)}\n`);
+      if (blocked.length) {
+        const detail = blocked.map((unit) => `${unit.sourceId}/${unit.unitId}: ${unit.reason ?? "未知原因"}`).join("；");
+        this.appendStepLog(run, "resolve", "error", `以下来源单元无法解析，任务整体阻断：${detail}`);
+        await this.setStep(run, "resolve", "failed", "存在无法解析的来源单元");
+        throw new Error(`来源解析受阻（${blocked.length} 个单元）：${detail}`.slice(0, 2_000));
+      }
+      if (!inventory.files.length) {
+        await this.setStep(run, "resolve", "failed", "未解析到任何可下载文件");
+        throw new Error("来源解析完成但没有可下载文件");
+      }
+      await this.setStep(run, "resolve", "succeeded", `${inventory.units.length} 个来源单元 · ${inventory.files.length} 个文件`);
+    }
+    if (!run.inventory) throw new Error("缺少下载清单");
+    const inventory = run.inventory;
+
+    // --- approval ---
+    if (run.approval?.state === "approved") {
+      await this.setStep(run, "approval", "succeeded", run.approval.reused ? "复用先前审批的清单" : "清单已批准");
+    } else if (Array.isArray(run.input.files)) {
+      // Legacy pre-expanded input is treated as pre-approved by the caller.
+      run.approval = { state: "approved", planSha256: inventory.inventorySha256, decidedAt: now(), decidedBy: "system-legacy" };
+      this.appendStepLog(run, "approval", "info", "直接文件输入按兼容策略视为已审批");
+      await this.setStep(run, "approval", "succeeded", "直接文件输入（免审批）");
+    } else {
+      run.approval = { state: "pending", planSha256: inventory.inventorySha256 };
+      run.status = "awaiting-approval";
+      await this.setStep(run, "approval", "pending", "等待人工审批下载清单");
+      await this.#save(run);
+      return; // execution resumes through approve()
+    }
+
+    // --- download ---
+    await this.setStep(run, "download", "running", `流式下载 ${inventory.files.length} 个文件，并发数 ${Number(run.input.concurrency ?? 4)}`);
     const storageConnectorId = typeof run.input.storageConnectorId === "string" ? run.input.storageConnectorId : undefined;
     let outputRoot: string | undefined;
     if (storageConnectorId) {
@@ -516,36 +796,73 @@ export class ProductionService {
       this.#localRoots.assertConfiguredPath(configuredRoot);
     }
     const download = await this.#downloads.submit({
-      files: run.input.files as CoverageDownloadFile[],
+      files: inventory.files.map((file) => ({
+        url: file.url,
+        name: file.relativePath.split("/").pop() ?? file.relativePath,
+        relativePath: file.relativePath,
+        ...(file.sizeBytes !== undefined ? { sizeBytes: file.sizeBytes } : {}),
+        ...(file.sha256 ? { sha256: file.sha256 } : {}),
+        ...(file.etag ? { etag: file.etag } : {}),
+        ...(file.lastModified ? { lastModified: file.lastModified } : {}),
+      })),
       componentId: region.componentId,
       sourceIds: region.sourceIds,
       concurrency: Number(run.input.concurrency ?? 4),
-      ...(outputRoot ? { outputRoot, outputPrefix: run.id } : { outputPrefix: run.id }),
+      requestKey: `production:${originId}`,
+      inventorySha256: inventory.inventorySha256,
+      ...(outputRoot ? { outputRoot } : {}),
+      outputPrefix: originId,
     });
     run.summary = { ...run.summary, downloadJobId: download.id, files: download.totalFiles };
     this.appendStepLog(run, "download", "info", `下载任务 ${download.id} 已提交，共 ${download.totalFiles} 个文件`);
     await this.#save(run);
-    let current = download;
+    let current: CoverageDownloadJob = download;
     let loggedFiles = current.downloadedFiles;
-    for (let attempt = 0; attempt < 1_200; attempt += 1) {
+    for (let attempt = 0; attempt < DOWNLOAD_POLL_ATTEMPTS; attempt += 1) {
       if (current.status === "completed" || current.status === "failed" || current.status === "cancelled") break;
-      await new Promise((resolve) => setTimeout(resolve, 500));
+      await new Promise((resolve) => setTimeout(resolve, DOWNLOAD_POLL_INTERVAL_MS));
       current = await this.#downloads.get(download.id);
       run.summary = { ...run.summary, downloadedFiles: current.downloadedFiles, downloadedBytes: current.downloadedBytes };
       if (current.downloadedFiles !== loggedFiles) {
         loggedFiles = current.downloadedFiles;
-        this.appendStepLog(run, "download", "info", `已下载 ${current.downloadedFiles}/${current.totalFiles} 个文件，${current.downloadedBytes} bytes`);
+        this.appendStepLog(run, "download", "info", `已完成 ${current.downloadedFiles}/${current.totalFiles} 个文件，${current.downloadedBytes} bytes`);
       }
       await this.#save(run);
     }
+    if (current.status !== "completed" && current.status !== "failed" && current.status !== "cancelled") {
+      await this.#downloads.cancel(download.id).catch(() => undefined);
+      throw new Error("下载任务超时（1 小时），已请求取消；可重试复用已下载内容");
+    }
     if (current.status === "cancelled") { run.status = "cancelled"; throw new Error(current.error ?? "下载已取消"); }
-    if (current.status !== "completed") throw new Error(current.error ?? "下载任务超时");
+    if (current.status !== "completed") throw new Error(current.error ?? "下载失败");
     run.outputConnectorId = current.outputConnectorId;
     run.outputPath = current.outputPath;
     await this.setStep(run, "download", "succeeded", `${current.downloadedFiles} 个文件下载完成`);
+
+    // --- connector ---
     await this.setStep(run, "connector", "running", "正在登记下载结果");
-    await this.writeArtifact(run, "download-manifest.json", "application/json", `${JSON.stringify({ region, crawlerId: run.input.crawlerId, files: run.input.files, job: current }, null, 2)}\n`);
+    await this.writeArtifact(run, "download-manifest.json", "application/json", `${JSON.stringify({ region, crawlerId: run.input.crawlerId, inventory, job: current }, null, 2)}\n`);
     await this.setStep(run, "connector", "succeeded", current.outputConnectorId ?? "已登记");
+
+    // --- warehouse ---
+    const handoffMode = run.input.warehouseHandoff === "submit" ? "submit" : "none";
+    if (handoffMode === "none") {
+      await this.setStep(run, "warehouse", "skipped", "未请求 Warehouse 扫描");
+      return;
+    }
+    if (!this.#warehouseHandoff) {
+      await this.setStep(run, "warehouse", "failed", "当前部署未启用 Warehouse 扫描适配器");
+      throw new Error("请求提交 Warehouse 扫描，但当前部署未启用 Warehouse（请设置 warehouseHandoff=none 或启用 Warehouse）");
+    }
+    if (!run.outputConnectorId) throw new Error("缺少输出 Connector，无法提交 Warehouse 扫描");
+    await this.setStep(run, "warehouse", "running", "提交 Warehouse 扫描请求");
+    const receipt = await this.#warehouseHandoff.submit({
+      runId: originId,
+      connectorId: run.outputConnectorId,
+      inventorySha256: inventory.inventorySha256,
+    });
+    run.summary = { ...run.summary, warehouseScanRuns: receipt.scanRunIds };
+    await this.setStep(run, "warehouse", "succeeded", `Warehouse 已受理 ${receipt.scanRunIds.length} 个扫描请求`);
   }
 
   async #executeCrossmatch(run: ProductionRun): Promise<void> {
@@ -621,9 +938,13 @@ export class ProductionService {
   }
 
   private async writeArtifact(run: ProductionRun, name: string, mediaType: string, content: string): Promise<void> {
-    await mkdir(path.join(this.#root, run.id), { recursive: true });
+    const directory = path.join(this.#root, run.id);
+    await mkdir(directory, { recursive: true });
     const bytes = Buffer.from(content, "utf8");
-    await writeFile(path.join(this.#root, run.id, name), bytes);
+    // Atomic publication: readers never observe a partial artifact.
+    const temporary = path.join(directory, `.${name}.${randomUUID()}.tmp`);
+    await writeFile(temporary, bytes, { mode: 0o600 });
+    await rename(temporary, path.join(directory, name));
     const artifact: ProductionArtifact = { name, mediaType, byteLength: bytes.byteLength, sha256: createHash("sha256").update(bytes).digest("hex"), createdAt: now() };
     run.artifacts = [...run.artifacts.filter((candidate) => candidate.name !== name), artifact];
     await this.#save(run);
@@ -637,10 +958,11 @@ export class ProductionService {
 
   async #persist(): Promise<void> {
     const snapshot = [...this.#runs.values()].sort((left, right) => right.createdAt.localeCompare(left.createdAt)).slice(0, MAX_STATE_RUNS);
+    const state: PersistedState = { schemaVersion: 2, runs: snapshot };
     const previous = this.#writes.get("state") ?? Promise.resolve();
     const current = previous.catch(() => undefined).then(async () => {
       const temporary = `${this.#statePath}.${randomUUID()}.tmp`;
-      await writeFile(temporary, `${JSON.stringify(snapshot, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
+      await writeFile(temporary, `${JSON.stringify(state, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
       await rename(temporary, this.#statePath);
     });
     this.#writes.set("state", current);
@@ -649,4 +971,4 @@ export class ProductionService {
 
 }
 
-export type { CoverageDownloadFile, CoverageDownloadJob };
+export type { CoverageDownloadFile, CoverageDownloadJob, SourceFileInventory, SourceUnit };

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -112,6 +112,89 @@ test("persists interrupted jobs as failed on restart", async () => {
     assert.match(job.error ?? "", /interrupted/);
     const persisted = JSON.parse(await readFile(statePath, "utf8")) as { jobs: Array<{ status: string }> };
     assert.equal(persisted.jobs[0]?.status, "failed");
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("resumes a failed transfer from the .part file using Range and If-Range", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "astro-coverage-download-resume-"));
+  const registrations: string[] = [];
+  let failFirst = true;
+  let resumeHeaders: Record<string, string> = {};
+  try {
+    const service = new CoverageDownloadService({
+      root: path.join(directory, "downloads"),
+      statePath: path.join(directory, "jobs.json"),
+      fetchImpl: async (_input, init) => {
+        const headers = (init?.headers ?? {}) as Record<string, string>;
+        if (failFirst) {
+          let delivered = false;
+          return new Response(new ReadableStream<Uint8Array>({
+            pull(controller) {
+              if (delivered) {
+                controller.error(new Error("short read"));
+                return;
+              }
+              delivered = true;
+              controller.enqueue(new TextEncoder().encode("AAAA"));
+            },
+          }), { status: 200, headers: { "content-length": "12", etag: '"v1"' } });
+        }
+        resumeHeaders = headers;
+        assert.equal(headers["Accept-Encoding"], "identity");
+        assert.equal(headers.Range, "bytes=4-");
+        assert.equal(headers["If-Range"], '"v1"');
+        return new Response("BBBBBBBB", { status: 206, headers: { "content-range": "bytes 4-11/12", "content-length": "8", etag: '"v1"' } });
+      },
+      registerConnector: async (input) => {
+        registrations.push(input.config.rootPath!);
+        return registeredConnector(input);
+      },
+    });
+    const file = { url: "https://example.test/data.bin", name: "data.bin", sizeBytes: 12, etag: '"v1"' };
+    const first = await service.submit({ files: [file], requestKey: "resume-key", outputPrefix: "resume-case", concurrency: 1 });
+    const failed = await waitForTerminal(service, first.id);
+    assert.equal(failed.status, "failed");
+    const outputDirectory = path.join(directory, "downloads", "files", "resume-case");
+    assert.equal(await readFile(path.join(outputDirectory, "data.bin.part"), "utf8"), "AAAA");
+
+    failFirst = false;
+    const second = await service.submit({ files: [file], requestKey: "resume-key", outputPrefix: "resume-case", concurrency: 1 });
+    assert.notEqual(second.id, first.id);
+    const completed = await waitForTerminal(service, second.id);
+    assert.equal(completed.status, "completed");
+    assert.equal(resumeHeaders.Range, "bytes=4-");
+    assert.equal(await readFile(path.join(outputDirectory, "data.bin"), "utf8"), "AAAABBBBBBBB");
+    const entries = await readdir(outputDirectory);
+    assert.ok(entries.includes("data.bin"));
+    assert.equal(entries.filter((entry) => entry.endsWith(".part")).length, 0);
+    assert.equal(registrations.length, 1);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("resubmitting a completed requestKey returns the original job without re-registering", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "astro-coverage-download-once-"));
+  const registrations: string[] = [];
+  try {
+    const service = new CoverageDownloadService({
+      root: path.join(directory, "downloads"),
+      statePath: path.join(directory, "jobs.json"),
+      fetchImpl: async () => new Response("xyz", { status: 200, headers: { "content-length": "3" } }),
+      registerConnector: async (input) => {
+        registrations.push(input.config.rootPath!);
+        return registeredConnector(input);
+      },
+    });
+    const file = { url: "https://example.test/once.bin", name: "once.bin", sizeBytes: 3 };
+    const first = await service.submit({ files: [file], requestKey: "once-key", outputPrefix: "once-case", concurrency: 1 });
+    const completed = await waitForTerminal(service, first.id);
+    assert.equal(completed.status, "completed");
+    const again = await service.submit({ files: [file], requestKey: "once-key", outputPrefix: "once-case", concurrency: 1 });
+    assert.equal(again.id, first.id);
+    assert.equal(registrations.length, 1);
   } finally {
     await rm(directory, { recursive: true, force: true });
   }

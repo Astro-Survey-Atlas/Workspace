@@ -111,3 +111,26 @@
 {{- if or (not (kindIs "string" $key)) (not (kindIs "string" $value)) (empty $key) (empty $value) }}{{ fail "localData.nodeSelector keys and values must be non-empty strings" }}{{- end }}
 {{- end }}
 {{- end }}
+{{- if not (kindIs "map" .Values.productionData) }}{{ fail "productionData must be an object" }}{{- end }}
+{{- if not (kindIs "bool" .Values.productionData.enabled) }}{{ fail "productionData.enabled must be a boolean" }}{{- end }}
+{{- range $key, $_ := .Values.productionData }}
+{{- if not (has $key (list "enabled" "existingClaim" "storageClass" "accessModes" "size" "mountPath" "scannerMountPath")) }}{{ fail (printf "productionData.%s is not a supported field" $key) }}{{- end }}
+{{- end }}
+{{- if not (kindIs "string" .Values.productionData.existingClaim) }}{{ fail "productionData.existingClaim must be a string" }}{{- end }}
+{{- if not (kindIs "string" .Values.productionData.storageClass) }}{{ fail "productionData.storageClass must be a string" }}{{- end }}
+{{- $productionMount := .Values.productionData.mountPath -}}
+{{- $scannerMount := .Values.productionData.scannerMountPath -}}
+{{- if not (hasPrefix "/" $productionMount) }}{{ fail "productionData.mountPath must be absolute" }}{{- end }}
+{{- if eq (trimSuffix "/" $productionMount) "" }}{{ fail "productionData.mountPath must not be root" }}{{- end }}
+{{- if regexMatch `(^|/)\.\.?(/|$)` $productionMount }}{{ fail "productionData.mountPath must not contain dot segments" }}{{- end }}
+{{- if not (hasPrefix "/" $scannerMount) }}{{ fail "productionData.scannerMountPath must be absolute" }}{{- end }}
+{{- if eq (trimSuffix "/" $scannerMount) "" }}{{ fail "productionData.scannerMountPath must not be root" }}{{- end }}
+{{- if regexMatch `(^|/)\.\.?(/|$)` $scannerMount }}{{ fail "productionData.scannerMountPath must not contain dot segments" }}{{- end }}
+{{- if .Values.productionData.enabled }}
+{{- if not (has "ReadWriteMany" .Values.productionData.accessModes) }}{{ fail "productionData.accessModes must include ReadWriteMany" }}{{- end }}
+{{- $mountRelative := trimPrefix (printf "%s/" $scannerMount) $productionMount -}}
+{{- if and .Values.dataWarehouse.enabled (or (eq $mountRelative $productionMount) (eq $mountRelative "") (hasPrefix $mountRelative "/")) }}{{ fail "productionData.mountPath must be a strict subpath of scannerMountPath so the Warehouse scanner can remount the claim" }}{{- end }}
+{{- if and .Values.productionData.existingClaim .Values.productionData.storageClass }}{{ fail "productionData.existingClaim cannot be combined with storageClass" }}{{- end }}
+{{- else }}
+{{- if or .Values.productionData.existingClaim .Values.productionData.storageClass }}{{ fail "productionData source fields require productionData.enabled=true" }}{{- end }}
+{{- end }}

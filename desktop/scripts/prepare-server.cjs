@@ -23,6 +23,14 @@ fs.mkdirSync(buildDir, { recursive: true });
 
 const banner = "import{createRequire as __createRequire}from'module';const require=__createRequire(import.meta.url);";
 
+// Bake the release commit into the bundle when the CI environment provides
+// one, so the desktop build reports the same immutable capability permalinks
+// as the container image.
+const buildCommit = (process.env.ASTRO_BUILD_COMMIT || "").trim().toLowerCase();
+const defineArgs = /^[0-9a-f]{40}$/.test(buildCommit)
+  ? [`--define:process.env.ASTRO_BUILD_COMMIT=${JSON.stringify(buildCommit)}`]
+  : [];
+
 execFileSync(
   process.execPath,
   [
@@ -34,6 +42,7 @@ execFileSync(
     `--banner:js=${banner}`,
     "--external:proxy-agent",
     "--external:pg-native",
+    ...defineArgs,
     `--outfile=${path.join(buildDir, "server.mjs")}`,
     "--log-level=warning"
   ],

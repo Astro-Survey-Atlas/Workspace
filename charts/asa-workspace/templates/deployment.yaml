@@ -60,15 +60,20 @@ spec:
               value: /state/resource-packages
             - name: ASTRO_RESOURCE_PACKAGE_STATE
               value: /state/resource-package-state.json
-            {{- if .Values.localData.enabled }}
+            {{- $localRoots := list "/state/coverage-downloads" -}}
+            {{- if .Values.localData.enabled }}{{- $localRoots = append $localRoots "/data/local" -}}{{- end }}
+            {{- if .Values.productionData.enabled }}{{- $localRoots = append $localRoots .Values.productionData.mountPath -}}{{- end }}
             - name: ASTRO_LOCAL_CONNECTOR_ROOTS
-              value: /data/local:/state/coverage-downloads
+              value: {{ join ":" $localRoots | quote }}
+            {{- if .Values.productionData.enabled }}
+            - name: ASTRO_COVERAGE_DOWNLOAD_ROOT
+              value: {{ .Values.productionData.mountPath | quote }}
+            - name: ASTRO_PRODUCTION_DATA_MOUNT
+              value: {{ .Values.productionData.mountPath | quote }}
             {{- else }}
-            - name: ASTRO_LOCAL_CONNECTOR_ROOTS
-              value: /state/coverage-downloads
-            {{- end }}
             - name: ASTRO_COVERAGE_DOWNLOAD_ROOT
               value: /state/coverage-downloads
+            {{- end }}
             - name: ASTRO_METADATA_STORE
               value: {{ ternary "sqlite" "postgres" (eq .Values.metadataStore.mode "sqlite") | quote }}
             {{- if eq .Values.metadataStore.mode "sqlite" }}
@@ -138,6 +143,12 @@ spec:
               value: {{ .Values.dataWarehouse.evidence.mountPath | quote }}
             - name: ASTRO_WAREHOUSE_SCANNER_IMAGE
               value: {{ .Values.dataWarehouse.scannerImage | quote }}
+            {{- if .Values.productionData.enabled }}
+            - name: ASTRO_WAREHOUSE_LOCAL_CLAIM
+              value: {{ include "asa-workspace.productionDataClaim" . | quote }}
+            - name: ASTRO_WAREHOUSE_LOCAL_SCANNER_MOUNT
+              value: {{ .Values.productionData.scannerMountPath | quote }}
+            {{- end }}
             {{- end }}
             {{- with .Values.env }}
             {{- toYaml . | nindent 12 }}
@@ -193,6 +204,10 @@ spec:
               mountPath: /state
             - name: tmp
               mountPath: /tmp
+            {{- if .Values.productionData.enabled }}
+            - name: production-data
+              mountPath: {{ .Values.productionData.mountPath | quote }}
+            {{- end }}
             {{- if .Values.dataWarehouse.enabled }}
             - name: warehouse-evidence
               mountPath: {{ .Values.dataWarehouse.evidence.mountPath | quote }}
@@ -215,6 +230,11 @@ spec:
           {{- end }}
         - name: tmp
           emptyDir: {}
+        {{- if .Values.productionData.enabled }}
+        - name: production-data
+          persistentVolumeClaim:
+            claimName: {{ include "asa-workspace.productionDataClaim" . | quote }}
+        {{- end }}
         {{- if .Values.dataWarehouse.enabled }}
         - name: warehouse-evidence
           persistentVolumeClaim:

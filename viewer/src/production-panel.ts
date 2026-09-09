@@ -1,7 +1,7 @@
 import {
   ArrowRight, BrainCircuit, Circle, createIcons, Crop, Database, Download,
   FileOutput, GitCompareArrows, Info, MapPinned, PackageCheck, PlugZap,
-  WandSparkles, X,
+  Search, WandSparkles, X,
 } from "lucide";
 
 import { workspaceApi, type CoverageDownloadFile, type DataAssetRecord } from "./api";
@@ -42,6 +42,7 @@ export interface ProductionInspectorView {
 const STATUS_LABELS: Record<string, string> = {
   pending: "等待执行", queued: "排队中", running: "执行中", succeeded: "已完成",
   failed: "失败", cancelled: "已取消", skipped: "已跳过",
+  resolving: "解析来源", "awaiting-approval": "待审批", rejected: "已拒绝",
 };
 
 const PIPELINE_ICONS: Record<string, string> = {
@@ -51,7 +52,8 @@ const PIPELINE_ICONS: Record<string, string> = {
 };
 
 const NODE_ICONS: Record<string, string> = {
-  region: "map-pinned", download: "download", connector: "plug-zap",
+  region: "map-pinned", resolve: "search", approval: "package-check",
+  download: "download", connector: "plug-zap", warehouse: "plug-zap",
   query: "database", match: "git-compare-arrows", export: "file-output",
   input: "database", cutout: "crop", denoise: "wand-sparkles", package: "package-check",
 };
@@ -66,7 +68,8 @@ function renderIcons(): void {
   createIcons({
     icons: {
       ArrowRight, BrainCircuit, Circle, Crop, Database, Download, FileOutput,
-      GitCompareArrows, Info, MapPinned, PackageCheck, PlugZap, WandSparkles, X,
+      GitCompareArrows, Info, MapPinned, PackageCheck, PlugZap, Search,
+      WandSparkles, X,
     },
     attrs: { "aria-hidden": "true" },
   });
@@ -115,7 +118,6 @@ export class ProductionPanel {
   private requestedPipelineKey: string | null = null;
   private readonly drafts = new Map<string, Record<string, unknown>>();
   private pollTimer: ReturnType<typeof setTimeout> | null = null;
-  private resolvingContext: ProductionContext | null = null;
 
   constructor(
     private readonly onError: (error: unknown) => void,
@@ -147,7 +149,6 @@ export class ProductionPanel {
     }
     if (this.initialized && pipelineKey) this.selectPipeline(pipelineKey);
     else if (this.initialized) this.renderAll();
-    if (this.active && this.context && targetKey === "overlap-download@1" && this.context.files === undefined) void this.resolveFiles();
   }
 
   async activate(): Promise<void> {
@@ -166,8 +167,7 @@ export class ProductionPanel {
       this.syncSelectedRun();
       this.renderAll();
     }
-    if (this.context && this.selectedPipelineKey === "overlap-download@1" && this.context.files === undefined) void this.resolveFiles();
-    if (this.runs.some((run) => run.status === "queued" || run.status === "running")) this.schedulePoll(400);
+    if (this.runs.some((run) => run.status === "queued" || run.status === "running" || run.status === "resolving" || run.status === "awaiting-approval")) this.schedulePoll(400);
   }
 
   deactivate(): void {
@@ -224,7 +224,6 @@ export class ProductionPanel {
     this.selectedNodeId = defaultNodeId(this.selectedRun, pipeline);
     this.nodeLogVisible = false;
     this.renderAll();
-    if (this.active && pipeline.key === "overlap-download@1" && this.context && this.context.files === undefined) void this.resolveFiles();
   }
 
   private selectRun(run: ProductionRun): void {
@@ -444,6 +443,8 @@ export class ProductionPanel {
   }
 
   private runResultLabel(run: ProductionRun): string {
+    if (run.status === "awaiting-approval") return `${String(run.summary.inventoryFiles ?? run.inventory?.files.length ?? "?")} 个文件待审批`;
+    if (run.status === "resolving") return "正在解析来源单元";
     if (run.summary.downloadedFiles !== undefined) {
       return `${String(run.summary.downloadedFiles)}/${String(run.summary.files ?? "?")} files · ${formatBytes(Number(run.summary.downloadedBytes ?? 0))}`;
     }
@@ -506,6 +507,46 @@ export class ProductionPanel {
     });
     content.append(steps);
 
+    if (run.status === "awaiting-approval" && run.approval?.state === "pending") {
+      const approvalSection = document.createElement("div");
+      approvalSection.className = "production-approval-section";
+      const approvalHeading = document.createElement("div");
+      approvalHeading.className = "form-section-title";
+      approvalHeading.textContent = "下载清单待审批";
+      approvalSection.append(approvalHeading);
+      const inventory = run.inventory;
+      const knownBytes = inventory?.files.reduce((sum, file) => sum + (file.sizeBytes ?? 0), 0) ?? 0;
+      const unknownSizes = inventory?.files.filter((file) => file.sizeBytes === undefined).length ?? 0;
+      const facts = document.createElement("dl");
+      facts.className = "production-run-detail-meta";
+      const approvalRows: Array<[string, string]> = [
+        ["文件数", String(inventory?.files.length ?? 0)],
+        ["已知体积", knownBytes ? formatBytes(knownBytes) : "未知"],
+        ["来源单元", String(inventory?.units.length ?? 0)],
+        ...(unknownSizes ? [["未知大小文件", String(unknownSizes)] as [string, string]] : []),
+        ...(run.summary.inventoryTruncated ? [["截断提示", "清单被上限截断"] as [string, string]] : []),
+        ["清单指纹", `${run.approval.planSha256.slice(0, 16)}…`],
+      ];
+      approvalRows.forEach(([label, value]) => {
+        const row = document.createElement("div");
+        const term = document.createElement("dt");
+        term.textContent = label;
+        const detail = document.createElement("dd");
+        detail.textContent = value;
+        detail.title = value;
+        row.append(term, detail);
+        facts.append(row);
+      });
+      approvalSection.append(facts);
+      if (inventory?.truncated) {
+        const truncatedNote = document.createElement("p");
+        truncatedNote.className = "production-run-error";
+        truncatedNote.textContent = "部分来源单元的文件列表被截断，审批前请确认总量。";
+        approvalSection.append(truncatedNote);
+      }
+      content.append(approvalSection);
+    }
+
     if (run.error) {
       const error = document.createElement("p");
       error.className = "production-run-error";
@@ -536,7 +577,20 @@ export class ProductionPanel {
 
     const actions = document.createElement("div");
     actions.className = "production-run-actions production-run-dialog-actions";
-    if ((run.status === "queued" || run.status === "running") && run.pipelineKey === "overlap-download@1") {
+    if (run.status === "awaiting-approval" && run.approval?.state === "pending") {
+      const approve = document.createElement("button");
+      approve.type = "button";
+      approve.className = "primary-command";
+      approve.textContent = "批准并开始下载";
+      approve.addEventListener("click", () => void this.approve(run));
+      const reject = document.createElement("button");
+      reject.type = "button";
+      reject.className = "command-button danger";
+      reject.textContent = "拒绝清单";
+      reject.addEventListener("click", () => void this.reject(run));
+      actions.append(approve, reject);
+    }
+    if ((run.status === "queued" || run.status === "running" || run.status === "resolving" || run.status === "awaiting-approval") && run.pipelineKey === "overlap-download@1") {
       const cancel = document.createElement("button");
       cancel.type = "button";
       cancel.className = "command-button danger";
@@ -624,12 +678,23 @@ export class ProductionPanel {
     storage.addEventListener("change", () => { draft.storageConnectorId = storage.value; });
     storageLabel.append(storage);
     root.append(storageLabel);
+    const handoffLabel = document.createElement("label");
+    handoffLabel.className = "field-label";
+    handoffLabel.textContent = "Warehouse 扫描提交";
+    const handoff = document.createElement("select");
+    handoff.id = "production-warehouse-handoff";
+    handoff.className = "field-input";
+    handoff.append(new Option("暂不提交（仅注册本地 Connector）", "none"), new Option("下载完成后提交 Warehouse 扫描", "submit"));
+    handoff.value = String(draft.warehouseHandoff ?? "none");
+    handoff.addEventListener("change", () => { draft.warehouseHandoff = handoff.value; });
+    handoffLabel.append(handoff);
+    root.append(handoffLabel);
     const files = document.createElement("p");
     files.id = "production-files-summary";
     files.className = "control-note";
-    files.textContent = this.context?.files === undefined
-      ? this.context ? "正在反查天区内可下载文件…" : "等待天区上下文"
-      : this.context.files.length ? `${this.context.files.length} 个可下载文件已反查` : "该天区没有可下载文件";
+    files.textContent = this.context?.files?.length
+      ? `沿用浏览器反查的 ${this.context.files.length} 个直接文件（提交后立即排队）`
+      : "提交后将在任务内解析来源单元并生成待审批的下载清单。";
     root.append(files);
   }
 
@@ -686,34 +751,9 @@ export class ProductionPanel {
 
   private canSubmit(pipeline: ProductionPipelineDefinition, draft: Record<string, unknown>): boolean {
     if (pipeline.availability !== "available" || !this.context) return false;
-    if (pipeline.key === "overlap-download@1") return Boolean(this.context.files?.length);
+    if (pipeline.key === "overlap-download@1") return true;
     if (pipeline.key === "object-crossmatch@1") return Boolean(draft.leftAssetId && draft.rightAssetId && draft.leftAssetId !== draft.rightAssetId);
     return false;
-  }
-
-  private async resolveFiles(): Promise<void> {
-    const context = this.context;
-    if (!context || context.files !== undefined || this.resolvingContext === context) return;
-    this.resolvingContext = context;
-    this.renderInspector();
-    try {
-      const lookup = await workspaceApi.skyReverseLookup({
-        componentId: context.componentId, sourceIds: context.sourceIds, assetIds: context.assetIds,
-        pixels: context.pixels, nside: context.nside,
-      });
-      if (this.context === context) {
-        this.context = { ...context, files: lookup.files };
-        this.renderInspector();
-      }
-    } catch (error) {
-      this.showError(error, "天区文件反查失败");
-      if (this.context === context) {
-        this.context = { ...context, files: [] };
-        this.renderInspector();
-      }
-    } finally {
-      if (this.resolvingContext === context) this.resolvingContext = null;
-    }
   }
 
   private async submit(): Promise<void> {
@@ -729,9 +769,10 @@ export class ProductionPanel {
     };
     const input = pipeline.key === "overlap-download@1"
       ? {
-          pipelineKey: pipeline.key, region, files: context.files ?? [],
+          pipelineKey: pipeline.key, region, ...(context.files?.length ? { files: context.files } : {}),
           exportFormat: String(draft.exportFormat ?? "json") as "json" | "csv",
           crawlerId: String(draft.crawlerId ?? "builtin-http"), concurrency: Number(draft.concurrency ?? 4),
+          warehouseHandoff: draft.warehouseHandoff === "submit" ? "submit" as const : "none" as const,
           ...(draft.storageConnectorId ? { storageConnectorId: String(draft.storageConnectorId) } : {}),
         }
       : {
@@ -764,7 +805,7 @@ export class ProductionPanel {
     });
     this.onSummary({
       templates: this.pipelines.length, runs: this.runs.length,
-      activeRuns: this.runs.filter((run) => run.status === "queued" || run.status === "running").length,
+      activeRuns: this.runs.filter((run) => run.status === "queued" || run.status === "running" || run.status === "resolving" || run.status === "awaiting-approval").length,
       succeededRuns: this.runs.filter((run) => run.status === "succeeded").length,
       artifacts: this.runs.reduce((count, run) => count + run.artifacts.length, 0),
       executors: executors.size ? [...executors].sort().join(" + ") : "--",
@@ -779,6 +820,34 @@ export class ProductionPanel {
       this.explicitSelectedRunId = cancelled.id;
       this.renderAll();
     } catch (error) { this.showError(error); }
+  }
+
+  private async approve(run: ProductionRun): Promise<void> {
+    const planSha256 = run.approval?.planSha256;
+    if (!planSha256) throw new Error("该任务没有待审批的清单指纹");
+    try {
+      const approved = await workspaceApi.approveProductionRun(run.id, planSha256);
+      this.runs = this.runs.map((candidate) => candidate.id === run.id ? approved : candidate);
+      this.selectedRun = approved;
+      this.explicitSelectedRunId = approved.id;
+      this.renderAll();
+      const dialog = byId<HTMLDialogElement>("production-run-dialog");
+      if (dialog.open) this.renderRunDialog(approved);
+      notifyWorkspace("下载清单已批准", `${shortId(run.id)} 开始传输`, { tone: "success" });
+      this.schedulePoll(100);
+    } catch (error) { this.showError(error, "批准失败"); }
+  }
+
+  private async reject(run: ProductionRun): Promise<void> {
+    try {
+      const rejected = await workspaceApi.rejectProductionRun(run.id);
+      this.runs = this.runs.map((candidate) => candidate.id === run.id ? rejected : candidate);
+      this.selectedRun = rejected;
+      this.explicitSelectedRunId = rejected.id;
+      this.renderAll();
+      const dialog = byId<HTMLDialogElement>("production-run-dialog");
+      if (dialog.open) this.renderRunDialog(rejected);
+    } catch (error) { this.showError(error, "拒绝清单失败"); }
   }
 
   private async retry(run: ProductionRun): Promise<void> {
@@ -803,7 +872,7 @@ export class ProductionPanel {
         await this.refreshRuns();
         this.syncSelectedRun();
         this.renderAll();
-        if (this.runs.some((run) => run.status === "queued" || run.status === "running")) this.schedulePoll(800);
+        if (this.runs.some((run) => run.status === "queued" || run.status === "running" || run.status === "resolving" || run.status === "awaiting-approval")) this.schedulePoll(800);
       } catch (error) { this.showError(error); }
     }, delay);
   }

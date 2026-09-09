@@ -70,6 +70,8 @@ jobs:
             ${{ env.GHCR_IMAGE }}:${{ needs.validate.outputs.image_tag }}
             ${{ env.GHCR_IMAGE }}:latest
             ${{ env.ALIYUN_REGISTRY }}/${{ env.ALIYUN_NAMESPACE_IMAGE }}:${{ needs.validate.outputs.image_tag }}
+          build-args: |
+            ASTRO_BUILD_COMMIT=${{ github.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
@@ -119,6 +121,8 @@ jobs:
           python-version: "3.11"
       - run: npm ci
       - run: npm run build
+        env:
+          ASTRO_BUILD_COMMIT: ${{ github.sha }}
       - name: Install desktop deps
         working-directory: desktop
         run: npm ci

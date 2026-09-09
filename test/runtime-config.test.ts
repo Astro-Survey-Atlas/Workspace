@@ -51,6 +51,7 @@ test("runtime data services are read-only, sanitized, and the catalog config rou
     ASTRO_RESOURCE_CATALOG_URL: pathToFileURL(catalogPath).href,
     ASTRO_RESOURCE_ADMIN_TOKEN: "test-admin-token",
     ASTRO_MOC_CORE_CLI: `${path.resolve("node_modules/.bin/tsx")} ${path.resolve("test/helpers/mock-moc-core-cli.ts")}`,
+    ASTRO_BUILD_COMMIT: "",
     NODE_NO_WARNINGS: "1",
   };
   apiProcess = spawn(path.resolve("node_modules/.bin/tsx"), ["src/http-server.ts"], {
@@ -70,6 +71,9 @@ test("runtime data services are read-only, sanitized, and the catalog config rou
     catalog: { endpoint: string; configured: boolean; available: boolean; source: string; adminConfigured: boolean };
     workspaceSearch: { endpoint: string; configured: boolean; indices: { file: string; object: string; coverage: string }; source: string };
     warehouseSearch: { enabled: boolean; endpoint: string; configured: boolean; indices: { layer: string; file: string; coverage: string } };
+    capabilities?: Array<{ kind: string; key: string; version: number; availability: string; responsibility: string; sourcePath: string }>;
+    build?: { commit: string | null; sourceUrl: string; permalinkBase: string | null };
+    assetsApi?: { endpoint: string; apiKeyConfigured: boolean };
   };
   assert.equal(runtime.readOnly, true);
   assert.equal(runtime.catalog.endpoint, pathToFileURL(catalogPath).href);
@@ -106,4 +110,44 @@ test("runtime data services are read-only, sanitized, and the catalog config rou
     body: "{}",
   });
   assert.equal(syncResponse.status, 401);
+
+  // Capability registry: read-only descriptors with warehouse availability reflecting this deployment.
+  const overlap = runtime.capabilities?.find((capability) => capability.key === "overlap-download" && capability.kind === "pipeline");
+  assert.ok(overlap);
+  assert.equal(overlap.availability, "available");
+  const warehouseScan = runtime.capabilities?.find((capability) => capability.key === "warehouse-scan");
+  assert.ok(warehouseScan);
+  assert.equal(warehouseScan.availability, "unavailable");
+  const desiTile = runtime.capabilities?.find((capability) => capability.key === "desi-tile");
+  assert.ok(desiTile);
+  assert.equal(desiTile.kind, "resolver");
+  assert.equal(desiTile.availability, "available");
+  assert.ok(runtime.capabilities?.every((capability) => capability.responsibility && capability.sourcePath));
+
+  // Build provenance: this test server has no baked commit, so permalinks stay null.
+  assert.equal(runtime.build?.commit, null);
+  assert.equal(runtime.build?.sourceUrl, "https://github.com/Astro-Survey-Atlas/Workspace");
+  assert.equal(runtime.build?.permalinkBase, null);
+
+  // Assets API key round-trip: stored server-side, never echoed into runtime output.
+  assert.equal(runtime.assetsApi?.endpoint, pathToFileURL(catalogPath).href);
+  assert.equal(runtime.assetsApi?.apiKeyConfigured, false);
+  const keyResponse = await fetch(`${baseUrl}/api/system-config/assets`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ apiKey: "assets-secret-1" }),
+  });
+  assert.equal(keyResponse.status, 200);
+  assert.deepEqual(await keyResponse.json(), { assets: { apiKeyConfigured: true } });
+  const runtimeAfterSet = await fetch(`${baseUrl}/api/system-config/runtime`);
+  const runtimeAfterText = await runtimeAfterSet.text();
+  assert.doesNotMatch(runtimeAfterText, /assets-secret-1/);
+  assert.equal((JSON.parse(runtimeAfterText) as { assetsApi: { apiKeyConfigured: boolean } }).assetsApi.apiKeyConfigured, true);
+  const clearResponse = await fetch(`${baseUrl}/api/system-config/assets`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ apiKey: null }),
+  });
+  assert.equal(clearResponse.status, 200);
+  assert.deepEqual(await clearResponse.json(), { assets: { apiKeyConfigured: false } });
 });

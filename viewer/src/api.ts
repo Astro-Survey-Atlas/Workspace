@@ -166,6 +166,19 @@ export interface ResourceCatalogConfig extends ResourceCatalogStatus {
   updatedAt?: string;
 }
 
+/** Production capability descriptor surfaced read-only from the server registry. */
+export interface RuntimeCapability {
+  kind: "pipeline" | "resolver" | "transfer" | "handoff";
+  key: string;
+  version: number;
+  title: string;
+  description: string;
+  availability: "available" | "planned" | "unavailable";
+  responsibility: string;
+  sourcePath?: string;
+  sourceUrl?: string;
+}
+
 /** Effective, read-only runtime endpoints provisioned by the deployment environment. */
 export interface RuntimeDataServices {
   readOnly: boolean;
@@ -191,6 +204,9 @@ export interface RuntimeDataServices {
     indices: { layer: string; file: string; coverage: string };
     source: string;
   };
+  capabilities?: RuntimeCapability[];
+  build?: { commit: string | null; sourceUrl: string; permalinkBase: string | null };
+  assetsApi?: { endpoint: string; apiKeyConfigured: boolean };
 }
 
 /** Browser-safe input for a Workspace-owned remote coverage scan. The server
@@ -465,6 +481,15 @@ export const workspaceApi = {
   },
   async retryProductionRun(id: string): Promise<ProductionRun> {
     return (await postJson<{ run: ProductionRun }>(`/api/production-runs/${encodeURIComponent(id)}/retry`, {})).run;
+  },
+  async approveProductionRun(id: string, planSha256: string): Promise<ProductionRun> {
+    return (await postJson<{ run: ProductionRun }>(`/api/production-runs/${encodeURIComponent(id)}/approve`, { planSha256 })).run;
+  },
+  async rejectProductionRun(id: string): Promise<ProductionRun> {
+    return (await postJson<{ run: ProductionRun }>(`/api/production-runs/${encodeURIComponent(id)}/reject`, {})).run;
+  },
+  async setAssetsApiKey(apiKey: string | null): Promise<{ assets: { apiKeyConfigured: boolean } }> {
+    return putJson<{ assets: { apiKeyConfigured: boolean } }>("/api/system-config/assets", { apiKey });
   },
   productionArtifactUrl(id: string, name: string): string {
     return `/api/production-runs/${encodeURIComponent(id)}/artifacts/${encodeURIComponent(name)}`;

@@ -4426,6 +4426,17 @@ select.field-input {
 .settings-record p { margin: 0; overflow: hidden; color: var(--muted); font: 9px var(--font-mono); text-overflow: ellipsis; white-space: nowrap; }
 .settings-record small { color: var(--text-soft); font-size: 9px; }
 .settings-record-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+.assets-key-form { align-items: center; }
+.assets-key-form .field-input { flex: 1 1 160px; min-width: 0; }
+.capability-groups { display: grid; gap: 8px; }
+.capability-group { display: grid; gap: 4px; }
+.capability-group > strong { color: var(--quiet); font: 8px var(--font-mono); text-transform: uppercase; }
+.capability-item { display: grid; gap: 2px; padding: 5px 7px; border: 1px solid var(--line-subtle); border-radius: 3px; }
+.capability-item[data-availability="unavailable"], .capability-item[data-availability="planned"] { opacity: 0.65; }
+.capability-link { color: var(--cyan); font: 10px var(--font-mono); overflow-wrap: anywhere; }
+a.capability-link:hover { text-decoration: underline; }
+.capability-item small { color: var(--text-soft); font-size: 9px; }
+.production-approval-section { display: grid; gap: 8px; margin: 12px 0; padding: 10px; border: 1px solid var(--asa-indigo, #6366f1); border-radius: 4px; }
 .toggle-row { display: flex; align-items: center; gap: 7px; margin: 10px 0; color: var(--text-soft); font-size: 10px; }
 
 .workspace-shell.agent-open {

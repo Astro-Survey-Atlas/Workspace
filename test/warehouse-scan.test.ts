@@ -681,3 +681,158 @@ test("polling ignores non-Workspace Warehouse history", async () => {
     await rm(fixture.directory, { recursive: true, force: true });
   }
 });
+
+const localConnector: ConnectorRecord = {
+  id: "connector-local-1",
+  locationKey: "/data/production/prd-test-run",
+  displayPath: "/data/production/prd-test-run",
+  name: "Production data",
+  description: "Local production output",
+  kind: "local",
+  config: { rootPath: "/data/production/prd-test-run" },
+  status: "ready",
+  origin: "user",
+  createdAt: "2026-08-26T00:00:00.000Z",
+  updatedAt: "2026-08-26T00:00:00.000Z",
+};
+
+const localAsset: DataAssetRecord = {
+  ...structuredClone(asset),
+  id: "user-asset-local-1",
+  name: "Production download",
+  access: { connector: "local", uri: localConnector.locationKey, format: "fits", connectorId: localConnector.id },
+  connectorIds: [localConnector.id],
+  connectorLocationKeys: [localConnector.locationKey],
+};
+
+const localSource = { claimName: "asa-workspace-production-data", scannerMountPath: "/data", workspaceMountPath: "/data/production" };
+
+function localRequest(selectedConnector: ConnectorRecord = localConnector, withLocalSource = true): Record<string, unknown> {
+  return buildWorkspaceScanRequest({
+    connector: selectedConnector,
+    asset: localAsset,
+    input: { assetId: localAsset.id, allowedSuffixes: [".fits"] },
+    ...(withLocalSource ? { localSource } : {}),
+    taskName: "workspace-scan-user-asset-local-1-ab12cd34",
+    batchId: "workspace-scan-ab12cd34",
+    secretName: "workspace-scan-user-asset-local-1-ab12cd34",
+    namespace: "asa-workspace",
+    warehouseEsUrl: "http://warehouse-es:9200",
+    evidenceClaimName: "workspace-evidence",
+    evidenceMountPath: "/var/lib/atlas-evidence",
+    scannerImage: "scanner:1.0.0",
+  });
+}
+
+test("builds local ScanRequests on the production data PVC without source secrets", () => {
+  const body = localRequest();
+  const spec = (body.spec as Record<string, any>);
+  const plan = spec.plan as Record<string, any>;
+  assert.equal(plan.source.connector.type, "local");
+  assert.deepEqual(plan.source.location, { rootPath: "/data/prd-test-run", subPath: "prd-test-run" });
+  assert.deepEqual(spec.scanner.sourceVolume, { claimName: "asa-workspace-production-data", mountPath: "/data", subPath: "prd-test-run" });
+  assert.equal(spec.scanner.backoffLimit, 0);
+  assert.deepEqual(spec.credentials.source, {});
+  assert.doesNotMatch(JSON.stringify(spec.credentials), /secretName/);
+  // The S3 plan also carries the fixed backoff limit contract.
+  assert.equal(((request() as Record<string, any>).spec as Record<string, any>).scanner.backoffLimit, 0);
+});
+
+test("refuses local connectors rooted outside the production data mount", () => {
+  assert.throws(() => localRequest({ ...localConnector, config: { rootPath: "/elsewhere/data" } }), /本地扫描路径不在生产数据卷挂载内/);
+});
+
+test("refuses local scan plans without a configured source volume", () => {
+  assert.throws(() => localRequest(localConnector, false), /未配置 Warehouse 本地扫描数据卷（localSource）/);
+});
+
+async function localWarehouseFixture(): Promise<WarehouseFixture> {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "astro-warehouse-local-service-"));
+  const store = new SqliteMetadataStore(path.join(directory, "workspace.sqlite"));
+  await store.initialize();
+  const runs = new ConnectorIngestRunCatalog(store);
+  const credentials = new MemoryConnectorCredentialStore();
+  const connectorRecord: ConnectorRecord = {
+    ...localConnector,
+    lastCheck: { status: "ok", checkedAt: localConnector.updatedAt, summary: "ok", configHash: connectorConfigurationHash(localConnector) },
+  };
+  const assetRecords = [structuredClone(localAsset)];
+  const dataCatalog = {
+    get: async (id: string) => {
+      const record = assetRecords.find((candidate) => candidate.id === id);
+      if (!record) throw new Error(`Data asset not found: ${id}`);
+      return structuredClone(record);
+    },
+    list: async () => assetRecords.map((entry) => structuredClone(entry)),
+  } as unknown as DataCatalogRegistry;
+  const connectors = {
+    get: async (id: string) => {
+      if (id !== connectorRecord.id) throw new Error(`Connector not found: ${id}`);
+      return structuredClone(connectorRecord);
+    },
+    list: async () => [structuredClone(connectorRecord)],
+  } as unknown as ConnectorRegistry;
+  const requests: Array<{ method: string; path: string; body?: unknown }> = [];
+  const artifactStore = {
+    createPending: async (context: UserMocArtifactContext): Promise<UserMocArtifact> => ({ id: `${context.layerId}-${context.scanRunId}`, layerId: context.layerId, scanRunId: context.scanRunId, status: "pending", availableOrders: [], precision: "exact", files: [], createdAt: localConnector.updatedAt, updatedAt: localConnector.updatedAt }),
+    importEvidence: async (_evidenceDirectory: string, context: UserMocArtifactContext): Promise<UserMocArtifact> => ({ id: `${context.layerId}-${context.scanRunId}`, layerId: context.layerId, scanRunId: context.scanRunId, status: "ready", availableOrders: [8], precision: "exact", files: [], createdAt: localConnector.updatedAt, updatedAt: localConnector.updatedAt }),
+    fail: async (context: UserMocArtifactContext, error: unknown): Promise<UserMocArtifact> => ({ id: `${context.layerId}-${context.scanRunId}`, layerId: context.layerId, scanRunId: context.scanRunId, status: "failed", availableOrders: [], precision: "exact", error: error instanceof Error ? error.message : String(error), files: [], createdAt: localConnector.updatedAt, updatedAt: localConnector.updatedAt }),
+  } as unknown as UserMocArtifactStore;
+  let submittedPlan: Record<string, any> | undefined;
+  const resourceClient = {
+    async request<T>(method: string, requestPath: string, body?: unknown): Promise<{ status: number; ok: boolean; value?: T; text: string }> {
+      requests.push({ method, path: requestPath, body });
+      if (method === "GET" && requestPath.includes("/secrets/")) return { status: 404, ok: false, text: "not found" };
+      if (method === "POST" && requestPath.endsWith("/scanrequests")) {
+        submittedPlan = ((body as Record<string, any>).spec as Record<string, any>).plan;
+        return { status: 201, ok: true, text: "{}" };
+      }
+      if (method === "GET" && requestPath.includes("/scanrequests/")) {
+        return { status: 200, ok: true, value: { status: { phase: "SUBMITTED", summary: {} } } as T, text: "{}" };
+      }
+      if (method === "DELETE") return { status: 200, ok: true, text: "{}" };
+      return { status: 200, ok: true, text: "{}" };
+    },
+  };
+  const service = new WarehouseScanService({
+    enabled: true,
+    connectors,
+    dataCatalog,
+    credentials,
+    runs,
+    namespace: "asa-workspace",
+    warehouseEsUrl: "http://warehouse-es:9200",
+    pollMs: 60_000,
+    evidenceMountPath: directory,
+    artifacts: artifactStore,
+    resourceClient,
+    localSource,
+  });
+  return { directory, runs, service, requests, pendingContexts: [], imported: [], connector: connectorRecord, asset: assetRecords[0]! };
+}
+
+test("production handoff submits exactly one local ScanRequest and stays idempotent", async () => {
+  const fixture = await localWarehouseFixture();
+  try {
+    const input = { runId: "prd-20260909-0001", connectorId: fixture.connector.id, inventorySha256: "a".repeat(64) };
+    const first = await fixture.service.submitProductionHandoff(input);
+    assert.equal(first.accepted, true);
+    assert.ok(first.scanRunIds.length >= 1);
+    const second = await fixture.service.submitProductionHandoff(input);
+    assert.equal(second.accepted, true);
+    assert.deepEqual(second.scanRunIds, first.scanRunIds);
+
+    assert.equal((await fixture.runs.list()).length, 1);
+    const scanRequests = fixture.requests.filter((request) => request.method === "POST" && request.path.endsWith("/scanrequests"));
+    assert.equal(scanRequests.length, 1);
+    assert.equal(fixture.requests.filter((request) => request.method === "POST" && request.path.includes("/secrets")).length, 0);
+
+    const spec = ((scanRequests[0]?.body as Record<string, any>).spec as Record<string, any>);
+    assert.equal((spec.plan as Record<string, any>).source.connector.type, "local");
+    assert.deepEqual(spec.credentials.source, {});
+    assert.equal(spec.scanner.backoffLimit, 0);
+    assert.equal(spec.scanner.sourceVolume.claimName, "asa-workspace-production-data");
+  } finally {
+    await rm(fixture.directory, { recursive: true, force: true });
+  }
+});

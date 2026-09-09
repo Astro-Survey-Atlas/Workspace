@@ -62,6 +62,15 @@ interface KubernetesResource {
 
 interface KubernetesList<T> { items?: T[] }
 
+export interface WarehouseLocalSourceVolume {
+  /** Namespace-local PVC claim labelled atlas.zhejianglab.org/scanner-source=true. */
+  claimName: string;
+  /** Read-only mount path used by Warehouse scanner pods. */
+  scannerMountPath: string;
+  /** Where the same claim is mounted read-write inside the Workspace pod. */
+  workspaceMountPath: string;
+}
+
 export interface WarehouseScanServiceOptions {
   enabled: boolean;
   connectors: ConnectorRegistry;
@@ -77,6 +86,7 @@ export interface WarehouseScanServiceOptions {
   artifacts?: UserMocArtifactStore;
   mocCore?: MocCoreAdapter;
   resourceClient?: WarehouseResourceClient;
+  localSource?: WarehouseLocalSourceVolume;
 }
 
 export interface WarehouseSinkCredentialBinding {
@@ -119,6 +129,26 @@ function objectStoreLocation(uri: string): { bucket: string; prefix: string } {
   const prefix = decodeURIComponent(parsed.pathname.replace(/^\/+/, ""));
   if (!bucket || bucket.includes("/") || prefix.split("/").some((part) => part === "." || part === "..")) throw new RangeError("scan source location is invalid");
   return { bucket, prefix };
+}
+
+function posixRelative(from: string, to: string): string | undefined {
+  const relative = path.relative(from, to);
+  if (!relative || relative.startsWith("..") || path.isAbsolute(relative)) return undefined;
+  return relative.split(path.sep).join("/");
+}
+
+/**
+ * Map a Workspace-local scan path into the scanner's view of the shared
+ * production-data volume: rootPath under the scanner mount, subPath relative
+ * to the claim. Both must stay contained; escapes are rejected.
+ */
+function localSourceLocation(sourcePath: string, local: WarehouseLocalSourceVolume): { rootPath: string; subPath?: string } {
+  const relative = posixRelative(path.resolve(local.workspaceMountPath), path.resolve(sourcePath));
+  if (relative === undefined) throw new RangeError("本地扫描路径不在生产数据卷挂载内");
+  const segments = relative.split("/").filter(Boolean);
+  if (segments.some((segment) => !segment || segment === "." || segment === "..")) throw new RangeError("本地扫描子路径不合法");
+  const rootPath = [local.scannerMountPath.replace(/\/+$/, ""), ...segments].join("/");
+  return { rootPath, ...(segments.length ? { subPath: segments.join("/") } : {}) };
 }
 
 function textValue(value: unknown): string | undefined {
@@ -288,16 +318,20 @@ export interface ScanRequestBuildInput {
   evidenceMountPath: string;
   scannerImage: string;
   warehouseSinkCredentials?: WarehouseSinkCredentialBinding;
+  localSource?: WarehouseLocalSourceVolume;
 }
 
 /** Build a namespace-local ScanRequest using the Warehouse ScanPlan v2 contract. */
 export function buildWorkspaceScanRequest(value: ScanRequestBuildInput): Record<string, unknown> {
-  const { connector, asset, input, coverage, taskName: name, batchId, secretName, namespace, warehouseEsUrl, evidenceClaimName, evidenceMountPath, scannerImage, warehouseSinkCredentials } = value;
+  const { connector, asset, input, coverage, taskName: name, batchId, secretName, namespace, warehouseEsUrl, evidenceClaimName, evidenceMountPath, scannerImage, warehouseSinkCredentials, localSource } = value;
   if (input.fileNamePattern !== undefined || coverage?.fileNamePattern !== undefined) {
     throw new RangeError("fileNamePattern is not supported by Warehouse ScanPlan v2; use path and allowedSuffixes");
   }
+  const isLocal = connector.kind === "local";
   const sourceUri = connectorScanPath(connector, input.path);
-  const location = objectStoreLocation(sourceUri);
+  if (isLocal && !localSource) throw new RangeError("未配置 Warehouse 本地扫描数据卷（localSource）");
+  const localLocation = isLocal ? localSourceLocation(sourceUri, localSource!) : undefined;
+  const location: { bucket: string; prefix: string } | { rootPath: string; subPath?: string } = localLocation ?? objectStoreLocation(sourceUri);
   const surveyId = coverage?.surveyId ?? asset.surveyId ?? connector.surveyId ?? `workspace-${asset.id}`;
   const releaseId = coverage?.releaseId ?? asset.releaseId ?? connector.releaseId ?? "user";
   const product = coverage?.product ?? asset.product;
@@ -319,7 +353,9 @@ export function buildWorkspaceScanRequest(value: ScanRequestBuildInput): Record<
       layerId: layerId(asset), surveyId: safeName(surveyId), releaseId: safeName(releaseId), productId: productId(coverage?.product ?? asset.product),
       modality: mode === "fits-wcs" ? "image" : "catalog", coverageRole: role, entrypoint: asset.access?.uri,
     },
-    source: { connector: sourceConnectorPlan(connector), location },
+    source: isLocal
+      ? { connector: { type: "local" }, location }
+      : { connector: sourceConnectorPlan(connector), location },
     filters: { includeSuffixes: warehouseIncludeSuffixes(input.allowedSuffixes) },
     extraction: extractionPlan(asset, input, coverage),
     sink: { connector: { type: "elasticsearch", endpoint: warehouse.endpoint, credentialRef: sinkCredentialRef } },
@@ -342,19 +378,40 @@ export function buildWorkspaceScanRequest(value: ScanRequestBuildInput): Record<
     name, namespace, labels,
     ...(Object.keys(sourceProperties).length ? { annotations: { "atlas.zhejianglab.org/scan-properties": JSON.stringify(sourceProperties) } } : {}),
   };
+  const localVolume = localLocation
+    ? { claimName: localSource!.claimName, mountPath: localSource!.scannerMountPath.replace(/\/+$/, ""), ...(localLocation.subPath ? { subPath: localLocation.subPath } : {}) }
+    : undefined;
   return {
     apiVersion: "atlas.zhejianglab.org/v1alpha1", kind: "ScanRequest",
     metadata,
     spec: {
-      scanner: { image: scannerImage, backoffLimit: 1, activeDeadlineSeconds: 86_400, ttlSecondsAfterFinished: 86_400, evidence: { claimName: evidenceClaimName, mountPath: evidenceMountPath } },
+      scanner: {
+        image: scannerImage,
+        // Warehouse rejects retries: a failed scanner pod must surface, never loop.
+        backoffLimit: 0,
+        activeDeadlineSeconds: 86_400, ttlSecondsAfterFinished: 86_400, evidence: { claimName: evidenceClaimName, mountPath: evidenceMountPath },
+        ...(localVolume ? { sourceVolume: localVolume } : {}),
+      },
       credentials: {
-        source: { secretName, accessKeyKey: "access-key", secretKeyKey: "secret-key" },
+        // Local PVC sources need no credentials; the secret remains bound to
+        // S3 sources and authenticated Warehouse sinks only.
+        source: isLocal ? {} : { secretName, accessKeyKey: "access-key", secretKeyKey: "secret-key" },
         sink: warehouseSinkCredentials ?? {},
       },
       plan,
     },
     // scannerCoverageProperties is kept in the local run for troubleshooting;
     // it is deliberately not added to the shared CRD's plan schema.
+  };
+}
+
+function localSourceVolumeFromEnvironment(): WarehouseLocalSourceVolume | undefined {
+  const claimName = process.env.ASTRO_WAREHOUSE_LOCAL_CLAIM?.trim();
+  if (!claimName) return undefined;
+  return {
+    claimName,
+    scannerMountPath: process.env.ASTRO_WAREHOUSE_LOCAL_SCANNER_MOUNT?.trim() || "/data",
+    workspaceMountPath: process.env.ASTRO_PRODUCTION_DATA_MOUNT?.trim() || "/data/production",
   };
 }
 
@@ -392,6 +449,7 @@ export class WarehouseScanService {
   readonly #artifacts?: UserMocArtifactStore;
   readonly #mocCore: MocCoreAdapter;
   readonly #client?: WarehouseResourceClient;
+  readonly #localSource?: WarehouseLocalSourceVolume;
   #timer: ReturnType<typeof setInterval> | undefined;
   #polling = false;
 
@@ -408,6 +466,7 @@ export class WarehouseScanService {
     this.#artifacts = options.artifacts;
     this.#mocCore = options.mocCore ?? defaultMocCoreAdapter;
     this.#client = this.#enabled ? options.resourceClient ?? (process.env.KUBERNETES_SERVICE_HOST ? new KubernetesResourceClient() : undefined) : undefined;
+    this.#localSource = options.localSource ?? localSourceVolumeFromEnvironment();
   }
 
   get enabled(): boolean { return this.#enabled; }
@@ -421,12 +480,18 @@ export class WarehouseScanService {
     if (!this.#client) throw new Error("Warehouse scan submission is only available inside Kubernetes");
     if (!this.#warehouseEsUrl) throw new ConnectorScanPreconditionError("Warehouse Elasticsearch is not configured");
     const connector = await this.#connectors.get(connectorId); this.#assertScannable(connector);
-    if (connector.kind !== "s3") throw new ConnectorScanCapabilityError(connector.kind);
+    if (connector.kind !== "s3" && connector.kind !== "local") throw new ConnectorScanCapabilityError(connector.kind);
     const asset = await this.#dataCatalog.get(input.assetId);
     if (asset.origin !== "user") throw new ConnectorScanPreconditionError("Only user assets can start an optional remote scan");
     const coverage = input.coverage ? validateCoverageJobSnapshot(input.coverage) : undefined;
-    const stored = connector.credentialRef ? await this.#credentials.get(connector.credentialRef) : undefined;
-    if (!stored?.accessKeyId || !stored.secretAccessKey) throw new ConnectorScanPreconditionError("Connector has no saved S3 credentials");
+    const stored = connector.kind === "s3"
+      ? (async () => {
+        const value = connector.credentialRef ? await this.#credentials.get(connector.credentialRef) : undefined;
+        if (!value?.accessKeyId || !value.secretAccessKey) throw new ConnectorScanPreconditionError("Connector has no saved S3 credentials");
+        return value;
+      })()
+      : Promise.resolve(undefined);
+    const sourceCredentials = await stored;
     const sourcePath = connectorScanPath(connector, input.path);
     const token = randomUUID().replace(/-/g, "").slice(0, 12);
     const batchId = `workspace-${coverage ? "coverage" : "scan"}-${token}`;
@@ -454,7 +519,11 @@ export class WarehouseScanService {
     };
     try {
       await this.#artifacts?.createPending(artifactContext);
-      await this.#createSecret(secretName, stored, sourceConnectorEndpoint(connector), batchId, this.#warehouseCredentials);
+      // A secret is required for S3 sources and authenticated sinks; local
+      // PVC sources with an unauthenticated sink need none at all.
+      if (sourceCredentials || this.#warehouseCredentials) {
+        await this.#createSecret(secretName, sourceCredentials, sourceCredentials ? sourceConnectorEndpoint(connector) : undefined, batchId, this.#warehouseCredentials);
+      }
       await this.#createRequest({ connector, asset, input, coverage, taskName: name, batchId, secretName });
     } catch (error) {
       await this.#artifacts?.fail(artifactContext, error).catch(() => undefined);
@@ -477,13 +546,32 @@ export class WarehouseScanService {
 
   async submitConnectorScan(connectorId: string, key?: string): Promise<ConnectorIngestRunRecord> {
     if (!this.#enabled) throw new DataWarehouseDisabledError();
-    const connector = await this.#connectors.get(connectorId); this.#assertScannable(connector); if (connector.kind !== "s3") throw new ConnectorScanCapabilityError(connector.kind);
+    const connector = await this.#connectors.get(connectorId); this.#assertScannable(connector); if (connector.kind !== "s3" && connector.kind !== "local") throw new ConnectorScanCapabilityError(connector.kind);
     const assets = (await this.#dataCatalog.list()).filter((asset) => asset.origin === "user" && ((asset.connectorIds ?? []).includes(connector.id) || (asset.connectorLocationKeys ?? []).includes(connector.locationKey)));
     if (assets.length > 1) {
       throw new ConnectorScanPreconditionError("Connector self-scan is ambiguous because it is linked to multiple user assets; submit a remote scan for one asset or unlink the extra assets");
     }
-    const asset = assets[0] ?? await this.#dataCatalog.register({ name: connector.name, description: `Scanned catalog from ${connector.locationKey}.`, surveyId: connector.surveyId, releaseId: connector.releaseId, product: connector.name, kind: "catalog", modalities: ["catalog"], connector: "s3", sourceUri: connector.locationKey, format: "directory", connectorIds: [connector.id], connectorLocationKeys: [connector.locationKey], status: "ready", projectState: "acquired" });
+    const asset = assets[0] ?? await this.#dataCatalog.register({ name: connector.name, description: `Scanned catalog from ${connector.locationKey}.`, surveyId: connector.surveyId, releaseId: connector.releaseId, product: connector.name, kind: "catalog", modalities: ["catalog"], connector: connector.kind, sourceUri: connector.locationKey, format: "directory", connectorIds: [connector.id], connectorLocationKeys: [connector.locationKey], status: "ready", projectState: "acquired" });
     return this.submitScan(connectorId, { assetId: asset.id }, key);
+  }
+
+  /**
+   * Production Warehouse handoff: hand a verified production output Connector
+   * to Warehouse with acceptance semantics. Deterministic idempotency key
+   * `production:<runId>` makes retries adopt the existing scan instead of
+   * creating duplicates. Acceptance means the ScanRequest was created; later
+   * scanner failures stay visible in connector ingest history and never
+   * retroactively fail the production run.
+   */
+  async submitProductionHandoff(input: { runId: string; connectorId: string; inventorySha256: string }): Promise<{ accepted: boolean; scanRunIds: string[] }> {
+    if (!this.#enabled) throw new DataWarehouseDisabledError();
+    const connector = await this.#connectors.get(input.connectorId);
+    if (connector.kind !== "local" && connector.kind !== "s3") throw new ConnectorScanCapabilityError(connector.kind);
+    const record = await this.submitConnectorScan(input.connectorId, `production:${input.runId}`);
+    if (record.status === "failed") {
+      throw new Error(record.error ?? "Warehouse 扫描请求创建失败");
+    }
+    return { accepted: true, scanRunIds: [record.batchId ?? record.id] };
   }
 
   async poll(): Promise<void> {
@@ -581,14 +669,12 @@ export class WarehouseScanService {
     if (phase === "SUCCEEDED") await this.#cleanupSecret(current.secretName);
   }
 
-  async #createSecret(name: string, credentials: StoredConnectorCredentials, endpoint: string, batchId: string, warehouseCredentials?: { username: string; password: string }): Promise<void> {
+  async #createSecret(name: string, credentials: StoredConnectorCredentials | undefined, endpoint: string | undefined, batchId: string, warehouseCredentials?: { username: string; password: string }): Promise<void> {
     const body = {
       metadata: { name, namespace: this.#namespace, labels: { "app.kubernetes.io/managed-by": "asa-workspace", "atlas.zhejianglab.org/track-caller": "workspace", "atlas.zhejianglab.org/track-batch": batchId } },
       type: "Opaque",
       stringData: {
-        "access-key": credentials.accessKeyId,
-        "secret-key": credentials.secretAccessKey,
-        "s3-endpoint": endpoint,
+        ...(credentials ? { "access-key": credentials.accessKeyId, "secret-key": credentials.secretAccessKey, "s3-endpoint": endpoint ?? "" } : {}),
         ...(warehouseCredentials ? { [WAREHOUSE_USERNAME_KEY]: warehouseCredentials.username, [WAREHOUSE_PASSWORD_KEY]: warehouseCredentials.password } : {}),
       },
     };
@@ -609,11 +695,19 @@ export class WarehouseScanService {
       evidenceMountPath: this.#evidenceMountPath,
       scannerImage: this.#scannerImage,
       ...(this.#warehouseCredentials ? { warehouseSinkCredentials: { secretName, usernameKey: WAREHOUSE_USERNAME_KEY, passwordKey: WAREHOUSE_PASSWORD_KEY } } : {}),
+      ...(this.#localSource ? { localSource: this.#localSource } : {}),
     });
     const result = await this.#client!.request("POST", `${WAREHOUSE_SCAN_API}/namespaces/${encodeURIComponent(this.#namespace)}/scanrequests`, body); if (!result.ok) throw new Error(`Unable to create ScanRequest (HTTP ${result.status}): ${result.text.slice(0, 300)}`);
   }
 
-  #assertScannable(connector: ConnectorRecord): void { if (connector.status === "disabled") throw new ConnectorScanPreconditionError("Disabled connectors cannot be scanned"); if (connector.kind !== "s3") throw new ConnectorScanCapabilityError(connector.kind); if (!this.#warehouseEsUrl) throw new ConnectorScanPreconditionError("Warehouse Elasticsearch is not configured"); sourceConnectorEndpoint(connector); if (!hasCurrentSuccessfulConnectorCheck(connector)) throw new ConnectorScanPreconditionError("Connector must have a current successful connection check for its current configuration before scanning"); }
+  #assertScannable(connector: ConnectorRecord): void {
+    if (connector.status === "disabled") throw new ConnectorScanPreconditionError("Disabled connectors cannot be scanned");
+    if (connector.kind !== "s3" && connector.kind !== "local") throw new ConnectorScanCapabilityError(connector.kind);
+    if (!this.#warehouseEsUrl) throw new ConnectorScanPreconditionError("Warehouse Elasticsearch is not configured");
+    if (connector.kind === "s3") sourceConnectorEndpoint(connector);
+    if (connector.kind === "local" && !this.#localSource) throw new ConnectorScanPreconditionError("未配置 Warehouse 本地扫描数据卷（ASTRO_WAREHOUSE_LOCAL_CLAIM）");
+    if (!hasCurrentSuccessfulConnectorCheck(connector)) throw new ConnectorScanPreconditionError("Connector must have a current successful connection check for its current configuration before scanning");
+  }
 }
 
 export { DataWarehouseDisabledError, ConnectorScanCapabilityError, ConnectorScanPreconditionError };
