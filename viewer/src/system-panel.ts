@@ -246,7 +246,7 @@ export class SystemPanel {
     }
 
     const installAction = installation.actions.find((action) => action.kind === "install");
-    if (installAction) {
+    if (installAction && installation.observed.state !== "connected") {
       const installRow = document.createElement("article"); installRow.className = "settings-record"; installRow.dataset.status = "unknown";
       const installHeading = document.createElement("header");
       const installTitle = document.createElement("strong"); installTitle.textContent = "安装 Warehouse";

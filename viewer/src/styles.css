@@ -3827,6 +3827,12 @@ select.field-input {
   border-top: 1px solid #243039;
 }
 
+/* Keep release section headings aligned with their choice rows. */
+.resource-release-section > .section-heading {
+  padding-left: 8px;
+  padding-right: 8px;
+}
+
 .resource-release-choices {
   display: grid;
   gap: 5px;
@@ -5709,15 +5715,7 @@ html[data-theme="light"] .coverage-context-menu button:focus-visible { color: va
   color: var(--cyan);
 }
 .dag-connector::before {
-  position: absolute;
-  top: 50%;
-  right: 4px;
-  left: 4px;
-  height: 2px;
-  border-radius: 2px;
-  background: color-mix(in srgb, var(--cyan) 72%, var(--border));
-  content: "";
-  transform: translateY(-50%);
+  display: none;
 }
 .dag-connector svg {
   position: relative;
@@ -7199,7 +7197,8 @@ html[data-theme="light"] .coverage-context-menu {
 .controls-panel:has(#layer-controls:not([hidden])) .survey-card {
   grid-template-columns: max-content max-content minmax(0, 1fr);
   min-width: 0;
-  width: 100%;
+  width: calc(100% - 8px);
+  margin-right: 8px;
 }
 
 .controls-panel:has(#layer-controls:not([hidden])) .layer-drag-handle,

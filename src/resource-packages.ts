@@ -445,7 +445,11 @@ function parseEntry(value: unknown): ResourcePackageCatalogEntry {
   if (!Number.isSafeInteger(entry.sizeBytes) || Number(entry.sizeBytes) <= 0) throw new Error(`Resource package catalog contains an invalid archive size: ${id}`);
   const releases = stringList(entry.releases, "Resource package releases");
   const parsedSources = sources(entry.sources, "Resource package sources");
-  if (parsedSources.some((source) => !releases.includes(source.releaseId))) throw new Error(`Resource package catalog contains a source for an unknown release: ${id}`);
+  const knownSources = parsedSources.filter((source) => releases.includes(source.releaseId));
+  if (knownSources.length !== parsedSources.length) {
+    const dropped = [...new Set(parsedSources.filter((source) => !releases.includes(source.releaseId)).map((source) => source.releaseId))];
+    console.warn(`Resource package ${id}@${version}: ignored source(s) for undeclared release(s): ${dropped.join(", ")}`);
+  }
   return {
     id,
     name: text(entry.name, "Resource package name", 160),
@@ -456,10 +460,10 @@ function parseEntry(value: unknown): ResourcePackageCatalogEntry {
     productTypes: stringList(entry.productTypes, "Resource package product types"),
     facilities: stringList(entry.facilities, "Resource package facilities"),
     coverageAuthorities: stringList(entry.coverageAuthorities, "Resource package coverage authorities"),
-    accessModes: stringList(entry.accessModes, "Resource package access modes"),
+    accessModes: optionalStringList(entry.accessModes, "Resource package access modes"),
     releases,
     releaseLabels: releaseLabels(entry.releaseLabels, releases, "Resource package release labels"),
-    sources: parsedSources,
+    sources: knownSources,
     version,
     archiveUrl: text(entry.archiveUrl, "Resource package archive URL"),
     sizeBytes: Number(entry.sizeBytes),

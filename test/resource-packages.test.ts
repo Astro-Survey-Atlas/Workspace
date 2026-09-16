@@ -171,6 +171,24 @@ test("invalid or unavailable Assets catalogs keep the service alive and expose 5
   }
 });
 
+test("catalog sync tolerates sources referencing undeclared releases instead of failing the whole catalog", async () => {
+  const paths = await fixture();
+  try {
+    const catalogPath = paths.catalogUrl.replace("file://", "");
+    const catalog = JSON.parse(await readFile(catalogPath, "utf8")) as { packages: Array<{ sources: Array<Record<string, string>> }> };
+    catalog.packages[0]!.sources.push({ releaseId: "undeclared-release", label: "2MASS-like HiPS MOC", url: "https://example.test/moc", authority: "official-moc" });
+    await writeFile(catalogPath, `${JSON.stringify(catalog, null, 2)}\n`, "utf8");
+
+    const status = await paths.manager.sync();
+    assert.equal(status.available, true);
+    assert.equal(paths.manager.list().length, 2);
+    assert.ok(paths.manager.get("public-legacy-surveys-footprints").sources.every((source) => source.releaseId !== "undeclared-release"));
+    assert.ok(paths.manager.get("public-galex-footprints").sources.every((source) => source.releaseId !== "undeclared-release"));
+  } finally {
+    await rm(paths.directory, { recursive: true, force: true });
+  }
+});
+
 test("explicit catalog sync trusts v3 metadata without downloading package archives", async () => {
   const paths = await fixture();
   try {
