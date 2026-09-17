@@ -593,6 +593,11 @@ export class WarehouseScanService {
     const result = await this.#client!.request<KubernetesResource>("GET", `${WAREHOUSE_SCAN_API}/namespaces/${encodeURIComponent(this.#namespace)}/scanrequests/${encodeURIComponent(original.jobId!)}`);
     if (result.status === 404) return; if (!result.ok || !result.value) throw new Error(`Unable to read ScanRequest (HTTP ${result.status})`);
     const status = result.value.status ?? {}; const phase = (status.phase ?? "SUBMITTED").toUpperCase(); const summary = status.summary ?? {};
+    // The Operator creates the ScanRequest before it claims it.  A missing
+    // phase (or SUBMITTED/PENDING) means it is waiting in the scheduler; it
+    // must not be presented as actively scanning.
+    const waitingPhase = phase === "SUBMITTED" || phase === "PENDING" || phase === "QUEUED" || phase === "ACCEPTED";
+    const runningPhase = phase === "RUNNING" || phase === "PROCESSING" || phase === "IN_PROGRESS";
     const discoveredFiles = typeof summary.discoveredFiles === "number" ? summary.discoveredFiles : typeof summary.discoveredFileCount === "number" ? summary.discoveredFileCount : undefined;
     const coverageDocuments = typeof summary.coverageDocuments === "number" ? summary.coverageDocuments : typeof summary.coverageRecordCount === "number" ? summary.coverageRecordCount : undefined;
     const rawSnapshotHash = textValue(summary.sourceSnapshotSha256);
@@ -618,7 +623,7 @@ export class WarehouseScanService {
       ...(summaryEvidencePath ? { evidencePath: summaryEvidencePath } : {}),
       ...(availableOrders ? { availableOrders } : {}),
       ...(sourceSnapshotSha256 ? { sourceSnapshotSha256 } : {}),
-      ...(phase === "SUCCEEDED" && !summaryIdentityError ? { status: "succeeded", completedAt: new Date().toISOString(), error: undefined } : phase === "FAILED" || phase === "INVALID" || summaryIdentityError ? { status: "failed", error: terminalMessage, completedAt: new Date().toISOString(), mocStatus: "failed" as const } : { status: "running", error: undefined }),
+      ...(phase === "SUCCEEDED" && !summaryIdentityError ? { status: "succeeded", completedAt: new Date().toISOString(), error: undefined } : phase === "FAILED" || phase === "INVALID" || summaryIdentityError ? { status: "failed", error: terminalMessage, completedAt: new Date().toISOString(), mocStatus: "failed" as const } : waitingPhase ? { status: "queued", error: undefined } : runningPhase ? { status: "running", error: undefined } : { status: "queued", error: undefined }),
     });
     const artifactContext = artifactContextForRun(current);
     if (terminalFailure) {

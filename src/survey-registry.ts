@@ -1,6 +1,7 @@
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
+import type { MetadataStore } from "./storage/types.js";
 
 export type SurveyModality = "imaging" | "spectroscopy" | "photometry" | "time-domain" | "integral-field" | "ultraviolet" | "infrared" | "catalog" | "simulation";
 export type ReleaseKind = "public_release" | "quick_release" | "early_release" | "science_results" | "archive_snapshot" | "planned";
@@ -168,7 +169,7 @@ function normalizeCoverage(value: unknown): SurveyReleaseCoverage {
   };
 }
 
-function normalizeRelease(value: unknown): SurveyRelease {
+export function normalizeRelease(value: unknown): SurveyRelease {
   const input = objectValue(value, "release");
   rejectUnknownFields(input, RELEASE_FIELDS, "release");
   if (!RELEASE_KINDS.includes(input.kind as ReleaseKind)) throw new RangeError("release.kind is not supported");
@@ -262,7 +263,7 @@ function validateRegistration(input: SurveyRegistrationInput): SurveyRegistratio
   };
 }
 
-function normalizePersistedSurvey(value: unknown): SurveyRecord {
+export function normalizePersistedSurvey(value: unknown): SurveyRecord {
   const raw = objectValue(value, "survey registry record");
   rejectUnknownFields(raw, RECORD_FIELDS, "survey registry record");
   if (raw.origin !== "user") throw new Error("survey registry record origin must be user");
@@ -292,11 +293,15 @@ export class SurveyRegistry {
   #registrations: SurveyRecord[] = [];
   #mutations: Promise<void> = Promise.resolve();
 
-  constructor(statePath: string) {
+  constructor(statePath: string, private readonly store?: MetadataStore) {
     this.#statePath = statePath;
   }
 
   async initialize(): Promise<void> {
+    if (this.store) {
+      this.#registrations = (await this.store.listSurveyIdentities()).filter((entry) => entry.source === "user").map((entry) => entry.survey);
+      return;
+    }
     try {
       const parsed = JSON.parse(await readFile(this.#statePath, "utf8")) as unknown;
       if (!Array.isArray(parsed)) throw new Error("survey registry state must be an array");
@@ -362,7 +367,16 @@ export class SurveyRegistry {
         releases,
       };
       const registrations = [...this.#registrations, record];
-      await this.#persist(registrations);
+      if (this.store) {
+        await this.store.transaction(async (tx) => {
+          const entries = await tx.listSurveyIdentities();
+          const ids = new Set(entries.flatMap((entry) => [entry.id, ...entry.survey.releases.map((item) => item.id), ...entry.localReleases.map((item) => item.id)]));
+          for (const candidate of [id, ...releases.map((item) => item.id)]) {
+            if (ids.has(candidate)) throw new RangeError(`Survey or release id already exists: ${candidate}`);
+          }
+          await tx.putSurveyIdentity({ id, source: "user", sourceId: id, survey: record, localReleases: [], history: [] });
+        });
+      } else await this.#persist(registrations);
       this.#registrations = registrations;
       return structuredClone(record);
     });
@@ -408,6 +422,17 @@ export class SurveyRegistry {
   }
 
   async #persist(registrations = this.#registrations): Promise<void> {
+    if (this.store) {
+      await this.store.transaction(async (tx) => {
+        const entries = await tx.listSurveyIdentities();
+        for (const survey of registrations) {
+          const existing = entries.find((entry) => entry.id === survey.id);
+          if (existing && existing.source !== "user") throw new RangeError(`Survey id already exists: ${survey.id}`);
+          await tx.putSurveyIdentity(existing ? { ...existing, survey } : { id: survey.id, source: "user", sourceId: survey.id, survey, localReleases: [], history: [] });
+        }
+      });
+      return;
+    }
     await mkdir(path.dirname(this.#statePath), { recursive: true });
     const temporaryPath = `${this.#statePath}.${process.pid}.tmp`;
     await writeFile(temporaryPath, JSON.stringify(registrations, null, 2), "utf8");

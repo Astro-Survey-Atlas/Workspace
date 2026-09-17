@@ -121,7 +121,7 @@ test("SQLite metadata store satisfies the storage contract and persists one DELE
 
     const database = new DatabaseSync(filename);
     assert.equal(database.prepare("PRAGMA journal_mode").get()?.journal_mode, "delete");
-    assert.deepEqual(database.prepare("SELECT version FROM schema_migrations ORDER BY version").all().map((row) => row.version), [1, 2]);
+    assert.deepEqual(database.prepare("SELECT version FROM schema_migrations ORDER BY version").all().map((row) => row.version), [1, 2, 3]);
     database.close();
 
     const reopened = new SqliteMetadataStore(filename);
@@ -171,7 +171,7 @@ test("SQLite v2 migration retains legacy connector ingest runs", async () => {
     await store.initialize();
     assert.deepEqual(await store.getConnectorIngestRun(legacy.id), legacy);
     const migrated = new DatabaseSync(filename);
-    assert.deepEqual(migrated.prepare("SELECT version FROM schema_migrations ORDER BY version").all().map((row) => row.version), [1, 2]);
+    assert.deepEqual(migrated.prepare("SELECT version FROM schema_migrations ORDER BY version").all().map((row) => row.version), [1, 2, 3]);
     migrated.close();
     await store.close();
   } finally {

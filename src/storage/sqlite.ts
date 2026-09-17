@@ -5,7 +5,7 @@ import { DatabaseSync, type StatementSync } from "node:sqlite";
 import type { ConnectorIngestRunFilter, ConnectorIngestRunRecord } from "../connector-history.js";
 import type { ConnectorRecord } from "../connectors.js";
 import type { DataAssetRecord } from "../data-catalog.js";
-import { assertPersistableDataAsset, type MetadataStore, type MetadataTransaction } from "./types.js";
+import { assertPersistableDataAsset, type MetadataStore, type MetadataTransaction, type SurveyIdentityRecord } from "./types.js";
 
 const MIGRATIONS = [{
   version: 1,
@@ -69,12 +69,32 @@ const MIGRATIONS = [{
       ON connector_ingest_runs(connector_id, idempotency_key_hash)
       WHERE connector_id IS NOT NULL AND idempotency_key_hash IS NOT NULL;
   `,
+}, {
+  version: 3,
+  sql: `CREATE TABLE survey_identities (
+    id TEXT PRIMARY KEY,
+    source TEXT NOT NULL CHECK (source IN ('user', 'assets')),
+    source_id TEXT NOT NULL,
+    record TEXT NOT NULL CHECK (json_valid(record)),
+    UNIQUE (source, source_id),
+    CHECK (json_extract(record, '$.id') = id)
+  ) STRICT;`,
 }];
 
 type SqliteRow = Record<string, unknown>;
 
 class SqliteTransaction implements MetadataTransaction {
   constructor(private readonly database: DatabaseSync) {}
+
+  async listSurveyIdentities(): Promise<SurveyIdentityRecord[]> {
+    return this.records<SurveyIdentityRecord>("SELECT record FROM survey_identities ORDER BY id");
+  }
+
+  async putSurveyIdentity(record: SurveyIdentityRecord): Promise<void> {
+    this.database.prepare(`INSERT INTO survey_identities (id, source, source_id, record) VALUES (?, ?, ?, ?)
+      ON CONFLICT (id) DO UPDATE SET record = excluded.record`)
+      .run(record.id, record.source, record.sourceId, JSON.stringify(record));
+  }
 
   async listConnectors(): Promise<ConnectorRecord[]> {
     return this.records<ConnectorRecord>("SELECT record FROM connectors ORDER BY id");
@@ -246,6 +266,8 @@ export class SqliteMetadataStore implements MetadataStore {
     });
   }
 
+  listSurveyIdentities = () => this.read((transaction) => transaction.listSurveyIdentities());
+  putSurveyIdentity = (record: SurveyIdentityRecord) => this.transaction((transaction) => transaction.putSurveyIdentity(record));
   listConnectors = () => this.read((transaction) => transaction.listConnectors());
   getConnector = (id: string) => this.read((transaction) => transaction.getConnector(id));
   getConnectorByLocationKey = (locationKey: string) => this.read((transaction) => transaction.getConnectorByLocationKey(locationKey));

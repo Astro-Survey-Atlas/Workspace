@@ -353,7 +353,7 @@ interface WarehouseFixture {
 }
 
 async function warehouseFixture(
-  statuses: Array<"SUBMITTED" | "RUNNING" | "SUCCEEDED"> = ["SUBMITTED", "RUNNING", "SUCCEEDED"],
+  statuses: Array<"SUBMITTED" | "PENDING" | "RUNNING" | "SUCCEEDED"> = ["SUBMITTED", "RUNNING", "SUCCEEDED"],
   summaryOverrides: Record<string, unknown> = {},
   warehouseEsUrl = "http://warehouse-es:9200",
   assetOrigin: DataAssetRecord["origin"] = "user",
@@ -463,7 +463,7 @@ test("submits a namespaced Workspace ScanRequest, polls status, and imports comp
   const fixture = await warehouseFixture();
   try {
     const run = await fixture.service.submitScan(fixture.connector.id, { assetId: fixture.asset.id, path: "catalogs/objects.csv", allowedSuffixes: [".csv"], coverage: warehouseCoverage() }, "service-idempotency");
-    assert.equal(run.status, "running");
+    assert.equal(run.status, "queued");
     assert.deepEqual(run.availableOrders, []);
     assert.equal(run.mocStatus, "pending");
     assert.equal(fixture.pendingContexts[0]?.availableOrders?.length, 0);
@@ -500,7 +500,7 @@ test("submits a direct Connector self-scan through the Workspace Warehouse contr
   try {
     const run = await fixture.service.submitConnectorScan(fixture.connector.id, "connector-self-scan");
 
-    assert.equal(run.status, "running");
+    assert.equal(run.status, "queued");
     assert.equal(run.backend, "warehouse");
     assert.equal(run.executor, "warehouse-scan");
     assert.equal(run.taskKind, "user_scan");

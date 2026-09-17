@@ -3,7 +3,7 @@ import { Pool, type PoolClient, type QueryResultRow } from "pg";
 import type { ConnectorIngestRunFilter, ConnectorIngestRunRecord } from "../connector-history.js";
 import type { ConnectorRecord } from "../connectors.js";
 import type { DataAssetRecord } from "../data-catalog.js";
-import { assertPersistableDataAsset, type MetadataStore, type MetadataTransaction } from "./types.js";
+import { assertPersistableDataAsset, type MetadataStore, type MetadataTransaction, type SurveyIdentityRecord } from "./types.js";
 
 const SCHEMA_IDENTIFIER = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
@@ -16,6 +16,16 @@ function quoteSchema(schema: string): string {
 
 class PostgresTransaction implements MetadataTransaction {
   constructor(private readonly client: Pool | PoolClient, private readonly schema: string) {}
+
+  async listSurveyIdentities(): Promise<SurveyIdentityRecord[]> {
+    return this.records<SurveyIdentityRecord>(`SELECT record FROM ${this.schema}.survey_identities ORDER BY id`);
+  }
+
+  async putSurveyIdentity(record: SurveyIdentityRecord): Promise<void> {
+    await this.client.query(`INSERT INTO ${this.schema}.survey_identities (id, source, source_id, record)
+      VALUES ($1, $2, $3, $4) ON CONFLICT (id) DO UPDATE SET record = excluded.record`,
+    [record.id, record.source, record.sourceId, record]);
+  }
 
   async listConnectors(): Promise<ConnectorRecord[]> {
     return this.records<ConnectorRecord>(`SELECT record FROM ${this.schema}.connectors ORDER BY id`);
@@ -225,6 +235,15 @@ export class PostgresMetadataStore implements MetadataStore {
             WHERE connector_id IS NOT NULL AND idempotency_key_hash IS NOT NULL`);
         await client.query(`INSERT INTO ${this.quotedSchema}.schema_migrations (version, applied_at) VALUES (2, now())`);
       }
+      const appliedV3 = await client.query(`SELECT version FROM ${this.quotedSchema}.schema_migrations WHERE version = 3`);
+      if (appliedV3.rowCount === 0) {
+        await client.query(`CREATE TABLE ${this.quotedSchema}.survey_identities (
+          id text PRIMARY KEY, source text NOT NULL CHECK (source IN ('user', 'assets')),
+          source_id text NOT NULL, record jsonb NOT NULL,
+          UNIQUE (source, source_id), CHECK (record->>'id' = id)
+        )`);
+        await client.query(`INSERT INTO ${this.quotedSchema}.schema_migrations (version, applied_at) VALUES (3, now())`);
+      }
       await client.query("COMMIT");
       this.initialized = true;
     } catch (error) {
@@ -256,6 +275,8 @@ export class PostgresMetadataStore implements MetadataStore {
     this.initialized = false;
   }
 
+  listSurveyIdentities = () => this.direct().listSurveyIdentities();
+  putSurveyIdentity = (record: SurveyIdentityRecord) => this.transaction((transaction) => transaction.putSurveyIdentity(record));
   listConnectors = () => this.direct().listConnectors();
   getConnector = (id: string) => this.direct().getConnector(id);
   getConnectorByLocationKey = (locationKey: string) => this.direct().getConnectorByLocationKey(locationKey);

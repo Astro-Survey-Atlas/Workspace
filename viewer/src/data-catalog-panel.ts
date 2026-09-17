@@ -68,7 +68,7 @@ export class DataCatalogPanel {
     });
     byId<HTMLButtonElement>("catalog-form-cancel").addEventListener("click", () => this.#closeCreateDialog());
     byId<HTMLButtonElement>("catalog-dialog-close").addEventListener("click", () => this.#closeCreateDialog());
-    byId<HTMLButtonElement>("catalog-new").addEventListener("click", () => this.#startNew());
+    byId<HTMLButtonElement>("catalog-new").addEventListener("click", () => this.startNew());
     byId<HTMLButtonElement>("catalog-new-connector").addEventListener("click", () => {
       this.#closeCreateDialog();
       this.#onNewConnector?.();
@@ -78,9 +78,7 @@ export class DataCatalogPanel {
 
   async activate(surveys: SurveyCard[], records: Map<string, SurveyRecord>): Promise<void> {
     this.#active = true;
-    this.#surveys = surveys;
-    this.#surveyRecords = records;
-    this.#renderSurveyOptions();
+    await this.refreshSurveys();
     [this.#assets, this.#connectors, this.#tags] = await Promise.all([this.#loadUserAssets(), workspaceApi.connectors(), workspaceApi.tags()]);
     this.#renderCreateConnectors();
     if (!this.#selectedId || !this.#assets.some((asset) => asset.id === this.#selectedId)) this.#selectedId = this.#assets[0]?.id ?? null;
@@ -99,7 +97,98 @@ export class DataCatalogPanel {
   }
 
   startNew(surveyId?: string): void {
-    this.#startNew(surveyId);
+    void this.refreshSurveys().then(() => this.#startNew(surveyId)).catch(this.#onError);
+  }
+
+  async refreshSurveys(): Promise<void> {
+    const selected = byId<HTMLSelectElement>("catalog-survey").value;
+    const selectedRelease = byId<HTMLSelectElement>("catalog-release").value;
+    const cards = await workspaceApi.surveys();
+    const records = await Promise.all(cards.map((card) => workspaceApi.survey(card.id)));
+    const canonical = selected && !cards.some((card) => card.id === selected)
+      ? await workspaceApi.survey(selected) : undefined;
+    this.#surveys = cards;
+    this.#surveyRecords = new Map(records.map((record) => [record.id, record]));
+    this.#renderSurveyOptions();
+    if (canonical) {
+      byId<HTMLSelectElement>("catalog-survey").value = canonical.id;
+      this.#syncReleaseOptions();
+    }
+    const releaseSelect = byId<HTMLSelectElement>("catalog-release");
+    if ([...releaseSelect.options].some((option) => option.value === selectedRelease)) releaseSelect.value = selectedRelease;
+    await this.#renderSurveyAssociations();
+  }
+
+  async #renderSurveyAssociations(): Promise<void> {
+    const identities = await workspaceApi.surveyIdentities();
+    let root = document.getElementById("catalog-survey-associations");
+    if (!root) {
+      root = document.createElement("details");
+      root.id = "catalog-survey-associations";
+      byId("catalog-survey").parentElement!.after(root);
+    }
+    const summary = document.createElement("summary");
+    summary.textContent = "关联本地巡天与公开巡天";
+    const note = document.createElement("p");
+    note.textContent = "确认是同一巡天后可合并选项。原始登记、发布和覆盖记录保留；关联可撤销。名称相同仅作为候选提示。";
+    const publicEntries = identities.filter((entry) => entry.source === "assets");
+    const rows = identities.filter((entry) => entry.source === "user").map((entry) => {
+      const row = document.createElement("div");
+      const label = document.createElement("label");
+      label.textContent = `${entry.survey.name} (${entry.id}) `;
+      const select = document.createElement("select");
+      select.setAttribute("aria-label", `${entry.survey.name} 的公开巡天`);
+      select.add(new Option("选择公开巡天", ""));
+      for (const target of publicEntries) {
+        const candidate = target.survey.name.toLocaleLowerCase() === entry.survey.name.toLocaleLowerCase();
+        select.add(new Option(`${target.survey.name} (${target.sourceId})${candidate ? " · 同名候选" : ""}`, target.id));
+      }
+      select.value = entry.linkedTo ?? "";
+      select.disabled = Boolean(entry.linkedTo);
+      const action = document.createElement("button");
+      action.type = "button";
+      action.textContent = entry.linkedTo ? "撤销关联" : "确认关联";
+      action.disabled = !select.value;
+      select.addEventListener("change", () => { action.disabled = !select.value; });
+      action.addEventListener("click", () => {
+        action.disabled = true;
+        void workspaceApi.associateSurvey(entry.id, select.value, Boolean(entry.linkedTo))
+          .then(() => this.refreshSurveys())
+          .then(() => this.#onAssetChanged?.())
+          .catch(this.#onError)
+          .finally(() => { action.disabled = !select.value; });
+      });
+      label.append(select);
+      row.append(label, action);
+      return row;
+    });
+    root.replaceChildren(summary, note, ...rows);
+  }
+
+  async resumeRegistration(surveyId?: string): Promise<void> {
+    const dialog = byId<HTMLDialogElement>("catalog-create-dialog");
+    if (!dialog.open) dialog.showModal();
+    try {
+      await this.refreshSurveys();
+      document.getElementById("catalog-survey-retry")?.remove();
+    } catch (error) {
+      let retry = document.getElementById("catalog-survey-retry") as HTMLButtonElement | null;
+      if (!retry) {
+        retry = document.createElement("button");
+        retry.id = "catalog-survey-retry";
+        retry.type = "button";
+        retry.textContent = "重试加载巡天选项";
+        byId("catalog-survey").parentElement!.append(retry);
+      }
+      retry.onclick = () => { void this.resumeRegistration(surveyId).catch(this.#onError); };
+      throw error;
+    }
+    if (surveyId) {
+      byId<HTMLSelectElement>("catalog-survey").value = surveyId;
+      this.#syncReleaseOptions();
+      const release = this.#surveyRecords.get(surveyId)?.releases[0];
+      if (release) byId<HTMLSelectElement>("catalog-release").value = release.id;
+    }
   }
 
   async #loadUserAssets(): Promise<DataAssetRecord[]> {

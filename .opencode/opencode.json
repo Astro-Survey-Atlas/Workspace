@@ -6,13 +6,29 @@
     "openai": {
       "options": {
         "baseURL": "{env:OPENAI_BASE_URL}/v1",
-        "apiKey": "{env:LINGSU_OPENAI_API_KEY}",
+        "apiKey": "{env:CAFE_OPENAI_API_KEY}",
         "headerTimeout": 60000,
         "timeout": 600000,
         "chunkTimeout": 120000
       },
       "name": "OpenAI via Sub2API",
       "models": {
+        "gpt-6-astra": {
+          "name": "GPT-6-Astra",
+          "limit": {
+            "context": 272000,
+            "output": 128000
+          },
+          "options": {
+            "store": false
+          },
+          "variants": {
+            "low": {},
+            "medium": {},
+            "high": {},
+            "xhigh": {}
+          }
+        },
         "gpt-5.6-terra": {
           "name": "GPT-5.6-Terra",
           "limit": {
@@ -86,65 +102,6 @@
           "limit": {
             "context": 1000000,
             "output": 128000
-          }
-        }
-      }
-    },
-    "wzzzz": {
-      "options": {
-        "baseURL": "https://sub2api.home.geekcity.tech:32443/v1",
-        "apiKey": "s",
-        "headerTimeout": 60000,
-        "timeout": 600000,
-        "chunkTimeout": 120000
-      },
-      "models": {
-        "gpt-5.6-terra": {
-          "name": "GPT-5.6-Terra",
-          "limit": {
-            "context": 272000,
-            "output": 128000
-          },
-          "options": {
-            "store": false
-          },
-          "variants": {
-            "low": {},
-            "medium": {},
-            "high": {},
-            "xhigh": {}
-          }
-        },
-        "gpt-5.6-luna": {
-          "name": "GPT-5.6-Luna",
-          "limit": {
-            "context": 272000,
-            "output": 128000
-          },
-          "options": {
-            "store": false
-          },
-          "variants": {
-            "low": {},
-            "medium": {},
-            "high": {},
-            "xhigh": {}
-          }
-        },
-        "gpt-5.6-sol": {
-          "name": "GPT-5.6-Sol",
-          "limit": {
-            "context": 272000,
-            "output": 128000
-          },
-          "options": {
-            "store": false
-          },
-          "variants": {
-            "low": {},
-            "medium": {},
-            "high": {},
-            "xhigh": {}
           }
         }
       }

@@ -705,12 +705,37 @@ test("survey registration belongs to user assets, not public resources or connec
   await page.locator("#catalog-new").click();
   await expect(page.locator("#catalog-create-dialog")).toBeVisible();
   await expect(page.locator("#catalog-new-survey")).toBeVisible();
+  await page.locator("#catalog-name").fill("Preserved asset draft");
   await page.locator("#catalog-new-survey").click();
   await expect(page.locator("#survey-registration-dialog")).toBeVisible();
   await page.locator("#survey-registration-close").click();
+  await expect(page.locator("#catalog-create-dialog")).toBeVisible();
+  await expect(page.locator("#catalog-name")).toHaveValue("Preserved asset draft");
+  await page.locator("#catalog-dialog-close").click();
 
   await page.locator('[data-mode="packages"]').click();
   await expect(page.locator('#resource-package-stage [data-action="new-survey"]')).toHaveCount(0);
+});
+
+test("registering a survey restores the asset draft with its first release selected", async ({ page }) => {
+  await page.goto("/");
+  await waitForWorkspace(page);
+  await page.locator('[data-mode="catalog"]').click();
+  await page.locator("#catalog-new").click();
+  await page.locator("#catalog-name").fill("Draft survives successful registration");
+  await page.locator("#catalog-new-survey").click();
+  const form = page.locator("#survey-registration-form");
+  const id = `browser-survey-${Date.now()}`;
+  for (const [name, value] of Object.entries({ id, name: "Browser survey", sourceUrl: "https://example.org/survey", releaseId: `${id}-simulation`, releaseLabel: "Simulation W1", product: "Images", productDescription: "Simulation images" })) {
+    await form.locator(`[name="${name}"]`).fill(value);
+  }
+  await form.locator('[name="modalities"]').selectOption("imaging");
+  await form.locator('[name="productModality"]').selectOption("imaging");
+  await form.locator('[type="submit"]').click();
+  await expect(page.locator("#catalog-create-dialog")).toBeVisible();
+  await expect(page.locator("#catalog-name")).toHaveValue("Draft survives successful registration");
+  await expect(page.locator("#catalog-survey")).toHaveValue(id);
+  await expect(page.locator("#catalog-release")).toHaveValue(`${id}-simulation`);
 });
 
 test("connector actions and unified scan history expose only supported execution", async ({ page }) => {
@@ -802,6 +827,25 @@ test("connector actions and unified scan history expose only supported execution
   await expect(page.locator("#inspector-kicker")).toHaveText("SCAN RUN DETAIL");
   await expect(inspector).toContainText("local-filesystem");
   await expect(inspector).toContainText("file:///data/catalog");
+  let releasePoll!: () => void;
+  let pollStarted!: () => void;
+  const started = new Promise<void>((resolve) => { pollStarted = resolve; });
+  const released = new Promise<void>((resolve) => { releasePoll = resolve; });
+  await page.route("**/api/connector-ingest-runs", async (route) => {
+    pollStarted();
+    await released;
+    await route.fallback();
+  });
+  await started;
+  await page.locator('[data-mode="catalog"]').click();
+  await expect(page.locator("#catalog-stage")).toBeVisible();
+  const assetInspector = await page.locator("#inspector-kicker").textContent();
+  const pollResponse = page.waitForResponse((response) => response.url().endsWith("/api/connector-ingest-runs"));
+  releasePoll();
+  await pollResponse;
+  await expect(page.locator("#inspector-kicker")).toHaveText(assetInspector!);
+  await page.locator('[data-mode="connectors"]').click();
+  await page.getByRole("tab", { name: "扫描记录" }).click();
   await page.locator("#connector-run-kind-filter").selectOption("all");
   await page.locator("#connector-run-status-filter").selectOption("failed");
   await expect(page.locator("#connector-history-list .connector-history-row")).toHaveCount(1);

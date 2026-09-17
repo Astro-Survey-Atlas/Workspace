@@ -380,6 +380,12 @@ export const workspaceApi = {
   async surveys(): Promise<SurveyCard[]> {
     return (await getJson<{ surveys: SurveyCard[] }>("/api/surveys")).surveys;
   },
+  async surveyIdentities(): Promise<import("../../src/storage/types").SurveyIdentityRecord[]> {
+    return (await getJson<{ identities: import("../../src/storage/types").SurveyIdentityRecord[] }>("/api/survey-identities")).identities;
+  },
+  async associateSurvey(id: string, publicId: string, unlink = false): Promise<void> {
+    await postJson(`/api/survey-identities/${encodeURIComponent(id)}/association`, { publicId, unlink });
+  },
   async survey(id: string): Promise<SurveyRecord> {
     return (await getJson<{ survey: SurveyRecord }>(`/api/surveys/${encodeURIComponent(id)}`)).survey;
   },

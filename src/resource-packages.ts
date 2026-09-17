@@ -20,6 +20,12 @@ const MAX_ZIP_ENTRIES = 256;
 const DOWNLOAD_TIMEOUT_MS = 60_000;
 const PACKAGE_ID = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 const VERSION = /^[0-9]+\.[0-9]+\.[0-9]+$/;
+
+function compareVersions(left: string, right: string): number {
+  const a = left.split(".").map(Number);
+  const b = right.split(".").map(Number);
+  return (a[0]! - b[0]!) || (a[1]! - b[1]!) || (a[2]! - b[2]!);
+}
 const REQUIRED_ARCHIVE_FILES = new Set(["resource-package.json", "footprints/survey-footprints.json", "provenance.json", "README.md"]);
 
 function isLoadableFootprint(footprint: SurveyFootprintManifest["footprints"][number]): boolean {
@@ -869,10 +875,12 @@ export class ResourcePackageManager {
 
   list(): PublicResourcePackage[] {
     this.#assertAvailable();
-    return this.#catalog.packages.filter((entry) => !entry.hidden).map((entry) => {
+    return [...new Set(this.#catalog.packages.filter((entry) => !entry.hidden).map((entry) => entry.id))].flatMap((id) => {
+      const entry = this.#catalogEntry(id);
+      if (!entry) return [];
       const installed = this.#state.packages.find((record) => record.id === entry.id);
       const update = this.#hasUpdate(entry, installed);
-      return this.#toPublic(entry, installed, update);
+      return [this.#toPublic(entry, installed, update)];
     });
   }
 
@@ -885,7 +893,7 @@ export class ResourcePackageManager {
 
   install(id: string): ResourcePackageJob {
     this.#assertAvailable();
-    const entry = this.#catalog.packages.find((candidate) => candidate.id === id);
+    const entry = this.#catalogEntry(id);
     if (!entry) throw new Error(`Resource package not found: ${id}`);
     if (this.#installing.has(id)) throw new RangeError(`Resource package install already in progress: ${id}`);
     const now = new Date().toISOString();
@@ -926,7 +934,7 @@ export class ResourcePackageManager {
       const draft = this.#state.packages.map((installed) => ({ ...installed, activeReleaseIds: [] as string[] }));
       const selected: SurveyFootprintManifest[] = [];
       for (const load of loads) {
-        const entry = this.#catalog.packages.find((candidate) => candidate.id === load.packageId && !candidate.hidden);
+        const entry = this.#catalogEntry(load.packageId);
         const installed = draft.find((record) => record.id === load.packageId);
         if (!entry) throw new Error(`Resource package not found: ${load.packageId}`);
         if (!installed) throw new RangeError(`Resource package must be installed before loading: ${load.packageId}`);
@@ -1084,7 +1092,7 @@ export class ResourcePackageManager {
   }
 
   #publicRecord(id: string): PublicResourcePackage | undefined {
-    const entry = this.#catalog.packages.find((candidate) => candidate.id === id);
+    const entry = this.#catalogEntry(id);
     if (!entry) return undefined;
     const installed = this.#state.packages.find((record) => record.id === id);
     const update = this.#hasUpdate(entry, installed);
@@ -1093,6 +1101,12 @@ export class ResourcePackageManager {
 
   #hasUpdate(entry: ResourcePackageCatalogEntry, installed: InstalledPackage | undefined): boolean {
     return Boolean(installed && (installed.version !== entry.version || installed.sha256 !== entry.sha256));
+  }
+
+  #catalogEntry(id: string): ResourcePackageCatalogEntry | undefined {
+    return this.#catalog.packages
+      .filter((candidate) => candidate.id === id && !candidate.hidden)
+      .sort((left, right) => compareVersions(right.version, left.version))[0];
   }
 
   async #validateInstalled(record: InstalledPackage): Promise<SurveyFootprintManifest> {

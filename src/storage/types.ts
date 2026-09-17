@@ -1,8 +1,21 @@
 import type { ConnectorIngestRunFilter, ConnectorIngestRunRecord } from "../connector-history.js";
 import type { ConnectorRecord } from "../connectors.js";
 import type { DataAssetRecord } from "../data-catalog.js";
+import type { SurveyRecord } from "../survey-registry.js";
+
+export interface SurveyIdentityRecord {
+  id: string;
+  source: "user" | "assets";
+  sourceId: string;
+  survey: SurveyRecord;
+  localReleases: SurveyRecord["releases"];
+  linkedTo?: string;
+  history: { action: "link" | "unlink"; targetId: string; at: string }[];
+}
 
 export interface MetadataTransaction {
+  listSurveyIdentities(): Promise<SurveyIdentityRecord[]>;
+  putSurveyIdentity(record: SurveyIdentityRecord): Promise<void>;
   listConnectors(): Promise<ConnectorRecord[]>;
   getConnector(id: string): Promise<ConnectorRecord | undefined>;
   getConnectorByLocationKey(locationKey: string): Promise<ConnectorRecord | undefined>;

@@ -334,6 +334,16 @@ test("HTTP local CSV scan writes object and coverage documents and serves a mult
     assert.deepEqual(coverageFromMoc.pixels.includes(1), true);
     ownEsUnavailable = false;
 
+    // Local registration remains usable while the public catalog is unavailable.
+    const registeredSurvey = await apiJson<{ survey: { releases: Array<Record<string, unknown>> } }>(baseUrl, "/api/surveys/registrations", {
+      method: "POST",
+      body: JSON.stringify({ id: "euclid", name: "Euclid", sourceUrl: "https://example.org/euclid", modalities: ["imaging"] }),
+    });
+    await apiJson(baseUrl, "/api/surveys/euclid/releases", {
+      method: "POST",
+      body: JSON.stringify({ ...registeredSurvey.survey.releases[0], id: "euclid-q1", label: "Q1" }),
+    });
+
     const connectorResponse = await apiJson<{ connector: { id: string; locationKey: string } }>(baseUrl, "/api/connectors", {
       method: "POST",
       body: JSON.stringify({
@@ -481,6 +491,14 @@ test("HTTP local CSV scan writes object and coverage documents and serves a mult
       },
     );
 
+    await apiJson(baseUrl, "/api/surveys/registrations", {
+      method: "POST",
+      body: JSON.stringify({ id: "other-survey", name: "Other survey", sourceUrl: "https://example.org/other", modalities: ["imaging"] }),
+    });
+    await apiJson(baseUrl, "/api/surveys/other-survey/releases", {
+      method: "POST",
+      body: JSON.stringify({ ...registeredSurvey.survey.releases[0], id: "other-release", label: "Other release" }),
+    });
     const thirdAssetResponse = await apiJson<{ asset: { id: string } }>(baseUrl, "/api/data-assets", {
       method: "POST",
       body: JSON.stringify({
@@ -524,7 +542,11 @@ test("HTTP local CSV scan writes object and coverage documents and serves a mult
     assert.ok(filteredLayerIds.includes(matchingMoc.layerId));
     assert.equal(filteredLayerIds.includes(`workspace-${thirdAssetResponse.asset.id}`), false);
     assert.equal(filteredLayerIds.includes("workspace-unassociated-asset"), false);
-    assert.equal(filteredMocs.layers.every((layer) => layer.assetId === assetResponse.asset.id || layer.assetIds.includes(assetResponse.asset.id)), true);
+    const matchingAssetIds = new Set([assetResponse.asset.id, secondAssetResponse.asset.id]);
+    assert.equal(filteredMocs.layers.every((layer) =>
+      (layer.assetId !== undefined && matchingAssetIds.has(layer.assetId))
+      || (layer.assetIds.length > 0 && layer.assetIds.every((id) => matchingAssetIds.has(id)))), true);
+    const searchesBeforeAssetCoverage = coverageSearchBodies.length;
     const coverage = await apiJson<{
       status: string;
       layers: Array<{ key: string; assetId?: string; assetIds: string[]; pixels: number[]; objectCount?: number }>;
@@ -541,7 +563,7 @@ test("HTTP local CSV scan writes object and coverage documents and serves a mult
     assert.equal(secondLayer.objectCount, 9);
     assert.deepEqual(firstLayer.pixels, [...new Set(coverageDocuments.map((document) => Math.floor(Number(document.source.healpix_pixel) / 256)))].sort((left, right) => left - right));
     assert.equal(firstLayer.objectCount, coverageDocuments.reduce((sum, document) => sum + Number(document.source.objectCount), 0));
-    assert.equal(coverageSearchBodies.length, 2);
+    assert.equal(coverageSearchBodies.length - searchesBeforeAssetCoverage, 2);
 
     const density = await apiJson<{
       status: string;

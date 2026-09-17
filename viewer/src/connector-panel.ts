@@ -538,6 +538,7 @@ export class ConnectorPanel {
       this.#runPollTimer = undefined;
       if (!this.#active || this.#view !== "history") return;
       void workspaceApi.connectorIngestRuns().then((runs) => {
+        if (!this.#active || this.#view !== "history") return;
         this.#runs = runs;
         this.#updateMetrics(runs);
         this.#renderHistory();
@@ -546,6 +547,7 @@ export class ConnectorPanel {
   }
 
   #renderRunDetail(): void {
+    if (!this.#active || this.#view !== "history") return;
     const run = this.#runs.find((candidate) => candidate.id === this.#selectedRunId);
     const empty = byId("inspector-empty");
     const content = byId("inspector-content");

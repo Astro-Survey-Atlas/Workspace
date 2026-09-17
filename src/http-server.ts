@@ -26,6 +26,7 @@ import { WorkflowEngine } from "./workflow-engine.js";
 import { WorkflowStore } from "./workflow-store.js";
 import { listTags } from "./tags.js";
 import { createMetadataStore, importJsonState } from "./storage/index.js";
+import { SurveyDirectory } from "./survey-directory.js";
 import { LocalConnectorRootsPolicy, LocalConnectorPolicyError, localConnectorRootsResponse } from "./local-connector-roots.js";
 import { inspectLocalCsv, listLocalCsvFiles, LocalSourceInspectionCapabilityError, LocalSourceInspectionError } from "./local-source-inspection.js";
 import { LocalCsvScanExecutor, LocalScanCapabilityError, LocalScanDisabledError, LocalScanPreconditionError, localScanEnabled, LOCAL_CSV_SCAN_EXECUTOR, type LocalCsvScanInput } from "./local-scan-executor.js";
@@ -88,8 +89,9 @@ const localCsvScanEnabled = localScanEnabled();
 const metadataStoreEngine = process.env.ASTRO_METADATA_STORE || "sqlite";
 
 const workflowStore = new WorkflowStore(workflowRoot);
-const surveys = new SurveyRegistry(surveyRegistryStatePath);
 const metadataStore = createMetadataStore();
+const surveys = new SurveyRegistry(surveyRegistryStatePath, metadataStore);
+const surveyDirectory = new SurveyDirectory(metadataStore);
 const dataCatalog = new DataCatalogRegistry(metadataStore);
 const connectors = new ConnectorRegistry(metadataStore, localConnectorRoots);
 const connectorCredentials = createConnectorCredentialStore();
@@ -408,13 +410,20 @@ function publicSurveyRecords(): SurveyRecord[] {
   return resourcePackageSurveyRecords(resourcePackages.list());
 }
 
-function surveyRecords(): SurveyRecord[] {
-  return surveys.list().map((card) => surveys.get(card.id));
+async function surveyRecords(): Promise<SurveyRecord[]> {
+  let publicRecords: SurveyRecord[];
+  try { publicRecords = publicSurveyRecords(); }
+  catch (error) {
+    if (!(error instanceof ResourceCatalogUnavailableError)) throw error;
+    return surveyDirectory.records();
+  }
+  await surveyDirectory.syncPublic(publicRecords);
+  return surveyDirectory.records();
 }
 
-function surveyRecord(id: string): SurveyRecord {
-  if (surveys.list().some((candidate) => candidate.id === id)) return surveys.get(id);
-  throw new Error(`Survey not found: ${id}`);
+async function surveyRecord(id: string): Promise<SurveyRecord> {
+  await surveyRecords();
+  return surveyDirectory.get(id);
 }
 
 function publicSurveyRecord(id: string): SurveyRecord {
@@ -545,6 +554,8 @@ app.post("/api/data-assets/:id/remote-scan", async (request: Request, response: 
     const assetId = datasetIdFrom(request);
     const surveyId = optionalLocalReference(request.body?.surveyId, "surveyId");
     if (!surveyId) throw new RangeError("surveyId is required for a remote scan");
+    await surveyRecords();
+    await surveyDirectory.validateReference(surveyId, optionalLocalReference(request.body?.releaseId, "releaseId"));
     const input = { ...request.body, assetId };
     delete input.surveyId;
     response.status(202).json({ run: publicConnectorIngestRun(await warehouseScans.submitRemoteAssetScan(surveyId, input, idempotencyKey(request))) });
@@ -557,6 +568,8 @@ app.post("/api/data-assets", async (request: Request, response: Response) => {
   try {
     const input = request.body as DataAssetRegistrationInput;
     await validateConnectorIds(input);
+    await surveyRecords();
+    await surveyDirectory.validateReference(input.surveyId, input.releaseId);
     response.status(201).json({ asset: await publicDataAsset(await dataCatalog.register(input)) });
   } catch (error) {
     sendApiError(response, error);
@@ -568,6 +581,8 @@ app.put("/api/data-assets/:id", async (request: Request, response: Response) => 
     const id = datasetIdFrom(request);
     const input = request.body as DataAssetRegistrationInput;
     await validateConnectorIds(input);
+    await surveyRecords();
+    await surveyDirectory.validateReference(input.surveyId, input.releaseId);
     response.json({ asset: await publicDataAsset(await dataCatalog.update(id, input)) });
   } catch (error) {
     sendApiError(response, error);
@@ -714,6 +729,8 @@ app.post("/api/connectors", async (request: Request, response: Response) => {
   try {
     const input = request.body as ConnectorRegistrationInput;
     const value = validateConnectorInput(input);
+    await surveyRecords();
+    await surveyDirectory.validateReference(value.surveyId, value.releaseId);
     const existing = (await connectors.list()).find((record) => record.locationKey === connectorLocationKey(value.kind, value.config));
     const existingCredentials = existing?.credentialRef ? await connectorCredentials.get(existing.credentialRef) : undefined;
     const credentials = value.kind === "s3" ? resolvedS3Credentials(input, existingCredentials) : undefined;
@@ -747,6 +764,8 @@ app.put("/api/connectors/:id", async (request: Request, response: Response) => {
     const input = request.body as ConnectorRegistrationInput;
     const current = await connectors.get(id);
     const value = validateConnectorInput(input);
+    await surveyRecords();
+    await surveyDirectory.validateReference(value.surveyId, value.releaseId);
     let credentialRef = value.kind === "s3" ? current.credentialRef : undefined;
     if (value.kind === "s3") {
       const existing = current.credentialRef ? await connectorCredentials.get(current.credentialRef) : undefined;
@@ -779,13 +798,30 @@ app.delete("/api/connectors/:id", async (request: Request, response: Response) =
   }
 });
 
-app.get("/api/surveys", (_request: Request, response: Response) => {
-  response.json({ surveys: surveyRecords().map(surveyCardFor) });
+app.get("/api/surveys", async (_request: Request, response: Response) => {
+  try { response.json({ surveys: (await surveyRecords()).map(surveyCardFor) }); }
+  catch (error) { sendApiError(response, error); }
 });
 
-app.get("/api/surveys/:id", (request: Request, response: Response) => {
+app.get("/api/survey-identities", async (_request: Request, response: Response) => {
   try {
-    response.json({ survey: surveyRecord(datasetIdFrom(request)) });
+    await surveyRecords();
+    response.json({ identities: await metadataStore.listSurveyIdentities() });
+  } catch (error) { sendApiError(response, error); }
+});
+
+app.post("/api/survey-identities/:id/association", async (request: Request, response: Response) => {
+  try {
+    await surveyRecords();
+    if (typeof request.body?.publicId !== "string" || (request.body.unlink !== undefined && typeof request.body.unlink !== "boolean")) throw new RangeError("publicId and optional boolean unlink are required");
+    await surveyDirectory.link(datasetIdFrom(request), request.body.publicId, request.body.unlink === true);
+    response.json({ surveys: await surveyDirectory.list() });
+  } catch (error) { sendApiError(response, error); }
+});
+
+app.get("/api/surveys/:id", async (request: Request, response: Response) => {
+  try {
+    response.json({ survey: await surveyRecord(datasetIdFrom(request)) });
   } catch (error) {
     sendApiError(response, error);
   }
@@ -811,7 +847,8 @@ app.get("/api/public-surveys/:id", (request: Request, response: Response) => {
 
 app.post("/api/surveys/:id/releases", async (request: Request, response: Response) => {
   try {
-    response.status(201).json({ release: await surveys.addRelease(datasetIdFrom(request), request.body as SurveyReleaseRegistrationInput) });
+    await surveyRecord(datasetIdFrom(request));
+    response.status(201).json({ release: await surveyDirectory.addRelease(datasetIdFrom(request), request.body as SurveyReleaseRegistrationInput) });
   } catch (error) {
     sendApiError(response, error);
   }
@@ -1189,6 +1226,12 @@ interface OverlapSourceContext {
 }
 
 async function overlapSources(context: OverlapSourceContext): Promise<SkyOverlapSource[]> {
+  await surveyRecords();
+  const identities = await metadataStore.listSurveyIdentities();
+  if (context.surveyIds) {
+    const aliases = await Promise.all([...context.surveyIds].map((id) => surveyDirectory.aliases(id)));
+    context = { ...context, surveyIds: new Set([...context.surveyIds, ...aliases.flat()]) };
+  }
   const result = new Map<string, SkyOverlapSource>();
   const accept = (source: SkyOverlapSource): void => {
     if (!source.pixels.length || !overlapSourceMatches(source, context)) return;
@@ -1206,7 +1249,7 @@ async function overlapSources(context: OverlapSourceContext): Promise<SkyOverlap
         kind: "public",
         nside: footprint.nside,
         pixels: footprint.pixels,
-        surveyId: footprint.surveyId,
+        surveyId: identities.find((entry) => entry.source === "assets" && entry.sourceId === footprint.surveyId)?.id ?? footprint.surveyId,
         releaseId: footprint.releaseId,
         product: footprint.product,
         sourceUrl: footprint.sourceUrl,
@@ -1678,7 +1721,7 @@ app.get("/api/sky/coverage", async (request: Request, response: Response) => {
     const nside = Number(request.query.nside ?? ASTRO_OVERVIEW_NSIDE);
     nsideOrderForCoverage(nside);
     const rawAssetIds = typeof request.query.assetIds === "string" ? request.query.assetIds : "";
-    const assetIds = rawAssetIds.split(",").map((value) => value.trim()).filter(Boolean);
+    let assetIds = rawAssetIds.split(",").map((value) => value.trim()).filter(Boolean);
     const survey = queryText(request.query.survey, "survey");
     const release = queryText(request.query.release, "release");
     const baseInput = {
@@ -1690,20 +1733,34 @@ app.get("/api/sky/coverage", async (request: Request, response: Response) => {
     const artifacts = await userMocs.list();
     const artifactSelections = selectUserMocArtifacts(artifacts);
     const knownAssets = await dataCatalog.list();
+    const surveyAliases = new Set(survey ? [survey, ...await surveyDirectory.aliases(survey)] : []);
+    if (survey) {
+      assetIds = knownAssets.filter((asset) => asset.surveyId && surveyAliases.has(asset.surveyId)
+        && (!release || asset.releaseId === release)
+        && (!rawAssetIds || assetIds.includes(asset.id))).map((asset) => asset.id);
+      if (!assetIds.length && rawAssetIds) {
+        response.json({ status: "empty", index: astroObjectIndex.coverageIndex, nside, pixels: [], byAsset: [], layers: [] });
+        return;
+      }
+    }
     const runs = await connectorRuns.list();
     const ownedWarehouseLayerIds = workspaceWarehouseLayerIds(knownAssets, artifacts, runs);
     const warehouse = await warehouseIndex.coverage({
       nside,
-      ...(assetIds.length ? { assetIds } : {}),
-      ...(survey ? { survey } : {}),
+      ...(rawAssetIds && assetIds.length ? { assetIds } : {}),
       ...(release ? { release } : {}),
       layerIds: ownedWarehouseLayerIds,
+    });
+    if (survey) warehouse.layers = warehouse.layers.filter((layer) => {
+      const asset = knownAssets.find((candidate) => warehouseLayerForAsset(layer, candidate));
+      const id = asset?.surveyId ?? layer.surveyId;
+      return Boolean(id && surveyAliases.has(id)) && (!release || (asset?.releaseId ?? layer.releaseId) === release);
     });
 
     // ES documents written by older scanner jobs may have blank survey / release
     // fields. Use the Atlas asset's own local labels when assembling per-asset
     // layers; never infer them from a Connector or the Assets package.
-    if (assetIds.length) {
+    if (assetIds.length || survey) {
       const layers: AstroCoverageLayer[] = [];
       const allPixels = new Set<number>();
       const allAssets = new Map<string, AstroCoverageLayer["byAsset"][number]>();
@@ -1712,7 +1769,7 @@ app.get("/api/sky/coverage", async (request: Request, response: Response) => {
       for (const assetId of [...new Set(assetIds)]) {
         let asset: DataAssetRecord;
         try { asset = await dataCatalog.get(assetId); } catch { continue; }
-        if (survey && asset.surveyId !== survey) continue;
+        if (survey && (!asset.surveyId || !surveyAliases.has(asset.surveyId))) continue;
         if (release && asset.releaseId !== release) continue;
         // Query both indexes by one asset id. The object coverage index is the
         // authoritative projection for local CSV scans; the file index keeps
@@ -1786,7 +1843,14 @@ app.get("/api/sky/coverage", async (request: Request, response: Response) => {
         pixels.forEach((pixel) => allPixels.add(pixel));
         layers.push(layer);
       }
-      if (layers.length) {
+      if (survey && !rawAssetIds) {
+        for (const layer of warehouse.layers.filter((candidate) => !knownAssets.some((asset) => warehouseLayerForAsset(candidate, asset)))) {
+          layers.push({ ...layer, source: "warehouse", status: coverageStatus(layer.status), byAsset: [] });
+          layer.pixels.forEach((pixel) => allPixels.add(pixel));
+          statuses.push(coverageStatus(layer.status));
+        }
+      }
+      if (layers.length || survey) {
         const status = aggregateCoverageStatus(statuses);
         response.json({
           status,
@@ -2125,6 +2189,7 @@ async function start(): Promise<void> {
   await metadataStore.initialize();
   await importJsonState(metadataStore, { connectorStatePath, dataCatalogStatePath, connectorRunStatePath });
   await workflowStore.initialize();
+  await surveyDirectory.importLegacy(surveyRegistryStatePath);
   await surveys.initialize();
   await dataCatalog.initialize();
   await connectors.initialize();

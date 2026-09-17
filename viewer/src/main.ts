@@ -536,9 +536,13 @@ function setupSurveyRegistration(): void {
     reset();
     if (!dialog.open) dialog.showModal();
   });
-  byId<HTMLButtonElement>("survey-registration-close").addEventListener("click", close);
-  byId<HTMLButtonElement>("survey-registration-cancel").addEventListener("click", close);
-  dialog.addEventListener("cancel", reset);
+  const cancel = () => {
+    close();
+    void dataCatalogPanel.resumeRegistration().catch((error) => notifyWorkspaceError(error, "巡天选项刷新失败，请重新打开登记表单重试"));
+  };
+  byId<HTMLButtonElement>("survey-registration-close").addEventListener("click", cancel);
+  byId<HTMLButtonElement>("survey-registration-cancel").addEventListener("click", cancel);
+  dialog.addEventListener("cancel", (event) => { event.preventDefault(); cancel(); });
   form.addEventListener("submit", (event) => {
     event.preventDefault();
     if (!form.reportValidity()) return;
@@ -547,7 +551,7 @@ function setupSurveyRegistration(): void {
     void workspaceApi.registerSurvey(surveyRegistrationInput(form)).then((survey) => {
       notifyWorkspace("巡天标签已登记", survey.name, { tone: "success" });
       close();
-      return activateMode("catalog").then(() => dataCatalogPanel.startNew(survey.id));
+      return dataCatalogPanel.resumeRegistration(survey.id).catch((error) => notifyWorkspaceError(error, "巡天已登记，但选项刷新失败，请重新打开登记表单重试"));
     }).catch((error) => surveyRegistrationFeedback("登记失败", error instanceof Error ? error.message : String(error)));
   });
 }
@@ -3261,6 +3265,7 @@ async function selectSurvey(id: string, scope: "local" | "public" = "local"): Pr
 async function activateMode(nextMode: ViewMode): Promise<void> {
   if (nextMode === "layers" && !surveyFootprints) throw new Error("Survey footprint catalog is not configured");
   mode = nextMode;
+  if (nextMode !== "connectors") connectorPanel.deactivate();
   destroyViewer();
   // Coverage uses four semantic metrics and hides the fifth slot. Restore the
   // slot before switching to any other view so its metrics remain visible.

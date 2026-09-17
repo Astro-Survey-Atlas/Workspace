@@ -391,8 +391,9 @@ export class ResourcePackagePanel {
      byId("resource-package-filter-summary").textContent = activeFilterCount ? `已选 ${activeFilterCount} 个筛选条件` : "全部公开资源";
     byId<HTMLButtonElement>("resource-package-filter-clear").disabled = activeFilterCount === 0;
     const apply = byId<HTMLButtonElement>("resource-package-apply");
-    apply.disabled = this.#busy || dirtyPackages === 0;
-    apply.querySelector("span")!.textContent = this.#busy ? "处理中…" : "应用到天球";
+    const pendingUpdates = this.#records.some((record) => record.status === "update_available");
+    apply.disabled = this.#busy || (dirtyPackages === 0 && !pendingUpdates);
+    apply.querySelector("span")!.textContent = this.#busy ? "处理中…" : pendingUpdates ? "更新并应用到天球" : "应用到天球";
     byId("resource-package-empty").hidden = visible.length > 0;
   }
 
@@ -419,7 +420,8 @@ export class ResourcePackagePanel {
   }
 
   #downloadQueue(): PublicResourcePackage[] {
-    return this.#records.filter((record) => this.#draftReleases.has(record.id) && (!record.installedVersion || record.status === "update_available"));
+    return this.#records.filter((record) => record.status === "update_available"
+      || (this.#draftReleases.has(record.id) && !record.installedVersion));
   }
 
   async #downloadSelected(): Promise<void> {
