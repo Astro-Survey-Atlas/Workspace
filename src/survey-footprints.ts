@@ -11,7 +11,7 @@ export interface SurveyFootprint {
   nside: number;
   pixels: number[];
   quality: FootprintGeometryQuality;
-  sourceUrl: string;
+  sourceUrl?: string;
   sourceId?: string;
   layerId?: string;
   retrievedAt: string;
@@ -38,8 +38,10 @@ function assertManifest(value: unknown): asserts value is SurveyFootprintManifes
       throw new Error("Survey footprint manifest contains an invalid footprint");
     }
     try {
-      const sourceUrl = new URL(footprint.sourceUrl);
-      if (sourceUrl.protocol !== "https:" && sourceUrl.protocol !== "http:") throw new Error();
+      if (footprint.sourceUrl !== undefined) {
+        const sourceUrl = new URL(footprint.sourceUrl);
+        if (sourceUrl.protocol !== "https:" && sourceUrl.protocol !== "http:") throw new Error();
+      }
     } catch {
       throw new Error(`Survey footprint contains an invalid source URL: ${footprint.surveyId}`);
     }

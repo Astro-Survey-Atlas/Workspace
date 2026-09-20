@@ -48,12 +48,13 @@ interface PackageFixture {
   releases: string[];
 }
 
-async function createPackage(directory: string, id: string, surveyId: string, options: { unsafeSymlink?: boolean; missingFile?: string; footprintSurveyId?: string; version?: string; releases?: string[]; nside?: number; quality?: "moc" | "official_overview" } = {}): Promise<PackageFixture> {
+async function createPackage(directory: string, id: string, surveyId: string, options: { unsafeSymlink?: boolean; missingFile?: string; footprintSurveyId?: string; version?: string; releases?: string[]; reviewedPreview?: boolean; previewOrdering?: string; previewLayerId?: string; nside?: number; quality?: "moc" | "official_overview" } = {}): Promise<PackageFixture> {
   const version = options.version ?? "3.0.0";
   const releases = options.releases ?? ["release-a", "release-b"];
   const mocBytes = fitsMoc();
   const footprints = manifestFor(options.footprintSurveyId ?? surveyId, releases, options.nside, options.quality);
-  const footprintBytes = Buffer.from(`${JSON.stringify(footprints, null, 2)}\n`);
+  const preview = options.reviewedPreview ? { schemaVersion: 1, coordinateFrame: "ICRS", ordering: options.previewOrdering ?? "NESTED", generatedAt: now, footprints: footprints.footprints.map(f => ({ surveyId: f.surveyId, releaseId: f.releaseId, product: f.product, layerId: options.previewLayerId ?? `${surveyId}-coverage`, nside: f.nside, pixels: f.pixels })) } : footprints;
+  const footprintBytes = Buffer.from(`${JSON.stringify(preview, null, 2)}\n`);
   const provenanceBytes = Buffer.from(JSON.stringify({ schemaVersion: 3, version: "3.0.0", files: [] }));
   const readmeBytes = Buffer.from("# README\n");
   const packageManifest = {
@@ -692,4 +693,97 @@ test("an unavailable catalog keeps the last snapshot and active package selectio
   } finally {
     await rm(paths.directory, { recursive: true, force: true });
   }
+});
+
+test("current reviewed catalog accepts empty sources and absent descriptive lists, retaining strict trust fields", async () => {
+  const paths = await fixture();
+  try {
+    const catalogPath = paths.catalogUrl.replace("file://", "");
+    const catalog = JSON.parse(await readFile(catalogPath, "utf8"));
+    for (const entry of catalog.packages) {
+      entry.sources = [];
+      delete entry.wavelengths;
+      delete entry.productTypes;
+      delete entry.coverageAuthorities;
+    }
+    await writeFile(catalogPath, JSON.stringify(catalog));
+    await paths.manager.sync();
+    const record = paths.manager.list()[0]!;
+    assert.deepEqual(record.sources, []);
+    assert.deepEqual(record.wavelengths, []);
+    assert.deepEqual(record.productTypes, []);
+    assert.deepEqual(record.coverageAuthorities, []);
+    assert.equal((await waitForJob(paths.manager, paths.manager.install(record.id))).status, "completed");
+    for (const [field, invalid] of [["sources", null], ["wavelengths", "optical"], ["productTypes", [""]], ["coverageAuthorities", [42]], ["sha256", "bad"]] as const) {
+      const broken = structuredClone(catalog);
+      broken.packages[0][field] = invalid;
+      await writeFile(catalogPath, JSON.stringify(broken));
+      await assert.rejects(() => paths.manager.sync(), /Assets catalog sync failed/);
+    }
+  } finally { await rm(paths.directory, { recursive: true, force: true }); }
+});
+
+test("failed sync and offline restart expose stale state without rolling back the current snapshot", async () => {
+  const paths = await fixture();
+  try {
+    const options = { catalogUrl: paths.catalogUrl, root: paths.root, statePath: paths.statePath, snapshotRoot: path.join(paths.directory, "snapshots") };
+    const manager = new ResourcePackageManager(options);
+    await manager.initialize();
+    const before = manager.catalogStatus();
+    const catalogPath = paths.catalogUrl.replace("file://", "");
+    const good = await readFile(catalogPath, "utf8");
+    await writeFile(catalogPath, "invalid JSON");
+    await assert.rejects(() => manager.sync(), /Assets catalog sync failed/);
+    assert.equal(manager.catalogStatus().stale, true);
+    assert.ok(manager.catalogStatus().lastSyncError);
+    assert.equal(manager.catalogStatus().catalogSha256, before.catalogSha256);
+    const restarted = new ResourcePackageManager(options);
+    await restarted.initialize();
+    assert.equal(restarted.available, true);
+    assert.equal(restarted.catalogStatus().stale, true);
+    assert.ok(restarted.catalogStatus().lastSyncError);
+    await writeFile(catalogPath, good);
+    await restarted.sync();
+    assert.equal(restarted.catalogStatus().stale, false);
+    assert.equal(restarted.catalogStatus().lastSyncError, undefined);
+  } finally { await rm(paths.directory, { recursive: true, force: true }); }
+});
+
+
+test("reviewed per-layer NESTED previews install and remain readable after restart", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "reviewed-preview-"));
+  try {
+    const pkg = await createPackage(directory, "public-reviewed-footprints", "reviewed", { releases: ["release-a"], reviewedPreview: true });
+    const catalogUrl = await writeCatalog(directory, [pkg]);
+    const options = { catalogUrl, root: path.join(directory, "packages"), statePath: path.join(directory, "state.json") };
+    const manager = new ResourcePackageManager(options);
+    await manager.initialize();
+    const job = await waitForJob(manager, manager.install(pkg.id));
+    assert.equal(job.status, "completed", job.error);
+    await manager.activate(pkg.id);
+    const before = await manager.activeFootprints();
+    assert.equal(before.nside, 16);
+    assert.equal(before.footprints[0]?.layerId, "reviewed-coverage");
+    assert.deepEqual(before.footprints[0]?.pixels, manifestFor("reviewed", ["release-a"]).footprints[0]?.pixels);
+    const restarted = new ResourcePackageManager(options);
+    await restarted.initialize();
+    assert.equal((await restarted.mocLayers(pkg.id))[0]?.layerId, "reviewed-coverage");
+    assert.deepEqual((await restarted.activeFootprints()).footprints, before.footprints);
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
+
+test("reviewed previews reject RING ordering and mismatched native layer identity", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "reviewed-preview-invalid-"));
+  try {
+    for (const invalid of [{ previewOrdering: "RING" }, { previewLayerId: "unknown-layer" }]) {
+      const pkg = await createPackage(directory, "public-reviewed-footprints", "reviewed", { releases: ["release-a"], reviewedPreview: true, ...invalid });
+      const manager = new ResourcePackageManager({ catalogUrl: await writeCatalog(directory, [pkg]), root: path.join(directory, "packages"), statePath: path.join(directory, "state.json") });
+      await manager.initialize();
+      const job = await waitForJob(manager, manager.install(pkg.id));
+      assert.equal(job.status, "failed");
+      assert.match(job.error ?? "", /NESTED|identity/);
+      assert.equal(manager.list()[0]?.installedVersion, undefined);
+    }
+  } finally { await rm(directory, { recursive: true, force: true }); }
 });

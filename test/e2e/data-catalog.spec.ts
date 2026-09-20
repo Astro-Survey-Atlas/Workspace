@@ -773,6 +773,11 @@ test("connector actions and unified scan history expose only supported execution
       id: "run-jdbc", locationKey: "jdbc:fixture", connectorId: "connector-jdbc-fixture", connectorName: "JDBC science database", connectorKind: "jdbc", executor: "jdbc-query",
       target: { uri: "jdbc:postgresql://db/catalog/public" }, assetIds: ["asset-jdbc"], status: "failed", startedAt: now, completedAt: now, createdAt: now, error: "Query executor unavailable",
     },
+    {
+      id: "run-warehouse", locationKey: "s3://fixture/catalog", connectorId: "connector-s3-fixture", connectorName: "S3 science archive", connectorKind: "s3", executor: "warehouse-scan",
+      target: { uri: "s3://fixture/catalog" }, assetIds: ["asset-s3"], status: "running", startedAt: now, createdAt: now,
+      jobId: "workspace-coverage-fixture", batchId: "workspace-coverage-fixture", warehouseLayerId: "workspace-asset-s3", backend: "warehouse",
+    },
   ];
 
   await page.route("**/api/capabilities", (route) => route.fulfill({ json: { dataWarehouse: { enabled: warehouseEnabled }, metadataStore: { engine: "postgres" } } }));
@@ -783,6 +788,12 @@ test("connector actions and unified scan history expose only supported execution
     const run: ConnectorIngestRun = { ...runs[0]!, id: "run-submitted", jobId: "flink-scan-02", status: "queued" };
     runs.unshift(run);
     await route.fulfill({ status: 202, json: { run } });
+  });
+  await page.route("**/api/connectors/connector-s3-fixture/ingest-runs/run-warehouse/logs", async (route) => {
+    await route.fulfill({ json: {
+      runId: "run-warehouse", status: "available", text: "scanner started\ncoverage extraction complete\n",
+      podName: "workspace-scanner-pod", containerName: "scanner", fetchedAt: now,
+    } });
   });
 
   await page.setViewportSize({ width: 1440, height: 900 });
@@ -802,11 +813,11 @@ test("connector actions and unified scan history expose only supported execution
   const iconTops = await inspector.locator(".connector-icon-actions button").evaluateAll((buttons) => buttons.map((button) => button.getBoundingClientRect().top));
   expect(new Set(iconTops.map((top) => Math.round(top))).size).toBe(1);
 
-  const execute = inspector.getByRole("button", { name: "执行扫描" });
+  const execute = inspector.getByRole("button", { name: "执行覆盖扫描" });
   await expect(execute).toBeEnabled();
   await expect(execute).toHaveClass(/primary-command/);
   await execute.click();
-  await expect(page.locator("#workspace-notification-deck .workspace-notification").filter({ hasText: "普通扫描任务已提交" })).toBeVisible();
+  await expect(page.locator("#workspace-notification-deck .workspace-notification").filter({ hasText: "覆盖扫描任务已提交" })).toBeVisible();
   expect(submittedBody).toEqual({});
 
   await page.getByRole("tab", { name: "扫描记录" }).click();
@@ -817,7 +828,7 @@ test("connector actions and unified scan history expose only supported execution
   }
   await expect(page.locator(".connector-filter-disabled-note")).toBeVisible();
   await expect(page.locator(".connector-filter-disabled-note")).toContainText("仅适用于 Connector list");
-  await expect(page.locator("#connector-history-list .connector-history-row")).toHaveCount(4);
+  await expect(page.locator("#connector-history-list .connector-history-row")).toHaveCount(5);
   await expect(page.locator("#connector-history-list")).toContainText("flink-ingest");
   await expect(page.locator("#connector-history-list")).toContainText("local-filesystem");
   await expect(page.locator("#connector-history-list")).toContainText("jdbc-query");
@@ -827,6 +838,18 @@ test("connector actions and unified scan history expose only supported execution
   await expect(page.locator("#inspector-kicker")).toHaveText("SCAN RUN DETAIL");
   await expect(inspector).toContainText("local-filesystem");
   await expect(inspector).toContainText("file:///data/catalog");
+   await page.locator("#connector-run-kind-filter").selectOption("s3");
+   await page.locator("#connector-history-list .connector-history-row", { hasText: "workspace-coverage-fixture" }).dblclick();
+   await expect(page.locator("#connector-run-logs-dialog")).toBeVisible();
+   await expect(page.locator("#connector-run-logs-dialog-output")).toContainText("coverage extraction complete");
+   await page.locator("#connector-run-logs-dialog-dismiss").click();
+   await expect(inspector).toContainText("任务日志");
+   await expect(inspector).toContainText("coverage extraction complete");
+   await inspector.getByRole("button", { name: "查看任务日志" }).click();
+   await expect(page.locator("#connector-run-logs-dialog")).toBeVisible();
+   await expect(page.locator("#connector-run-logs-dialog-output")).toContainText("coverage extraction complete");
+   await page.locator("#connector-run-logs-dialog-dismiss").click();
+  await page.locator("#connector-run-kind-filter").selectOption("local");
   let releasePoll!: () => void;
   let pollStarted!: () => void;
   const started = new Promise<void>((resolve) => { pollStarted = resolve; });
@@ -859,16 +882,16 @@ test("connector actions and unified scan history expose only supported execution
   const connectorTabUnderline = await page.locator("#connector-list-tab").evaluate((button) => getComputedStyle(button, "::after").backgroundColor);
   expect(connectorTabUnderline).not.toBe("rgb(66, 212, 198)");
   await page.locator("#connector-list .connector-row", { hasText: "Local mounted catalog" }).click();
-  await expect(inspector.getByRole("button", { name: "执行扫描" })).toBeDisabled();
-  await expect(inspector).toContainText("本地路径扫描执行器尚未接入");
+  await expect(inspector.getByRole("button", { name: "执行覆盖扫描" })).toBeDisabled();
+  await expect(inspector).toContainText("本地覆盖扫描需要已登记的图像或数据立方体资产");
   await page.locator("#connector-list .connector-row", { hasText: "JDBC science database" }).click();
-  await expect(inspector.getByRole("button", { name: "执行扫描" })).toBeDisabled();
+  await expect(inspector.getByRole("button", { name: "执行覆盖扫描" })).toBeDisabled();
   await expect(inspector).toContainText("JDBC 扫描执行器尚未接入");
 
   warehouseEnabled = false;
   await page.locator('[data-mode="catalog"]').click();
   await page.locator('[data-mode="connectors"]').click();
   await page.locator("#connector-list .connector-row", { hasText: "S3 science archive" }).click();
-  await expect(inspector.getByRole("button", { name: "执行扫描" })).toBeDisabled();
+  await expect(inspector.getByRole("button", { name: "执行覆盖扫描" })).toBeDisabled();
   await expect(inspector).toContainText("数据仓库不可用");
 });

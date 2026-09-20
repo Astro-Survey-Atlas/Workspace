@@ -87,7 +87,7 @@
             <label class="field-label" for="connector-kind-filter">类型</label><select id="connector-kind-filter" class="field-input" aria-describedby="connector-filter-disabled-note"><option value="all">全部类型</option><option value="s3">S3 / OSS</option><option value="local">本地路径</option><option value="jdbc">JDBC 数据库</option></select>
             <label class="field-label" for="connector-status-filter">连接状态</label><select id="connector-status-filter" class="field-input" aria-describedby="connector-filter-disabled-note"><option value="all">全部状态</option><option value="draft">未检测</option><option value="ready">可用</option><option value="disabled">已停用</option></select>
             <label class="field-label" for="connector-survey-filter">巡天</label><select id="connector-survey-filter" class="field-input" aria-describedby="connector-filter-disabled-note"><option value="all">全部巡天</option></select>
-            <p class="control-note">筛选只改变 Connector list；新增 Connector 在中栏完成，检测、执行扫描、编辑和删除位于右栏，运行状态统一在“扫描记录”查看。</p>
+            <p class="control-note">筛选只改变 Connector list；新增 Connector 在中栏完成，检测、执行覆盖扫描、编辑和删除位于右栏，运行状态统一在“扫描记录”查看。</p>
             <p id="connector-filter-disabled-note" class="control-note connector-filter-disabled-note" hidden>扫描记录视图：左侧这些筛选仅适用于 Connector list。</p>
           </section>
         </div>
@@ -474,6 +474,24 @@
           <div id="connector-config-jdbc" data-config="jdbc" class="connector-config-grid" hidden><label><span class="field-label">JDBC URL</span><input id="connector-jdbc-url" name="url" class="field-input" /></label><label><span class="field-label">Database</span><input id="connector-jdbc-database" name="database" class="field-input" /></label><label><span class="field-label">Schema</span><input id="connector-jdbc-schema" name="schema" class="field-input" value="public" /></label></div>
           <div class="connector-registration-actions"><button id="connector-check-form" class="command-button secondary" type="button">检测此配置</button></div>
           <footer><button id="connector-form-cancel" class="command-button secondary" type="button">取消</button><button id="connector-form-submit" class="command-button" type="submit">登记 Connector</button></footer>
+        </form>
+      </dialog>
+
+      <dialog id="connector-run-logs-dialog" class="workspace-dialog wide-dialog" aria-labelledby="connector-run-logs-dialog-title">
+        <form method="dialog" class="dialog-form connector-run-logs-dialog-form">
+          <header>
+            <div>
+              <span class="panel-kicker">WAREHOUSE TASK</span>
+              <h2 id="connector-run-logs-dialog-title">任务日志</h2>
+            </div>
+            <button id="connector-run-logs-dialog-close" class="icon-button" type="button" aria-label="关闭任务日志" title="关闭任务日志"><i data-lucide="x"></i></button>
+          </header>
+          <p id="connector-run-logs-dialog-meta" class="connector-run-logs-dialog-meta"></p>
+          <p id="connector-run-logs-dialog-status" class="connector-run-logs-dialog-status" role="status"></p>
+          <pre id="connector-run-logs-dialog-output" class="connector-run-logs-dialog-output" hidden></pre>
+          <footer>
+            <button id="connector-run-logs-dialog-dismiss" class="command-button secondary" type="button">关闭</button>
+          </footer>
         </form>
       </dialog>
 

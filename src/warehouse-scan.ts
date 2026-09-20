@@ -6,7 +6,7 @@ import { connectorConfigurationHash, connectorLocationKey, hasCurrentSuccessfulC
 import type { ConnectorCredentialStore, StoredConnectorCredentials } from "./connector-credentials.js";
 import { ConnectorIngestRunCatalog, type ConnectorIngestRunRecord, type ConnectorScanTargetSnapshot } from "./connector-history.js";
 import { coverageJobSnapshot, scannerCoverageProperties, validateCoverageJobSnapshot, validateCoverageJobSubmission, type CoverageJobSnapshot } from "./coverage-jobs.js";
-import type { DataAssetRecord, DataCatalogRegistry } from "./data-catalog.js";
+import type { DataAssetAccess, DataAssetRecord, DataCatalogRegistry } from "./data-catalog.js";
 import { DataWarehouseDisabledError, ConnectorScanCapabilityError, ConnectorScanPreconditionError, connectorScanPath, connectorScanTarget, type GenericScanInput } from "./scan-contract.js";
 import type { UserMocArtifact, UserMocArtifactContext, UserMocArtifactStore, UserMocPrecision } from "./user-moc-artifacts.js";
 import { defaultMocCoreAdapter, type MocCoreAdapter } from "./moc-core-adapter.js";
@@ -61,6 +61,47 @@ interface KubernetesResource {
 }
 
 interface KubernetesList<T> { items?: T[] }
+
+interface KubernetesPod extends KubernetesResource {
+  spec?: { containers?: Array<{ name?: string }> };
+}
+
+export interface WarehouseTaskLogs {
+  runId: string;
+  status: "available" | "unavailable";
+  text: string;
+  podName?: string;
+  containerName?: string;
+  fetchedAt: string;
+  message?: string;
+}
+
+const MAX_TASK_LOG_BYTES = 64 * 1024;
+const TASK_LOG_TAIL_LINES = 2000;
+const SIDECAR_CONTAINER = /^(?:istio-proxy|linkerd-proxy|envoy|sidecar)$/i;
+
+function safeKubernetesName(value: string | undefined): string | undefined {
+  const name = textValue(value);
+  return name && /^[a-z0-9](?:[-a-z0-9]*[a-z0-9])?$/.test(name) ? name : undefined;
+}
+
+function sanitizeTaskLog(value: string): string {
+  return value
+    .replace(/(https?:\/\/)[^/\s:@]+:[^@\s]+@/gi, "$1[REDACTED]@")
+    .replace(/((?:access[-_ ]?key(?:[-_ ]?id)?|secret[-_ ]?key|password|token|authorization|api[-_ ]?key)\s*[:=]\s*["']?)[^\s,;"']+/gi, "$1[REDACTED]");
+}
+
+function boundedTaskLog(value: string): string {
+  const sanitized = sanitizeTaskLog(value);
+  if (Buffer.byteLength(sanitized, "utf8") <= MAX_TASK_LOG_BYTES) return sanitized;
+  let result = sanitized.slice(-MAX_TASK_LOG_BYTES);
+  while (Buffer.byteLength(result, "utf8") > MAX_TASK_LOG_BYTES) result = result.slice(1);
+  return `[日志已截断，仅显示末尾内容]\n${result}`.slice(0, MAX_TASK_LOG_BYTES);
+}
+
+function unavailableTaskLogs(runId: string, message: string): WarehouseTaskLogs {
+  return { runId, status: "unavailable", text: "", fetchedAt: new Date().toISOString(), message };
+}
 
 export interface WarehouseLocalSourceVolume {
   /** Namespace-local PVC claim labelled atlas.zhejianglab.org/scanner-source=true. */
@@ -255,12 +296,21 @@ function requiredAssetIdentity(asset: DataAssetRecord): { surveyId: string; rele
   return { surveyId, releaseId, product };
 }
 
-function fitsAccessFormat(value: string): boolean {
+function imageDataAccessFormat(value: string): boolean {
   const format = value.trim().toLowerCase();
-  return format === "fits" || format === "fit" || format === "fits.gz" || format === "application/fits";
+  return format === "directory" || format === "fits" || format === "fit" || format === "fits.gz" || format === "application/fits";
 }
 
-function coverageForAsset(asset: DataAssetRecord): CoverageJobSnapshot {
+function connectorDataAccess(connector: ConnectorRecord): DataAssetAccess {
+  return {
+    connector: connector.kind,
+    uri: connector.displayPath,
+    format: connector.config.format ?? "directory",
+    connectorId: connector.id,
+  };
+}
+
+function coverageForAsset(asset: DataAssetRecord, connector?: ConnectorRecord): CoverageJobSnapshot {
   const identity = requiredAssetIdentity(asset);
   try {
     if (asset.kind === "catalog") {
@@ -285,9 +335,9 @@ function coverageForAsset(asset: DataAssetRecord): CoverageJobSnapshot {
       });
     }
     if (asset.kind === "image" || asset.kind === "cube") {
-      const accesses = [asset.access, ...(asset.accesses ?? [])];
-      if (!accesses.some((access) => fitsAccessFormat(access.format))) {
-        throw new ConnectorScanPreconditionError("Image and cube Warehouse scans require a FITS access format");
+      const accesses = [asset.access, ...(asset.accesses ?? []), ...(connector ? [connectorDataAccess(connector)] : [])];
+      if (!accesses.some((access) => imageDataAccessFormat(access.format))) {
+        throw new ConnectorScanPreconditionError("Image and cube Warehouse scans require a FITS file or directory access format");
       }
       return validateCoverageJobSnapshot({
         ...identity,
@@ -610,7 +660,7 @@ export class WarehouseScanService {
     if (connector.kind !== "s3" && connector.kind !== "local") throw new ConnectorScanCapabilityError(connector.kind);
     const asset = await this.#dataCatalog.get(input.assetId);
     if (asset.origin !== "user") throw new ConnectorScanPreconditionError("Only user assets can start an optional remote scan");
-    const coverage = input.coverage ? validateCoverageJobSnapshot(input.coverage) : coverageForAsset(asset);
+    const coverage = input.coverage ? validateCoverageJobSnapshot(input.coverage) : coverageForAsset(asset, connector);
     const stored = connector.kind === "s3"
       ? (async () => {
         const value = connector.credentialRef ? await this.#credentials.get(connector.credentialRef) : undefined;
@@ -680,7 +730,7 @@ export class WarehouseScanService {
     }
     const asset = assets[0];
     if (!asset) throw new ConnectorScanPreconditionError("Connector self-scan requires one linked user asset with a persisted coverage recipe");
-    const coverage = coverageForAsset(asset);
+    const coverage = coverageForAsset(asset, connector);
     return this.submitScan(connectorId, { assetId: asset.id, allowedSuffixes: defaultSuffixesForCoverage(coverage), coverage }, key);
   }
 
@@ -701,6 +751,77 @@ export class WarehouseScanService {
       throw new Error(record.error ?? "Warehouse 扫描请求创建失败");
     }
     return { accepted: true, scanRunIds: [record.batchId ?? record.id] };
+  }
+
+  async taskLogs(connectorId: string, runId: string): Promise<WarehouseTaskLogs> {
+    const connector = await this.#connectors.get(connectorId);
+    const run = (await this.#runs.list()).find((candidate) => candidate.id === runId
+      && (candidate.connectorId === connector.id || (!candidate.connectorId && candidate.locationKey === connector.locationKey)));
+    if (!run) throw new Error(`Connector ingest run not found: ${runId}`);
+
+    const workspaceOwned = run.backend === "warehouse"
+      && run.executor === "warehouse-scan"
+      && Boolean(run.jobId?.startsWith("workspace-"))
+      && Boolean(run.batchId?.startsWith("workspace-"))
+      && Boolean(run.warehouseLayerId?.startsWith("workspace-"));
+    if (!workspaceOwned) return unavailableTaskLogs(run.id, "该记录没有 Workspace Warehouse 任务日志");
+    if (!this.#enabled || !this.#client) return unavailableTaskLogs(run.id, "Warehouse 任务日志服务当前不可用");
+
+    let scanRequest: { status?: KubernetesResource["status"] } | undefined;
+    try {
+      const result = await this.#client.request<KubernetesResource>("GET", `${WAREHOUSE_SCAN_API}/namespaces/${encodeURIComponent(this.#namespace)}/scanrequests/${encodeURIComponent(run.jobId!)}`);
+      if (result.status === 404) return unavailableTaskLogs(run.id, "Warehouse ScanRequest 已不存在");
+      if (!result.ok || !result.value) return unavailableTaskLogs(run.id, "Warehouse ScanRequest 状态暂不可用");
+      scanRequest = result.value;
+    } catch {
+      return unavailableTaskLogs(run.id, "Warehouse ScanRequest 状态暂不可用");
+    }
+
+    const jobName = safeKubernetesName(scanRequest.status?.jobName);
+    if (!jobName) return unavailableTaskLogs(run.id, "Warehouse scanner Job 尚未创建");
+    const namespace = encodeURIComponent(this.#namespace);
+    let podsResult: { status: number; ok: boolean; value?: KubernetesList<KubernetesPod> };
+    try {
+      podsResult = await this.#client.request<KubernetesList<KubernetesPod>>(
+        "GET",
+        `/api/v1/namespaces/${namespace}/pods?labelSelector=${encodeURIComponent(`job-name=${jobName}`)}`,
+      );
+    } catch {
+      return unavailableTaskLogs(run.id, "Warehouse scanner Pod 状态暂不可用");
+    }
+    if (!podsResult.ok || !podsResult.value) return unavailableTaskLogs(run.id, "Warehouse scanner Pod 状态暂不可用");
+    const pods = podsResult.value.items ?? [];
+    const pod = pods.find((candidate) => candidate.status?.phase === "Running")
+      ?? pods.find((candidate) => candidate.status?.phase === "Succeeded" || candidate.status?.phase === "Failed")
+      ?? pods[0];
+    const podName = safeKubernetesName(pod?.metadata?.name);
+    if (!pod || !podName) return unavailableTaskLogs(run.id, "Warehouse scanner Pod 尚未创建");
+    const containers = (pod.spec?.containers ?? [])
+      .map((container) => textValue(container.name))
+      .filter((name): name is string => Boolean(name));
+    const containerName = containers.find((name) => name === "scanner")
+      ?? containers.find((name) => !SIDECAR_CONTAINER.test(name))
+      ?? containers[0];
+    if (!containerName) return unavailableTaskLogs(run.id, "Warehouse scanner 容器尚未就绪");
+
+    let logResult: { status: number; ok: boolean; text: string };
+    try {
+      logResult = await this.#client.request(
+        "GET",
+        `/api/v1/namespaces/${namespace}/pods/${encodeURIComponent(podName)}/log?container=${encodeURIComponent(containerName)}&timestamps=true&tailLines=${TASK_LOG_TAIL_LINES}`,
+      );
+    } catch {
+      return unavailableTaskLogs(run.id, "Warehouse scanner 容器日志暂不可用");
+    }
+    if (!logResult.ok) return unavailableTaskLogs(run.id, "Warehouse scanner 容器日志暂不可用");
+    return {
+      runId: run.id,
+      status: "available",
+      text: boundedTaskLog(logResult.text),
+      podName,
+      containerName,
+      fetchedAt: new Date().toISOString(),
+    };
   }
 
   async poll(): Promise<void> {

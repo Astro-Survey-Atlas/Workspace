@@ -1,8 +1,8 @@
 import type { ConnectorKind, ConnectorPublicRecord, ConnectorRegistrationInput, ConnectorStatus } from "../../src/connectors";
 import type { SurveyCard, SurveyRecord } from "../../src/survey-registry";
-import { createIcons, Pencil, Play, SearchCheck, Trash2 } from "lucide";
+import { createIcons, Pencil, Play, ScrollText, SearchCheck, Trash2 } from "lucide";
 
-import { workspaceApi, type ConnectorScanRun, type WorkspaceCapabilities } from "./api";
+import { workspaceApi, type ConnectorScanRun, type WarehouseTaskLogs, type WorkspaceCapabilities } from "./api";
 import { notifyWorkspace } from "./notifications";
 
 export interface ConnectorMetrics {
@@ -50,6 +50,8 @@ export class ConnectorPanel {
   #surveyRecords = new Map<string, SurveyRecord>();
   #selectedId: string | null = null;
   #selectedRunId: string | null = null;
+  #runLogState: { runId: string; loading: boolean; value?: WarehouseTaskLogs; error?: string } | undefined;
+  #runLogRequest = 0;
   #editingId: string | null = null;
   #view: ConnectorView = "list";
   #active = false;
@@ -83,6 +85,19 @@ export class ConnectorPanel {
     ["connector-run-status-filter", "connector-run-kind-filter"].forEach((id) => {
       byId<HTMLSelectElement>(id).addEventListener("change", () => this.#renderHistory());
     });
+    const historyList = byId<HTMLElement>("connector-history-list");
+    historyList.addEventListener("dblclick", (event) => {
+      const target = event.target instanceof Element ? event.target : undefined;
+      const row = target?.closest<HTMLElement>(".connector-history-row");
+      const run = row?.dataset.runId ? this.#runs.find((candidate) => candidate.id === row.dataset.runId) : undefined;
+      if (run) void this.#loadRunLogs(run, true);
+    });
+    const logDialog = byId<HTMLDialogElement>("connector-run-logs-dialog");
+    byId<HTMLButtonElement>("connector-run-logs-dialog-close").addEventListener("click", () => logDialog.close());
+    byId<HTMLButtonElement>("connector-run-logs-dialog-dismiss").addEventListener("click", () => logDialog.close());
+    logDialog.addEventListener("click", (event) => {
+      if (event.target === logDialog) logDialog.close();
+    });
   }
 
   async activate(selectedId?: string): Promise<void> {
@@ -102,7 +117,10 @@ export class ConnectorPanel {
       this.#view = "list";
     }
     if (!this.#selectedId || !this.#records.some((record) => record.id === this.#selectedId)) this.#selectedId = this.#records[0]?.id ?? null;
-    if (!this.#selectedRunId || !this.#runs.some((run) => run.id === this.#selectedRunId)) this.#selectedRunId = this.#runs[0]?.id ?? null;
+    if (!this.#selectedRunId || !this.#runs.some((run) => run.id === this.#selectedRunId)) {
+      this.#selectedRunId = this.#runs[0]?.id ?? null;
+      this.#runLogState = undefined;
+    }
     this.#resetRegistrationForm();
     this.#render();
   }
@@ -122,6 +140,9 @@ export class ConnectorPanel {
   deactivate(): void {
     this.#active = false;
     this.#editingId = null;
+    this.#runLogRequest += 1;
+    this.#runLogState = undefined;
+    this.#closeRunLogsDialog();
     if (this.#runPollTimer) clearTimeout(this.#runPollTimer);
     this.#runPollTimer = undefined;
   }
@@ -230,7 +251,11 @@ export class ConnectorPanel {
   #renderHistory(): void {
     if (!this.#active || this.#view !== "history") return;
     const runs = this.#filteredRuns();
-    if (!runs.some((run) => run.id === this.#selectedRunId)) this.#selectedRunId = runs[0]?.id ?? null;
+    if (!runs.some((run) => run.id === this.#selectedRunId)) {
+      this.#selectedRunId = runs[0]?.id ?? null;
+      this.#runLogRequest += 1;
+      this.#runLogState = undefined;
+    }
     byId("connector-run-filter-count").textContent = `${runs.length} / ${this.#runs.length}`;
     const list = byId("connector-history-list");
     list.replaceChildren(...runs.map((run) => this.#historyRow(run)));
@@ -245,11 +270,21 @@ export class ConnectorPanel {
     const row = document.createElement("button");
     row.type = "button";
     row.className = "connector-history-row";
+    row.dataset.runId = run.id;
+    row.title = "双击查看任务日志";
     row.dataset.status = run.status;
     row.classList.toggle("selected", run.id === this.#selectedRunId);
     row.addEventListener("click", () => {
+      if (this.#selectedRunId !== run.id) {
+        this.#runLogRequest += 1;
+        this.#runLogState = undefined;
+        this.#closeRunLogsDialog();
+      }
       this.#selectedRunId = run.id;
-      this.#renderHistory();
+      byId("connector-history-list").querySelectorAll<HTMLElement>(".connector-history-row").forEach((candidate) => {
+        candidate.classList.toggle("selected", candidate.dataset.runId === run.id);
+      });
+      this.#renderRunDetail();
       if (window.innerWidth <= 1040) byId("inspector-panel").classList.add("mobile-open");
     });
     const identity = document.createElement("span");
@@ -364,7 +399,7 @@ export class ConnectorPanel {
     if (this.#editingId === record.id) root.append(this.#editForm(record));
     else root.append(...this.#detailView(record));
     content.replaceChildren(root);
-    if (this.#editingId !== record.id) createIcons({ icons: { Pencil, Play, SearchCheck, Trash2 }, attrs: { "aria-hidden": "true" } });
+    if (this.#editingId !== record.id) createIcons({ icons: { Pencil, Play, ScrollText, SearchCheck, Trash2 }, attrs: { "aria-hidden": "true" } });
   }
 
   #detailView(record: ConnectorPublicRecord): HTMLElement[] {
@@ -559,8 +594,14 @@ export class ConnectorPanel {
       return;
     }
     const connector = this.#connectorForRun(run);
+    const headingRow = document.createElement("div");
+    headingRow.className = "connector-run-detail-heading";
     const heading = document.createElement("h2");
     heading.textContent = run.jobId ?? run.batchId ?? run.id;
+    const headingActions = document.createElement("div");
+    headingActions.className = "connector-run-detail-actions";
+    headingActions.append(this.#iconButton("查看任务日志", "scroll-text", () => void this.#loadRunLogs(run, true)));
+    headingRow.append(heading, headingActions);
     const status = document.createElement("span");
     status.className = "connector-run-status connector-run-detail-status";
     status.dataset.status = run.status;
@@ -592,8 +633,115 @@ export class ConnectorPanel {
     error.hidden = !run.error;
     empty.hidden = true;
     content.hidden = false;
-    content.replaceChildren(heading, status, metadata, error);
+    const children: Node[] = [headingRow, status, metadata, error];
+    const logState = this.#runLogState?.runId === run.id ? this.#runLogState : undefined;
+    if (logState) {
+      const logs = document.createElement("section");
+      logs.className = "connector-run-logs";
+      const logHeading = document.createElement("div");
+      logHeading.className = "connector-run-logs-heading";
+      const logTitle = document.createElement("strong");
+      logTitle.textContent = "任务日志";
+      logHeading.append(logTitle);
+      if (logState.value?.podName) {
+        const source = document.createElement("small");
+        source.textContent = `${logState.value.podName} · ${logState.value.containerName ?? "scanner"}`;
+        logHeading.append(source);
+      }
+      logs.append(logHeading);
+      if (logState.loading) {
+        const loading = document.createElement("p");
+        loading.className = "connector-run-logs-status";
+        loading.textContent = "读取任务日志…";
+        logs.append(loading);
+      } else if (logState.error) {
+        const logError = document.createElement("p");
+        logError.className = "connector-run-logs-status connector-run-logs-error";
+        logError.textContent = logState.error;
+        logs.append(logError);
+      } else if (logState.value?.status === "available") {
+        const output = document.createElement("pre");
+        output.className = "connector-run-logs-output";
+        output.textContent = logState.value.text || "任务日志为空";
+        logs.append(output);
+      } else {
+        const unavailable = document.createElement("p");
+        unavailable.className = "connector-run-logs-status";
+        unavailable.textContent = logState.value?.message ?? "任务日志暂不可用";
+        logs.append(unavailable);
+      }
+      children.push(logs);
+    }
+    content.replaceChildren(...children);
+    createIcons({ icons: { ScrollText }, attrs: { "aria-hidden": "true" } });
+    const logDialog = byId<HTMLDialogElement>("connector-run-logs-dialog");
+    if (logDialog.open) this.#renderRunLogsDialog(run);
     if (this.#capabilities.dataWarehouse.enabled && this.#runs.some((candidate) => candidate.status === "queued" || candidate.status === "running")) this.#scheduleRunPoll();
+  }
+
+  #closeRunLogsDialog(): void {
+    const dialog = byId<HTMLDialogElement>("connector-run-logs-dialog");
+    if (dialog.open) dialog.close();
+  }
+
+  #openRunLogsDialog(run: ConnectorScanRun): void {
+    const dialog = byId<HTMLDialogElement>("connector-run-logs-dialog");
+    this.#renderRunLogsDialog(run);
+    if (!dialog.open) dialog.showModal();
+  }
+
+  #renderRunLogsDialog(run: ConnectorScanRun): void {
+    const state = this.#runLogState?.runId === run.id ? this.#runLogState : undefined;
+    const connector = this.#connectorForRun(run);
+    const dialog = byId<HTMLDialogElement>("connector-run-logs-dialog");
+    byId("connector-run-logs-dialog-title").textContent = `任务日志 · ${run.jobId ?? run.batchId ?? run.id}`;
+    byId("connector-run-logs-dialog-meta").textContent = `${connector?.name ?? run.connectorName ?? "Connector 已删除"} · 运行 ID ${run.id}`;
+    const status = byId("connector-run-logs-dialog-status");
+    const output = byId<HTMLPreElement>("connector-run-logs-dialog-output");
+    status.hidden = false;
+    output.hidden = true;
+    output.textContent = "";
+    if (!state || state.loading) {
+      status.className = "connector-run-logs-dialog-status";
+      status.textContent = "读取任务日志…";
+    } else if (state.error) {
+      status.className = "connector-run-logs-dialog-status connector-run-logs-dialog-error";
+      status.textContent = state.error;
+    } else if (state.value?.status === "available") {
+      status.className = "connector-run-logs-dialog-status";
+      status.textContent = `${state.value.podName ?? "scanner Pod"} · ${state.value.containerName ?? "scanner"}`;
+      output.textContent = state.value.text || "任务日志为空";
+      output.hidden = false;
+    } else {
+      status.className = "connector-run-logs-dialog-status";
+      status.textContent = state.value?.message ?? "任务日志暂不可用";
+    }
+    dialog.setAttribute("aria-busy", String(Boolean(state?.loading)));
+  }
+
+  async #loadRunLogs(run: ConnectorScanRun, openDialog = false): Promise<void> {
+    const requestId = ++this.#runLogRequest;
+    this.#selectedRunId = run.id;
+    this.#runLogState = { runId: run.id, loading: true };
+    this.#renderHistory();
+    if (openDialog) this.#openRunLogsDialog(run);
+    const connector = this.#connectorForRun(run);
+    if (!connector) {
+      this.#runLogState = { runId: run.id, loading: false, error: "Connector 已删除，无法查询任务日志" };
+      this.#renderRunDetail();
+      if (openDialog) this.#renderRunLogsDialog(run);
+      return;
+    }
+    try {
+      const value = await workspaceApi.connectorRunLogs(connector.id, run.id);
+      if (requestId !== this.#runLogRequest || this.#selectedRunId !== run.id) return;
+      this.#runLogState = { runId: run.id, loading: false, value };
+    } catch (error) {
+      if (requestId !== this.#runLogRequest || this.#selectedRunId !== run.id) return;
+      this.#runLogState = { runId: run.id, loading: false, error: error instanceof Error ? error.message : String(error) };
+    }
+    this.#renderRunDetail();
+    if (openDialog) this.#renderRunLogsDialog(run);
   }
 
   #resetRegistrationForm(): void {

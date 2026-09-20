@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { calculateSkyOverlap, type SkyOverlapSource } from "../src/sky-overlap.js";
+import { commonOverlapNside, calculateSkyOverlap, type SkyOverlapSource } from "../src/sky-overlap.js";
 
 function source(id: string, pixels: number[], nside = 4): SkyOverlapSource {
   return { id, label: id, kind: "workspace", nside, pixels };
@@ -51,4 +51,12 @@ test("ignores invalid pixels and sources at a different order", () => {
   assert.equal(result.status, "empty");
   assert.deepEqual(result.sourceIds, ["a", "c"]);
   assert.throws(() => calculateSkyOverlap([source("a", [0]), source("b", [0])], 3), /power of two/);
+});
+
+
+test("automatic overlap uses native order 8 but keeps a selected preview-only source", () => {
+  const native = { ...source("native", [1], 16), kind: "public" as const, availableOrders: [4, 8] };
+  assert.equal(commonOverlapNside([native, { ...native, id: "second" }]), 256);
+  assert.equal(commonOverlapNside([native, source("legacy", [1], 16)]), 16);
+  assert.equal(commonOverlapNside([]), 16);
 });

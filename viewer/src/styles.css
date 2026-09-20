@@ -2347,6 +2347,24 @@ input {
   margin-top: 10px;
 }
 
+.connector-run-detail-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.connector-run-detail-heading h2 {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.connector-run-detail-actions {
+  display: flex;
+  flex: 0 0 auto;
+  gap: 6px;
+}
+
 .connector-run-error {
   margin: 12px 0 0;
   padding: 9px;
@@ -2355,6 +2373,89 @@ input {
   background: color-mix(in srgb, var(--coral) 8%, transparent);
   font-size: 9px;
   line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.connector-run-logs {
+  display: grid;
+  gap: 8px;
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+}
+
+.connector-run-logs-heading {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.connector-run-logs-heading strong {
+  color: var(--text-strong);
+  font-size: 10px;
+}
+
+.connector-run-logs-heading small,
+.connector-run-logs-status {
+  color: var(--quiet);
+  font: 8px var(--font-mono);
+}
+
+.connector-run-logs-status {
+  margin: 0;
+  line-height: 1.5;
+}
+
+.connector-run-logs-error {
+  color: var(--coral);
+}
+
+.connector-run-logs-output {
+  max-height: 360px;
+  margin: 0;
+  padding: 10px;
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  color: var(--text-soft);
+  background: color-mix(in srgb, var(--row) 72%, #000 28%);
+  font: 8px/1.55 var(--font-mono);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.connector-run-logs-dialog-form {
+  min-width: 0;
+}
+
+.connector-run-logs-dialog-meta,
+.connector-run-logs-dialog-status {
+  margin: 0;
+  color: var(--quiet);
+  font: 9px/1.55 var(--font-mono);
+  overflow-wrap: anywhere;
+}
+
+.connector-run-logs-dialog-status {
+  margin-top: 12px;
+}
+
+.connector-run-logs-dialog-error {
+  color: var(--coral);
+}
+
+.connector-run-logs-dialog-output {
+  max-height: min(65vh, 640px);
+  margin: 12px 0 0;
+  padding: 12px;
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  color: var(--text-soft);
+  background: color-mix(in srgb, var(--row) 72%, #000 28%);
+  font: 9px/1.6 var(--font-mono);
+  white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
 

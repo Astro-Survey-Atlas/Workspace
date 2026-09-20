@@ -18,6 +18,7 @@ export interface SkyOverlapSource {
   sourceIdentity?: PublicSourceIdentity;
   executable?: boolean;
   availability?: SkyOverlapAvailability;
+  availableOrders?: number[];
 }
 
 export interface SkyOverlapComponent {
@@ -150,4 +151,12 @@ export function calculateSkyOverlap(sources: readonly SkyOverlapSource[], reques
     pixels,
     components: pixels.length ? components(pixels, nside, sourceIds) : [],
   };
+}
+
+/** A lower-resolution selected source limits the whole result; never drop it. */
+export function commonOverlapNside(sources: readonly SkyOverlapSource[], fallback = 16): number {
+  if (!sources.length) return fallback;
+  const orders = sources.map(source => source.availableOrders ?? [Math.log2(source.nside)]);
+  const common = orders[0]!.filter(order => orders.every(values => values.includes(order)));
+  return common.length ? 2 ** Math.max(...common) : fallback;
 }

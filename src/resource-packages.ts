@@ -6,6 +6,7 @@ import { pipeline } from "node:stream/promises";
 
 import yauzl from "yauzl";
 
+import { MocCoreCliAdapter } from "./moc-core-adapter.js";
 import { COVERAGE_ROLES, DATA_ORIGINS, SOURCE_TIERS } from "./assets-core.js";
 import { normalizeSurveyFootprintManifest, type SurveyFootprintManifest } from "./survey-footprints.js";
 import type { ReleaseKind, SurveyModality, SurveyRecord, SurveyRelease } from "./survey-registry.js";
@@ -74,6 +75,7 @@ interface ResourcePackageManifest {
   files: Array<{ path: "README.md" | "footprints/survey-footprints.json" | "provenance.json"; sizeBytes: number; sha256: string }>;
   layers: Array<{
     layerId: string;
+    maxOrder?: number;
     surveyId: string;
     coverageRole: string;
     dataOrigin: string;
@@ -361,6 +363,8 @@ export class ResourceCatalogSyncError extends Error {
 export interface ResourceCatalogStatus {
   catalogUrl: string;
   available: boolean;
+  stale?: boolean;
+  lastSyncError?: string;
   unavailableReason?: string;
   catalogSha256?: string;
   generatedAt?: string;
@@ -416,7 +420,7 @@ function optionalStringList(value: unknown, label: string): string[] {
 }
 
 function sources(value: unknown, label: string): ResourcePackageCatalogEntry["sources"] {
-  if (!Array.isArray(value) || !value.length) throw new Error(`${label} is invalid`);
+  if (!Array.isArray(value)) throw new Error(`${label} is invalid`);
   return value.map((item) => {
     const source = object(item, label);
     return {
@@ -462,10 +466,10 @@ function parseEntry(value: unknown): ResourcePackageCatalogEntry {
     description: text(entry.description, "Resource package description", 2000),
     surveyId: text(entry.surveyId, "Resource package survey id", 80),
     modalities: stringList(entry.modalities, "Resource package modalities"),
-    wavelengths: stringList(entry.wavelengths, "Resource package wavelengths"),
-    productTypes: stringList(entry.productTypes, "Resource package product types"),
+    wavelengths: optionalStringList(entry.wavelengths, "Resource package wavelengths"),
+    productTypes: optionalStringList(entry.productTypes, "Resource package product types"),
     facilities: stringList(entry.facilities, "Resource package facilities"),
-    coverageAuthorities: stringList(entry.coverageAuthorities, "Resource package coverage authorities"),
+    coverageAuthorities: optionalStringList(entry.coverageAuthorities, "Resource package coverage authorities"),
     accessModes: optionalStringList(entry.accessModes, "Resource package access modes"),
     releases,
     releaseLabels: releaseLabels(entry.releaseLabels, releases, "Resource package release labels"),
@@ -493,6 +497,24 @@ function parseCatalog(value: unknown): ResourcePackageCatalogDocument {
     identities.add(identity);
   }
   return { schemaVersion: CATALOG_SCHEMA_VERSION, version: PACKAGE_FORMAT_VERSION, generatedAt: text(document.generatedAt, "Resource package catalog generation time", 80), packages };
+}
+
+/** Adapt the reviewed per-layer preview only after its package hashes and native MOCs validate. */
+function packageFootprints(value: unknown, manifest: ResourcePackageManifest, retrievedAt: string): SurveyFootprintManifest {
+  const document = object(value, "Resource package preview");
+  if (document.nside !== undefined) return normalizeSurveyFootprintManifest(value);
+  if (document.schemaVersion !== 1 || document.coordinateFrame !== "ICRS" || document.ordering !== "NESTED" || !Array.isArray(document.footprints) || !document.footprints.length) throw new Error("Resource package preview must declare ICRS/NESTED per-layer cells");
+  const seen = new Set<string>();
+  const footprints = document.footprints.map(raw => {
+    const f = object(raw, "Resource package preview layer");
+    const layer = manifest.layers.find(layer => layer.layerId === f.layerId);
+    if (!layer || layer.surveyId !== f.surveyId || layer.releaseId !== f.releaseId || seen.has(layer.layerId)) throw new Error("Resource package preview identity does not match native MOC layer");
+    seen.add(layer.layerId);
+    return { ...f, nside: f.nside, label: f.label ?? f.product, quality: "moc", sourceId: layer.layerId, retrievedAt,
+      notes: "Assets package display preview at its declared NSIDE; use the manifest native MOC for scientific queries. No finer cells are inferred." };
+  });
+  if (seen.size !== manifest.layers.length) throw new Error("Resource package preview omits a native MOC layer");
+  return normalizeSurveyFootprintManifest({ ...document, nside: footprints[0]!.nside, footprints });
 }
 
 function parseManifest(value: unknown): ResourcePackageManifest {
@@ -523,6 +545,7 @@ function parseManifest(value: unknown): ResourcePackageManifest {
     if (!(SOURCE_TIERS as readonly unknown[]).includes(layer.sourceTier)) throw new Error(`Resource package layer ${index} has an invalid sourceTier`);
     return {
       layerId,
+      ...(Number.isInteger(layer.maxOrder) && Number(layer.maxOrder) >= 0 && Number(layer.maxOrder) <= 29 ? { maxOrder: Number(layer.maxOrder) } : {}),
       surveyId: text(layer.surveyId, `Resource package layer ${index} survey id`, 80),
       coverageRole: text(layer.coverageRole, `Resource package layer ${index} coverage role`, 80),
       dataOrigin: text(layer.dataOrigin, `Resource package layer ${index} data origin`, 80),
@@ -703,6 +726,7 @@ export class ResourcePackageManager {
   #installing = new Set<string>();
   #mutation = Promise.resolve();
   #catalogError?: Error;
+  #lastSyncError?: string;
   #catalogSha256?: string;
   #catalogSyncedAt?: string;
   #surveyCatalog: AssetsSurveyRecord[] = [];
@@ -730,12 +754,14 @@ export class ResourcePackageManager {
       const parsed = parseCatalog(JSON.parse(catalogBytes.toString("utf8")) as unknown);
       catalog = parsed;
       this.#catalogError = undefined;
+      this.#lastSyncError = undefined;
       this.#catalogSha256 = createHash("sha256").update(catalogBytes).digest("hex");
       this.#catalogSyncedAt = new Date().toISOString();
       if (!await this.#fetchSurveyMetadata()) await this.#loadSurveySnapshot();
       if (this.#snapshotRoot) await this.#writeSnapshot(catalogBytes);
     } catch (error) {
       this.#catalogError = error instanceof Error ? error : new Error(String(error));
+      this.#lastSyncError = this.#catalogError.message;
       if (this.#snapshotRoot) {
         try {
           const snapshotBytes = await readFile(path.join(this.#snapshotRoot, "assets-current", "catalog.json"));
@@ -784,6 +810,8 @@ export class ResourcePackageManager {
     return {
       catalogUrl: this.#catalogUrl.href,
       available: this.available,
+      stale: this.#lastSyncError !== undefined,
+      ...(this.#lastSyncError ? { lastSyncError: this.#lastSyncError } : {}),
       ...(this.#catalogError ? { unavailableReason: this.#catalogError.message } : {}),
       ...(this.#catalogSha256 ? { catalogSha256: this.#catalogSha256 } : {}),
       ...(this.#catalog.generatedAt ? { generatedAt: this.#catalog.generatedAt } : {}),
@@ -809,10 +837,12 @@ export class ResourcePackageManager {
       if (!surveyMetadata && !this.#surveyCatalogBytes) await this.#loadSurveySnapshot();
       if (this.#snapshotRoot) await this.#writeSnapshot(catalogBytes);
     } catch (error) {
-      throw new ResourceCatalogSyncError(error instanceof Error ? error.message : String(error));
+      this.#lastSyncError = error instanceof Error ? error.message : String(error);
+      throw new ResourceCatalogSyncError(this.#lastSyncError);
     }
     this.#catalog = parsed;
     this.#catalogError = undefined;
+    this.#lastSyncError = undefined;
     this.#catalogSha256 = createHash("sha256").update(catalogBytes).digest("hex");
     this.#catalogSyncedAt = new Date().toISOString();
     return this.catalogStatus();
@@ -992,6 +1022,45 @@ export class ResourcePackageManager {
     return { schemaVersion: 1, generatedAt: new Date().toISOString(), coordinateFrame: "ICRS", nside, footprints: [...footprints.values()] };
   }
 
+  readonly #nativeProjectionCache = new Map<string, Promise<number[]>>();
+  readonly #projectionCore = new MocCoreCliAdapter();
+
+  async #nativeLayer(footprint: SurveyFootprintManifest["footprints"][number]) {
+    for (const record of this.#state.packages) {
+      if (!record.activeReleaseIds.includes(footprint.releaseId)) continue;
+      const manifest = await this.#readManifest(record);
+      const layer = manifest.layers.find(layer => layer.layerId === footprint.layerId && layer.surveyId === footprint.surveyId && layer.releaseId === footprint.releaseId);
+      if (layer) return { record, layer };
+    }
+    return undefined;
+  }
+
+  async footprintOrders(footprint: SurveyFootprintManifest["footprints"][number]): Promise<number[]> {
+    const native = await this.#nativeLayer(footprint);
+    const previewOrder = Math.log2(footprint.nside);
+    // Order 8 is the shared Assets query contract. Missing authority metadata
+    // deliberately keeps legacy packages at their actual preview precision.
+    return native && (native.layer.maxOrder ?? -1) >= 8 ? [...new Set([previewOrder, 8])] : [previewOrder];
+  }
+
+  async footprintPixels(footprint: SurveyFootprintManifest["footprints"][number], order: number): Promise<number[]> {
+    if (order === Math.log2(footprint.nside)) return footprint.pixels;
+    const native = await this.#nativeLayer(footprint);
+    if (!native || !(await this.footprintOrders(footprint)).includes(order)) {
+      throw new RangeError(`Layer ${footprint.layerId ?? footprint.product} does not support order ${order}; preview cannot be refined`);
+    }
+    const artifact = await this.mocArtifact(native.record.id, native.layer.layerId);
+    const key = `${artifact.sha256}:${order}`;
+    let projection = this.#nativeProjectionCache.get(key);
+    if (!projection) {
+      if (this.#nativeProjectionCache.size >= 64) this.#nativeProjectionCache.clear();
+      projection = this.#projectionCore.projectMoc(artifact.filePath, order);
+      this.#nativeProjectionCache.set(key, projection);
+      projection.catch(() => this.#nativeProjectionCache.delete(key));
+    }
+    return [...await projection];
+  }
+
   /** List the native FITS MOCs declared by one installed, verified package. */
   async mocLayers(id: string): Promise<ResourcePackageMocLayer[]> {
     this.#assertAvailable();
@@ -1055,7 +1124,7 @@ export class ResourcePackageManager {
       const manifest = parseManifest(JSON.parse(await readFile(path.join(stagingPath, "resource-package.json"), "utf8")) as unknown);
       if (manifest.id !== entry.id || manifest.version !== entry.version || manifest.surveyId !== entry.surveyId) throw new Error("Resource package manifest does not match the catalog");
       await validateManifestFiles(stagingPath, manifest);
-      const footprints = normalizeSurveyFootprintManifest(JSON.parse(await readFile(path.join(stagingPath, "footprints/survey-footprints.json"), "utf8")) as unknown);
+      const footprints = packageFootprints(JSON.parse(await readFile(path.join(stagingPath, "footprints/survey-footprints.json"), "utf8")) as unknown, manifest, job.createdAt);
       if (!footprints.footprints.length || footprints.footprints.some((footprint) => footprint.surveyId !== manifest.surveyId)) throw new Error("Resource package footprints do not match its survey");
       const finalParent = path.join(this.#root, "installed", entry.id);
       const finalPath = path.join(finalParent, entry.version);
@@ -1067,7 +1136,7 @@ export class ResourcePackageManager {
         this.#state.packages = this.#state.packages.filter((record) => record.id !== entry.id);
         const loadableReleaseIds = new Set(this.#releaseIds(footprints));
         const activeReleaseIds = current?.activeReleaseIds.filter((releaseId) => loadableReleaseIds.has(releaseId)) ?? [];
-        this.#state.packages.push({ id: entry.id, version: entry.version, sha256: entry.sha256, installedAt: new Date().toISOString(), activeReleaseIds });
+        this.#state.packages.push({ id: entry.id, version: entry.version, sha256: entry.sha256, installedAt: job.createdAt, activeReleaseIds });
         this.#installedFootprints.set(entry.id, footprints);
         await this.#persist();
       });
@@ -1121,7 +1190,7 @@ export class ResourcePackageManager {
   }
 
   async #readFootprints(record: InstalledPackage): Promise<SurveyFootprintManifest> {
-    return normalizeSurveyFootprintManifest(JSON.parse(await readFile(path.join(this.#root, "installed", record.id, record.version, "footprints", "survey-footprints.json"), "utf8")) as unknown);
+    return packageFootprints(JSON.parse(await readFile(path.join(this.#root, "installed", record.id, record.version, "footprints", "survey-footprints.json"), "utf8")) as unknown, await this.#readManifest(record), record.installedAt);
   }
 
   async #readManifest(record: InstalledPackage): Promise<ResourcePackageManifest> {

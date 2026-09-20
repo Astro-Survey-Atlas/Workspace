@@ -8,6 +8,9 @@ import type { SurveyFootprintManifest } from "../../src/survey-footprints";
 import type { PublicResourcePackage, ResourceCatalogStatus, ResourcePackageJob, ResourcePackageLoad, ResourcePackageMocLayer } from "../../src/resource-packages";
 import type { AstroCoverageLayer, AstroOverviewResponse, AstroSkyQueryInput, AstroSpatialSummary } from "../../src/astro-index";
 import type { UserMocArtifact } from "../../src/user-moc-artifacts";
+import type { WarehouseTaskLogs } from "../../src/warehouse-scan";
+
+export type { WarehouseTaskLogs };
 import type { CoverageJobSpec } from "../../src/coverage-jobs";
 import type { DataAssetCoverageState, DataAssetNextAction, DataAssetObjectState, DataAssetOperationalStatus } from "../../src/data-asset-status";
 import type { SkyOverlapComponent, SkyOverlapSource } from "../../src/sky-overlap";
@@ -187,6 +190,8 @@ export interface RuntimeDataServices {
     available: boolean;
     unavailableReason?: string;
     syncedAt?: string;
+    stale?: boolean;
+    lastSyncError?: string;
     source: string;
   };
   workspaceSearch: {
@@ -373,6 +378,9 @@ export const workspaceApi = {
   },
   async connectorIngestRuns(): Promise<ConnectorScanRun[]> {
     return (await getJson<{ runs: ConnectorScanRun[] }>("/api/connector-ingest-runs")).runs;
+  },
+  async connectorRunLogs(connectorId: string, runId: string): Promise<WarehouseTaskLogs> {
+    return getJson<WarehouseTaskLogs>(`/api/connectors/${encodeURIComponent(connectorId)}/ingest-runs/${encodeURIComponent(runId)}/logs`);
   },
   async executeConnectorScan(id: string): Promise<ConnectorScanRun> {
     return (await postJson<{ run: ConnectorScanRun }>(`/api/connectors/${encodeURIComponent(id)}/scan-runs`, {})).run;

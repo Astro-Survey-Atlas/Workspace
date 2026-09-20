@@ -585,6 +585,7 @@ async function syncResourceCatalog(): Promise<void> {
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     resourceCatalogSyncFeedback("同步失败", message, "error");
+    resourcePackagePanel.setCatalogStatus(await workspaceApi.resourceCatalogConfig().catch(() => null));
   } finally {
     syncButton.disabled = false;
     syncButton.dataset.busy = "false";
@@ -1384,6 +1385,8 @@ function renderOverlapSummary(result: SkyOverlapResponse): void {
   inspectorRows("G · 天区重合", [
     ["来源", sourceLabels],
     ["参与来源", formatInteger(result.sourceIds.length)],
+    ["计算精度", `ICRS / NESTED · order ${result.order} · NSIDE ${result.nside}`],
+    ["边界精度", "受来源 MOC 与像元分辨率限制"],
     ["重合区块", formatInteger(result.components.length)],
     ["HEALPix 单元", formatInteger(result.pixels.length)],
     ["状态", result.status === "ready" ? "已计算" : "没有共同覆盖"],
@@ -1461,7 +1464,8 @@ async function enterSkyOverlapMode(): Promise<void> {
     const state = layerViewer.state;
     const sourceIds = overlapSourceIdsForState(state);
     const result = await workspaceApi.skyOverlap({
-      nside: state.nside,
+      // The server chooses the highest common real coverage order, independently
+      // of the globe's lightweight overview NSIDE.
       ...(sourceIds.length
         ? { sourceIds }
         : {
@@ -1721,7 +1725,8 @@ function renderSurveyInspection(inspection: SurveyLayerInspection | null): void 
       const quality = document.createElement("small");
       quality.textContent = artifact.quality === "moc" ? "MOC GEOMETRY" : "OFFICIAL OVERVIEW";
       const source = document.createElement("a");
-      source.href = artifact.sourceUrl;
+      if (artifact.sourceUrl) source.href = artifact.sourceUrl;
+      else source.hidden = true;
       source.target = "_blank";
       source.rel = "noreferrer";
       source.textContent = "来源";
@@ -2253,7 +2258,8 @@ function renderSurveyHover(hover: SurveyLayerHover | null): void {
     const quality = document.createElement("small");
     quality.textContent = artifact.quality === "moc" ? "MOC" : "OFFICIAL OVERVIEW";
     const source = document.createElement("a");
-    source.href = artifact.sourceUrl;
+    if (artifact.sourceUrl) source.href = artifact.sourceUrl;
+    else source.hidden = true;
     source.target = "_blank";
     source.rel = "noreferrer";
     source.textContent = "Source";

@@ -108,6 +108,26 @@ export class MocCoreCliAdapter implements MocCoreAdapter {
     this.#timeoutMs = timeoutMs;
   }
 
+  /** Offline projection from verified native FITS, never from preview pixels. */
+  async projectMoc(inputPath: string, order: number): Promise<number[]> {
+    if (!Number.isInteger(order) || order < 0 || order > 8) throw new RangeError("Public query order must be between 0 and 8");
+    const work = await mkdtemp(path.join(os.tmpdir(), "astro-moc-project-"));
+    try {
+      const output = path.join(work, "projection.json");
+      const [program, ...args] = this.#command.match(/(?:[^\s"]+|"[^"]*")+/g) ?? [];
+      await execFileAsync(program!, [...args.map(arg => arg.replaceAll('"', "")), "project", "--moc", inputPath, "--order", String(order), "--output", output], {
+        timeout: this.#timeoutMs, maxBuffer: 2 * 1024 * 1024,
+      });
+      const result = JSON.parse(await readFile(output, "utf8")) as Record<string, unknown>;
+      if (result.order !== order || result.ordering !== "NESTED") throw new Error("Invalid native MOC projection order/ordering");
+      return pixels(result.pixels, order, "native MOC");
+    } catch (error) {
+      throw new MocCoreUnavailableError(`Native MOC projection failed: ${error instanceof Error ? error.message.slice(0, 500) : String(error)}`);
+    } finally {
+      await rm(work, { recursive: true, force: true });
+    }
+  }
+
   async buildCatalog(input: MocCoreCatalogInput): Promise<MocCoreCatalogResult> {
     const maxOrder = positiveOrder(input.maxOrder, MOC_CORE_DEFAULT_MAX_ORDER, "maxOrder");
     const queryOrder = positiveOrder(input.queryOrder, MOC_CORE_QUERY_ORDER, "queryOrder");

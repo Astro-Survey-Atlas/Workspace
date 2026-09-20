@@ -252,6 +252,17 @@ export class ResourcePackagePanel {
       this.#showSelected();
     }
     const list = byId("resource-package-list");
+    let notice = document.getElementById("resource-catalog-sync-status");
+    if (!notice) {
+      notice = document.createElement("p");
+      notice.id = "resource-catalog-sync-status";
+      notice.setAttribute("role", "status");
+      list.before(notice);
+    }
+    notice.hidden = !this.#catalogStatus?.stale && !this.#catalogUnavailableReason;
+    notice.textContent = this.#catalogStatus?.stale
+      ? `最新同步失败；显示最后成功缓存，未回退版本。${this.#catalogStatus.lastSyncError ?? ""}`
+      : this.#catalogUnavailableReason;
     const groups: Array<{ key: string; label: string; records: PublicResourcePackage[] }> = [
       { key: "active", label: "已应用到天球", records: [] },
       { key: "installed", label: "已下载，尚未应用", records: [] },

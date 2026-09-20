@@ -417,6 +417,12 @@ async function warehouseFixture(
         submittedPlan = ((body as Record<string, any>).spec as Record<string, any>).plan;
         return { status: 201, ok: true, text: "{}" };
       }
+      if (method === "GET" && requestPath.includes("/pods?") && requestPath.includes("labelSelector=")) {
+        return { status: 200, ok: true, value: { items: [{ metadata: { name: "workspace-scanner-pod" }, status: { phase: "Running" }, spec: { containers: [{ name: "scanner" }] } }] } as T, text: "{}" };
+      }
+      if (method === "GET" && requestPath.includes("/pods/") && requestPath.includes("/log?")) {
+        return { status: 200, ok: true, text: "2026-09-20T10:00:00Z scanner started\n2026-09-20T10:00:01Z scanner finished\n" };
+      }
       if (method === "GET" && requestPath.includes("/scanrequests/")) {
         const phase = statuses[Math.min(stateIndex++, statuses.length - 1)]!;
         const summary = phase === "SUCCEEDED"
@@ -424,7 +430,7 @@ async function warehouseFixture(
           : phase === "FAILED"
             ? { evidencePath: `${directory}/evidence`, ...summaryOverrides }
             : {};
-        return { status: 200, ok: true, value: { status: { phase, summary } } as T, text: JSON.stringify({ status: { phase, summary } }) };
+        return { status: 200, ok: true, value: { status: { phase, summary, jobName: "workspace-scanner-job" } } as T, text: JSON.stringify({ status: { phase, summary, jobName: "workspace-scanner-job" } }) };
       }
       if (method === "DELETE") return { status: 200, ok: true, text: "{}" };
       if (method === "POST" || method === "PUT") return { status: 201, ok: true, text: "{}" };
@@ -497,6 +503,27 @@ test("submits a namespaced Workspace ScanRequest, polls status, and imports comp
     assert.equal(fixture.imported[0]?.context.evidenceScanRunId, run.batchId);
     assert.equal(fixture.imported[0]?.context.layerId, `workspace-${fixture.asset.id}`);
     assert.equal(fixture.imported[0]?.directory, completed.evidencePath);
+  } finally {
+    await rm(fixture.directory, { recursive: true, force: true });
+  }
+});
+
+test("reads scanner container logs for a Workspace Warehouse run", async () => {
+  const fixture = await warehouseFixture(["RUNNING"]);
+  try {
+    const run = await fixture.service.submitScan(fixture.connector.id, {
+      assetId: fixture.asset.id,
+      path: "catalogs/objects.csv",
+      allowedSuffixes: [".csv"],
+      coverage: warehouseCoverage(),
+    }, "task-logs");
+    const logs = await fixture.service.taskLogs(fixture.connector.id, run.id);
+    assert.equal(logs.status, "available");
+    assert.equal(logs.podName, "workspace-scanner-pod");
+    assert.equal(logs.containerName, "scanner");
+    assert.match(logs.text, /scanner started/);
+    assert.ok(fixture.requests.some((request) => request.path.includes("labelSelector=job-name%3Dworkspace-scanner-job")));
+    assert.ok(fixture.requests.some((request) => request.path.includes("/pods/workspace-scanner-pod/log?container=scanner")));
   } finally {
     await rm(fixture.directory, { recursive: true, force: true });
   }
@@ -744,7 +771,8 @@ const localAsset: DataAssetRecord = {
   kind: "image",
   modalities: ["image"],
   scanSpec: undefined,
-  access: { connector: "local", uri: localConnector.locationKey, format: "fits", connectorId: localConnector.id },
+  access: { connector: "metadata", uri: "asset://Production%20download", format: "metadata" },
+  accesses: [{ connector: "metadata", uri: "asset://Production%20download", format: "metadata" }],
   connectorIds: [localConnector.id],
   connectorLocationKeys: [localConnector.locationKey],
 };

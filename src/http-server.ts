@@ -34,7 +34,7 @@ import { LocalCsvScanExecutor, LocalScanCapabilityError, LocalScanDisabledError,
 import { UserMocArtifactStore, type UserMocArtifact } from "./user-moc-artifacts.js";
 import { WarehouseIndexService, type WarehouseCoverageLayer } from "./warehouse-index.js";
 import { WarehouseScanService } from "./warehouse-scan.js";
-import { calculateSkyOverlap, type SkyOverlapSource } from "./sky-overlap.js";
+import { commonOverlapNside, calculateSkyOverlap, type SkyOverlapSource } from "./sky-overlap.js";
 import { CoverageDownloadService, type CoverageDownloadFile } from "./coverage-downloads.js";
 import { discoverSourceFiles, type SourceUnit } from "./source-crawler.js";
 import { ProductionService, ProductionStateError, type ProductionSourceResolver, type ProductionWarehouseHandoff } from "./production.js";
@@ -720,6 +720,18 @@ app.get("/api/connectors/:id/runs", async (request: Request, response: Response)
   }
 });
 
+app.get("/api/connectors/:id/ingest-runs/:runId/logs", async (request: Request, response: Response) => {
+  try {
+    const connectorId = datasetIdFrom(request);
+    const rawRunId = request.params.runId;
+    const runId = typeof rawRunId === "string" ? rawRunId.trim() : "";
+    if (!runId) throw new RangeError("runId must be a non-empty string");
+    response.json(await warehouseScans.taskLogs(connectorId, runId));
+  } catch (error) {
+    sendApiError(response, error);
+  }
+});
+
 app.post("/api/connectors/:id/check", async (request: Request, response: Response) => {
   try {
     const id = datasetIdFrom(request);
@@ -933,6 +945,8 @@ app.get("/api/system-config/runtime", async (_request: Request, response: Respon
       available: catalog.available,
       unavailableReason: catalog.unavailableReason,
       syncedAt: catalog.syncedAt,
+      stale: catalog.stale,
+      lastSyncError: catalog.lastSyncError,
       source: "environment",
     },
     workspaceSearch: {
@@ -1292,12 +1306,10 @@ async function overlapSources(context: OverlapSourceContext): Promise<SkyOverlap
   if (context.includePublic) {
     let manifest: SurveyFootprintManifest | undefined;
     try { manifest = await effectiveFootprints(); } catch (error) { console.warn("Public overlap sources unavailable", error); }
-    manifest?.footprints
-      .filter((footprint) => footprint.nside === context.nside)
-      .forEach((footprint) => {
+    for (const footprint of manifest?.footprints ?? []) {
         const sourceIdentity = publicFootprintIdentity(footprint);
         const hasConcreteFields = Boolean(footprint.sourceId?.trim() || footprint.layerId?.trim());
-        accept({
+        const source: SkyOverlapSource = {
           id: overlapSourceIdForPublic(footprint),
           label: footprint.label,
           kind: "public",
@@ -1311,8 +1323,13 @@ async function overlapSources(context: OverlapSourceContext): Promise<SkyOverlap
             executable: false,
             availability: hasConcreteFields ? "unavailable" as const : "geometry-only" as const,
           }),
-        });
-      });
+        };
+        if (!overlapSourceMatches(source, context)) continue;
+        source.availableOrders = await resourcePackages.footprintOrders(footprint);
+        source.pixels = await resourcePackages.footprintPixels(footprint, Math.log2(context.nside));
+        source.nside = context.nside;
+        accept(source);
+    }
   }
 
   if (!context.includeWorkspace) return [...result.values()].sort((left, right) => left.id.localeCompare(right.id));
@@ -1485,8 +1502,16 @@ async function reverseLookupFiles(sources: readonly SkyOverlapSource[]): Promise
 
 app.post("/api/sky/overlap", async (request: Request, response: Response) => {
   try {
-    const context = overlapContext((request.body ?? {}) as SkyOverlapRequest);
-    const sources = await overlapSources(context);
+    const body = (request.body ?? {}) as SkyOverlapRequest;
+    let context = overlapContext(body);
+    let sources = await overlapSources(context);
+    if (body.nside === undefined) {
+      const nside = commonOverlapNside(sources, context.nside);
+      if (nside !== context.nside) {
+        context = { ...context, nside };
+        sources = await overlapSources(context);
+      }
+    }
     const result = calculateSkyOverlap(sources, context.nside);
     response.json({ ...result, sources });
   } catch (error) {
