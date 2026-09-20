@@ -13,6 +13,7 @@ export interface SurveyFootprint {
   quality: FootprintGeometryQuality;
   sourceUrl: string;
   sourceId?: string;
+  layerId?: string;
   retrievedAt: string;
   notes: string;
 }
@@ -45,7 +46,7 @@ function assertManifest(value: unknown): asserts value is SurveyFootprintManifes
     const identity = `${footprint.surveyId}:${footprint.releaseId}:${footprint.product}`;
     if (identities.has(identity)) throw new Error(`Survey footprint manifest contains a duplicate identity: ${identity}`);
     identities.add(identity);
-    if (footprint.pixels.some((pixel) => !Number.isInteger(pixel) || pixel < 0 || pixel >= 12 * manifest.nside! ** 2)) {
+    if ((footprint.sourceId !== undefined && (typeof footprint.sourceId !== "string" || !footprint.sourceId.trim())) || (footprint.layerId !== undefined && (typeof footprint.layerId !== "string" || !footprint.layerId.trim())) || footprint.pixels.some((pixel) => !Number.isInteger(pixel) || pixel < 0 || pixel >= 12 * manifest.nside! ** 2)) {
       throw new Error(`Survey footprint contains an invalid HEALPix cell: ${footprint.surveyId}`);
     }
   }

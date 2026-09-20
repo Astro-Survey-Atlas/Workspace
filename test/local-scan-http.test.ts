@@ -292,6 +292,34 @@ test("HTTP local CSV scan writes object and coverage documents and serves a mult
       coverageIndex: "astro_coverage_index_v1",
     });
 
+    const runsBeforeInvalidPublicInput = await apiJson<{ runs: Array<{ id: string }> }>(baseUrl, "/api/production-runs");
+    const invalidProduction = await fetch(`${baseUrl}/api/production-runs`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        pipelineKey: "overlap-download@1",
+        region: {
+          coordinateFrame: "ICRS",
+          ordering: "NESTED",
+          nside: 16,
+          pixels: [1],
+          sourceIds: ["public:desi"],
+        },
+      }),
+    });
+    assert.equal(invalidProduction.status, 400);
+    assert.match(await invalidProduction.text(), /public sourceId/);
+
+    const invalidCoverageDownload = await fetch(`${baseUrl}/api/coverage-downloads`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ files: [], sourceIds: ["geometry:public:euclid:ero:imaging"] }),
+    });
+    assert.equal(invalidCoverageDownload.status, 400);
+    assert.match(await invalidCoverageDownload.text(), /geometry-only/);
+    const runsAfterInvalidPublicInput = await apiJson<{ runs: Array<{ id: string }> }>(baseUrl, "/api/production-runs");
+    assert.deepEqual(runsAfterInvalidPublicInput.runs.map((run) => run.id), runsBeforeInvalidPublicInput.runs.map((run) => run.id));
+
     const coverageWithoutWarehouse = await apiJson<{ status: string; index: string }>(baseUrl, "/api/sky/coverage?nside=16");
     assert.equal(coverageWithoutWarehouse.status, "ready");
     assert.equal(coverageWithoutWarehouse.index, ASTRO_FILE_INDEX);

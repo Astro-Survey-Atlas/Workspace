@@ -9,7 +9,10 @@
 
 ## 🗺️ Product Boundary & Contract
 
-Assets is built to enforce a **package-first, read-only** boundary for public data. It has no user management, does not track private catalogs, does not store credentials, and has no sky maps.
+Assets is built to enforce a **package-first** geometry boundary for public data. It
+has no user management, does not track private catalogs, and does not store user
+credentials. Assets owns public survey geometry and release metadata; Workspace
+owns the user-facing mixed sky UI and user data.
 
 ### Component Responsibility Matrix
 
@@ -19,7 +22,7 @@ Assets is built to enforce a **package-first, read-only** boundary for public da
 | **User Asset Registry & Metadata** | ❌ None | ❌ None | **Authoritative Owner** |
 | **Local Scanning & local ES indexing** | ❌ None | ❌ None | **Authoritative Owner** |
 | **Remote S3/OSS High-throughput Scan** | ❌ None | **Execution & Operator** | Task Submission & Evidence Import |
-| **天球 UI (Aladin Lite v3 Explorer)** | ❌ None | ❌ None | **Authoritative Owner** |
+| **天球 UI (Aladin Lite v3 Explorer)** | Public geometry source | ❌ None | **Authoritative Owner** |
 
 ### Key Contracts
 
@@ -27,7 +30,11 @@ Assets is built to enforce a **package-first, read-only** boundary for public da
    - `resource-package.json`: Contains catalog manifest, size, SHA-256 hash, and provenance metadata.
    - FITS MOC: Native HEALPix Multi-Order Coverage files describing the survey boundary.
 2. **Assets MOC Core Adapter**: Authoritative scientific library (`astro_survey_moc_core`) written in Python, exposing a deterministic CLI contract for HEALPix pixel conversions.
-3. **No Dynamic Workspace APIs**: Workspace reads only published packages. Assets does not provide dynamic query endpoints for workspace tasks.
+3. **Protected public data lookup**: The normal Workspace sky view reads verified
+   package geometry. A future server-to-server, authenticated and bounded Assets
+   query may resolve fine public coverage and tile/source units for one overlap or
+   download session; the browser never receives its credential and Workspace does
+   not copy the complete private reverse index.
 
 ---
 

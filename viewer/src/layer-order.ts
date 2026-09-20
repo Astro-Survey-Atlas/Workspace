@@ -6,8 +6,9 @@ export interface LayerDepth {
   renderOrder: number;
 }
 
-const OVERLAP_DEPTH_STEP = 0.0015;
-const RADIAL_DEPTH_STEP = 0.075;
+const OVERLAP_DEPTH_STEP = 0;
+const LAYER_RADIUS_INNER = 0.88;
+const LAYER_RADIUS_OUTER = 1.12;
 
 export function normalizeLayerOrder(
   knownKeys: Iterable<string>,
@@ -37,11 +38,15 @@ export function visibleLayerDepths(
   const visible = new Set(visibleKeys);
   const keys = order.filter((key) => visible.has(key));
   const midpoint = (keys.length - 1) / 2;
-  const step = layout === "layers" ? RADIAL_DEPTH_STEP : OVERLAP_DEPTH_STEP;
+  const layerSpan = Math.max(0, LAYER_RADIUS_OUTER - LAYER_RADIUS_INNER);
   return keys.map((key, index) => ({
     key,
     // The first list item is the front-most layer.
-    radius: 1 + (midpoint - index) * step,
+    radius: layout === "layers"
+      ? keys.length <= 1
+        ? 1
+        : LAYER_RADIUS_OUTER - (index / (keys.length - 1)) * layerSpan
+      : 1 + (midpoint - index) * OVERLAP_DEPTH_STEP,
     renderOrder: 2 + (keys.length - 1 - index) * 2,
   }));
 }

@@ -1,10 +1,15 @@
 # 公开巡天覆盖 MOC 的来源与计算方法
 
-本文是 Atlas 历史覆盖制品的来源记录。历史生成的 footprint JSON 已从 Atlas 仓库移除，Atlas 运行时不再生成或读取公共 MOC。它只描述天空覆盖，不包含星表行、图像像素或观测深度模型。
+本文是 Atlas 历史覆盖制品的来源记录。历史生成的 footprint JSON 已从 Atlas 仓库
+移除，Atlas 运行时不再生成或发布公共 MOC；当前 Workspace 只验证并读取随
+Resource Package v3 发布的 package-native MOC/footprint。它们只描述天空覆盖，
+不包含星表行、图像像素或观测深度模型。
 
 ## 证据等级
 
-发布后的产品级台账位于 `Astro-Survey-Atlas-Assets`；Atlas 只信任同步后的 Resource Package v3 快照，不保留公共覆盖生成器或发布校验入口。
+发布后的产品级台账位于 `Astro-Survey-Atlas-Assets`；Atlas 只信任同步后的
+Resource Package v3 快照，不保留公共覆盖生成器或发布校验入口。安装包是
+Workspace 日常公开几何的边界，不需要读取 Assets catalog/blocks 运行时接口。
 
 Assets 的 `artifacts/public-survey-footprints/sources.json` 是产品级台账。只有存在产品级几何来源、且原始制品已保存并通过校验的记录才标为 `acquired`。本次新增的 CDS 产品直接来自公开的 CDS MocServer/HiPS MOC；Euclid Q1 使用 Euclid Consortium 发布的 DS9 区域文件计算。尚未有产品几何的记录仍是 `overview_only` 或 `awaiting_geometry`，没有用面积、中心点、示意图或相邻产品代填。
 
@@ -46,7 +51,7 @@ Assets 流程只接受 ZIP 根目录中的 `q1_edff.reg`、`q1_edfn.reg`、`q1_e
 
 每个顶点从 ICRS 度数转换为 `theta = (90 - Dec) * pi/180`、`phi = RA * pi/180`，再交给 `healpixjs` 的 `queryPolygonInclusive`。计算参数为 NSIDE 16、`fact = 8`，即用过采样的 HEALPix 多边形查询保留所有与官方边界相交的像素；三份文件的像素集合合并、去重并排序。该结果是由官方边界导出的 MOC，不是由 63.1 deg2 和场中心反推的圆形近似。
 
-原始 ZIP 保存在历史 Assets 制品中，索引记录来源、抓取时间、文件大小、SHA-256、多边形数量和解析器参数。Atlas 不再运行该抓取或发布校验流程；新的公共 MOC 和 Resource Package v3 必须在 `Astro-Survey-Atlas-Assets` 中生成并通过 trust gate。
+原始 ZIP 保存在历史 Assets 制品中，索引记录来源、抓取时间、文件大小、SHA-256、多边形数量和解析器参数。Atlas 不再运行该抓取或发布校验流程；新的公共 MOC 和 Resource Package v3 必须在 `Astro-Survey-Atlas-Assets` 中生成并通过 trust gate。需要公开文件单元时，Workspace 另行使用受保护的、范围受限的 Assets 查询；这不改变 package-first 几何边界。
 
 ## DESI EDR 与 DR1 光谱 tile 覆盖
 

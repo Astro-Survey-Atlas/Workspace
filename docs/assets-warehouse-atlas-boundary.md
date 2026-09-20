@@ -40,18 +40,29 @@ MOC artifact store 中落盘，并把可查询的用户层合并到天球响应�
   `coverageRole`、`dataOrigin`、`sourceTier` 和 precision；
 - Warehouse `atlas.zhejianglab.org/v1alpha1/ScanRequest` 中的
   `ScanPlan.version=2`；
-- pinned `astro_survey_moc_core` 的输入/输出契约。
+- pinned `astro_survey_moc_core` 的输入/输出契约；
+- 未来受保护的 Assets scoped query 契约：Workspace 服务端携带认证，按明确
+  区域、order、survey/release/DR/product 和 sourceId/layerId 请求有限的公开
+  细粒度覆盖或数据单元结果。
 
 `catalog-radec` 的边界转换也属于共享契约：先计算
 `theta=(90-Dec)*pi/180`、`phi=RA*pi/180`，再以 `z=cos(theta)` 执行 NESTED
 查找。不能用 `sin(Dec)` 替代；两者在赤道精确边界上的浮点归属不同，会让
 Warehouse evidence 和本地 MOC 的 cell 不一致。
 
-Workspace 不调用 Assets 的计算或管理 API。它只下载、验证并激活 Assets
-发布的不可变 v3 包；公共包记录与 Workspace 的用户 survey/release 标签是
-两个命名空间。用户 manifest、normalized scan、任务快照、错误和原始 MOC
-属于 evidence，保存在 evidence PVC/object store 或 Workspace 用户 MOC
-store，不放进浏览器初始请求。
+Workspace 的正常公开几何路径是下载、验证并激活 Assets 发布的不可变 v3
+包；已安装 package/native MOC 足以支持日常天球绘图和几何重合，不依赖 Assets
+catalog/blocks 运行时接口。公共包记录与 Workspace 的用户 survey/release 标签
+是两个命名空间。
+
+只有用户明确请求重合详情或下载计划时，Workspace 服务端才可调用受保护的
+Assets scoped query。这个查询不是任务管理或发布 API，浏览器不能看到认证信息，
+结果必须限制在请求区域和短期 session 内；Workspace 不复制 Assets 的完整
+tile/file/shard 反查索引。公开几何仍可在没有文件入口时显示，几何-only、
+entrypoint-only、candidate/incomplete、tile-resolved 和 unavailable 状态不能
+互相替代。用户 manifest、normalized scan、任务快照、错误和原始 MOC 属于
+evidence，保存在 evidence PVC/object store 或 Workspace 用户 MOC store，不放
+进浏览器初始请求。
 
 ## 任务标识
 

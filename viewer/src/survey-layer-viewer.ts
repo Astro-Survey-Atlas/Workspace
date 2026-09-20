@@ -269,8 +269,8 @@ const OVERLAP_COLOR_LIGHT = new THREE.Color("#2c3792");
 const SELECTION_COLOR = new THREE.Color("#9fe7e0");
 const SELECTION_EDGE_COLOR = new THREE.Color("#e7fffb");
 const WORKSPACE_COLOR = new THREE.Color("#d69b4e");
-const COVERAGE_OPACITY = 0.17;
-const COVERAGE_EDGE_OPACITY = 0.22;
+const COVERAGE_OPACITY = 0.34;
+const COVERAGE_EDGE_OPACITY = 0.16;
 // Keep surrounding layers subdued while the selected region remains readable.
 const DIMMED_OPACITY = 0.075;
 const DIMMED_EDGE_OPACITY = 0.12;
@@ -874,8 +874,8 @@ export class SurveyLayerViewer {
       const component = this.#overlapComponents.find((candidate) => candidate.id === componentId);
       if (component) {
         const nside = 2 ** component.order;
-        const radius = Math.max(1.025, this.#outerRadius + 0.028);
-        const cells = component.cells.map((pixel) => ({ nside, pixel, radius, color: SELECTION_COLOR, inset: 0.008 }));
+        const radius = 1;
+        const cells = component.cells.map((pixel) => ({ nside, pixel, radius, color: SELECTION_COLOR, inset: nside === this.#manifest.nside ? 0.018 : 0.006 }));
         const mesh = new THREE.Mesh(buildSphericalCellSheetGeometry(cells), new THREE.MeshBasicMaterial({ vertexColors: true, transparent: true, opacity: 0.32, side: THREE.DoubleSide, depthTest: false, depthWrite: false, toneMapped: false }));
         mesh.renderOrder = SELECTION_RENDER_ORDER + 2;
         const edges = new THREE.LineSegments(buildSphericalCellEdges(cells), new THREE.LineBasicMaterial({ vertexColors: true, transparent: true, opacity: 0.95, depthTest: false, depthWrite: false, toneMapped: false }));
@@ -1085,13 +1085,13 @@ export class SurveyLayerViewer {
     const selectedSurveyCount = [...this.#visibleSurveyIds].filter((surveyId) => (this.#model.pixelsBySurvey.get(surveyId)?.length ?? 0) > 0).length;
     const nside = this.#overlapNside ?? this.#manifest.nside;
     const pixels = this.#overlapPixels ?? (selectedSurveyCount > 1 ? [...counts.entries()].filter(([, count]) => count === selectedSurveyCount).map(([pixel]) => pixel).sort((left, right) => left - right) : []);
-    const radius = Math.max(1.02, this.#outerRadius + 0.012);
-    const cells = pixels.map((pixel) => ({ nside, pixel, radius, color: this.#overlapColor(), inset: nside === this.#manifest.nside ? 0.028 : 0.008 }));
+    const radius = 1;
+    const cells = pixels.map((pixel) => ({ nside, pixel, radius, color: this.#overlapColor(), inset: nside === this.#manifest.nside ? 0.018 : 0.006 }));
     if (cells.length) this.#addFragmentLayer("__overlap__", pixels, cells, animated, SELECTION_RENDER_ORDER - 1);
     this.#rebuildOverlapLabels(nside, pixels, radius);
   }
 
-  #rebuildOverlapLabels(nside = this.#overlapNside ?? this.#manifest.nside, pixels = this.#overlapPixels ?? [], radius = Math.max(1.02, this.#outerRadius + 0.012)): void {
+  #rebuildOverlapLabels(nside = this.#overlapNside ?? this.#manifest.nside, pixels = this.#overlapPixels ?? [], radius = 1): void {
     clearGroup(this.#overlapLabelGroup);
     if (!this.#overlapMode || !pixels.length) return;
     const components = this.#overlapComponents.length && this.#overlapComponents[0]!.order === Math.round(Math.log2(nside))
@@ -1312,7 +1312,7 @@ export class SurveyLayerViewer {
       pixel,
       radius,
       color,
-      inset: 0.045,
+      inset: 0.018,
     };
   }
 

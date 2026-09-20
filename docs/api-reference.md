@@ -2,7 +2,9 @@
 
 > 本轮 Workspace 边界、任务 label、历史隔离和统一通知以
 > [`atlas-boundary-plan.md`](atlas-boundary-plan.md) 为准。这里的接口只描述
-> Workspace 自有 API，不是 Assets 或 Warehouse API。
+> Workspace 自有 API，不是 Assets 或 Warehouse API。Workspace 服务端可能在
+> 明确的重合/下载操作中调用受保护的 Assets scoped query；该调用不是浏览器
+> API，也不会把 Assets 的私有反查索引暴露给客户端。
 
 这是 Astro Data Workspace API 的维护入口。接口实现、请求示例和状态语义发生变化时，必须在同一变更中更新本文和对应测试；`README.md` 只保留入口链接，不再复制完整请求体。
 
@@ -12,7 +14,10 @@
 - `POST /api/connectors/:id/check` 只检测 Connector 的端点、Bucket、Prefix 或数据库连接，不创建扫描任务。
 - Connector 凭据只保存在 Workspace 的受管 Secret 中，不进入请求体、任务快照或公开响应。
 - `surveyId`、`releaseId`、`product` 是 Atlas 用户资产的本地标签；`connectorId` 是访问位置。Atlas 不向 Assets 注册这些用户标签，也不把它们写回公共 catalog。
-- 浏览器只调用 Workspace 管理 API。审核后的公开覆盖和资源文件由已同步的 Astro Survey Atlas Assets Resource Package v3 提供；公共包元数据与 Atlas 本地 SurveyRegistry 分开读取。
+- 浏览器只调用 Workspace 管理 API。普通公开覆盖几何和 native MOC 由已同步、
+  已校验的 Astro Survey Atlas Assets Resource Package v3 提供；公共包元数据与
+  Atlas 本地 SurveyRegistry 分开读取。需要公开细粒度数据单元时，由 Workspace
+  服务端按本次区域调用受保护的 Assets scoped query，浏览器不持有凭据。
 - Workspace 自己维护一个独立 Elasticsearch（`ASTRO_ES_URL`），用于用户文件、对象、coverage 和 MOC 投影；Warehouse Elasticsearch（`ASTRO_WAREHOUSE_ES_URL`）只在启用远程执行时使用，二者不共享索引。
 - Warehouse 的 `ast_*` 索引没有 caller 字段；Workspace 只接受能由本地用户资产、扫描记录或 MOC artifact 关联出的 layer ID。Assets 公共 layer 不会因为 Warehouse 可达而混入用户天球，公共覆盖仍来自已验证的 Resource Package v3。
 - 用户 manifest、normalized scan、任务快照和证据只保存在 Workspace/Warehouse evidence PVC 或对象存储中，不能放入浏览器初始响应。
@@ -119,8 +124,10 @@ source Secret 和 evidence PVC 目录；Warehouse Operator 必须监听该 names
 任务结果写入 Warehouse `ast_layer_index_v1`、`ast_file_index_v1`、
 `ast_coverage_index_v1`，完成后 Workspace 导入 evidence 并在本地生成用户
 MOC。公共覆盖任务、公共 MOC 计算、manifest 锁定和发布不属于 Workspace
-API；这些流程只在 Assets 内部完成，Workspace 只通过 Resource Package v3
-同步和安装已经发布的结果。
+API；这些流程只在 Assets 内部完成，Workspace 通过 Resource Package v3
+同步和安装已经发布的几何结果。Workspace 不依赖 Assets catalog/blocks
+运行时接口绘制已安装几何；仅在明确的重合详情或下载计划中使用受保护的
+Assets scoped query。
 
 Warehouse v1 不提供逐行 catalog object index。这个接口的远程结果是文件、
 覆盖像元和 evidence，成功后可生成用户 MOC 并进入 `/api/sky/coverage`；它
@@ -147,7 +154,9 @@ astro.zhejianglab.org/atlas-task: "true"
 astro.zhejianglab.org/atlas-task-kind: user_scan | user_coverage
 ```
 
-Atlas 不读取 Assets 的任务资源、API 或执行历史。
+Atlas 不读取 Assets 的任务资源、发布管理接口或执行历史，也不把 Assets
+catalog/blocks 当作日常绘图数据源。公开数据单元反查如已配置，只能通过
+Workspace 服务端的受保护 scoped query 完成，不会返回 Assets 的完整私有索引。
 
 支持的用户资产覆盖 mode：
 
@@ -225,11 +234,17 @@ POST /api/sky/overlap/details
 POST /api/sky/reverse-lookup
 ```
 
-`componentId` 可代替 `pixels`。反查只返回已经确认可直接读取的 HTTP/HTTPS 文件
-URL；没有文件 URL、S3 凭据或不受支持协议的来源会放在 `unavailable`，不会伪装成
-可下载文件。Workspace 内置的受限爬虫会识别直链，并从小型 HTML/XML 目录提取
-数据文件链接；结果过多时只返回前 128 个并在 `warnings` 中说明。MOC JSON、普通
-说明页和无法确认文件类型的服务 URL 会保持不可下载状态。
+`componentId` 可代替 `pixels`。普通几何重合不要求有文件反查索引。用户来源的
+反查使用 Workspace 自有 coverage/MOC/index；公开来源的精确反查应使用服务端
+受保护的 Assets scoped query。其请求必须携带 concrete public source identity，
+例如 `public:desi:dr1:spectro:sourceId=tile-123`，不能使用 `public:desi` 或
+任何仅含 survey 的 ID。返回结果必须保留实际 order、revision、expiry 和状态。
+
+当前 Workspace 内置 HTTP 爬虫只是受限 fallback：它识别直链，并从小型
+HTML/XML 目录提取数据文件链接；结果过多时只返回前 128 个并在 `warnings`
+中说明。MOC JSON、普通说明页、S3 入口和无法确认文件类型的服务 URL 会保持
+`entrypoint-only` 或 `unavailable`，不会伪装成可下载文件。受保护 Assets API
+未配置时，公开几何和 overlap 仍可用，但公开下载可能只能显示不可执行状态。
 
 ### 重合来源下载闭环
 
@@ -239,7 +254,7 @@ Content-Type: application/json
 
 {
   "componentId": "C01",
-  "sourceIds": ["public:desi:dr1:catalog"],
+  "sourceIds": ["public:desi:dr1:spectro:sourceId=tile-123"],
   "files": [{
     "url": "https://example.org/catalog.fits",
     "name": "catalog.fits",
@@ -253,6 +268,12 @@ Content-Type: application/json
 在服务器上下载并校验大小和 SHA-256；成功后把文件放到受管本地目录并自动登记
 一个新的 `local` Connector，任务的 `outputConnectorId`/`outputPath` 指向该闭环
 结果。可用下面的接口轮询或取消任务：
+
+下载计划的 public item 只能来自 concrete public source identity 对应的受控
+结果；`public:<survey>`、缺少 release/DR/product/sourceId/layerId 或身份与
+返回结果不一致时，在创建/执行前拒绝。用户资产和 MOC 只作为区域快照与空间
+约束，不会进入 public item 列表。几何-only、entrypoint-only 和
+candidate/incomplete 结果必须先以对应状态展示；未确认的候选不执行。
 
 ```http
 GET  /api/coverage-downloads

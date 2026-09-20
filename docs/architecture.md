@@ -15,16 +15,20 @@ Atlas is the user-facing workspace. It owns:
 - deterministic Agent/MCP and workflow runs over user data.
 
 Atlas does not own public survey jobs, public connectors, MOC publication, or a
-public release catalog. It consumes only the immutable Resource Package v3
-published by Astro Survey Atlas Assets. Atlas never registers a user asset with
-Assets and never publishes a user record back to Assets. Its Elasticsearch is
-independent from Warehouse Elasticsearch; either service may be absent without
-turning the other into a shared database.
+public release catalog. Its ordinary public geometry comes from the immutable
+Resource Package v3 published by Astro Survey Atlas Assets. Atlas never
+registers a user asset with Assets and never publishes a user record back to
+Assets. Its Elasticsearch is independent from Warehouse Elasticsearch; either
+service may be absent without turning the other into a shared database.
 
 ```text
 Assets Resource Package v3
   -> Atlas download, validation, and local snapshot
-  -> public coverage/release display and read-only downloads
+  -> public coverage/release display and local geometric overlap
+
+Atlas server + scoped public region
+  -> bounded authenticated Assets query (explicit overlap/download only)
+  -> fine coverage and concrete public source units for one session
 
 Atlas local scanner
   -> MOC Core
@@ -44,9 +48,12 @@ never required for a user registration.
 
 The HTTP surface keeps these namespaces separate: `/api/surveys` and its
 registration routes address Atlas-local labels, while `/api/public-surveys`
-only reads metadata from the installed Resource Package v3 catalog for the
+reads public metadata from the installed Resource Package v3 catalog for the
 public viewer. That display data never becomes a user record and never changes
-an existing asset, Connector, run, artifact, or hash.
+an existing asset, Connector, run, artifact, or hash. An explicit overlap or
+download session may ask Assets for a bounded fine-grained result, but the
+browser never receives its credential and Atlas never stores the complete
+public tile/file/shard index.
 
 ## Deterministic data plane
 
@@ -184,6 +191,12 @@ operate on the same public/user layer set.
   evidence PVC
 
 Atlas has no runtime dependency on Assets management APIs, public scan jobs, or
-public release mutation endpoints. The only cross-product contract is the
-verified Resource Package v3, the pinned MOC Core contract, and Warehouse's
-namespaced `ScanRequest`/`ScanPlan` v2 contract when remote execution is enabled.
+public release mutation endpoints, and it does not use Assets catalog/block
+endpoints as the ordinary drawing source for an installed package. The
+cross-product contracts are the verified Resource Package v3, the pinned MOC
+Core contract, Warehouse's namespaced `ScanRequest`/`ScanPlan` v2 contract when
+remote execution is enabled, and a future bounded authenticated Assets query
+used only by an explicit overlap/download session. Geometry-only,
+entrypoint-only, candidate/incomplete, tile-resolved, and unavailable results
+remain distinct; a user asset constrains a region but is never a public survey
+download item.

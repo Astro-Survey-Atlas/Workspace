@@ -405,7 +405,7 @@ export class ConnectorPanel {
 
   #scanUnavailableReason(record: ConnectorPublicRecord): string | undefined {
     if (!this.#capabilities.dataWarehouse.enabled) return "数据仓库不可用，当前不能执行扫描。";
-    if (record.kind === "local") return "本地路径扫描执行器尚未接入；当前只能查看配置和历史记录。";
+    if (record.kind === "local") return "本地覆盖扫描需要已登记的图像或数据立方体资产；当前只能查看配置和历史记录。";
     if (record.kind === "jdbc") return "JDBC 扫描执行器尚未接入；当前只能查看配置和历史记录。";
     if (record.status === "disabled") return "Connector 已停用，当前不能执行扫描。";
     if (record.status !== "ready" && record.lastCheck?.status !== "ok") return "请先检测连接并确认 S3 / OSS 可用。";
@@ -419,16 +419,16 @@ export class ConnectorPanel {
     const button = document.createElement("button");
     button.type = "button";
     button.className = "primary-command connector-execute-scan";
-    button.setAttribute("aria-label", "执行扫描");
+    button.setAttribute("aria-label", "执行覆盖扫描");
     const icon = document.createElement("i"); icon.dataset.lucide = "play";
-    const label = document.createElement("span"); label.textContent = "执行扫描";
+    const label = document.createElement("span"); label.textContent = "执行覆盖扫描";
     button.append(icon, label);
     const note = document.createElement("p");
     note.className = "connector-scan-availability";
     const reason = this.#scanUnavailableReason(record);
     button.disabled = Boolean(reason);
-    button.title = reason ?? "使用已保存的 Connector 配置执行扫描";
-    note.textContent = reason ?? "使用已保存的 S3 / OSS 配置执行扫描；扫描范围由服务端任务定义。";
+    button.title = reason ?? "使用已保存的 Connector 配置生成用户覆盖证据";
+    note.textContent = reason ?? "使用已保存的 Connector 配置生成用户覆盖证据。";
     button.addEventListener("click", () => void this.#executeScan(record, button));
     section.append(button, note);
     return section;
@@ -436,16 +436,16 @@ export class ConnectorPanel {
 
   async #executeScan(record: ConnectorPublicRecord, button: HTMLButtonElement): Promise<void> {
     button.disabled = true;
-    notifyWorkspace("正在提交普通扫描任务", `${record.name} · 使用已保存的 S3 / OSS 配置`, { tone: "info" });
+    notifyWorkspace("正在提交覆盖扫描任务", `${record.name} · 使用已保存的 Connector 配置`, { tone: "info" });
     try {
       const submitted = await workspaceApi.executeConnectorScan(record.id);
       this.#runs = await workspaceApi.connectorIngestRuns();
       this.#selectedRunId = submitted.id ?? this.#runs[0]?.id ?? null;
       this.#updateMetrics(this.#runs);
-      notifyWorkspace("普通扫描任务已提交", `${record.name} · ${submitted.taskKind === "user_coverage" ? "用户覆盖任务" : "Atlas 用户扫描"}`, { tone: "success" });
+      notifyWorkspace("覆盖扫描任务已提交", `${record.name} · ${submitted.taskKind === "user_coverage" ? "用户覆盖任务" : "用户覆盖任务"}`, { tone: "success" });
     } catch (error) {
       button.disabled = false;
-      notifyWorkspace("普通扫描任务提交失败", error instanceof Error ? error.message : String(error), { tone: "error" });
+      notifyWorkspace("覆盖扫描任务提交失败", error instanceof Error ? error.message : String(error), { tone: "error" });
     }
   }
 

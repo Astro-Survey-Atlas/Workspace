@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -38,6 +38,7 @@ const asset: DataAssetRecord = {
   kind: "catalog",
   modalities: ["catalog"],
   access: { connector: "s3", uri: "s3://user-data/catalogs", format: "csv", connectorId: connector.id },
+  scanSpec: { format: "csv", objectIdColumn: "object_id", raColumn: "ra", decColumn: "dec", coordinateFrame: "ICRS", coordinateUnits: "deg" },
   connectorIds: [connector.id],
   connectorLocationKeys: [connector.locationKey],
   status: "ready",
@@ -48,15 +49,15 @@ const asset: DataAssetRecord = {
   updatedAt: "2026-08-26T00:00:00.000Z",
 };
 
-function request(coverage?: CoverageJobSnapshot, selectedConnector: ConnectorRecord = connector): Record<string, unknown> {
+function request(coverage: CoverageJobSnapshot = warehouseCoverage(), selectedConnector: ConnectorRecord = connector): Record<string, unknown> {
   return buildWorkspaceScanRequest({
     connector: selectedConnector,
     asset,
     input: { assetId: asset.id, path: "catalogs/objects.csv", allowedSuffixes: [".csv"] },
-    ...(coverage ? { coverage } : {}),
-    taskName: "workspace-scan-user-asset-1-ab12cd34",
-    batchId: "workspace-scan-ab12cd34",
-    secretName: "workspace-scan-user-asset-1-ab12cd34",
+    coverage,
+    taskName: "workspace-coverage-user-asset-1-ab12cd34",
+    batchId: "workspace-coverage-ab12cd34",
+    secretName: "workspace-coverage-user-asset-1-ab12cd34",
     namespace: "asa-workspace",
     warehouseEsUrl: "http://warehouse-es:9200",
     evidenceClaimName: "workspace-evidence",
@@ -70,9 +71,10 @@ function requestWithWarehouseEndpoint(warehouseEsUrl: string): Record<string, un
     connector,
     asset,
     input: { assetId: asset.id, path: "catalogs/objects.csv", allowedSuffixes: [".csv"] },
-    taskName: "workspace-scan-user-asset-1-ab12cd34",
-    batchId: "workspace-scan-ab12cd34",
-    secretName: "workspace-scan-user-asset-1-ab12cd34",
+    coverage: warehouseCoverage(),
+    taskName: "workspace-coverage-user-asset-1-ab12cd34",
+    batchId: "workspace-coverage-ab12cd34",
+    secretName: "workspace-coverage-user-asset-1-ab12cd34",
     namespace: "asa-workspace",
     warehouseEsUrl,
     evidenceClaimName: "workspace-evidence",
@@ -106,7 +108,7 @@ test("builds a ScanRequest v2 with distinct Workspace tracking labels", () => {
   assert.equal(metadata.labels[WORKSPACE_TRACK_LABELS.taskKind], "user-coverage");
   assert.equal(metadata.labels[WORKSPACE_TRACK_LABELS.asset], asset.id);
   assert.equal(metadata.labels[WORKSPACE_TRACK_LABELS.connector], connector.id);
-  assert.equal(metadata.labels[WORKSPACE_TRACK_LABELS.batch], "workspace-scan-ab12cd34");
+   assert.equal(metadata.labels[WORKSPACE_TRACK_LABELS.batch], "workspace-coverage-ab12cd34");
   assert.equal(metadata.labels["astro.zhejianglab.org/atlas-task-kind"], "user_coverage");
 
   const spec = body.spec as Record<string, any>;
@@ -117,9 +119,9 @@ test("builds a ScanRequest v2 with distinct Workspace tracking labels", () => {
   assert.equal(plan.extraction.mode, "catalog-radec");
   assert.equal(plan.extraction.catalog.raColumn, "ra");
   assert.equal(plan.sink.connector.endpoint, "http://warehouse-es:9200");
-  assert.equal(plan.evidence.outputPath, "/var/lib/atlas-evidence/workspace-scan-ab12cd34");
+   assert.equal(plan.evidence.outputPath, "/var/lib/atlas-evidence/workspace-coverage-ab12cd34");
   assert.deepEqual(spec.credentials, {
-    source: { secretName: "workspace-scan-user-asset-1-ab12cd34", accessKeyKey: "access-key", secretKeyKey: "secret-key" },
+     source: { secretName: "workspace-coverage-user-asset-1-ab12cd34", accessKeyKey: "access-key", secretKeyKey: "secret-key" },
     sink: {},
   });
   assert.doesNotMatch(JSON.stringify(body), /secret-value|access-value/);
@@ -131,13 +133,14 @@ test("keeps Warehouse endpoint credentials in the temporary Secret", () => {
     connector,
     asset,
     input: { assetId: asset.id, path: "catalogs/objects.csv", allowedSuffixes: [".csv"] },
-    taskName: "workspace-scan-user-asset-1-ab12cd34",
-    batchId: "workspace-scan-ab12cd34",
-    secretName: "workspace-scan-user-asset-1-ab12cd34",
+     coverage: warehouseCoverage(),
+     taskName: "workspace-coverage-user-asset-1-ab12cd34",
+     batchId: "workspace-coverage-ab12cd34",
+     secretName: "workspace-coverage-user-asset-1-ab12cd34",
     namespace: "asa-workspace",
     warehouseEsUrl: "https://super-secret-user:super-secret-pass@warehouse-es:9200",
     warehouseSinkCredentials: {
-      secretName: "workspace-scan-user-asset-1-ab12cd34",
+       secretName: "workspace-coverage-user-asset-1-ab12cd34",
       usernameKey: "warehouse-username",
       passwordKey: "warehouse-password",
     },
@@ -150,11 +153,11 @@ test("keeps Warehouse endpoint credentials in the temporary Secret", () => {
   const plan = (body.spec as Record<string, any>).plan as Record<string, any>;
   assert.equal(plan.sink.connector.endpoint, "https://warehouse-es:9200");
   assert.deepEqual(plan.sink.connector.credentialRef, { usernameEnv: "ATLAS_WAREHOUSE_USERNAME", passwordEnv: "ATLAS_WAREHOUSE_PASSWORD" });
-  assert.deepEqual((body.spec as Record<string, any>).credentials.sink, {
-    secretName: "workspace-scan-user-asset-1-ab12cd34",
-    usernameKey: "warehouse-username",
-    passwordKey: "warehouse-password",
-  });
+   assert.deepEqual((body.spec as Record<string, any>).credentials.sink, {
+     secretName: "workspace-coverage-user-asset-1-ab12cd34",
+     usernameKey: "warehouse-username",
+     passwordKey: "warehouse-password",
+   });
 });
 
 test("binds the generated scan Secret when submitting an authenticated Warehouse request", async () => {
@@ -172,14 +175,21 @@ test("binds the generated scan Secret when submitting an authenticated Warehouse
   }
 });
 
-test("ordinary Workspace scans use a separate task kind and preserve explicit source mode", () => {
-  const body = request();
-  const labels = (body.metadata as { labels: Record<string, string> }).labels;
-  assert.equal(labels[WORKSPACE_TRACK_LABELS.caller], "workspace");
-  assert.equal(labels[WORKSPACE_TRACK_LABELS.taskKind], "user-scan");
-  const plan = (body.spec as Record<string, any>).plan as Record<string, any>;
-  assert.equal(plan.layer.coverageRole, "occupancy");
-  assert.equal(plan.extraction.mode, "fits-header-position");
+test("Workspace request construction rejects an unscoped scan instead of choosing a FITS header extractor", () => {
+  assert.throws(() => buildWorkspaceScanRequest({
+    connector,
+    asset,
+    input: { assetId: asset.id, path: "catalogs/objects.csv", allowedSuffixes: [".csv"], spatial: { mode: "auto" } },
+    coverage: undefined as unknown as CoverageJobSnapshot,
+    taskName: "workspace-coverage-user-asset-1-ab12cd34",
+    batchId: "workspace-coverage-ab12cd34",
+    secretName: "workspace-coverage-user-asset-1-ab12cd34",
+    namespace: "asa-workspace",
+    warehouseEsUrl: "http://warehouse-es:9200",
+    evidenceClaimName: "workspace-evidence",
+    evidenceMountPath: "/var/lib/atlas-evidence",
+    scannerImage: "scanner:1.0.0",
+  }), /coverage/i);
 });
 
 test("rejects catalog footprint claims that Warehouse v2 cannot represent", () => {
@@ -201,26 +211,7 @@ test("rejects catalog footprint claims that Warehouse v2 cannot represent", () =
   }), /catalog-radec extraction requires coverageRole=object_presence/);
 });
 
-test("ordinary HEALPix scans require an explicit source order", () => {
-  assert.throws(() => buildWorkspaceScanRequest({
-    connector,
-    asset,
-    input: {
-      assetId: asset.id,
-      path: "catalogs/objects.csv",
-      allowedSuffixes: [".csv"],
-      spatial: { mode: "healpix", healpixColumn: "hpix" },
-    },
-    taskName: "workspace-scan-user-asset-1-ab12cd34",
-    batchId: "workspace-scan-ab12cd34",
-    secretName: "workspace-scan-user-asset-1-ab12cd34",
-    namespace: "asa-workspace",
-    warehouseEsUrl: "http://warehouse-es:9200",
-    evidenceClaimName: "workspace-evidence",
-    evidenceMountPath: "/var/lib/atlas-evidence",
-    scannerImage: "scanner:1.0.0",
-  }), /requires an explicit healpixOrder/);
-
+test("builds a nested HEALPix coverage extraction when its order is explicit", () => {
   const body = buildWorkspaceScanRequest({
     connector,
     asset,
@@ -228,11 +219,25 @@ test("ordinary HEALPix scans require an explicit source order", () => {
       assetId: asset.id,
       path: "catalogs/objects.csv",
       allowedSuffixes: [".csv"],
-      spatial: { mode: "healpix", healpixColumn: "hpix", healpixOrder: 4 },
     },
-    taskName: "workspace-scan-user-asset-1-ab12cd34",
-    batchId: "workspace-scan-ab12cd34",
-    secretName: "workspace-scan-user-asset-1-ab12cd34",
+    coverage: {
+      surveyId: "my-survey",
+      releaseId: "my-release",
+      product: "my-product",
+      mode: "nested-healpix",
+      coordinateFrame: "ICRS",
+      coverageRole: "object_presence",
+      dataOrigin: "catalog",
+      sourceTier: "user_file_derived",
+      maxOrder: 10,
+      queryOrder: 8,
+      previewOrder: 4,
+      healpixColumn: "hpix",
+      healpixOrder: 4,
+    },
+    taskName: "workspace-coverage-user-asset-1-ab12cd34",
+    batchId: "workspace-coverage-ab12cd34",
+    secretName: "workspace-coverage-user-asset-1-ab12cd34",
     namespace: "asa-workspace",
     warehouseEsUrl: "http://warehouse-es:9200",
     evidenceClaimName: "workspace-evidence",
@@ -353,7 +358,7 @@ interface WarehouseFixture {
 }
 
 async function warehouseFixture(
-  statuses: Array<"SUBMITTED" | "PENDING" | "RUNNING" | "SUCCEEDED"> = ["SUBMITTED", "RUNNING", "SUCCEEDED"],
+  statuses: Array<"SUBMITTED" | "PENDING" | "RUNNING" | "SUCCEEDED" | "FAILED"> = ["SUBMITTED", "RUNNING", "SUCCEEDED"],
   summaryOverrides: Record<string, unknown> = {},
   warehouseEsUrl = "http://warehouse-es:9200",
   assetOrigin: DataAssetRecord["origin"] = "user",
@@ -416,7 +421,9 @@ async function warehouseFixture(
         const phase = statuses[Math.min(stateIndex++, statuses.length - 1)]!;
         const summary = phase === "SUCCEEDED"
           ? { discoveredFileCount: 2, coverageRecordCount: 3, sourceSnapshotSha256: "a".repeat(64), evidencePath: `${directory}/evidence`, availableOrders: [8], scanRunId: submittedPlan?.scanRunId, layerId: submittedPlan?.layer?.layerId, ...summaryOverrides }
-          : {};
+          : phase === "FAILED"
+            ? { evidencePath: `${directory}/evidence`, ...summaryOverrides }
+            : {};
         return { status: 200, ok: true, value: { status: { phase, summary } } as T, text: JSON.stringify({ status: { phase, summary } }) };
       }
       if (method === "DELETE") return { status: 200, ok: true, text: "{}" };
@@ -495,6 +502,38 @@ test("submits a namespaced Workspace ScanRequest, polls status, and imports comp
   }
 });
 
+test("surfaces scanner evidence when a Warehouse request fails", async () => {
+  const fixture = await warehouseFixture(["FAILED"], {
+    rootError: "FITS spatial header position is missing",
+    counts: { files: 534168, fitsErrors: 356112, catalog: 178056 },
+  });
+  try {
+    const evidenceDirectory = path.join(fixture.directory, "evidence");
+    await mkdir(evidenceDirectory, { recursive: true });
+    await writeFile(path.join(evidenceDirectory, "summary.json"), JSON.stringify({
+      rootError: "FITS spatial header position is missing",
+      counts: { files: 534168, fitsErrors: 356112, catalog: 178056 },
+    }));
+
+    const run = await fixture.service.submitScan(
+      fixture.connector.id,
+      { assetId: fixture.asset.id, path: "catalogs/objects.csv", allowedSuffixes: [".csv"], coverage: warehouseCoverage() },
+      "failed-evidence",
+    );
+    const stored = (await fixture.runs.list()).find((candidate) => candidate.id === run.id);
+    assert.ok(stored);
+    assert.equal(stored.status, "failed");
+    assert.equal(stored.mocStatus, "failed");
+    assert.match(stored.error ?? "", /FITS spatial header position is missing/);
+    assert.match(stored.error ?? "", /files=534168/);
+    assert.match(stored.error ?? "", /fitsErrors=356112/);
+    assert.match(stored.error ?? "", /catalog=178056/);
+    assert.doesNotMatch(stored.error ?? "", /^Warehouse ScanRequest failed$/);
+  } finally {
+    await rm(fixture.directory, { recursive: true, force: true });
+  }
+});
+
 test("submits a direct Connector self-scan through the Workspace Warehouse contract", async () => {
   const fixture = await warehouseFixture(["SUBMITTED"]);
   try {
@@ -503,12 +542,12 @@ test("submits a direct Connector self-scan through the Workspace Warehouse contr
     assert.equal(run.status, "queued");
     assert.equal(run.backend, "warehouse");
     assert.equal(run.executor, "warehouse-scan");
-    assert.equal(run.taskKind, "user_scan");
+    assert.equal(run.taskKind, "user_coverage");
     assert.equal(run.assetId, fixture.asset.id);
     assert.equal(run.warehouseLayerId, `workspace-${fixture.asset.id}`);
-    assert.match(run.batchId ?? "", /^workspace-scan-/);
-    assert.match(run.jobId ?? "", /^workspace-scan-user-asset-1-/);
-    assert.match(run.secretName ?? "", /^workspace-scan-user-asset-1-/);
+    assert.match(run.batchId ?? "", /^workspace-coverage-/);
+    assert.match(run.jobId ?? "", /^workspace-coverage-user-asset-1-/);
+    assert.match(run.secretName ?? "", /^workspace-coverage-user-asset-1-/);
 
     const secretRequest = fixture.requests.find((request) => request.method === "POST" && request.path.endsWith("/secrets"));
     assert.ok(secretRequest);
@@ -532,7 +571,7 @@ test("submits a direct Connector self-scan through the Workspace Warehouse contr
     assert.equal(scanBody.metadata.namespace, "asa-workspace");
     assert.equal(scanBody.metadata.name, run.jobId);
     assert.equal(scanBody.metadata.labels[WORKSPACE_TRACK_LABELS.caller], "workspace");
-    assert.equal(scanBody.metadata.labels[WORKSPACE_TRACK_LABELS.taskKind], "user-scan");
+    assert.equal(scanBody.metadata.labels[WORKSPACE_TRACK_LABELS.taskKind], "user-coverage");
     assert.equal(scanBody.metadata.labels[WORKSPACE_TRACK_LABELS.asset], fixture.asset.id);
     assert.equal(scanBody.metadata.labels[WORKSPACE_TRACK_LABELS.connector], fixture.connector.id);
     assert.equal(scanBody.metadata.labels[WORKSPACE_TRACK_LABELS.batch], run.batchId);
@@ -558,8 +597,8 @@ test("submits a direct Connector self-scan through the Workspace Warehouse contr
     });
     assert.deepEqual(plan.source.location, { bucket: "user-data", prefix: "catalogs" });
     assert.equal(plan.source.connector.endpoint, "https://objects.example");
-    assert.deepEqual(plan.filters, { includeSuffixes: [] });
-    assert.deepEqual(plan.extraction, { mode: "fits-header-position", outputOrder: 8 });
+    assert.deepEqual(plan.filters, { includeSuffixes: [".csv"] });
+    assert.deepEqual(plan.extraction, { mode: "catalog-radec", outputOrder: 10, catalog: { raColumn: "ra", decColumn: "dec" } });
     assert.equal(plan.sink.connector.endpoint, "http://warehouse-es:9200");
     assert.deepEqual(plan.sink.connector.credentialRef, {});
     assert.equal(plan.evidence.outputPath, `${fixture.directory}/${run.batchId}`);
@@ -574,9 +613,10 @@ test("normalizes the historical wildcard to Warehouse's automatic file-type filt
     connector,
     asset,
     input: { assetId: asset.id, path: "catalogs", allowedSuffixes: ["*"] },
-    taskName: "workspace-scan-user-asset-1-ab12cd34",
-    batchId: "workspace-scan-ab12cd34",
-    secretName: "workspace-scan-user-asset-1-ab12cd34",
+    coverage: warehouseCoverage(),
+    taskName: "workspace-coverage-user-asset-1-ab12cd34",
+    batchId: "workspace-coverage-ab12cd34",
+    secretName: "workspace-coverage-user-asset-1-ab12cd34",
     namespace: "asa-workspace",
     warehouseEsUrl: "http://warehouse-es:9200",
     evidenceClaimName: "workspace-evidence",
@@ -589,9 +629,10 @@ test("normalizes the historical wildcard to Warehouse's automatic file-type filt
     connector,
     asset,
     input: { assetId: asset.id, path: "catalogs", allowedSuffixes: ["*.csv"] },
-    taskName: "workspace-scan-user-asset-1-ab12cd34",
-    batchId: "workspace-scan-ab12cd34",
-    secretName: "workspace-scan-user-asset-1-ab12cd34",
+    coverage: warehouseCoverage(),
+    taskName: "workspace-coverage-user-asset-1-ab12cd34",
+    batchId: "workspace-coverage-ab12cd34",
+    secretName: "workspace-coverage-user-asset-1-ab12cd34",
     namespace: "asa-workspace",
     warehouseEsUrl: "http://warehouse-es:9200",
     evidenceClaimName: "workspace-evidence",
@@ -700,6 +741,9 @@ const localAsset: DataAssetRecord = {
   ...structuredClone(asset),
   id: "user-asset-local-1",
   name: "Production download",
+  kind: "image",
+  modalities: ["image"],
+  scanSpec: undefined,
   access: { connector: "local", uri: localConnector.locationKey, format: "fits", connectorId: localConnector.id },
   connectorIds: [localConnector.id],
   connectorLocationKeys: [localConnector.locationKey],
@@ -712,10 +756,23 @@ function localRequest(selectedConnector: ConnectorRecord = localConnector, withL
     connector: selectedConnector,
     asset: localAsset,
     input: { assetId: localAsset.id, allowedSuffixes: [".fits"] },
+    coverage: {
+      surveyId: "my-survey",
+      releaseId: "my-release",
+      product: "my-product",
+      mode: "fits-wcs",
+      coordinateFrame: "ICRS",
+      coverageRole: "image_extent",
+      dataOrigin: "observed",
+      sourceTier: "user_file_derived",
+      maxOrder: 10,
+      queryOrder: 8,
+      previewOrder: 4,
+    },
     ...(withLocalSource ? { localSource } : {}),
-    taskName: "workspace-scan-user-asset-local-1-ab12cd34",
-    batchId: "workspace-scan-ab12cd34",
-    secretName: "workspace-scan-user-asset-local-1-ab12cd34",
+    taskName: "workspace-coverage-user-asset-local-1-ab12cd34",
+    batchId: "workspace-coverage-ab12cd34",
+    secretName: "workspace-coverage-user-asset-local-1-ab12cd34",
     namespace: "asa-workspace",
     warehouseEsUrl: "http://warehouse-es:9200",
     evidenceClaimName: "workspace-evidence",
@@ -729,6 +786,7 @@ test("builds local ScanRequests on the production data PVC without source secret
   const spec = (body.spec as Record<string, any>);
   const plan = spec.plan as Record<string, any>;
   assert.equal(plan.source.connector.type, "local");
+  assert.deepEqual(plan.extraction, { mode: "fits-wcs", outputOrder: 10 });
   assert.deepEqual(plan.source.location, { rootPath: "/data/prd-test-run", subPath: "prd-test-run" });
   assert.deepEqual(spec.scanner.sourceVolume, { claimName: "asa-workspace-production-data", mountPath: "/data", subPath: "prd-test-run" });
   assert.equal(spec.scanner.backoffLimit, 0);

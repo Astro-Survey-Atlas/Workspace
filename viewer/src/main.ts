@@ -39,6 +39,11 @@ import type { SurveyModality, SurveyRegistrationInput } from "../../src/survey-r
 import type { ConnectorPublicRecord } from "../../src/connectors";
 import type { CoverageCoordinateUnits, CoverageJobMode, CoverageJobSpec } from "../../src/coverage-jobs";
 import type { UserMocArtifact } from "../../src/user-moc-artifacts";
+import {
+  isConcretePublicSourceId,
+  publicGeometrySourceIdForFootprint,
+  publicSourceIdForFootprint,
+} from "../../src/public-source-identity";
 import { WorkflowPanel } from "./workflow-panel";
 import { ProductionPanel, type ProductionContext, type ProductionInspectorView, type ProductionSummary } from "./production-panel";
 import { SystemPanel, type SystemSummary } from "./system-panel";
@@ -1292,7 +1297,15 @@ function renderSurveyContextMenu(menu: SkyRegionMenu): void {
     void enterAladinExplorer(menu).catch(showFatal);
   };
   const selectedComponent = menu.componentId ? overlapResponse?.components.find((candidate) => candidate.id === menu.componentId) : undefined;
-  const context: ProductionContext = { nside: menu.nside, pixels: selectedComponent?.cells ?? menu.pixels, sourceIds: selectedComponent?.sourceIds ?? [...menu.surveyIds.map((id) => `public:${id}`), ...menu.assetIds.map((id) => `workspace:asset:${id}`)], componentId: menu.componentId, assetIds: menu.assetIds };
+  const contextPixels = selectedComponent?.cells ?? menu.pixels;
+  const contextSourceIds = selectedComponent
+    ? executablePublicSourceIds(selectedComponent.sourceIds ?? [])
+    : publicExecutableSourceIdsForRegion(menu.nside, contextPixels, menu.surveyIds, menu.releaseIds);
+  const context: ProductionContext = { nside: menu.nside, pixels: contextPixels, sourceIds: contextSourceIds, componentId: menu.componentId, assetIds: menu.assetIds };
+  buildDownload.disabled = contextSourceIds.length === 0;
+  buildDownload.title = buildDownload.disabled
+    ? "当前覆盖只有几何证据，没有具体 sourceId/layerId 可供下载"
+    : "构建公开数据下载任务";
   const crossmatchableAssets = menu.assetIds.filter((assetId) => {
     const asset = dataAssets.find((candidate) => candidate.id === assetId);
     return asset?.kind === "catalog" && Boolean(asset.scanSpec?.raColumn && asset.scanSpec?.decColumn && asset.scanSpec?.objectIdColumn);
@@ -1381,7 +1394,7 @@ function overlapSourceIdsForState(state: SurveyLayerState): string[] {
   const ids = new Set<string>();
   (surveyFootprints?.footprints ?? [])
     .filter((footprint) => footprint.nside === state.nside && state.visibleSurveyIds.includes(footprint.surveyId))
-    .forEach((footprint) => ids.add(`public:${footprint.surveyId}:${footprint.releaseId}:${footprint.product}`));
+    .forEach((footprint) => ids.add(publicDisplaySourceId(footprint)));
   state.visibleAssetIds.forEach((assetId) => ids.add(`workspace:asset:${assetId}`));
   state.visibleWorkspaceLayerKeys.forEach((key) => {
     if (key.startsWith("warehouse:")) ids.add(`workspace:warehouse:${key.slice("warehouse:".length)}`);
@@ -1411,10 +1424,15 @@ function renderOverlapComponent(component: SurveyLayerOverlapComponent): void {
     .then((lookup) => {
       if (!overlapModeActive) return;
       const actions: HTMLButtonElement[] = [];
+      const executableSourceIds = executablePublicSourceIds(sourceIds);
       const download = actionButton("构建数据下载任务", () => {
-        productionPanel.setContext({ nside: overlapResponse?.nside ?? 16, pixels: selected.cells, sourceIds, componentId: selected.id }, "overlap-download@1");
+        productionPanel.setContext({ nside: overlapResponse?.nside ?? 16, pixels: selected.cells, sourceIds: executableSourceIds, componentId: selected.id }, "overlap-download@1");
         void activateMode("workflow").catch(showFatal);
       });
+      download.disabled = executableSourceIds.length === 0;
+      download.title = download.disabled
+        ? "当前重合来源没有具体 sourceId/layerId，无法构建下载任务"
+        : "把具体公开来源交给数据生产工作台";
       actions.push(download);
       inspectorRows(`重合区块 ${selected.id}`, [
         ["模式", "G · 天区重合"],
@@ -1592,10 +1610,15 @@ function renderSurveySelection(selection: SurveyLayerSelection | null): void {
     layerViewer?.clearRegionSelection();
   });
   clearAction.classList.add("secondary");
-  const buildAction = actionButton("交给数据生产", () => {
-    productionPanel.setContext({ nside: selection.nside, pixels: selection.pixels, sourceIds: [...selectedSurveyIds.map((id) => `public:${id}`), ...selection.assetIds.map((id) => `workspace:asset:${id}`)], assetIds: selection.assetIds }, "overlap-download@1");
-    void activateMode("workflow").catch(showFatal);
-  });
+   const publicSourceIds = publicExecutableSourceIdsForRegion(selection.nside, selection.pixels, selectedSurveyIds, selection.releaseIds);
+   const buildAction = actionButton("交给数据生产", () => {
+     productionPanel.setContext({ nside: selection.nside, pixels: selection.pixels, sourceIds: publicSourceIds, assetIds: selection.assetIds }, "overlap-download@1");
+     void activateMode("workflow").catch(showFatal);
+   });
+   buildAction.disabled = publicSourceIds.length === 0;
+   buildAction.title = buildAction.disabled
+     ? "所选区域没有带具体 sourceId/layerId 的公开来源"
+     : "把具体公开来源交给数据生产工作台";
    inspectorRows(`已选择 ${selection.pixels.length} 个天区`, [
     ["天区中心", `RA ${selection.centerRaDeg.toFixed(4)}° · Dec ${selection.centerDecDeg >= 0 ? "+" : ""}${selection.centerDecDeg.toFixed(4)}°`],
     ["HEALPix mask", `NESTED · NSIDE ${selection.nside} · ${selection.pixels.length} cells`],
@@ -1750,11 +1773,14 @@ function renderSurveyInspection(inspection: SurveyLayerInspection | null): void 
   const prepare = document.createElement("button");
   prepare.type = "button";
   prepare.className = "command-button";
-  prepare.disabled = false;
+  const publicSourceIds = publicExecutableSourceIdsForRegion(inspection.nside, [inspection.pixel], inspectionSurveyIds, inspection.releaseIds);
+  prepare.disabled = publicSourceIds.length === 0;
   prepare.textContent = "构建数据生产任务";
-  prepare.title = "把当前数据覆盖区块交给数据生产工作台";
+  prepare.title = prepare.disabled
+    ? "当前覆盖只有几何证据，没有具体 sourceId/layerId 可供下载"
+    : "把当前数据覆盖区块交给数据生产工作台";
   prepare.addEventListener("click", () => {
-    productionPanel.setContext({ nside: inspection.nside, pixels: [inspection.pixel], sourceIds: inspectionSurveyIds.map((id) => `public:${id}`), assetIds: inspection.assetIds });
+    productionPanel.setContext({ nside: inspection.nside, pixels: [inspection.pixel], sourceIds: publicSourceIds, assetIds: inspection.assetIds });
     void activateMode("workflow").catch(showFatal);
   });
   nextStep.append(nextCopy, prepare);
@@ -1765,8 +1791,68 @@ function renderSurveyInspection(inspection: SurveyLayerInspection | null): void 
   if (window.innerWidth <= 1040) byId("inspector-panel").classList.add("mobile-open");
 }
 
-function footprintsForSurvey(surveyId: string) {
-  return surveyFootprints?.footprints.filter((footprint) => footprint.surveyId === surveyId) ?? [];
+type InstalledSurveyFootprint = SurveyFootprintManifest["footprints"][number];
+
+function installedFootprints(): InstalledSurveyFootprint[] {
+  return surveyFootprints?.footprints ?? [];
+}
+
+function footprintsForSurvey(surveyId: string): InstalledSurveyFootprint[] {
+  return installedFootprints().filter((footprint) => footprint.surveyId === surveyId);
+}
+
+function footprintsForRegion(
+  nside: number,
+  pixels: readonly number[],
+  surveyIds: readonly string[] = [],
+  releaseIds: readonly string[] = [],
+): InstalledSurveyFootprint[] {
+  const surveys = new Set(surveyIds);
+  const releases = new Set(releaseIds);
+  const selectedPixels = new Set(pixels);
+  return installedFootprints().filter((footprint) => {
+    if (surveys.size && !surveys.has(footprint.surveyId)) return false;
+    if (releases.size && !releases.has(footprint.releaseId)) return false;
+    // Pixel numbers are only comparable when both manifests use the same NSIDE.
+    if (footprint.nside === nside && selectedPixels.size && !footprint.pixels.some((pixel) => selectedPixels.has(pixel))) return false;
+    return true;
+  });
+}
+
+function publicDisplaySourceId(footprint: InstalledSurveyFootprint): string {
+  try {
+    return publicSourceIdForFootprint(footprint) ?? publicGeometrySourceIdForFootprint(footprint);
+  } catch {
+    return publicGeometrySourceIdForFootprint(footprint);
+  }
+}
+
+function publicExecutableSourceIdsForRegion(
+  nside: number,
+  pixels: readonly number[],
+  surveyIds: readonly string[] = [],
+  releaseIds: readonly string[] = [],
+): string[] {
+  return [...new Set(
+    footprintsForRegion(nside, pixels, surveyIds, releaseIds)
+      .flatMap((footprint) => {
+        try {
+          const sourceId = publicSourceIdForFootprint(footprint);
+          return sourceId ? [sourceId] : [];
+        } catch {
+          return [];
+        }
+      }),
+  )].sort();
+}
+
+function executablePublicSourceIds(sourceIds: readonly string[]): string[] {
+  const sources = new Map((overlapResponse?.sources ?? []).map((source) => [source.id, source]));
+  return [...new Set(sourceIds.filter((sourceId) => {
+    if (!isConcretePublicSourceId(sourceId)) return false;
+    const source = sources.get(sourceId);
+    return !source || (source.kind === "public" && source.executable !== false);
+  }))].sort();
 }
 
 function workspaceSummaryKey(pixel: number, assetIds: readonly string[]): string {

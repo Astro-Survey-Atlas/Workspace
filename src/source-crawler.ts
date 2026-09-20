@@ -376,6 +376,9 @@ async function fetchDirectoryListing(
     }
     const body = await readLimited(response, maxListingBytes);
     const children = directoryChildLinks(body, directoryUrl);
+    if (!children.length) {
+      return { urls: [], truncated: false, reason: "目录没有可下载的直接子文件" };
+    }
     return {
       urls: children.slice(0, maxPerUnit),
       truncated: children.length > maxPerUnit,

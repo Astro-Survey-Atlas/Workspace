@@ -22,6 +22,7 @@ import { createAstroMcpServer } from "./mcp.js";
 import { ResourceCatalogSyncError, ResourceCatalogUnavailableError, ResourcePackageManager, resourcePackageSurveyRecords, type ResourcePackageLoad } from "./resource-packages.js";
 import type { SurveyFootprintManifest } from "./survey-footprints.js";
 import { surveyCardFor, SurveyRegistry, type SurveyRecord, type SurveyRegistrationInput, type SurveyReleaseRegistrationInput } from "./survey-registry.js";
+import { isConcretePublicSourceId, publicGeometrySourceIdForFootprint, publicSourceIdForFootprint, publicSourceIdentityForFootprint } from "./public-source-identity.js";
 import { WorkflowEngine } from "./workflow-engine.js";
 import { WorkflowStore } from "./workflow-store.js";
 import { listTags } from "./tags.js";
@@ -143,8 +144,46 @@ const coverageDownloads = new CoverageDownloadService({
  * is where a future authorized Assets source-unit API plugs in. */
 const DESI_TILE_URL_PATTERN = /^https:\/\/data\.desi\.lbl\.gov\/public\/(dr1|edr)\/spectro\/redux\/(iron|fuji)\/tiles\/cumulative\/(\d{1,6})\/(\d{8})\/$/;
 const DIRECT_FILE_URL_PATTERN = /\.(?:fits?|fits?\.gz|fz|csv|tsv|ecsv|jsonl?|parquet|zip|tgz|tar|gz|hdf5?|nc|xml|reg|txt|sha256sum)(?:$|[?#])/i;
+
+function assertExecutablePublicSourceId(sourceId: string): void {
+  if (sourceId.startsWith("public:") && !isConcretePublicSourceId(sourceId)) {
+    throw new RangeError("public sourceId must include survey, release/DR, product, and sourceId or layerId");
+  }
+  if (sourceId.startsWith("geometry:public:")) {
+    throw new RangeError("geometry-only public coverage cannot be used as a download source");
+  }
+}
+
+function assertExecutablePublicSourceIds(sourceIds: readonly string[]): void {
+  sourceIds.forEach(assertExecutablePublicSourceId);
+}
+
+function assertPublicSourceIdsInFiles(value: unknown): void {
+  if (!Array.isArray(value)) return;
+  value.forEach((entry) => {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) return;
+    const sourceId = (entry as { sourceId?: unknown }).sourceId;
+    if (typeof sourceId === "string") assertExecutablePublicSourceId(sourceId);
+  });
+}
+
+function assertPublicSourceIdsInProductionInput(value: unknown): void {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return;
+  const body = value as { region?: unknown; files?: unknown };
+  if (body.region && typeof body.region === "object" && !Array.isArray(body.region)) {
+    const sourceIds = (body.region as { sourceIds?: unknown }).sourceIds;
+    if (Array.isArray(sourceIds)) {
+      sourceIds.forEach((sourceId) => {
+        if (typeof sourceId === "string") assertExecutablePublicSourceId(sourceId);
+      });
+    }
+  }
+  assertPublicSourceIdsInFiles(body.files);
+}
+
 const productionSourceResolver: ProductionSourceResolver = {
   async resolve(region) {
+    assertExecutablePublicSourceIds(region.sourceIds);
     const sources = await overlapSources({
       nside: region.nside,
       ...(region.sourceIds.length ? { sourceIds: new Set(region.sourceIds) } : {}),
@@ -161,6 +200,10 @@ const productionSourceResolver: ProductionSourceResolver = {
     for (const source of sources) {
       if (!source.pixels.some((pixel) => regionPixels.has(pixel))) {
         blocked.push({ sourceId: source.id, reason: "来源覆盖与所选区域没有交集" });
+        continue;
+      }
+      if (source.kind === "public" && source.executable === false) {
+        blocked.push({ sourceId: source.id, reason: "公开覆盖只有几何证据，没有具体 sourceId/layerId 可供下载" });
         continue;
       }
       const url = source.sourceUrl;
@@ -1192,8 +1235,16 @@ function booleanInput(value: unknown, name: string, fallback: boolean): boolean 
   return value;
 }
 
+function publicFootprintIdentity(footprint: SurveyFootprintManifest["footprints"][number]) {
+  try {
+    return publicSourceIdentityForFootprint(footprint);
+  } catch {
+    return undefined;
+  }
+}
+
 function overlapSourceIdForPublic(footprint: SurveyFootprintManifest["footprints"][number]): string {
-  return `public:${footprint.surveyId}:${footprint.releaseId}:${footprint.product}`;
+  return publicSourceIdForFootprint(footprint) ?? publicGeometrySourceIdForFootprint(footprint);
 }
 
 function overlapSourceIdForAsset(assetId: string): string {
@@ -1243,17 +1294,25 @@ async function overlapSources(context: OverlapSourceContext): Promise<SkyOverlap
     try { manifest = await effectiveFootprints(); } catch (error) { console.warn("Public overlap sources unavailable", error); }
     manifest?.footprints
       .filter((footprint) => footprint.nside === context.nside)
-      .forEach((footprint) => accept({
-        id: overlapSourceIdForPublic(footprint),
-        label: footprint.label,
-        kind: "public",
-        nside: footprint.nside,
-        pixels: footprint.pixels,
-        surveyId: identities.find((entry) => entry.source === "assets" && entry.sourceId === footprint.surveyId)?.id ?? footprint.surveyId,
-        releaseId: footprint.releaseId,
-        product: footprint.product,
-        sourceUrl: footprint.sourceUrl,
-      }));
+      .forEach((footprint) => {
+        const sourceIdentity = publicFootprintIdentity(footprint);
+        const hasConcreteFields = Boolean(footprint.sourceId?.trim() || footprint.layerId?.trim());
+        accept({
+          id: overlapSourceIdForPublic(footprint),
+          label: footprint.label,
+          kind: "public",
+          nside: footprint.nside,
+          pixels: footprint.pixels,
+          surveyId: identities.find((entry) => entry.source === "assets" && entry.sourceId === footprint.surveyId)?.id ?? footprint.surveyId,
+          releaseId: footprint.releaseId,
+          product: footprint.product,
+          sourceUrl: footprint.sourceUrl,
+          ...(sourceIdentity ? { sourceIdentity, executable: true, availability: "entrypoint-only" as const } : {
+            executable: false,
+            availability: hasConcreteFields ? "unavailable" as const : "geometry-only" as const,
+          }),
+        });
+      });
   }
 
   if (!context.includeWorkspace) return [...result.values()].sort((left, right) => left.id.localeCompare(right.id));
@@ -1488,6 +1547,8 @@ function coverageDownloadInput(value: unknown): CoverageDownloadRequest {
     return entry.trim();
   };
   const sourceIds = stringArrayInput(body.sourceIds, "sourceIds");
+  if (sourceIds) assertExecutablePublicSourceIds(sourceIds);
+  assertPublicSourceIdsInFiles(body.files);
   if (body.targetConnectorId !== undefined) {
     throw new RangeError("targetConnectorId is not supported; coverage downloads create a new Connector");
   }
@@ -1948,6 +2009,7 @@ app.get("/api/production-runs", async (_request: Request, response: Response) =>
 
 app.post("/api/production-runs", async (request: Request, response: Response) => {
   try {
+    assertPublicSourceIdsInProductionInput(request.body);
     response.status(202).json({ run: await productionService.submit(request.body) });
   } catch (error) { sendApiError(response, error); }
 });

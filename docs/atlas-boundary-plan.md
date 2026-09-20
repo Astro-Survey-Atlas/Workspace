@@ -46,6 +46,18 @@ manifest、大小、SHA-256、MOC 坐标/ordering 和 provenance，验证失败�
 可以使用没有公共包记录的 `surveyId`/`releaseId`。Assets 的公共 MOC 会随
 package 安装进入只读公共层，不写入用户资产或用户 MOC 历史。
 
+Resource Package v3 是公开几何的正常边界。Workspace 的日常天球绘图、公共
+几何重合和离线回退都只读取已安装且通过校验的 package/native MOC，不依赖
+Assets 的 catalog/blocks 运行时接口。公开 MOC 表示官方覆盖，不保证对应文件
+一定可读。
+
+当用户明确进入重合详情或下载计划，Workspace 服务端才可以使用 Assets 的
+受保护、带认证、范围受限的查询契约，提交本次区域、HEALPix order、公开
+survey/release/DR/product 和 sourceId/layerId。浏览器不持有凭据，Workspace
+不复制或长期保存 Assets 的完整 tile/file/shard 索引；结果只属于当前
+overlap/download session，并带 revision、expiry 和可用性状态。没有具体
+sourceId/layerId 的几何层仍可显示和参与几何重合，但不能生成可执行下载项。
+
 ## Warehouse 任务契约
 
 Workspace 的远程普通扫描和 coverage 扫描都提交 namespaced
@@ -140,6 +152,8 @@ Warehouse ES 服务可以位于 `atlas-warehouse`，但不改变上述 namespace
    在 `/api/sky/coverage` 合并本地 ES、Warehouse ACTIVE layer、用户 MOC 与
    公共 Assets 层。
 5. 保持统一通知、任务历史隔离和用户数据不重算/不覆盖/不删除。
+6. 普通公开天球展示只依赖已验证 Resource Package；受保护 Assets 查询只用于
+   明确的重合详情或下载计划，并且返回结果受区域、单元数、结果数和有效期限制。
 
 验收必须同时满足：
 
@@ -158,3 +172,6 @@ Warehouse ES 服务可以位于 `atlas-warehouse`，但不改变上述 namespace
   scan、任务快照和错误不进入浏览器初始请求。
 - 没有重复通知 deck/id，临时反馈按统一生命周期显示；现有用户资产、run、
   artifact 和 hash 不被重算、覆盖或删除。
+- 几何-only、entrypoint-only、candidate/incomplete、tile-resolved 和
+  unavailable 状态保持可区分；没有具体 public source identity 时不得创建
+  下载计划项，也不得把用户资产变成公开巡天下载项。

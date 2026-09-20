@@ -10,6 +10,7 @@ import type {
   RegionSnapshot,
 } from "../../src/production";
 import type { ConnectorPublicRecord } from "../../src/connectors";
+import { isConcretePublicSourceId } from "../../src/public-source-identity";
 import { notifyWorkspace } from "./notifications";
 
 export interface ProductionContext {
@@ -644,7 +645,11 @@ export class ProductionPanel {
     execute.className = "primary-command";
     execute.textContent = pipeline.availability === "planned" ? "尚未开放" : "执行流水线";
     execute.disabled = !this.canSubmit(pipeline, draft);
-    execute.title = !this.context ? "必须先从数据覆盖页附加天区上下文" : execute.disabled ? "请补齐流水线输入" : "使用当前参数创建一条执行记录";
+    execute.title = !this.context
+      ? "必须先从数据覆盖页附加天区上下文"
+      : pipeline.key === "overlap-download@1" && !this.hasExecutablePublicSource()
+        ? "当前只有公开覆盖几何，没有具体 sourceId/layerId 可供下载"
+        : execute.disabled ? "请补齐流水线输入" : "使用当前参数创建一条执行记录";
     execute.addEventListener("click", () => void this.submit().catch((error) => this.showError(error)));
     this.renderInspectorView({ kicker: "PIPELINE TEMPLATE", title: pipeline.title, rows, body, actions: [execute] });
   }
@@ -696,6 +701,12 @@ export class ProductionPanel {
       ? `沿用浏览器反查的 ${this.context.files.length} 个直接文件（提交后立即排队）`
       : "提交后将在任务内解析来源单元并生成待审批的下载清单。";
     root.append(files);
+    if (!this.hasExecutablePublicSource()) {
+      const unavailable = document.createElement("p");
+      unavailable.className = "control-note";
+      unavailable.textContent = "当前区域只有几何覆盖证据，尚未提供具体 public sourceId/layerId，因此不能创建公开下载任务。";
+      root.append(unavailable);
+    }
   }
 
   private renderCrossmatchFields(root: HTMLElement, pipeline: ProductionPipelineDefinition, draft: Record<string, unknown>): void {
@@ -751,9 +762,13 @@ export class ProductionPanel {
 
   private canSubmit(pipeline: ProductionPipelineDefinition, draft: Record<string, unknown>): boolean {
     if (pipeline.availability !== "available" || !this.context) return false;
-    if (pipeline.key === "overlap-download@1") return true;
+    if (pipeline.key === "overlap-download@1") return this.hasExecutablePublicSource();
     if (pipeline.key === "object-crossmatch@1") return Boolean(draft.leftAssetId && draft.rightAssetId && draft.leftAssetId !== draft.rightAssetId);
     return false;
+  }
+
+  private hasExecutablePublicSource(): boolean {
+    return Boolean(this.context?.sourceIds?.some((sourceId) => isConcretePublicSourceId(sourceId)));
   }
 
   private async submit(): Promise<void> {

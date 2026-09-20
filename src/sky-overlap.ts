@@ -1,4 +1,7 @@
 import { Healpix } from "healpixjs";
+import type { PublicSourceIdentity } from "./public-source-identity.js";
+
+export type SkyOverlapAvailability = "geometry-only" | "entrypoint-only" | "candidate" | "incomplete" | "tile-resolved" | "unavailable";
 
 export interface SkyOverlapSource {
   id: string;
@@ -12,6 +15,9 @@ export interface SkyOverlapSource {
   product?: string;
   modality?: string;
   sourceUrl?: string;
+  sourceIdentity?: PublicSourceIdentity;
+  executable?: boolean;
+  availability?: SkyOverlapAvailability;
 }
 
 export interface SkyOverlapComponent {
