@@ -333,23 +333,25 @@ test("Assets survey metadata exposes pending releases without making them loadab
         name: "Legacy Surveys",
         mission: "Fixture mission",
         color: "#123456",
-        description: "Fixture survey metadata",
-        modalities: ["imaging"],
+        description: "",
+        // The public Assets projection may omit aggregate modalities; release
+        // metadata remains authoritative for the package projection.
+        modalities: [],
         releases: [
           {
             id: "release-a",
             label: "Release A",
             kind: "early_release",
-            releasedYear: 2025,
+            releasedYear: null,
             modalities: ["imaging"],
-            products: [{ name: "Fixture image", modality: "imaging", description: "Acquired geometry", status: "acquired", sourceUrl: "https://example.test/a" }],
+            products: [{ name: "Fixture image", modality: "imaging", description: "Acquired geometry", status: "acquired", sourceUrl: "/api/v1/coverage/example", geometrySourceUrl: null, reason: null, manualStep: null }],
           },
           {
             id: "release-b",
             label: "Release B",
             kind: "early_release",
             modalities: ["imaging"],
-            products: [{ name: "Fixture pending image", modality: "imaging", description: "Geometry is pending", status: "awaiting_geometry", sourceUrl: "https://example.test/b" }],
+            products: [{ name: "Fixture pending image", modality: "imaging", description: "Geometry is pending", status: "awaiting_geometry", sourceUrl: "" }],
           },
         ],
       }],
@@ -366,7 +368,9 @@ test("Assets survey metadata exposes pending releases without making them loadab
     const packageRecord = manager.get("public-legacy-surveys-footprints");
     assert.deepEqual(packageRecord.releases, ["release-a", "release-b"]);
     assert.deepEqual(packageRecord.publicReleases?.map((release) => release.id), ["release-a", "release-b"]);
+    assert.equal(packageRecord.surveyColor, "#123456");
     const record = resourcePackageSurveyRecords([packageRecord])[0]!;
+    assert.equal(record.color, "#123456");
     assert.deepEqual(record.releases.map((release) => [release.id, release.availability, release.coverage.status]), [
       ["release-a", "available", "verified"],
       ["release-b", "metadata_only", "pending"],

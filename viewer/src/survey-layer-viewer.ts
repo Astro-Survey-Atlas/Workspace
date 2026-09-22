@@ -19,6 +19,7 @@ import type { SurveyFootprint } from "../../src/survey-footprints";
 import type { SurveyCard, SurveyFootprintManifest } from "./api";
 import { cartesianToRaDec, raDecToCartesian } from "./coordinates";
 import { normalizeLayerOrder, visibleLayerDepths, type LayerDepth } from "./layer-order";
+import { surveyDisplayColor } from "../../src/survey-colors";
 import {
   buildSphericalCellEdges,
   buildSphericalCellVolumeEdges,
@@ -116,6 +117,7 @@ export interface WorkspaceCoverageLayer {
   color?: string;
   nside: number;
   pixels: number[];
+  preview?: boolean;
 }
 
 export interface WorkspaceCoverageMembership {
@@ -269,8 +271,11 @@ const OVERLAP_COLOR_LIGHT = new THREE.Color("#2c3792");
 const SELECTION_COLOR = new THREE.Color("#9fe7e0");
 const SELECTION_EDGE_COLOR = new THREE.Color("#e7fffb");
 const WORKSPACE_COLOR = new THREE.Color("#d69b4e");
-const COVERAGE_OPACITY = 0.34;
-const COVERAGE_EDGE_OPACITY = 0.16;
+const COVERAGE_OPACITY = 0.38;
+const COVERAGE_EDGE_OPACITY = 0.34;
+const OVERLAP_SURVEY_OPACITY = 0.22;
+const OVERLAP_FILL_OPACITY = 0.14;
+const OVERLAP_EDGE_OPACITY = 0.46;
 // Keep surrounding layers subdued while the selected region remains readable.
 const DIMMED_OPACITY = 0.075;
 const DIMMED_EDGE_OPACITY = 0.12;
@@ -327,14 +332,6 @@ function narrativeCameraPose(direction: THREE.Vector3, distance: number, outerRa
 
 function artifactKey(artifact: SurveyFootprint): string {
   return `${artifact.surveyId}:${artifact.releaseId}:${artifact.product}:${artifact.label}`;
-}
-
-function displayColor(source: string): THREE.Color {
-  const color = new THREE.Color(source);
-  const hsl = { h: 0, s: 0, l: 0 };
-  color.getHSL(hsl);
-  color.setHSL(hsl.h, Math.min(0.92, Math.max(0.68, hsl.s)), 0.32);
-  return color;
 }
 
 export function workspaceAssetColor(key: string): string {
@@ -523,7 +520,7 @@ export class SurveyLayerViewer {
     this.#onObjectPoint = onObjectPoint;
     this.#onOverlapComponent = onOverlapComponent;
     this.#model = buildSurveyLayerModel(surveys, manifest);
-    surveys.forEach((survey) => this.#colorBySurvey.set(survey.id, displayColor(survey.color)));
+    surveys.forEach((survey) => this.#colorBySurvey.set(survey.id, new THREE.Color(surveyDisplayColor(survey.id, survey.color))));
 
     this.#renderer = new THREE.WebGLRenderer({ canvas, antialias: true, powerPreference: "high-performance" });
     this.#renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
@@ -1278,7 +1275,7 @@ export class SurveyLayerViewer {
   }
 
   #workspaceAvailableAt(pixel: number): boolean {
-    return [...this.#workspaceLayers.values()].some((layer) => this.#workspaceLayerVisible(layer) && layer.pixels.includes(pixel));
+    return [...this.#workspaceLayers.values()].some((layer) => !layer.preview && this.#workspaceLayerVisible(layer) && layer.pixels.includes(pixel));
   }
 
   #workspaceMembershipAt(pixel: number): { surveyIds: string[]; releaseIds: string[]; assetIds: string[]; layers: WorkspaceCoverageMembership[] } {
@@ -1320,7 +1317,7 @@ export class SurveyLayerViewer {
     const root = new THREE.Group();
     root.scale.setScalar(animated ? 0.94 : 1);
     const isOverlap = surveyId === "__overlap__";
-    const meshOpacity = isOverlap ? 0.86 : COVERAGE_OPACITY;
+    const meshOpacity = isOverlap ? OVERLAP_FILL_OPACITY : COVERAGE_OPACITY;
     const material = fragmentMaterial();
     material.opacity = animated ? 0 : meshOpacity;
     const mesh = new THREE.Mesh(buildSphericalCellSheetGeometry(cells), material) as LayerMesh;
@@ -1329,7 +1326,7 @@ export class SurveyLayerViewer {
     const lineMaterials: THREE.LineBasicMaterial[] = [];
     if (isOverlap) {
       const edgeGeometry = buildSphericalCellEdges(cells);
-      const glowMaterial = new THREE.LineBasicMaterial({ vertexColors: true, transparent: true, opacity: animated ? 0 : 0.72, depthTest: false, depthWrite: false, blending: THREE.AdditiveBlending, toneMapped: false });
+      const glowMaterial = new THREE.LineBasicMaterial({ vertexColors: true, transparent: true, opacity: animated ? 0 : OVERLAP_EDGE_OPACITY, depthTest: false, depthWrite: false, blending: THREE.AdditiveBlending, toneMapped: false });
       const glow = new THREE.LineSegments(edgeGeometry, glowMaterial);
       glow.renderOrder = renderOrder + 1;
       const dashMaterial = new THREE.LineDashedMaterial({ vertexColors: true, transparent: true, opacity: animated ? 0 : 1, dashSize: 0.04, gapSize: 0.022, depthTest: false, depthWrite: false, toneMapped: false });
@@ -1340,7 +1337,7 @@ export class SurveyLayerViewer {
       lineMaterials.push(glowMaterial, dashMaterial);
       root.add(mesh, glow, dash);
     } else {
-      const lineMaterial = new THREE.LineBasicMaterial({ vertexColors: true, transparent: true, opacity: animated ? 0 : COVERAGE_EDGE_OPACITY, depthTest: true, depthWrite: false });
+      const lineMaterial = new THREE.LineBasicMaterial({ vertexColors: true, transparent: true, opacity: animated ? 0 : COVERAGE_EDGE_OPACITY, depthTest: false, depthWrite: false });
       this.#coverageEdgeMaterials.push(lineMaterial);
       const edges = new THREE.LineSegments(buildSphericalCellEdges(cells), lineMaterial);
       edges.renderOrder = renderOrder + 1;
@@ -1396,6 +1393,8 @@ export class SurveyLayerViewer {
     for (const [surveyId, mesh] of this.#meshBySurvey) {
       mesh.material.opacity = dimmed
         ? DIMMED_OPACITY
+        : this.#overlapMode
+        ? OVERLAP_SURVEY_OPACITY
         : this.#focusedSurveyId === surveyId ? 0.24 : COVERAGE_OPACITY;
     }
     this.#workspaceCoverageGroup.traverse((child) => {
@@ -1405,7 +1404,7 @@ export class SurveyLayerViewer {
         ? DIMMED_OPACITY
         : this.#focusedAssetId && assetId === this.#focusedAssetId ? 0.28 : 0.14;
     });
-    const edgeOpacity = dimmed ? DIMMED_EDGE_OPACITY : COVERAGE_EDGE_OPACITY;
+    const edgeOpacity = dimmed ? DIMMED_EDGE_OPACITY : this.#overlapMode ? OVERLAP_EDGE_OPACITY : COVERAGE_EDGE_OPACITY;
     this.#coverageEdgeMaterials.forEach((material) => { material.opacity = edgeOpacity; });
     this.#requestRender();
   }
@@ -1887,8 +1886,8 @@ export class SurveyLayerViewer {
     const restore = (group: THREE.Group, meshOpacity: number, edgeOpacity: number): void => {
       group.traverse((child) => {
         const overlap = child instanceof THREE.Mesh && child.userData.surveyId === "__overlap__";
-        if (child instanceof THREE.Mesh && child.material instanceof THREE.MeshBasicMaterial) child.material.opacity = dimmed ? DIMMED_OPACITY : overlap ? 0.86 : meshOpacity;
-        if (child instanceof THREE.LineSegments && child.material instanceof THREE.LineBasicMaterial) child.material.opacity = dimmed ? DIMMED_EDGE_OPACITY : overlap ? 0.72 : edgeOpacity;
+        if (child instanceof THREE.Mesh && child.material instanceof THREE.MeshBasicMaterial) child.material.opacity = dimmed ? DIMMED_OPACITY : overlap ? OVERLAP_FILL_OPACITY : meshOpacity;
+        if (child instanceof THREE.LineSegments && child.material instanceof THREE.LineBasicMaterial) child.material.opacity = dimmed ? DIMMED_EDGE_OPACITY : overlap ? OVERLAP_EDGE_OPACITY : edgeOpacity;
       });
     };
     restore(this.#coverageGroup, COVERAGE_OPACITY, COVERAGE_EDGE_OPACITY);

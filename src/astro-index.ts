@@ -99,6 +99,7 @@ export interface AstroCoverageLayer {
   latestArtifactId?: string;
   state?: string;
   message?: string;
+  preview?: boolean;
 }
 
 export interface AstroCoverageResponse {

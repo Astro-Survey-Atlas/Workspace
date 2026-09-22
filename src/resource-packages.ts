@@ -112,6 +112,8 @@ export interface PublicResourcePackage extends ResourcePackageCatalogEntry {
   status: ResourcePackageStatus;
   /** Read-only Assets survey registry projection; does not imply a package layer exists. */
   publicReleases?: AssetsSurveyRelease[];
+  /** Canonical display color copied from the Assets survey registry. */
+  surveyColor?: string;
 }
 
 export type AssetsProductStatus = "acquired" | "overview_only" | "awaiting_geometry" | "not_applicable";
@@ -162,16 +164,18 @@ function resourceSurveyModalities(values: readonly string[]): SurveyModality[] {
 const ASSETS_PRODUCT_STATUSES: readonly AssetsProductStatus[] = ["acquired", "overview_only", "awaiting_geometry", "not_applicable"];
 const SURVEY_RELEASE_KINDS: readonly ReleaseKind[] = ["public_release", "quick_release", "early_release", "science_results", "archive_snapshot", "planned"];
 
-function assetsSurveyModalities(value: unknown, label: string): SurveyModality[] {
+function assetsSurveyModalities(value: unknown, label: string, allowEmpty = false): SurveyModality[] {
   if (!Array.isArray(value)) throw new Error(`${label} is invalid`);
   const result = [...new Set(value.filter((entry): entry is SurveyModality => RESOURCE_SURVEY_MODALITIES.includes(entry as SurveyModality)))];
-  if (!result.length) throw new Error(`${label} is invalid`);
+  if (!result.length && !allowEmpty) throw new Error(`${label} is invalid`);
   return result;
 }
 
 function optionalHttpText(value: unknown, label: string): string | undefined {
-  if (value === undefined) return undefined;
+  if (value === undefined || value === null) return undefined;
+  if (typeof value === "string" && !value.trim()) return undefined;
   const result = text(value, label);
+  if (result.startsWith("/") && !result.startsWith("//")) return result;
   const parsed = new URL(result);
   if (parsed.protocol !== "http:" && parsed.protocol !== "https:") throw new Error(`${label} must use HTTP or HTTPS`);
   return result;
@@ -197,14 +201,14 @@ function parseAssetsSurveyCatalog(value: unknown): AssetsSurveyRecord[] {
           status,
           ...(sourceUrl === undefined ? {} : { sourceUrl }),
           ...(geometrySourceUrl === undefined ? {} : { geometrySourceUrl }),
-          ...(product.reason === undefined ? {} : { reason: text(product.reason, "Assets survey product reason", 2000) }),
-          ...(product.manualStep === undefined ? {} : { manualStep: text(product.manualStep, "Assets survey product manual step", 2000) }),
+          ...(product.reason === undefined || product.reason === null ? {} : { reason: text(product.reason, "Assets survey product reason", 2000) }),
+          ...(product.manualStep === undefined || product.manualStep === null ? {} : { manualStep: text(product.manualStep, "Assets survey product manual step", 2000) }),
         } satisfies AssetsSurveyProduct;
       }) : [];
       if (!products.length) throw new Error(`Assets survey ${surveyIndex} release ${releaseIndex} has no products`);
       const kindValue = text(release.kind, "Assets survey release kind", 40);
       const kind = SURVEY_RELEASE_KINDS.includes(kindValue as ReleaseKind) ? kindValue as ReleaseKind : "planned";
-      const releasedYear = release.releasedYear === undefined ? undefined : Number(release.releasedYear);
+      const releasedYear = release.releasedYear === undefined || release.releasedYear === null ? undefined : Number(release.releasedYear);
       if (releasedYear !== undefined && (!Number.isSafeInteger(releasedYear) || releasedYear < 1900 || releasedYear > 3000)) throw new Error("Assets survey release year is invalid");
       return {
         id: text(release.id, "Assets survey release id", 160),
@@ -221,8 +225,11 @@ function parseAssetsSurveyCatalog(value: unknown): AssetsSurveyRecord[] {
       name: text(survey.name, "Assets survey name", 200),
       mission: text(survey.mission, "Assets survey mission", 300),
       color: text(survey.color, "Assets survey color", 32),
-      description: text(survey.description, "Assets survey description", 5000),
-      modalities: assetsSurveyModalities(survey.modalities, "Assets survey modalities"),
+      description: descriptionText(survey.description, "Assets survey description", 5000),
+      // Older Assets public projections may omit the aggregate survey modalities
+      // while every release still carries its own validated modalities. Keep the
+      // metadata usable so canonical colors and release labels continue to sync.
+      modalities: assetsSurveyModalities(survey.modalities, "Assets survey modalities", true),
       releases,
     } satisfies AssetsSurveyRecord;
   });
@@ -283,7 +290,7 @@ export function resourcePackageSurveyRecords(packages: readonly PublicResourcePa
       id: surveyId,
       name: first.name,
       mission: [...new Set(records.flatMap((record) => record.facilities))].join(" / ") || first.name,
-      color: resourceSurveyColor(surveyId),
+      color: first.surveyColor ?? resourceSurveyColor(surveyId),
       description: records.map((record) => record.description).filter((value, index, all) => all.indexOf(value) === index).join(" "),
       modalities: resourceSurveyModalities(records.flatMap((record) => record.modalities)),
       origin: "public",
@@ -405,6 +412,12 @@ function object(value: unknown, label: string): Record<string, unknown> {
 
 function text(value: unknown, label: string, maximum = 2048): string {
   if (typeof value !== "string" || !value.trim() || value.length > maximum) throw new Error(`${label} is invalid`);
+  return value.trim();
+}
+
+function descriptionText(value: unknown, label: string, maximum: number): string {
+  if (value === undefined || value === null) return "";
+  if (typeof value !== "string" || value.length > maximum) throw new Error(`${label} is invalid`);
   return value.trim();
 }
 
@@ -1239,7 +1252,7 @@ export class ResourcePackageManager {
       availableReleaseIds: installed ? this.#availableReleaseIds(installed) : [],
       active,
       status: update ? "update_available" : active ? "active" : installed ? "installed" : "not_installed",
-      ...(survey ? { publicReleases: survey.releases } : {}),
+      ...(survey ? { publicReleases: survey.releases, surveyColor: survey.color } : {}),
     };
   }
 

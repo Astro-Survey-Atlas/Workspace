@@ -37,6 +37,7 @@ export interface CoverageJobSubmission {
   path?: string;
   fileNamePattern?: string;
   allowedSuffixes?: string[];
+  excludePatterns?: string[];
   coverage: CoverageJobSpec;
 }
 
@@ -58,7 +59,7 @@ export const COVERAGE_JOB_CAPABILITIES: readonly CoverageJobCapability[] = [
   { mode: "fits-wcs", coverageRole: "image_extent", requiredFields: [] },
 ];
 
-const SUBMISSION_FIELDS = new Set(["connectorId", "assetId", "releaseId", "product", "path", "fileNamePattern", "allowedSuffixes", "coverage"]);
+const SUBMISSION_FIELDS = new Set(["connectorId", "assetId", "releaseId", "product", "path", "fileNamePattern", "allowedSuffixes", "excludePatterns", "coverage"]);
 const SPEC_FIELDS = new Set(["mode", "coordinateFrame", "coordinateUnits", "raColumn", "decColumn", "healpixColumn", "healpixOrder", "coverageRole", "dataOrigin", "sourceTier", "maxOrder", "queryOrder", "previewOrder", "fileNamePattern", "centerRaAliases", "centerDecAliases", "centerUnits", "centerFrame"]);
 const SNAPSHOT_FIELDS = new Set(["surveyId", "releaseId", "product", ...SPEC_FIELDS]);
 const STABLE_ID = /^[a-z0-9](?:[a-z0-9._-]{0,178}[a-z0-9])?$/;
@@ -117,16 +118,30 @@ function suffixes(value: unknown): string[] | undefined {
   return result;
 }
 
-function fileNamePattern(value: unknown): string | undefined {
+function excludePatterns(value: unknown): string[] | undefined {
   if (value === undefined) return undefined;
-  if (typeof value !== "string") throw new RangeError("fileNamePattern must be a string");
+  if (!Array.isArray(value) || value.length < 1 || value.length > 32) throw new RangeError("excludePatterns must contain between 1 and 32 patterns");
+  const result = value.map((entry, index) => {
+    if (typeof entry !== "string" || !entry.trim()) throw new RangeError(`excludePatterns[${index}] must be a non-empty string`);
+    const pattern = entry.trim();
+    if (pattern.length > 512) throw new RangeError(`excludePatterns[${index}] must contain at most 512 characters`);
+    if (/[\0\n\r]/.test(pattern)) throw new RangeError(`excludePatterns[${index}] must be a safe glob`);
+    return pattern;
+  });
+  if (new Set(result).size !== result.length) throw new RangeError("excludePatterns must not contain duplicates");
+  return result;
+}
+
+export function validateCoverageFileNamePattern(value: unknown, label = "fileNamePattern"): string | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== "string") throw new RangeError(`${label} must be a string`);
   const pattern = value.trim();
-  if (!pattern || pattern.length > FILE_NAME_PATTERN_MAX) throw new RangeError("fileNamePattern must contain between 1 and 512 characters");
-  if (/[\0/]/.test(pattern) || /[\n\r]/.test(pattern)) throw new RangeError("fileNamePattern must match a safe basename");
+  if (!pattern || pattern.length > FILE_NAME_PATTERN_MAX) throw new RangeError(`${label} must contain between 1 and 512 characters`);
+  if (/[\0/]/.test(pattern) || /[\n\r]/.test(pattern)) throw new RangeError(`${label} must match a safe basename`);
   try {
     const compiled = new RegExp(pattern);
     if (compiled.test("a/b") || compiled.test("a\\b")) throw new Error();
-  } catch { throw new RangeError("fileNamePattern must be a safe basename regular expression"); }
+  } catch { throw new RangeError(`${label} must be a safe basename regular expression`); }
   return pattern;
 }
 
@@ -188,7 +203,7 @@ function normalizeSpec(value: unknown): CoverageJobSpec {
   const maxOrder = normalizedAuthorityOrder(raw.maxOrder, dataOrigin, sourceTier, role);
   if (raw.queryOrder !== undefined && raw.queryOrder !== 8) throw new RangeError("coverage.queryOrder is fixed at 8");
   if (raw.previewOrder !== undefined && raw.previewOrder !== 4) throw new RangeError("coverage.previewOrder is fixed at 4");
-  const pattern = fileNamePattern(raw.fileNamePattern);
+  const pattern = validateCoverageFileNamePattern(raw.fileNamePattern);
   const centerRaAliases = aliases(raw.centerRaAliases, "coverage.centerRaAliases");
   const centerDecAliases = aliases(raw.centerDecAliases, "coverage.centerDecAliases");
   const centerUnits = raw.centerUnits === undefined ? undefined : raw.centerUnits as CoverageCoordinateUnits;
@@ -214,12 +229,13 @@ export function validateCoverageJobSubmission(value: unknown): CoverageJobSubmis
   const raw = objectValue(value, "coverage job");
   rejectUnknown(raw, SUBMISSION_FIELDS, "coverage job");
   const path = optionalText(raw.path, "path", 4096);
-  const pattern = fileNamePattern(raw.fileNamePattern);
+  const pattern = validateCoverageFileNamePattern(raw.fileNamePattern);
   const allowedSuffixes = suffixes(raw.allowedSuffixes);
+  const excluded = excludePatterns(raw.excludePatterns);
   if (path?.includes("\0")) throw new RangeError("path must not contain a NUL byte");
   const normalizedCoverage = normalizeSpec(raw.coverage);
   if (pattern !== undefined && normalizedCoverage.fileNamePattern !== undefined && normalizedCoverage.fileNamePattern !== pattern) throw new RangeError("fileNamePattern must be consistent between submission and coverage");
-  return { connectorId: stableId(raw.connectorId, "connectorId"), assetId: stableId(raw.assetId, "assetId"), releaseId: stableId(raw.releaseId, "releaseId"), product: text(raw.product, "product", 160), ...(path === undefined ? {} : { path }), ...(pattern === undefined ? {} : { fileNamePattern: pattern }), ...(allowedSuffixes === undefined ? {} : { allowedSuffixes }), coverage: { ...normalizedCoverage, ...(pattern === undefined || normalizedCoverage.fileNamePattern !== undefined ? {} : { fileNamePattern: pattern }) } };
+  return { connectorId: stableId(raw.connectorId, "connectorId"), assetId: stableId(raw.assetId, "assetId"), releaseId: stableId(raw.releaseId, "releaseId"), product: text(raw.product, "product", 160), ...(path === undefined ? {} : { path }), ...(pattern === undefined ? {} : { fileNamePattern: pattern }), ...(allowedSuffixes === undefined ? {} : { allowedSuffixes }), ...(excluded === undefined ? {} : { excludePatterns: excluded }), coverage: { ...normalizedCoverage, ...(pattern === undefined || normalizedCoverage.fileNamePattern !== undefined ? {} : { fileNamePattern: pattern }) } };
 }
 
 export function coverageJobSnapshot(surveyId: string, submission: CoverageJobSubmission): CoverageJobSnapshot {

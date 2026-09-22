@@ -14,6 +14,7 @@ export type { WarehouseTaskLogs };
 import type { CoverageJobSpec } from "../../src/coverage-jobs";
 import type { DataAssetCoverageState, DataAssetNextAction, DataAssetObjectState, DataAssetOperationalStatus } from "../../src/data-asset-status";
 import type { SkyOverlapComponent, SkyOverlapSource } from "../../src/sky-overlap";
+import type { AssetsRegionFileEvidence } from "../../src/assets-region-client";
 import type { ProductionPipelineDefinition, ProductionRun, ProductionRunInput } from "../../src/production";
 import type { AiProviderInput, AiProviderRecord, McpServerInput, McpServerRecord } from "../../src/system-config";
 import type { WorkspaceAgentSession } from "../../src/workspace-agent";
@@ -114,6 +115,7 @@ export interface WorkspaceAssetCoverageLayer extends Omit<AstroCoverageLayer, "k
   coverageState?: DataAssetCoverageState;
   objectState?: DataAssetObjectState;
   nextAction?: DataAssetNextAction;
+  preview?: boolean;
 }
 
 export interface WorkspaceAssetCoverageResponse {
@@ -250,7 +252,9 @@ export interface RemoteCoverageScanInput {
   releaseId: string;
   product: string;
   path?: string;
+  fileNamePattern?: string;
   allowedSuffixes?: string[];
+  excludePatterns?: string[];
   coverage: CoverageJobSpec;
 }
 
@@ -480,8 +484,8 @@ export const workspaceApi = {
   async skyOverlapDetails(input: { componentId: string; sourceIds: string[]; nside: number }): Promise<Record<string, unknown>> {
     return postJson<Record<string, unknown>>("/api/sky/overlap/details", input);
   },
-  async skyReverseLookup(input: { componentId?: string; sourceIds?: string[]; assetIds?: string[]; pixels?: number[]; nside?: number }): Promise<{ files: CoverageDownloadFile[]; unavailable: Array<{ sourceId: string; url?: string; reason: string }>; warnings?: string[]; sources: SkyOverlapSource[] }> {
-    return postJson<{ files: CoverageDownloadFile[]; unavailable: Array<{ sourceId: string; url?: string; reason: string }>; warnings?: string[]; sources: SkyOverlapSource[] }>("/api/sky/reverse-lookup", input);
+  async skyReverseLookup(input: { componentId?: string; sourceIds?: string[]; assetIds?: string[]; pixels?: number[]; nside?: number }): Promise<{ files: CoverageDownloadFile[]; fileEvidence?: AssetsRegionFileEvidence[]; unavailable: Array<{ sourceId: string; url?: string; reason: string }>; warnings?: string[]; sources: SkyOverlapSource[] }> {
+    return postJson<{ files: CoverageDownloadFile[]; fileEvidence?: AssetsRegionFileEvidence[]; unavailable: Array<{ sourceId: string; url?: string; reason: string }>; warnings?: string[]; sources: SkyOverlapSource[] }>("/api/sky/reverse-lookup", input);
   },
   async submitCoverageDownload(input: { files: CoverageDownloadFile[]; componentId?: string; sourceIds?: string[] }): Promise<CoverageDownloadJob> {
     return (await postJson<{ job: CoverageDownloadJob }>("/api/coverage-downloads", input)).job;

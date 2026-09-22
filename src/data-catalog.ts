@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 
 import { normalizeLocalSourceRelativePath } from "./local-source-inspection.js";
 import type { MetadataStore } from "./storage/types.js";
+import { validateCoverageFileNamePattern } from "./coverage-jobs.js";
 
 export type DataAssetKind = "catalog" | "image" | "spectra" | "cube" | "timeseries" | "other";
 export type DataConnectorKind = "metadata" | "local" | "http" | "mcp" | "tap" | "s3" | "database" | "jdbc";
@@ -46,6 +47,14 @@ export interface DataAssetScanSpec {
   product?: string;
 }
 
+/**
+ * Selection metadata for image/cube Warehouse scans. This is deliberately
+ * separate from the CSV-only scanSpec used by the legacy local executor.
+ */
+export interface DataAssetWarehouseScanSpec {
+  fileNamePattern: string;
+}
+
 export interface DataAssetRecord {
   id: string;
   name: string;
@@ -65,6 +74,7 @@ export interface DataAssetRecord {
   connectorLocationKeys?: string[];
   lineage?: DataAssetLineage[];
   scanSpec?: DataAssetScanSpec;
+  warehouseScanSpec?: DataAssetWarehouseScanSpec;
   status: DataAssetStatus;
   projectState: DataAssetProjectState;
   projectStates?: DataAssetProjectState[];
@@ -93,6 +103,7 @@ export interface DataAssetRegistrationInput {
   connectorLocationKeys?: string[];
   lineage?: DataAssetLineage[];
   scanSpec?: DataAssetScanSpec;
+  warehouseScanSpec?: DataAssetWarehouseScanSpec;
   status?: DataAssetStatus;
   projectState?: DataAssetProjectState;
   projectStates?: DataAssetProjectState[];
@@ -116,6 +127,7 @@ const SCAN_SPEC_FIELDS = new Set([
 ]);
 const SCAN_SPEC_COLUMN_MAXIMUM = 512;
 const SCAN_SPEC_TEXT_MAXIMUM = 160;
+const WAREHOUSE_SCAN_SPEC_FIELDS = new Set(["fileNamePattern"]);
 
 export function inferProjectStates(record: Pick<DataAssetRecord, "status" | "access"> & { accesses?: DataAssetAccess[] }): DataAssetProjectState[] {
   const accesses = record.accesses?.length ? record.accesses : [record.access];
@@ -186,6 +198,17 @@ function validateScanSpec(value: unknown): DataAssetScanSpec | undefined {
     ...(modality === undefined ? {} : { modality }),
     ...(product === undefined ? {} : { product }),
   };
+}
+
+function validateWarehouseScanSpec(value: unknown): DataAssetWarehouseScanSpec | undefined {
+  if (value === undefined) return undefined;
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new RangeError("warehouseScanSpec must be an object");
+  const spec = value as Record<string, unknown>;
+  const unknown = Object.keys(spec).find((field) => !WAREHOUSE_SCAN_SPEC_FIELDS.has(field));
+  if (unknown) throw new RangeError(`warehouseScanSpec contains unknown field: ${unknown}`);
+  const fileNamePattern = validateCoverageFileNamePattern(spec.fileNamePattern, "warehouseScanSpec.fileNamePattern");
+  if (!fileNamePattern) throw new RangeError("warehouseScanSpec.fileNamePattern is required");
+  return { fileNamePattern };
 }
 
 function validateAccesses(value: unknown): DataAssetAccess[] | undefined {
@@ -290,6 +313,10 @@ function validateInput(input: DataAssetRegistrationInput): DataAssetRegistration
   const connectorLocationKeys = validateConnectorLocationKeys(value.connectorLocationKeys);
   const projectStates = validProjectStates(value.projectStates);
   const scanSpec = validateScanSpec(value.scanSpec);
+  const warehouseScanSpec = validateWarehouseScanSpec(value.warehouseScanSpec);
+  if (warehouseScanSpec && value.kind !== "image" && value.kind !== "cube") {
+    throw new RangeError("warehouseScanSpec is supported only for image and cube assets");
+  }
   const surveyId = textValue(value.surveyId, "surveyId", 120, false) || undefined;
   const releaseId = textValue(value.releaseId, "releaseId", 120, false) || undefined;
   if (releaseId && !surveyId) throw new RangeError("releaseId requires surveyId");
@@ -315,6 +342,7 @@ function validateInput(input: DataAssetRegistrationInput): DataAssetRegistration
     connectorLocationKeys,
     lineage,
     scanSpec,
+    warehouseScanSpec,
     status: value.status,
     projectState: value.projectState,
     projectStates: projectStates ?? (value.projectState ? [value.projectState] : undefined),
@@ -327,6 +355,10 @@ export function normalizeDataAssetRecord(entry: DataAssetRecord, origin: DataAss
     ? undefined
     : normalizeLocalSourceRelativePath(entry.sourceRelativePath, "sourceRelativePath");
   const scanSpec = validateScanSpec(entry.scanSpec);
+  const warehouseScanSpec = validateWarehouseScanSpec(entry.warehouseScanSpec);
+  if (warehouseScanSpec && entry.kind !== "image" && entry.kind !== "cube") {
+    throw new RangeError("warehouseScanSpec is supported only for image and cube assets");
+  }
   const accesses = entry.accesses?.length ? entry.accesses : [entry.access];
   const access = accesses[0] ?? entry.access;
   const inferredStates = inferProjectStates({ status: entry.status, access, accesses });
@@ -344,6 +376,7 @@ export function normalizeDataAssetRecord(entry: DataAssetRecord, origin: DataAss
     connectorLocationKeys: Array.isArray(entry.connectorLocationKeys) ? [...new Set(entry.connectorLocationKeys)] : [],
     ...(sourceRelativePath === undefined ? {} : { sourceRelativePath }),
     ...(scanSpec === undefined ? {} : { scanSpec }),
+    ...(warehouseScanSpec === undefined ? {} : { warehouseScanSpec }),
     projectStates: projectStates.length ? projectStates : ["planned"],
     projectState: PROJECT_STATES.includes(entry.projectState) && projectStates.includes(entry.projectState)
       ? entry.projectState
@@ -411,6 +444,7 @@ export class DataCatalogRegistry {
       connectorLocationKeys: value.connectorLocationKeys ?? [],
       lineage: value.lineage ?? [],
       ...(value.scanSpec === undefined ? {} : { scanSpec: value.scanSpec }),
+      ...(value.warehouseScanSpec === undefined ? {} : { warehouseScanSpec: value.warehouseScanSpec }),
       status: value.status ?? "metadata_only",
       projectState: value.projectState ?? preferredProjectState(value.projectStates ?? inferProjectStates({
         status: value.status ?? "metadata_only",
@@ -459,6 +493,9 @@ export class DataCatalogRegistry {
       ...(value.scanSpec === undefined
         ? (current.scanSpec === undefined ? {} : { scanSpec: current.scanSpec })
         : { scanSpec: value.scanSpec }),
+      ...(value.warehouseScanSpec === undefined
+        ? (current.warehouseScanSpec === undefined ? {} : { warehouseScanSpec: current.warehouseScanSpec })
+        : { warehouseScanSpec: value.warehouseScanSpec }),
       status: value.status ?? current.status,
       projectState: value.projectState ?? preferredProjectState(value.projectStates ?? current.projectStates ?? [current.projectState]),
       projectStates: value.projectStates ?? current.projectStates ?? [current.projectState],

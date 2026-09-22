@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { DataCatalogRegistry, normalizeDataAssetRecord, normalizePersistedDataAsset, type DataAssetRegistrationInput, type DataAssetScanSpec } from "../src/data-catalog.js";
+import { DataCatalogRegistry, normalizeDataAssetRecord, normalizePersistedDataAsset, type DataAssetRegistrationInput, type DataAssetScanSpec, type DataAssetWarehouseScanSpec } from "../src/data-catalog.js";
 import { SqliteMetadataStore } from "../src/storage/index.js";
 
 async function fixture(): Promise<{ directory: string; statePath: string }> {
@@ -30,6 +30,10 @@ const normalizedScanSpec: DataAssetScanSpec = {
   coordinateUnits: "deg",
   modality: "photometry",
   product: "source catalog",
+};
+
+const normalizedWarehouseScanSpec: DataAssetWarehouseScanSpec = {
+  fileNamePattern: "^CSST_MSC_MS_WIDE_.*\\.fits$",
 };
 
 function registrationWithScanSpec(scanSpec: unknown): DataAssetRegistrationInput {
@@ -154,6 +158,51 @@ test("CSV scan specs reject unknown fields, invalid formats, columns, coordinate
 
     const created = await registry.register({ ...registrationWithScanSpec(valid) });
     await assert.rejects(async () => normalizePersistedDataAsset({ ...created, scanSpec: { ...valid, modality: 42 } }), /modality must be a string/);
+  } finally {
+    await rm(paths.directory, { recursive: true, force: true });
+  }
+});
+
+test("image Warehouse scan selectors are normalized, retained by updates, and survive restart", async () => {
+  const paths = await fixture();
+  try {
+    const registry = await catalogRegistry(paths.statePath);
+    const created = await registry.register({
+      name: "CSST W1 image",
+      kind: "image",
+      connector: "s3",
+      sourceUri: "s3://example/W1_Phot",
+      format: "directory",
+      warehouseScanSpec: { fileNamePattern: " ^CSST_MSC_MS_WIDE_.*\\.fits$ " },
+    });
+    assert.deepEqual(created.warehouseScanSpec, normalizedWarehouseScanSpec);
+    assert.deepEqual(normalizeDataAssetRecord(created, "user").warehouseScanSpec, normalizedWarehouseScanSpec);
+    assert.deepEqual(normalizePersistedDataAsset(created)?.warehouseScanSpec, normalizedWarehouseScanSpec);
+
+    const updated = await registry.update(created.id, { name: "Updated CSST W1 image", kind: "image" });
+    assert.deepEqual(updated.warehouseScanSpec, normalizedWarehouseScanSpec);
+
+    const restarted = await catalogRegistry(paths.statePath);
+    assert.deepEqual((await restarted.get(created.id)).warehouseScanSpec, normalizedWarehouseScanSpec);
+  } finally {
+    await rm(paths.directory, { recursive: true, force: true });
+  }
+});
+
+test("Warehouse scan selectors reject unsafe fields, patterns, and asset kinds", async () => {
+  const paths = await fixture();
+  try {
+    const registry = await catalogRegistry(paths.statePath);
+    const base = {
+      name: "Image",
+      kind: "image" as const,
+      connector: "s3" as const,
+      sourceUri: "s3://example/images",
+      format: "directory",
+    };
+    await assert.rejects(() => registry.register({ ...base, warehouseScanSpec: { fileNamePattern: "^foo/.*\\.fits$" } }), /safe basename/);
+    await assert.rejects(() => registry.register({ ...base, warehouseScanSpec: { fileNamePattern: "^foo-.*\\.fits$", extra: true } as never }), /unknown field/);
+    await assert.rejects(() => registry.register({ ...base, kind: "catalog", warehouseScanSpec: normalizedWarehouseScanSpec }), /only for image and cube/);
   } finally {
     await rm(paths.directory, { recursive: true, force: true });
   }

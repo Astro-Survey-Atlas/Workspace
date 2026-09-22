@@ -43,6 +43,7 @@ import { buildProvenance } from "./build-metadata.js";
 import { InstallationService } from "./installation.js";
 import { SystemConfigStore } from "./system-config.js";
 import { WorkspaceAgentService } from "./workspace-agent.js";
+import { AssetsRegionClient, assetsLayerIdForIdentity, type AssetsRegionFileEvidence } from "./assets-region-client.js";
 
 const projectRoot = fileURLToPath(new URL("../", import.meta.url));
 const port = Number(process.env.PORT ?? "3000");
@@ -255,6 +256,10 @@ const productionService = new ProductionService({
   ...(warehouseScans.enabled ? { warehouseHandoff: warehouseProductionHandoff } : {}),
 });
 const systemConfig = new SystemConfigStore(systemConfigRoot);
+const assetsRegionClient = new AssetsRegionClient({
+  catalogUrl: resourceCatalogUrl,
+  getApiKey: () => systemConfig.getAssetsApiKey(),
+});
 const workspaceAgent = new WorkspaceAgentService({ root: path.join(stateRoot, "agent"), config: systemConfig, dataCatalog, connectors, production: productionService });
 const workflowEngine = new WorkflowEngine(workflowStore, new McpCatalogQueryClient(catalogMcpUrl, catalogMcpTimeoutMs, 1));
 const agentService = new AgentService(workflowStore, workflowEngine);
@@ -1442,18 +1447,66 @@ interface ReverseLookupUnavailable {
 interface ReverseLookupResult {
   files: CoverageDownloadFile[];
   unavailable: ReverseLookupUnavailable[];
+  fileEvidence?: AssetsRegionFileEvidence[];
   warnings?: string[];
 }
 
-async function reverseLookupFiles(sources: readonly SkyOverlapSource[]): Promise<ReverseLookupResult> {
+interface ReverseLookupRegion {
+  order: number;
+  cells: number[];
+}
+
+function mergeUnavailable(unavailable: Map<string, ReverseLookupUnavailable>, sourceId: string, reason: string): void {
+  const current = unavailable.get(sourceId);
+  unavailable.set(sourceId, current ? { ...current, reason: `${current.reason}；${reason}` } : { sourceId, reason });
+}
+
+async function reverseLookupFiles(sources: readonly SkyOverlapSource[], region?: ReverseLookupRegion): Promise<ReverseLookupResult> {
   const files = new Map<string, CoverageDownloadFile>();
   const unavailable = new Map<string, ReverseLookupUnavailable>();
   const usedNames = new Set<string>();
   const warnings: string[] = [];
+  const fileEvidence: AssetsRegionFileEvidence[] = [];
+  const assetsHandledSources = new Set<string>();
+  if (region) {
+    const publicSources = sources.filter((source) => source.kind === "public" && source.sourceIdentity);
+    const layerIds = [...new Set(publicSources.map((source) => assetsLayerIdForIdentity(source.sourceIdentity)).filter((value): value is string => Boolean(value)))];
+    if (layerIds.length) {
+      try {
+        const lookup = await assetsRegionClient.lookup({ layerIds, order: region.order, cells: region.cells, limit: 1000 });
+        if (lookup) {
+          lookup.requested.layerIds.forEach((layerId) => assetsHandledSources.add(layerId));
+          fileEvidence.push(...lookup.files);
+          warnings.push(...lookup.notes);
+          lookup.files.forEach((evidence) => {
+            const sourceIds = [...new Set(evidence.matchingCoverage.map((match) => match.layerId))];
+            const sourceId = sourceIds[0] ?? "assets-region-query";
+            if (evidence.downloadable && /^https?:\/\//i.test(evidence.sourceUri ?? "")) {
+              const key = `${evidence.sourceUri}\u0000${sourceId}`;
+              files.set(key, {
+                url: evidence.sourceUri!,
+                name: evidence.fileName,
+                ...(evidence.sizeBytes === undefined ? {} : { sizeBytes: evidence.sizeBytes }),
+                sourceId,
+              });
+              return;
+            }
+            mergeUnavailable(unavailable, sourceId, `Assets 已定位 ${evidence.fileName}，但该文件当前没有可直接下载的 HTTP 地址`);
+          });
+          if (!lookup.files.length) {
+            layerIds.forEach((layerId) => mergeUnavailable(unavailable, layerId, "Assets 反查未找到该区域的文件证据"));
+          }
+        }
+      } catch (error) {
+        warnings.push(error instanceof Error ? error.message : String(error));
+      }
+    }
+  }
   const discoveredSources = await Promise.all([...sources]
     .sort((left, right) => left.id.localeCompare(right.id))
     .map(async (source) => ({ source, discovered: /^https?:\/\//i.test(source.sourceUrl ?? "") ? await discoverSourceFiles(source.sourceUrl!) : undefined })));
   discoveredSources.forEach(({ source, discovered }) => {
+    if (source.sourceIdentity && assetsHandledSources.has(assetsLayerIdForIdentity(source.sourceIdentity) ?? "")) return;
     if (!source.sourceUrl) {
       unavailable.set(source.id, { sourceId: source.id, reason: "来源没有可反查的文件 URL" });
       return;
@@ -1496,6 +1549,7 @@ async function reverseLookupFiles(sources: readonly SkyOverlapSource[]): Promise
   return {
     files: [...files.values()].sort((left, right) => left.url.localeCompare(right.url)),
     unavailable: [...unavailable.values()].sort((left, right) => left.sourceId.localeCompare(right.sourceId)),
+    ...(fileEvidence.length ? { fileEvidence } : {}),
     ...(warnings.length ? { warnings } : {}),
   };
 }
@@ -1530,7 +1584,7 @@ app.post("/api/sky/overlap/details", async (request: Request, response: Response
     if (componentId && !component) throw new Error(`Overlap component not found: ${componentId}`);
     const pixels = component?.cells ?? (body.pixels === undefined ? overlap.pixels : overlapPixelsInput(body.pixels));
     const selectedSources = sources.filter((source) => pixels.some((pixel) => source.pixels.includes(pixel)));
-    response.json({ component: component ?? null, pixels, sources: selectedSources, ...(await reverseLookupFiles(selectedSources)) });
+    response.json({ component: component ?? null, pixels, sources: selectedSources, ...(await reverseLookupFiles(selectedSources, { order: Math.log2(context.nside), cells: pixels })) });
   } catch (error) {
     sendApiError(response, error);
   }
@@ -1550,7 +1604,7 @@ app.post("/api/sky/reverse-lookup", async (request: Request, response: Response)
     }
     if (!pixels?.length) throw new RangeError("pixels or componentId is required");
     const selectedSources = sources.filter((source) => pixels!.some((pixel) => source.pixels.includes(pixel)));
-    response.json({ pixels, sources: selectedSources, ...(await reverseLookupFiles(selectedSources)) });
+    response.json({ pixels, sources: selectedSources, ...(await reverseLookupFiles(selectedSources, { order: Math.log2(context.nside), cells: pixels })) });
   } catch (error) {
     sendApiError(response, error);
   }
@@ -1767,6 +1821,7 @@ function mergeCoverageLayers(base: AstroCoverageLayer, extra: AstroCoverageLayer
       ? {}
       : { maxOrder: Math.max(base.maxOrder ?? 0, extra.maxOrder ?? 0) }),
     precision: mergeCoveragePrecision(base.precision, extra.precision),
+    preview: Boolean(base.preview) || Boolean(extra.preview),
     ...(messages.length ? { message: [...new Set(messages)].join("; ") } : {}),
   };
 }
@@ -1873,22 +1928,27 @@ app.get("/api/sky/coverage", async (request: Request, response: Response) => {
         const mocLayer = artifactSelection
           ? await artifactCoverageLayer(artifactSelection.renderable, nside, asset, artifactSelection.latest)
           : undefined;
+        const officialReady = mocLayer?.mocStatus === "ready" || warehouseLayer?.state === "ACTIVE";
+        const preview = officialReady ? undefined : await warehouseScans.coveragePreview(asset.id, nside);
         const pixels = new Set<number>(legacy.pixels);
         local.pixels.forEach((pixel) => pixels.add(pixel));
         warehouseLayer?.pixels.forEach((pixel) => pixels.add(pixel));
         mocLayer?.pixels.forEach((pixel) => pixels.add(pixel));
+        preview?.pixels.forEach((pixel) => pixels.add(pixel));
         const objectCount = local.facts.reduce((sum, fact) => sum + fact.objectCount, 0);
         const status = aggregateCoverageStatus([
           coverageStatus(legacy.status),
           coverageStatus(local.status),
           ...(warehouseLayer ? [coverageStatus(warehouseLayer.status)] : warehouse.status === "error" ? ["error" as const] : []),
           ...(mocLayer ? [coverageStatus(mocLayer.status)] : []),
+          ...(preview ? ["pending" as const] : []),
         ]);
         const message = [
           legacy.status === "error" ? legacy.message : undefined,
           local.status !== "ready" ? local.message : undefined,
           warehouseLayer?.message,
           mocLayer?.message,
+          preview ? "扫描中/临时覆盖" : undefined,
         ].filter(Boolean).join("; ") || undefined;
         const breakdown = {
           key: asset.id,
@@ -1918,10 +1978,11 @@ app.get("/api/sky/coverage", async (request: Request, response: Response) => {
           nativeOrders: warehouseLayer?.nativeOrders ?? mocLayer?.availableOrders,
           availableOrders: warehouseLayer?.availableOrders ?? mocLayer?.availableOrders,
           maxOrder: warehouseLayer?.maxOrder ?? mocLayer?.maxOrder,
-          precision: warehouseLayer?.precision ?? mocLayer?.precision,
+          precision: warehouseLayer?.precision ?? mocLayer?.precision ?? preview?.precision,
           state: warehouseLayer?.state,
           mocStatus: mocLayer?.mocStatus,
           artifactId: mocLayer?.artifactId,
+          ...(preview ? { preview: true } : {}),
         } satisfies AstroCoverageLayer;
         statuses.push(status);
         if (message) messages.push(message);
@@ -2003,6 +2064,31 @@ app.get("/api/sky/coverage", async (request: Request, response: Response) => {
       const existing = layersByKey.get(key);
       layersByKey.set(key, existing ? mergeCoverageLayers(existing, layer, key) : { ...layer, key });
     });
+    for (const asset of knownAssets) {
+      const key = `asset:${asset.id}`;
+      const existing = layersByKey.get(key);
+      if (existing?.mocStatus === "ready" || existing?.state === "ACTIVE") continue;
+      const preview = await warehouseScans.coveragePreview(asset.id, nside);
+      if (!preview) continue;
+      const previewLayer: AstroCoverageLayer = {
+        key,
+        layerId: existing?.layerId ?? workspaceLayerIdForAsset(asset.id),
+        assetId: asset.id,
+        assetIds: [asset.id],
+        assetName: asset.name,
+        surveyId: asset.surveyId,
+        releaseId: asset.releaseId,
+        pixels: preview.pixels,
+        byAsset: [{ key: asset.id, label: asset.name, files: 0, bytes: 0 }],
+        status: "pending",
+        source: "asset",
+        message: "扫描中/临时覆盖",
+        nside,
+        precision: preview.precision,
+        preview: true,
+      };
+      layersByKey.set(key, existing ? mergeCoverageLayers(existing, previewLayer, key) : previewLayer);
+    }
     const layers = [...layersByKey.values()];
     response.json({
       ...local,

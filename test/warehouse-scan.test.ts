@@ -267,7 +267,7 @@ test("passes an S3 connector region through ScanPlan v2", () => {
   assert.equal(plan.source.connector.region, "cn-hangzhou");
 });
 
-test("does not silently drop a basename filter unsupported by ScanPlan v2", () => {
+test("rejects a basename filter that is not a FITS image selector", () => {
   assert.throws(() => request({
     surveyId: "my-survey",
     releaseId: "my-release",
@@ -283,8 +283,55 @@ test("does not silently drop a basename filter unsupported by ScanPlan v2", () =
     previewOrder: 4,
     raColumn: "ra",
     decColumn: "dec",
-    fileNamePattern: "^objects-.*\\.csv$",
-  }), /fileNamePattern.*not supported.*ScanPlan v2/);
+    fileNamePattern: "^(objects|sources)-.*\\.csv$",
+  }), /Warehouse filename patterns are supported only for FITS image scans/);
+});
+
+test("allows an unscoped S3 image self-scan without a filename selector", async () => {
+  const fixture = await warehouseFixture(["SUBMITTED"], {}, "http://warehouse-es:9200", "user", [], {
+    kind: "image",
+    modalities: ["image"],
+    scanSpec: undefined,
+    access: { ...asset.access, format: "directory" },
+    accesses: [{ ...asset.access, format: "directory" }],
+  });
+  try {
+    const run = await fixture.service.submitConnectorScan(fixture.connector.id, "unscoped-image");
+    const scanRequest = fixture.requests.find((request) => request.method === "POST" && request.path.endsWith("/scanrequests"));
+    assert.ok(scanRequest);
+    const plan = ((scanRequest.body as Record<string, any>).spec as Record<string, any>).plan as Record<string, any>;
+    assert.equal(run.sourcePath, "s3://user-data/catalogs");
+    assert.deepEqual(plan.filters, { includeSuffixes: [".fits", ".fit", ".fits.gz"] });
+    assert.deepEqual(plan.extraction, { mode: "fits-wcs", outputOrder: 10 });
+  } finally {
+    await rm(fixture.directory, { recursive: true, force: true });
+  }
+});
+
+test("narrows a persisted S3 image filename selector into a ScanPlan v2 prefix", async () => {
+  const fixture = await warehouseFixture(["SUBMITTED"], {}, "http://warehouse-es:9200", "user", [], {
+    kind: "image",
+    modalities: ["image"],
+    scanSpec: undefined,
+    warehouseScanSpec: { fileNamePattern: "^CSST_MSC_MS_WIDE_.*\\.fits$" },
+    access: { ...asset.access, format: "directory" },
+    accesses: [{ ...asset.access, format: "directory" }],
+  });
+  try {
+    const run = await fixture.service.submitConnectorScan(fixture.connector.id, "scoped-image");
+    const scanRequest = fixture.requests.find((request) => request.method === "POST" && request.path.endsWith("/scanrequests"));
+    assert.ok(scanRequest);
+    const plan = ((scanRequest.body as Record<string, any>).spec as Record<string, any>).plan as Record<string, any>;
+    assert.equal(run.sourcePath, "s3://user-data/catalogs/CSST_MSC_MS_WIDE_");
+    assert.deepEqual(plan.source.location, { bucket: "user-data", prefix: "catalogs/CSST_MSC_MS_WIDE_" });
+    assert.deepEqual(plan.filters, {
+      includeSuffixes: [".fits"],
+      excludePatterns: ["catalogs/CSST_MSC_MS_WIDE_*/*"],
+    });
+    assert.deepEqual(plan.extraction, { mode: "fits-wcs", outputOrder: 10 });
+  } finally {
+    await rm(fixture.directory, { recursive: true, force: true });
+  }
 });
 
 test("the Warehouse integration flag accepts only strict booleans and defaults off", () => {
@@ -363,6 +410,7 @@ async function warehouseFixture(
   warehouseEsUrl = "http://warehouse-es:9200",
   assetOrigin: DataAssetRecord["origin"] = "user",
   additionalAssets: DataAssetRecord[] = [],
+  assetOverride: Partial<DataAssetRecord> = {},
 ): Promise<WarehouseFixture> {
   const directory = await mkdtemp(path.join(os.tmpdir(), "astro-warehouse-scan-service-"));
   const store = new SqliteMetadataStore(path.join(directory, "workspace.sqlite"));
@@ -376,7 +424,7 @@ async function warehouseFixture(
     lastCheck: { status: "ok", checkedAt: connector.updatedAt, summary: "ok", configHash: connectorConfigurationHash({ ...connector, credentialRef }) },
   };
   await credentialStore.put(credentialRef, { accessKeyId: "access", secretAccessKey: "secret", endpoint: "https://objects.example" });
-  const assetRecord = { ...structuredClone(asset), origin: assetOrigin };
+  const assetRecord: DataAssetRecord = { ...structuredClone(asset), ...structuredClone(assetOverride), origin: assetOrigin };
   const assetRecords = [assetRecord, ...additionalAssets.map((entry) => structuredClone(entry))];
   const dataCatalog = {
     get: async (id: string) => {

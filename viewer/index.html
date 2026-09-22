@@ -441,6 +441,9 @@
             <label><span class="field-label">Connector</span><select id="remote-coverage-connector" class="field-input" required></select></label>
             <label><span class="field-label">产品</span><input id="remote-coverage-product" class="field-input" readonly required /></label>
             <label><span class="field-label">相对路径（可选）</span><input id="remote-coverage-path" class="field-input" maxlength="4096" placeholder="留空使用 Connector 根目录" /></label>
+            <label><span class="field-label">文件名筛选（可选）</span><input id="remote-coverage-file-name-pattern" class="field-input" maxlength="512" placeholder="^prefix-.*\\.fits$" /></label>
+            <label><span class="field-label">包含后缀（可选）</span><input id="remote-coverage-allowed-suffixes" class="field-input" maxlength="512" placeholder=".fits,.fit,.fits.gz" /></label>
+            <label><span class="field-label">排除规则（可选）</span><input id="remote-coverage-exclude-patterns" class="field-input" maxlength="2048" placeholder="catalogs/tmp*/*" /></label>
             <label><span class="field-label">覆盖模式</span><select id="remote-coverage-mode" class="field-input" required><option value="catalog-radec">目录 RA / Dec</option><option value="nested-healpix">NESTED HEALPix 列</option><option value="fits-wcs">FITS WCS 图像范围</option></select></label>
           </div>
           <fieldset id="remote-coverage-catalog-fields" class="remote-coverage-fields">

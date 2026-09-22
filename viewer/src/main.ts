@@ -21,6 +21,7 @@ import {
 import { Healpix } from "healpixjs";
 import { cartesianToRaDec, raDecToCartesian } from "./coordinates";
 import type { AstroObjectRecord } from "../../src/astro-object-index";
+import { surveyDisplayColor } from "../../src/survey-colors";
 import {
   SurveyLayerViewer,
   workspaceAssetColor,
@@ -212,7 +213,11 @@ function displayLayerFor(input: {
   const fallbackKey = input.assetId ?? input.surveyId ?? input.key ?? "layer";
   const color = input.assetId
     ? workspaceAssetColor(input.assetId)
-    : surveyCard?.color ?? survey?.color ?? DISPLAY_LAYER_PALETTE[Math.abs([...fallbackKey].reduce((hash, character) => ((hash * 31) + character.charCodeAt(0)) | 0, 7)) % DISPLAY_LAYER_PALETTE.length] ?? "#45d7c6";
+    : surveyCard
+      ? surveyDisplayColor(surveyCard.id, surveyCard.color)
+      : survey
+        ? surveyDisplayColor(survey.id, survey.color)
+        : DISPLAY_LAYER_PALETTE[Math.abs([...fallbackKey].reduce((hash, character) => ((hash * 31) + character.charCodeAt(0)) | 0, 7)) % DISPLAY_LAYER_PALETTE.length] ?? "#45d7c6";
   return {
     id: fallbackKey,
     label,
@@ -1444,6 +1449,7 @@ function renderOverlapComponent(component: SurveyLayerOverlapComponent): void {
         ["来源", sourceLabels],
         ...(selected.areaDeg2 === undefined ? [] : [["面积", `${selected.areaDeg2.toFixed(3)} deg²`] as [string, string]]),
         ["反查文件", lookup.files.length ? `${lookup.files.length} 个可下载文件` : "未找到可下载文件"],
+        ...(lookup.fileEvidence?.length ? [["已定位文件", lookup.fileEvidence.map((file) => `${file.fileName}${file.sizeBytes === undefined ? "" : ` · ${formatBytes(file.sizeBytes)}`}`).join("；")] as [string, string]] : []),
         ...(lookup.unavailable.length ? [["不可下载", lookup.unavailable.map((entry) => entry.reason).join("；")] as [string, string]] : []),
         ...(lookup.warnings?.length ? [["提示", lookup.warnings.join("；")] as [string, string]] : []),
       ], actions);
@@ -2029,6 +2035,7 @@ function normalizedAssetCoverage(asset: DataAssetRecord, response: WorkspaceAsse
     pixels,
     ...(objectCount === undefined ? {} : { objectCount }),
     coverageStatus: response.status,
+    ...(layer?.preview ? { preview: true } : {}),
   };
 }
 
@@ -2134,6 +2141,9 @@ async function loadWorkspaceAssetCoverage(scannedAssetId?: string): Promise<void
     assetVisibilityPreferenceRestored = true;
   }
   if (scannedAssetId && coveredAssetIds.has(scannedAssetId)) visibleAssetIds.add(scannedAssetId);
+  for (const layer of coverage.layers) {
+    if (layer.preview && layer.pixels.length > 0) visibleAssetIds.add(layer.assetId);
+  }
 
   layerViewer?.setWorkspaceCoverageLayers([...coverage.layers, ...legacyWorkspaceLayers, ...workspaceExtraLayers.values()], nside);
   // Add newly covered assets to layer order, but don't add all known layers
@@ -2941,6 +2951,9 @@ function populateRemoteCoverageForm(asset: DataAssetRecord, connectors: readonly
 
   byId<HTMLInputElement>("remote-coverage-product").value = asset.product;
   byId<HTMLInputElement>("remote-coverage-path").value = asset.sourceRelativePath ?? "";
+  byId<HTMLInputElement>("remote-coverage-file-name-pattern").value = asset.warehouseScanSpec?.fileNamePattern ?? "";
+  byId<HTMLInputElement>("remote-coverage-allowed-suffixes").value = "";
+  byId<HTMLInputElement>("remote-coverage-exclude-patterns").value = "";
   const defaultMode: CoverageJobMode = asset.scanSpec?.format === "csv"
     ? "catalog-radec"
     : asset.kind === "image" || asset.kind === "cube" ? "fits-wcs" : "catalog-radec";
@@ -2995,12 +3008,24 @@ function remoteCoverageInput(): RemoteCoverageScanInput {
     } : {}),
   };
   const pathValue = byId<HTMLInputElement>("remote-coverage-path").value.trim();
+  const fileNamePattern = byId<HTMLInputElement>("remote-coverage-file-name-pattern").value.trim();
+  const allowedSuffixes = byId<HTMLInputElement>("remote-coverage-allowed-suffixes").value
+    .split(/[,\s]+/)
+    .map((value) => value.trim())
+    .filter(Boolean);
+  const excludePatterns = byId<HTMLInputElement>("remote-coverage-exclude-patterns").value
+    .split(/[,\s]+/)
+    .map((value) => value.trim())
+    .filter(Boolean);
   return {
     surveyId: byId<HTMLSelectElement>("remote-coverage-survey").value,
     connectorId: byId<HTMLSelectElement>("remote-coverage-connector").value,
     releaseId: byId<HTMLSelectElement>("remote-coverage-release").value,
     product: byId<HTMLInputElement>("remote-coverage-product").value.trim(),
     ...(pathValue ? { path: pathValue } : {}),
+    ...(fileNamePattern ? { fileNamePattern } : {}),
+    ...(allowedSuffixes.length ? { allowedSuffixes } : {}),
+    ...(excludePatterns.length ? { excludePatterns } : {}),
     coverage,
   };
 }
@@ -3157,6 +3182,11 @@ function renderLayerAssetDetails(asset: DataAssetRecord): void {
 }
 
 function workspaceLayerStatusLabel(layer: WorkspaceCoverageLayer): string {
+  if (layer.preview) {
+    return layer.pixels.length
+      ? `扫描中/临时覆盖 · ${formatInteger(layer.pixels.length)} 个 HEALPix 单元`
+      : "扫描中/临时覆盖";
+  }
   const coverage = layer.status === "ready"
     ? layer.pixels.length ? `${formatInteger(layer.pixels.length)} 个 HEALPix 单元` : "已完成，覆盖为空"
     : layer.status === "pending" ? "处理中"
@@ -3295,7 +3325,7 @@ function buildSurveyList(): void {
       else setUnassignedWorkspaceVisibility(checkbox.checked);
     });
     const swatch = document.createElement("i");
-    swatch.style.background = survey?.color ?? (asset ? workspaceAssetColor(asset.id) : workspaceLayer ? workspaceAssetColor(key) : "#d69b4e");
+    swatch.style.background = survey ? surveyDisplayColor(survey.id, survey.color) : (asset ? workspaceAssetColor(asset.id) : workspaceLayer ? workspaceAssetColor(key) : "#d69b4e");
     visibility.append(checkbox, swatch);
 
     const body = document.createElement("div");

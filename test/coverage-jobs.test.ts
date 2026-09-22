@@ -110,6 +110,9 @@ test("coverage job rejects ambiguous or unsupported scientific claims", () => {
   assert.throws(() => validateCoverageJobSubmission({ ...catalogRequest, connectorId: "not a connector" }), /stable identifier/);
   assert.throws(() => validateCoverageJobSubmission({ ...catalogRequest, fileNamePattern: "foo/bar" }), /basename/);
   assert.throws(() => validateCoverageJobSubmission({ ...catalogRequest, fileNamePattern: "bad\npattern" }), /basename|newlines/);
+  const excluded = validateCoverageJobSubmission({ ...catalogRequest, excludePatterns: ["catalogs/tmp*/*"] });
+  assert.deepEqual(excluded.excludePatterns, ["catalogs/tmp*/*"]);
+  assert.throws(() => validateCoverageJobSubmission({ ...catalogRequest, excludePatterns: ["bad\npattern"] }), /safe glob/);
   assert.throws(() => validateCoverageJobSnapshot({
     surveyId: "csst",
     releaseId: "csst-sim-w1-20250731",

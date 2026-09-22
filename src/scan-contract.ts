@@ -11,6 +11,7 @@ export interface GenericScanInput {
   path?: string;
   fileNamePattern?: string;
   allowedSuffixes?: string[];
+  excludePatterns?: string[];
   spatial?: {
     mode?: "none" | "auto" | "catalog" | "healpix";
     raColumn?: string;

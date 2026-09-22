@@ -5,8 +5,9 @@ import path from "node:path";
 import { connectorConfigurationHash, connectorLocationKey, hasCurrentSuccessfulConnectorCheck, type ConnectorRecord, type ConnectorRegistry } from "./connectors.js";
 import type { ConnectorCredentialStore, StoredConnectorCredentials } from "./connector-credentials.js";
 import { ConnectorIngestRunCatalog, type ConnectorIngestRunRecord, type ConnectorScanTargetSnapshot } from "./connector-history.js";
-import { coverageJobSnapshot, scannerCoverageProperties, validateCoverageJobSnapshot, validateCoverageJobSubmission, type CoverageJobSnapshot } from "./coverage-jobs.js";
+import { coverageJobSnapshot, scannerCoverageProperties, validateCoverageFileNamePattern, validateCoverageJobSnapshot, validateCoverageJobSubmission, type CoverageJobSnapshot } from "./coverage-jobs.js";
 import type { DataAssetAccess, DataAssetRecord, DataCatalogRegistry } from "./data-catalog.js";
+import { CoveragePreviewCache, type CoveragePreviewLayer } from "./coverage-preview.js";
 import { DataWarehouseDisabledError, ConnectorScanCapabilityError, ConnectorScanPreconditionError, connectorScanPath, connectorScanTarget, type GenericScanInput } from "./scan-contract.js";
 import type { UserMocArtifact, UserMocArtifactContext, UserMocArtifactStore, UserMocPrecision } from "./user-moc-artifacts.js";
 import { defaultMocCoreAdapter, type MocCoreAdapter } from "./moc-core-adapter.js";
@@ -170,6 +171,68 @@ function objectStoreLocation(uri: string): { bucket: string; prefix: string } {
   const prefix = decodeURIComponent(parsed.pathname.replace(/^\/+/, ""));
   if (!bucket || bucket.includes("/") || prefix.split("/").some((part) => part === "." || part === "..")) throw new RangeError("scan source location is invalid");
   return { bucket, prefix };
+}
+
+interface NarrowedFilePattern {
+  prefix: string;
+  suffix: string;
+}
+
+interface WarehouseScanSelection {
+  sourceUri: string;
+  filters: { includeSuffixes: string[]; excludePatterns?: string[] };
+}
+
+function literalPatternCharacter(value: string, index: number): { character: string; nextIndex: number } | undefined {
+  const character = value[index];
+  if (!character) return undefined;
+  if (character === "\\") {
+    const escaped = value[index + 1];
+    if (!escaped || !new Set(["\\", ".", "^", "$", "|", "?", "*", "+", "(", ")", "[", "]", "{", "}", "-"]).has(escaped)) return undefined;
+    return { character: escaped, nextIndex: index + 2 };
+  }
+  if (!/[A-Za-z0-9 _-]/.test(character)) return undefined;
+  return { character, nextIndex: index + 1 };
+}
+
+/**
+ * Lower the only basename-regex shape that ScanPlan v2 can represent without
+ * changing Warehouse: a literal prefix, a greedy wildcard, and a literal
+ * extension. The source prefix is narrowed and nested objects are excluded.
+ */
+function narrowedFilePattern(value: string): NarrowedFilePattern {
+  if (!value.startsWith("^") || !value.endsWith("$")) {
+    throw new ConnectorScanPreconditionError("Warehouse image scans require an anchored literal-prefix filename pattern");
+  }
+  let index = 1;
+  let prefix = "";
+  let wildcard = false;
+  while (index < value.length - 1) {
+    if (value.startsWith(".*", index)) {
+      index += 2;
+      wildcard = true;
+      break;
+    }
+    const literal = literalPatternCharacter(value, index);
+    if (!literal) break;
+    prefix += literal.character;
+    index = literal.nextIndex;
+  }
+  if (!wildcard || !prefix || !value.startsWith("\\.", index)) {
+    throw new ConnectorScanPreconditionError("Warehouse image scans require a pattern shaped like ^literal-prefix.*\\.ext$");
+  }
+  index += 2;
+  let extension = "";
+  while (index < value.length - 1) {
+    const literal = literalPatternCharacter(value, index);
+    if (!literal) break;
+    extension += literal.character;
+    index = literal.nextIndex;
+  }
+  if (index !== value.length - 1 || !/^\.[A-Za-z0-9][A-Za-z0-9._-]*$/.test(`.${extension}`)) {
+    throw new ConnectorScanPreconditionError("Warehouse image scans require a pattern shaped like ^literal-prefix.*\\.ext$");
+  }
+  return { prefix, suffix: `.${extension}`.toLowerCase() };
 }
 
 function posixRelative(from: string, to: string): string | undefined {
@@ -349,6 +412,7 @@ function coverageForAsset(asset: DataAssetRecord, connector?: ConnectorRecord): 
         maxOrder: 10,
         queryOrder: 8,
         previewOrder: 4,
+        ...(asset.warehouseScanSpec?.fileNamePattern === undefined ? {} : { fileNamePattern: asset.warehouseScanSpec.fileNamePattern }),
       });
     }
     throw new ConnectorScanPreconditionError(`Warehouse coverage is not defined for ${asset.kind} assets`);
@@ -360,6 +424,62 @@ function coverageForAsset(asset: DataAssetRecord, connector?: ConnectorRecord): 
 
 function defaultSuffixesForCoverage(coverage: CoverageJobSnapshot): string[] {
   return coverage.mode === "fits-wcs" ? [".fits", ".fit", ".fits.gz"] : [".csv"];
+}
+
+function effectiveCoverage(input: GenericScanInput, coverage: CoverageJobSnapshot, asset: DataAssetRecord): CoverageJobSnapshot {
+  const normalized = validateCoverageJobSnapshot(coverage);
+  const inputPattern = validateCoverageFileNamePattern(input.fileNamePattern);
+  const assetPattern = asset.kind === "image" || asset.kind === "cube"
+    ? asset.warehouseScanSpec?.fileNamePattern
+    : undefined;
+  if (inputPattern !== undefined && normalized.fileNamePattern !== undefined && inputPattern !== normalized.fileNamePattern) {
+    throw new ConnectorScanPreconditionError("fileNamePattern must be consistent between the scan input and coverage");
+  }
+  const fileNamePattern = inputPattern ?? normalized.fileNamePattern ?? assetPattern;
+  return fileNamePattern === normalized.fileNamePattern
+    ? normalized
+    : validateCoverageJobSnapshot({ ...normalized, ...(fileNamePattern === undefined ? {} : { fileNamePattern }) });
+}
+
+function buildWarehouseScanSelection(connector: ConnectorRecord, asset: DataAssetRecord, input: GenericScanInput, coverage: CoverageJobSnapshot): WarehouseScanSelection {
+  const sourceUri = connectorScanPath(connector, input.path);
+  const pattern = coverage.fileNamePattern;
+  const excludePatterns = warehouseExcludePatterns(input.excludePatterns);
+  if (pattern === undefined) {
+    return {
+      sourceUri,
+      filters: {
+        includeSuffixes: warehouseIncludeSuffixes(input.allowedSuffixes),
+        ...(excludePatterns === undefined ? {} : { excludePatterns }),
+      },
+    };
+  }
+  if (connector.kind !== "s3") {
+    throw new ConnectorScanPreconditionError("Warehouse filename patterns are supported only for S3 image scans");
+  }
+  if (coverage.mode !== "fits-wcs") {
+    throw new ConnectorScanPreconditionError("Warehouse filename patterns are supported only for FITS image scans");
+  }
+  const narrowed = narrowedFilePattern(pattern);
+  const location = objectStoreLocation(sourceUri);
+  const basePrefix = location.prefix.replace(/\/+$/g, "");
+  const narrowedPrefix = [basePrefix, narrowed.prefix].filter(Boolean).join("/");
+  const requestedSuffixes = warehouseIncludeSuffixes(input.allowedSuffixes);
+  const defaultImageSuffixes = new Set([".fits", ".fit", ".fits.gz"]);
+  if (requestedSuffixes.length
+    && (!requestedSuffixes.every((suffix) => defaultImageSuffixes.has(suffix.toLowerCase()))
+      || !requestedSuffixes.includes(narrowed.suffix))) {
+    throw new ConnectorScanPreconditionError(`allowedSuffixes must include only the filename pattern suffix ${narrowed.suffix}`);
+  }
+  if (!narrowedPrefix) throw new ConnectorScanPreconditionError("Warehouse image filename patterns require a non-empty S3 source prefix");
+  const nestedExclude = `${narrowedPrefix}*/*`;
+  return {
+    sourceUri: `s3://${location.bucket}/${narrowedPrefix}`,
+    filters: {
+      includeSuffixes: [narrowed.suffix],
+      excludePatterns: [...new Set([nestedExclude, ...(excludePatterns ?? [])])],
+    },
+  };
 }
 
 function artifactContextForRun(run: ConnectorIngestRunRecord): UserMocArtifactContext {
@@ -465,6 +585,21 @@ function warehouseIncludeSuffixes(value: string[] | undefined): string[] {
   return suffixes;
 }
 
+function warehouseExcludePatterns(value: string[] | undefined): string[] | undefined {
+  if (value === undefined || value.length === 0) return undefined;
+  if (!Array.isArray(value)) throw new RangeError("excludePatterns must be an array");
+  if (value.length > 32) throw new RangeError("excludePatterns must contain at most 32 patterns");
+  const patterns = value.map((entry, index) => {
+    if (typeof entry !== "string" || !entry.trim()) throw new RangeError(`excludePatterns[${index}] must be a non-empty string`);
+    const pattern = entry.trim();
+    if (pattern.length > 512) throw new RangeError(`excludePatterns[${index}] must contain at most 512 characters`);
+    if (/[\0\n\r]/.test(pattern)) throw new RangeError(`excludePatterns[${index}] must be a safe glob`);
+    return pattern;
+  });
+  if (new Set(patterns).size !== patterns.length) throw new RangeError("excludePatterns must not contain duplicates");
+  return patterns;
+}
+
 function extractionPlan(_asset: DataAssetRecord, _input: GenericScanInput, coverage: CoverageJobSnapshot): Record<string, unknown> {
   if (coverage.mode === "catalog-radec") {
     if (coverage.coverageRole !== "object_presence") {
@@ -499,12 +634,10 @@ export interface ScanRequestBuildInput {
 /** Build a namespace-local ScanRequest using the Warehouse ScanPlan v2 contract. */
 export function buildWorkspaceScanRequest(value: ScanRequestBuildInput): Record<string, unknown> {
   const { connector, asset, input, coverage, taskName: name, batchId, secretName, namespace, warehouseEsUrl, evidenceClaimName, evidenceMountPath, scannerImage, warehouseSinkCredentials, localSource } = value;
-  const normalizedCoverage = validateCoverageJobSnapshot(coverage);
-  if (input.fileNamePattern !== undefined || normalizedCoverage.fileNamePattern !== undefined) {
-    throw new RangeError("fileNamePattern is not supported by Warehouse ScanPlan v2; use path and allowedSuffixes");
-  }
+  const normalizedCoverage = effectiveCoverage(input, coverage, asset);
   const isLocal = connector.kind === "local";
-  const sourceUri = connectorScanPath(connector, input.path);
+  const selection = buildWarehouseScanSelection(connector, asset, input, normalizedCoverage);
+  const sourceUri = selection.sourceUri;
   if (isLocal && !localSource) throw new RangeError("未配置 Warehouse 本地扫描数据卷（localSource）");
   const localLocation = isLocal ? localSourceLocation(sourceUri, localSource!) : undefined;
   const location: { bucket: string; prefix: string } | { rootPath: string; subPath?: string } = localLocation ?? objectStoreLocation(sourceUri);
@@ -532,7 +665,7 @@ export function buildWorkspaceScanRequest(value: ScanRequestBuildInput): Record<
     source: isLocal
       ? { connector: { type: "local" }, location }
       : { connector: sourceConnectorPlan(connector), location },
-    filters: { includeSuffixes: warehouseIncludeSuffixes(input.allowedSuffixes) },
+    filters: selection.filters,
     extraction: extractionPlan(asset, input, normalizedCoverage),
     sink: { connector: { type: "elasticsearch", endpoint: warehouse.endpoint, credentialRef: sinkCredentialRef } },
     evidence: { outputPath: `${evidenceMountPath.replace(/\/+$/, "")}/${batchId}` },
@@ -629,6 +762,7 @@ export class WarehouseScanService {
   #timer: ReturnType<typeof setInterval> | undefined;
   #polling = false;
   readonly #checkedFailureEvidence = new Set<string>();
+  readonly #coveragePreview: CoveragePreviewCache;
 
   constructor(options: WarehouseScanServiceOptions) {
     this.#enabled = options.enabled; this.#connectors = options.connectors; this.#dataCatalog = options.dataCatalog; this.#credentials = options.credentials; this.#runs = options.runs;
@@ -644,6 +778,20 @@ export class WarehouseScanService {
     this.#mocCore = options.mocCore ?? defaultMocCoreAdapter;
     this.#client = this.#enabled ? options.resourceClient ?? (process.env.KUBERNETES_SERVICE_HOST ? new KubernetesResourceClient() : undefined) : undefined;
     this.#localSource = options.localSource ?? localSourceVolumeFromEnvironment();
+    this.#coveragePreview = new CoveragePreviewCache(this.#evidenceMountPath);
+  }
+
+  async coveragePreview(assetId: string, nside: number): Promise<CoveragePreviewLayer | undefined> {
+    const runs = (await this.#runs.list()).filter((run) => run.backend === "warehouse"
+      && run.executor === "warehouse-scan"
+      && Boolean(run.batchId?.startsWith("workspace-"))
+      && Boolean(run.warehouseLayerId?.startsWith("workspace-"))
+      && (run.assetId === assetId || run.assetIds?.includes(assetId)));
+    const run = runs.find((candidate) => candidate.status === "running")
+      ?? runs.find((candidate) => candidate.status === "queued")
+      ?? runs.find((candidate) => candidate.status === "failed");
+    if (!run?.evidencePath) return undefined;
+    return this.#coveragePreview.preview(run.id, run.evidencePath, nside);
   }
 
   get enabled(): boolean { return this.#enabled; }
@@ -660,7 +808,8 @@ export class WarehouseScanService {
     if (connector.kind !== "s3" && connector.kind !== "local") throw new ConnectorScanCapabilityError(connector.kind);
     const asset = await this.#dataCatalog.get(input.assetId);
     if (asset.origin !== "user") throw new ConnectorScanPreconditionError("Only user assets can start an optional remote scan");
-    const coverage = input.coverage ? validateCoverageJobSnapshot(input.coverage) : coverageForAsset(asset, connector);
+    const coverage = effectiveCoverage(input, input.coverage ? validateCoverageJobSnapshot(input.coverage) : coverageForAsset(asset, connector), asset);
+    const selection = buildWarehouseScanSelection(connector, asset, input, coverage);
     const stored = connector.kind === "s3"
       ? (async () => {
         const value = connector.credentialRef ? await this.#credentials.get(connector.credentialRef) : undefined;
@@ -669,7 +818,7 @@ export class WarehouseScanService {
       })()
       : Promise.resolve(undefined);
     const sourceCredentials = await stored;
-    const sourcePath = connectorScanPath(connector, input.path);
+    const sourcePath = selection.sourceUri;
     const token = randomUUID().replace(/-/g, "").slice(0, 12);
     const batchId = `workspace-coverage-${token}`;
     const name = taskName("workspace-coverage", asset.id, token);
@@ -717,8 +866,15 @@ export class WarehouseScanService {
     const linked = (asset.connectorIds ?? []).includes(connector.id) || (asset.connectorLocationKeys ?? []).includes(connector.locationKey) || [asset.access, ...(asset.accesses ?? [])].some((access) => access.connectorId === connector.id || access.uri === connector.locationKey);
     if (!linked) throw new ConnectorScanPreconditionError("Coverage asset must be linked to the selected Connector");
     if (asset.product !== submission.product) throw new ConnectorScanPreconditionError("Coverage product does not match the selected data asset");
-    const coverage = coverageJobSnapshot(surveyId, submission); const allowedSuffixes = submission.allowedSuffixes ?? (coverage.mode === "fits-wcs" ? [".fits", ".fit", ".fits.gz"] : [".csv", ".tsv", ".fits", ".fit", ".fits.gz"]);
-    return this.submitScan(submission.connectorId, { assetId: submission.assetId, ...(submission.path === undefined ? {} : { path: submission.path }), ...(submission.fileNamePattern === undefined ? {} : { fileNamePattern: submission.fileNamePattern }), allowedSuffixes, coverage }, key ?? idempotencyKey(connector, submission, surveyId));
+    const coverage = coverageJobSnapshot(surveyId, submission);     const allowedSuffixes = submission.allowedSuffixes ?? (coverage.mode === "fits-wcs" ? [".fits", ".fit", ".fits.gz"] : [".csv", ".tsv", ".fits", ".fit", ".fits.gz"]);
+    return this.submitScan(submission.connectorId, {
+      assetId: submission.assetId,
+      ...(submission.path === undefined ? {} : { path: submission.path }),
+      ...(submission.fileNamePattern === undefined ? {} : { fileNamePattern: submission.fileNamePattern }),
+      allowedSuffixes,
+      ...(submission.excludePatterns === undefined ? {} : { excludePatterns: submission.excludePatterns }),
+      coverage,
+    }, key ?? idempotencyKey(connector, submission, surveyId));
   }
 
   async submitConnectorScan(connectorId: string, key?: string): Promise<ConnectorIngestRunRecord> {
@@ -836,6 +992,9 @@ export class WarehouseScanService {
            await this.#pollRun(run);
          } else if (workspaceOwned && run.status === "failed" && run.evidencePath && !this.#checkedFailureEvidence.has(run.id)) {
            await this.#enrichFailedRunEvidence(run);
+         }
+         if (workspaceOwned && run.evidencePath && (run.status === "running" || run.status === "failed")) {
+           await this.#coveragePreview.preview(run.id, run.evidencePath, 16);
          }
       }
     }
