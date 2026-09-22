@@ -1,0 +1,110 @@
+<!doctype html>
+<!--
+Copyright 2026 Astro Survey Atlas contributors.
+Licensed under the Apache License, Version 2.0.
+-->
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Workspace (Atlas) documentation: user-facing sky dashboard, local assets, connectors, and task orchestration in Astro Survey Atlas.">
+  <title>Workspace | Astro Survey Atlas</title>
+  <link rel="icon" href="assets/asa-mark.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="styles.css">
+  <script src="main.js" defer></script>
+  <script src="theme.js" defer></script>
+</head>
+<body>
+  <a class="skip-link" href="#main-content">Skip to documentation</a>
+
+  <header class="site-header">
+    <div class="header-inner">
+      <a class="brand-wrap" href="#overview" aria-label="Workspace documentation home">
+        <img class="brand-logo" src="assets/asa-mark.svg" alt="" width="72" height="28">
+        <span class="brand-text">Workspace <span class="brand-badge">Docs</span></span>
+      </a>
+      <nav aria-label="Primary navigation">
+        <ul class="nav-links">
+          <li><a class="nav-link" href="#boundary">Boundary</a></li>
+          <li><a class="nav-link" href="#docs">Repo docs</a></li>
+          <li><a class="btn btn-secondary btn-sm" href="https://github.com/Astro-Survey-Atlas/Workspace" target="_blank" rel="noopener noreferrer">GitHub repository</a></li>
+          <li><button type="button" id="theme-toggle" class="btn btn-secondary btn-sm" aria-label="Toggle theme" hidden><span data-theme-label>Dark mode</span></button></li>
+        </ul>
+      </nav>
+    </div>
+  </header>
+
+  <div class="doc-wrapper">
+    <aside class="sidebar">
+      <nav aria-label="On this page" class="sidebar-group">
+        <p class="sidebar-title">Documentation</p>
+        <ul class="sidebar-list">
+          <li class="sidebar-item active"><a href="#overview">01 / What Workspace is</a></li>
+          <li class="sidebar-item"><a href="#boundary">02 / Product boundary</a></li>
+          <li class="sidebar-item"><a href="#docs">03 / Canonical repo docs</a></li>
+        </ul>
+      </nav>
+      <div class="sidebar-group">
+        <p class="sidebar-title">Related projects</p>
+        <ul class="sidebar-list">
+          <li class="sidebar-item"><a href="https://github.com/Astro-Survey-Atlas/Assets" target="_blank" rel="noopener noreferrer">Assets</a></li>
+          <li class="sidebar-item"><a href="https://astro-survey-atlas.github.io/Warehouse/" target="_blank" rel="noopener noreferrer">Warehouse docs</a></li>
+          <li class="sidebar-item"><a href="https://astro-survey-atlas.github.io/MOC-Core-SDK/" target="_blank" rel="noopener noreferrer">MOC Core docs</a></li>
+        </ul>
+      </div>
+    </aside>
+
+    <main id="main-content" class="main-content" tabindex="-1">
+      <section id="overview" class="hero doc-section" aria-labelledby="overview-title" data-title-key="01 / What Workspace is">
+        <p class="hero-pill"><span class="pill-dot"></span><span>Astro Survey Atlas / user workspace</span></p>
+        <h1 id="overview-title">Workspace (Atlas)</h1>
+        <p class="hero-desc">Workspace is the user-facing interactive data exploration surface in Astro Survey Atlas. It hosts the sky dashboard, local asset registration, connectors, credentials, and task orchestration over <em>user</em> data—while public survey packages come from Assets, and high-throughput remote scans can be delegated to Warehouse.</p>
+        <div class="arch-diagram" aria-label="Workspace in the ASA ecosystem">
+          <div class="arch-node"><span class="arch-node-icon icon-core" aria-hidden="true"></span><p class="arch-node-name">Assets</p><p class="arch-node-role">public Resource Package v3</p></div>
+          <div class="arch-node highlight-warehouse"><span class="arch-node-icon icon-core" aria-hidden="true"></span><p class="arch-node-name">Workspace</p><p class="arch-node-role">viewer + user assets + MCP</p></div>
+          <div class="arch-node"><span class="arch-node-icon icon-core" aria-hidden="true"></span><p class="arch-node-name">Warehouse</p><p class="arch-node-role">optional remote ScanRequest</p></div>
+          <div class="arch-node"><span class="arch-node-icon icon-core" aria-hidden="true"></span><p class="arch-node-name">MOC Core</p><p class="arch-node-role">geometry kernel</p></div>
+        </div>
+      </section>
+
+      <section id="boundary" class="doc-section" aria-labelledby="boundary-title" data-title-key="02 / Product boundary">
+        <h2 id="boundary-title">Product boundary</h2>
+        <p class="section-lead">Taken from the in-repo architecture note. Atlas owns user-side state; it does not become a public survey catalog.</p>
+        <h3>Workspace owns</h3>
+        <ul>
+          <li>User assets, local survey/release labels, connectors, and access metadata</li>
+          <li>Local scanning and optional remote user scans through Warehouse</li>
+          <li>Its own Elasticsearch search indexes, sky coverage queries, and the viewer</li>
+          <li>User MOC artifacts, scan/task history, and evidence references</li>
+          <li>Deterministic Agent/MCP and workflow runs over user data</li>
+        </ul>
+        <h3>Workspace does not own</h3>
+        <ul>
+          <li>Public survey jobs, public connectors, MOC publication, or a public release catalog</li>
+          <li>Registering a user asset with Assets, or publishing user records back to Assets</li>
+          <li>Warehouse Elasticsearch as a shared database (Workspace ES stays independent)</li>
+        </ul>
+        <div class="callout callout-info"><p><strong>Ordinary public geometry</strong> comes from the immutable Resource Package v3 published by Assets. Fine-grained public region queries, when used, stay server-side and scoped—browsers do not hold Assets credentials.</p></div>
+      </section>
+
+      <section id="docs" class="doc-section" aria-labelledby="docs-title" data-title-key="03 / Canonical repo docs">
+        <h2 id="docs-title">Canonical repo docs</h2>
+        <p class="section-lead">This Pages site is a landing shell. Detailed contracts live in the repository and stay the source of truth until Doc Bot expands the static pages.</p>
+        <ul>
+          <li><a href="https://github.com/Astro-Survey-Atlas/Workspace/blob/main/docs/architecture.md" target="_blank" rel="noopener noreferrer"><code>docs/architecture.md</code></a> — product boundary and data flow</li>
+          <li><a href="https://github.com/Astro-Survey-Atlas/Workspace/blob/main/docs/api-reference.md" target="_blank" rel="noopener noreferrer"><code>docs/api-reference.md</code></a> — Workspace-owned HTTP API</li>
+          <li><a href="https://github.com/Astro-Survey-Atlas/Workspace/blob/main/docs/atlas-boundary-plan.md" target="_blank" rel="noopener noreferrer"><code>docs/atlas-boundary-plan.md</code></a> — frozen boundary plan</li>
+          <li><a href="https://github.com/Astro-Survey-Atlas/Workspace/blob/main/docs/assets-warehouse-atlas-boundary.md" target="_blank" rel="noopener noreferrer"><code>docs/assets-warehouse-atlas-boundary.md</code></a> — Assets / Warehouse / Atlas split</li>
+        </ul>
+      </section>
+    </main>
+  </div>
+
+  <footer class="site-footer">
+    <div class="footer-inner">
+      <p>Astro Survey Atlas / Workspace<br>Static documentation skeleton. No live service connection.</p>
+      <a href="https://github.com/Astro-Survey-Atlas/Workspace">Source on GitHub</a>
+    </div>
+  </footer>
+</body>
+</html>

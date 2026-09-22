@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48" role="img" aria-labelledby="title desc">
+  <title id="title">Astro Survey Atlas</title>
+  <desc id="desc">A circuit globe mark</desc>
+  <defs>
+    <style>
+      .night { display: none; }
+      :target ~ .night { display: inline; }
+      :target ~ .day { display: none; }
+    </style>
+  </defs>
+  <g id="night" aria-hidden="true"></g>
+  <g class="day" fill="none" stroke="#f01951" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
+    <circle cx="24" cy="24" r="18" stroke="#2c3792"/>
+    <path d="M6 24h36M24 6c5 5 7.5 11 7.5 18S29 37 24 42M24 6c-5 5-7.5 11-7.5 18S19 37 24 42M9 14.5h30M9 33.5h30"/>
+    <path d="M3 24h5M40 24h5M24 3v5M24 40v5"/>
+    <circle cx="11" cy="14.5" r="1.4" fill="#f01951"/><circle cx="37" cy="33.5" r="1.4" fill="#f01951"/>
+  </g>
+  <g class="night" fill="none" stroke="#ff6b93" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
+    <circle cx="24" cy="24" r="18" stroke="#aab4ff"/>
+    <path d="M6 24h36M24 6c5 5 7.5 11 7.5 18S29 37 24 42M24 6c-5 5-7.5 11-7.5 18S19 37 24 42M9 14.5h30M9 33.5h30"/>
+    <path d="M3 24h5M40 24h5M24 3v5M24 40v5"/>
+    <circle cx="11" cy="14.5" r="1.4" fill="#ff6b93"/><circle cx="37" cy="33.5" r="1.4" fill="#ff6b93"/>
+  </g>
+</svg>
