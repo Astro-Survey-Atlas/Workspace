@@ -7,30 +7,32 @@ Licensed under the Apache License, Version 2.0.
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="description" content="Workspace (Atlas) documentation: user-facing sky dashboard, local assets, connectors, and task orchestration in Astro Survey Atlas.">
+  <meta name="description" content="Workspace (Atlas) documentation: user-facing sky dashboard, local assets, connectors, and task orchestration in Astro Survey Atlas." data-i18n-meta="meta.description">
   <title>Workspace | Astro Survey Atlas</title>
   <link rel="icon" href="assets/asa-mark.svg" type="image/svg+xml">
   <link rel="stylesheet" href="styles.css">
   <script src="main.js" defer></script>
+  <script src="i18n.js" defer></script>
   <script src="theme.js" defer></script>
 </head>
 <body>
-  <a class="skip-link" href="#main-content">Skip to documentation</a>
+  <a class="skip-link" href="#main-content" data-i18n="a11y.skip">Skip to documentation</a>
 
   <header class="site-header">
     <div class="header-inner">
-      <a class="brand-wrap" href="#overview" aria-label="Workspace documentation home">
+      <a class="brand-wrap" href="#overview" aria-label="Workspace documentation home" data-i18n-aria-label="a11y.home">
         <img class="brand-logo" src="assets/asa-mark.svg" alt="" width="72" height="28">
-        <span class="brand-text">Workspace <span class="brand-badge">Docs</span></span>
+        <span class="brand-text">Workspace <span class="brand-badge" data-i18n="brand.docs">Docs</span></span>
       </a>
-      <nav aria-label="Primary navigation">
+      <nav aria-label="Primary navigation" data-i18n-aria-label="a11y.primaryNav">
         <ul class="nav-links">
-          <li><a class="nav-link" href="#boundary">Boundary</a></li>
-          <li><a class="nav-link" href="#sky-viewer">Sky viewer</a></li>
-          <li><a class="nav-link" href="#quick-start">Quick start</a></li>
-          <li><a class="nav-link" href="#limits">Limits</a></li>
-          <li><a class="btn btn-secondary btn-sm" href="https://github.com/Astro-Survey-Atlas/Workspace" target="_blank" rel="noopener noreferrer">GitHub repository</a></li>
-          <li><button type="button" id="theme-toggle" class="btn btn-secondary btn-sm" aria-label="Toggle theme" hidden><span data-theme-label>Dark mode</span></button></li>
+          <li><a class="nav-link" href="#boundary" data-i18n="nav.boundary">Boundary</a></li>
+          <li><a class="nav-link" href="#sky-viewer" data-i18n="nav.skyViewer">Sky viewer</a></li>
+          <li><a class="nav-link" href="#quick-start" data-i18n="nav.quickStart">Quick start</a></li>
+          <li><a class="nav-link" href="#limits" data-i18n="nav.limits">Limits</a></li>
+          <li><a class="btn btn-secondary btn-sm" href="https://github.com/Astro-Survey-Atlas/Workspace" target="_blank" rel="noopener noreferrer"><span data-i18n="nav.github">GitHub repository</span></a></li>
+          <li><button type="button" id="language-toggle" class="btn btn-secondary btn-sm" aria-label="Switch to Chinese" data-i18n-aria-label="a11y.languageToggle" hidden>中文</button></li>
+          <li><button type="button" id="theme-toggle" class="btn btn-secondary btn-sm" aria-label="Toggle theme" data-i18n-aria-label="a11y.themeToggle" hidden><span data-theme-label>Dark mode</span></button></li>
         </ul>
       </nav>
     </div>
@@ -38,242 +40,242 @@ Licensed under the Apache License, Version 2.0.
 
   <div class="doc-wrapper">
     <aside class="sidebar">
-      <nav aria-label="On this page" class="sidebar-group">
-        <p class="sidebar-title">Documentation</p>
+      <nav aria-label="On this page" class="sidebar-group" data-i18n-aria-label="a11y.onThisPage">
+        <p class="sidebar-title" data-i18n="sidebar.documentation">Documentation</p>
         <ul class="sidebar-list">
-          <li class="sidebar-item active"><a href="#overview">01 / What Workspace is</a></li>
-          <li class="sidebar-item"><a href="#boundary">02 / Product boundary</a></li>
-          <li class="sidebar-item"><a href="#sky-viewer">03 / Sky viewer</a></li>
-          <li class="sidebar-item"><a href="#user-assets">04 / User asset registry</a></li>
-          <li class="sidebar-item"><a href="#connectors">05 / Connectors</a></li>
-          <li class="sidebar-item"><a href="#local-scan">06 / Local scan &amp; user MOCs</a></li>
-          <li class="sidebar-item"><a href="#warehouse-scan">07 / Optional Warehouse scans</a></li>
-          <li class="sidebar-item"><a href="#resource-packages">08 / Resource Package v3</a></li>
-          <li class="sidebar-item"><a href="#agent-mcp">09 / Agent &amp; MCP</a></li>
-          <li class="sidebar-item"><a href="#quick-start">10 / Quick start</a></li>
-          <li class="sidebar-item"><a href="#limits">11 / Limits &amp; non-goals</a></li>
-          <li class="sidebar-item"><a href="#docs">12 / Canonical repo docs</a></li>
+          <li class="sidebar-item active"><a href="#overview" data-i18n="nav.s01">01 / What Workspace is</a></li>
+          <li class="sidebar-item"><a href="#boundary" data-i18n="nav.s02">02 / Product boundary</a></li>
+          <li class="sidebar-item"><a href="#sky-viewer" data-i18n="nav.s03">03 / Sky viewer</a></li>
+          <li class="sidebar-item"><a href="#user-assets" data-i18n="nav.s04">04 / User asset registry</a></li>
+          <li class="sidebar-item"><a href="#connectors" data-i18n="nav.s05">05 / Connectors</a></li>
+          <li class="sidebar-item"><a href="#local-scan" data-i18n="nav.s06">06 / Local scan &amp; user MOCs</a></li>
+          <li class="sidebar-item"><a href="#warehouse-scan" data-i18n="nav.s07">07 / Optional Warehouse scans</a></li>
+          <li class="sidebar-item"><a href="#resource-packages" data-i18n="nav.s08">08 / Resource Package v3</a></li>
+          <li class="sidebar-item"><a href="#agent-mcp" data-i18n="nav.s09">09 / Agent &amp; MCP</a></li>
+          <li class="sidebar-item"><a href="#quick-start" data-i18n="nav.s10">10 / Quick start</a></li>
+          <li class="sidebar-item"><a href="#limits" data-i18n="nav.s11">11 / Limits &amp; non-goals</a></li>
+          <li class="sidebar-item"><a href="#docs" data-i18n="nav.s12">12 / Canonical repo docs</a></li>
         </ul>
       </nav>
       <div class="sidebar-group">
-        <p class="sidebar-title">Related projects</p>
+        <p class="sidebar-title" data-i18n="sidebar.related">Related projects</p>
         <ul class="sidebar-list">
-          <li class="sidebar-item"><a href="https://github.com/Astro-Survey-Atlas/Assets" target="_blank" rel="noopener noreferrer">Assets</a></li>
-          <li class="sidebar-item"><a href="https://astro-survey-atlas.github.io/Warehouse/" target="_blank" rel="noopener noreferrer">Warehouse docs</a></li>
-          <li class="sidebar-item"><a href="https://astro-survey-atlas.github.io/MOC-Core-SDK/" target="_blank" rel="noopener noreferrer">MOC Core docs</a></li>
+          <li class="sidebar-item"><a href="https://github.com/Astro-Survey-Atlas/Assets" target="_blank" rel="noopener noreferrer" data-i18n="related.assets">Assets</a></li>
+          <li class="sidebar-item"><a href="https://astro-survey-atlas.github.io/Warehouse/" target="_blank" rel="noopener noreferrer" data-i18n="related.warehouse">Warehouse docs</a></li>
+          <li class="sidebar-item"><a href="https://astro-survey-atlas.github.io/MOC-Core-SDK/" target="_blank" rel="noopener noreferrer" data-i18n="related.moc">MOC Core docs</a></li>
         </ul>
       </div>
     </aside>
 
     <main id="main-content" class="main-content" tabindex="-1">
       <section id="overview" class="hero doc-section" aria-labelledby="overview-title" data-title-key="01 / What Workspace is">
-        <p class="hero-pill"><span class="pill-dot"></span><span>Astro Survey Atlas / user workspace</span></p>
-        <h1 id="overview-title">Workspace (Atlas)</h1>
-        <p class="hero-desc">Workspace is the user-facing interactive data exploration surface in Astro Survey Atlas. It hosts the Aladin sky dashboard, local user-asset registration, connectors and credentials, local scanning with MOC Core, optional Warehouse remote scans, and a read-only MCP surface over <em>user</em> data. Public survey geometry comes from Assets Resource Package v3 (one-way consume). High-throughput remote scans can be delegated to Warehouse when configured.</p>
-        <div class="arch-diagram" aria-label="Workspace in the ASA ecosystem">
-          <div class="arch-node"><span class="arch-node-icon icon-core" aria-hidden="true"></span><p class="arch-node-name">Assets</p><p class="arch-node-role">public Resource Package v3</p></div>
-          <div class="arch-node highlight-warehouse"><span class="arch-node-icon icon-core" aria-hidden="true"></span><p class="arch-node-name">Workspace</p><p class="arch-node-role">viewer + user assets + MCP</p></div>
-          <div class="arch-node"><span class="arch-node-icon icon-core" aria-hidden="true"></span><p class="arch-node-name">Warehouse</p><p class="arch-node-role">optional remote ScanRequest</p></div>
-          <div class="arch-node"><span class="arch-node-icon icon-core" aria-hidden="true"></span><p class="arch-node-name">MOC Core</p><p class="arch-node-role">geometry kernel</p></div>
+        <p class="hero-pill"><span class="pill-dot"></span><span data-i18n="hero.eyebrow">Astro Survey Atlas / user workspace</span></p>
+        <h1 id="overview-title" data-i18n="hero.title">Workspace (Atlas)</h1>
+        <p class="hero-desc" data-i18n="hero.description">Workspace is the user-facing interactive data exploration surface in Astro Survey Atlas. It hosts the Aladin sky dashboard, local user-asset registration, connectors and credentials, local scanning with MOC Core, optional Warehouse remote scans, and a read-only MCP surface over <em>user</em> data. Public survey geometry comes from Assets Resource Package v3 (one-way consume). High-throughput remote scans can be delegated to Warehouse when configured.</p>
+        <div class="arch-diagram" aria-label="Workspace in the ASA ecosystem" data-i18n-aria-label="a11y.ecosystem">
+          <div class="arch-node"><span class="arch-node-icon icon-core" aria-hidden="true"></span><p class="arch-node-name">Assets</p><p class="arch-node-role" data-i18n="flow.assets.role">public Resource Package v3</p></div>
+          <div class="arch-node highlight-warehouse"><span class="arch-node-icon icon-core" aria-hidden="true"></span><p class="arch-node-name">Workspace</p><p class="arch-node-role" data-i18n="flow.workspace.role">viewer + user assets + MCP</p></div>
+          <div class="arch-node"><span class="arch-node-icon icon-core" aria-hidden="true"></span><p class="arch-node-name">Warehouse</p><p class="arch-node-role" data-i18n="flow.warehouse.role">optional remote ScanRequest</p></div>
+          <div class="arch-node"><span class="arch-node-icon icon-core" aria-hidden="true"></span><p class="arch-node-name">MOC Core</p><p class="arch-node-role" data-i18n="flow.moc.role">geometry kernel</p></div>
         </div>
         <div class="grid-3">
           <article class="card">
-            <h3 class="card-title">Explore the sky</h3>
-            <p class="card-desc">Aladin Lite v3 viewer with ICRS coverage, density, objects, and display-only survey layers from installed public packages and user scans.</p>
+            <h3 class="card-title" data-i18n="card.explore.title">Explore the sky</h3>
+            <p class="card-desc" data-i18n="card.explore.body">Aladin Lite v3 viewer with ICRS coverage, density, objects, and display-only survey layers from installed public packages and user scans.</p>
           </article>
           <article class="card">
-            <h3 class="card-title">Own user data</h3>
-            <p class="card-desc">Register private assets and connectors, run local CSV scans, keep Workspace Elasticsearch and user MOC artifacts independent of Warehouse.</p>
+            <h3 class="card-title" data-i18n="card.own.title">Own user data</h3>
+            <p class="card-desc" data-i18n="card.own.body">Register private assets and connectors, run local CSV scans, keep Workspace Elasticsearch and user MOC artifacts independent of Warehouse.</p>
           </article>
           <article class="card">
-            <h3 class="card-title">Stay deterministic</h3>
-            <p class="card-desc">Parsing, HEALPix indexing, and MOC generation run in tested code via pinned MOC Core. MCP and Agent adapt that plane; they do not invent geometry.</p>
+            <h3 class="card-title" data-i18n="card.deterministic.title">Stay deterministic</h3>
+            <p class="card-desc" data-i18n="card.deterministic.body">Parsing, HEALPix indexing, and MOC generation run in tested code via pinned MOC Core. MCP and Agent adapt that plane; they do not invent geometry.</p>
           </article>
         </div>
       </section>
 
       <section id="boundary" class="doc-section" aria-labelledby="boundary-title" data-title-key="02 / Product boundary">
-        <p class="section-tag">02 / Boundary</p>
-        <h2 id="boundary-title">Product boundary</h2>
-        <p class="section-lead">Taken from the in-repo architecture and atlas-boundary plan. Atlas owns user-side state; it does not become a public survey catalog.</p>
+        <p class="section-tag">02 / <span data-i18n="boundary.tag">Boundary</span></p>
+        <h2 id="boundary-title" data-i18n="boundary.title">Product boundary</h2>
+        <p class="section-lead" data-i18n="boundary.lead">Taken from the in-repo architecture and atlas-boundary plan. Atlas owns user-side state; it does not become a public survey catalog.</p>
         <div class="grid-2">
           <article class="mode-card">
-            <h3 class="card-title">Workspace owns</h3>
+            <h3 class="card-title" data-i18n="boundary.owns.title">Workspace owns</h3>
             <ul>
-              <li>User assets, local survey/release labels, connectors, and access metadata</li>
-              <li>Local scanning and optional remote user scans through Warehouse</li>
-              <li>Its own Elasticsearch search indexes, sky coverage queries, and the viewer</li>
-              <li>User MOC artifacts, scan/task history, and evidence references</li>
-              <li>Deterministic Agent/MCP and workflow runs over user data</li>
+              <li data-i18n="boundary.owns.1">User assets, local survey/release labels, connectors, and access metadata</li>
+              <li data-i18n="boundary.owns.2">Local scanning and optional remote user scans through Warehouse</li>
+              <li data-i18n="boundary.owns.3">Its own Elasticsearch search indexes, sky coverage queries, and the viewer</li>
+              <li data-i18n="boundary.owns.4">User MOC artifacts, scan/task history, and evidence references</li>
+              <li data-i18n="boundary.owns.5">Deterministic Agent/MCP and workflow runs over user data</li>
             </ul>
           </article>
           <article class="mode-card">
-            <h3 class="card-title">Workspace does not own</h3>
+            <h3 class="card-title" data-i18n="boundary.not.title">Workspace does not own</h3>
             <ul>
-              <li>Public survey jobs, public connectors, MOC publication, or a public release catalog</li>
-              <li>Registering a user asset with Assets, or publishing user records back to Assets</li>
-              <li>Warehouse Elasticsearch as a shared database (Workspace ES stays independent)</li>
-              <li>Warehouse scanner/operator runtime or Assets management APIs</li>
+              <li data-i18n="boundary.not.1">Public survey jobs, public connectors, MOC publication, or a public release catalog</li>
+              <li data-i18n="boundary.not.2">Registering a user asset with Assets, or publishing user records back to Assets</li>
+              <li data-i18n="boundary.not.3">Warehouse Elasticsearch as a shared database (Workspace ES stays independent)</li>
+              <li data-i18n="boundary.not.4">Warehouse scanner/operator runtime or Assets management APIs</li>
             </ul>
           </article>
         </div>
-        <div class="callout"><p><strong>Ordinary public geometry</strong> comes from the immutable Resource Package v3 published by Assets. Fine-grained public region queries, when used, stay server-side and scoped—browsers do not hold Assets credentials. Atlas never stores the complete public tile/file/shard index.</p></div>
-        <p><code>surveyId</code> and <code>releaseId</code> on user assets and connectors are Atlas-local labels. A matching public package record is never required for a user registration. HTTP namespaces stay separate: <code>/api/surveys</code> addresses Atlas-local labels; <code>/api/public-surveys</code> reads installed Resource Package v3 metadata for the public viewer only.</p>
+        <div class="callout"><p><strong data-i18n="boundary.callout.title">Ordinary public geometry</strong> <span data-i18n="boundary.callout.body">comes from the immutable Resource Package v3 published by Assets. Fine-grained public region queries, when used, stay server-side and scoped—browsers do not hold Assets credentials. Atlas never stores the complete public tile/file/shard index.</span></p></div>
+        <p data-i18n="boundary.labels"><code>surveyId</code> and <code>releaseId</code> on user assets and connectors are Atlas-local labels. A matching public package record is never required for a user registration. HTTP namespaces stay separate: <code>/api/surveys</code> addresses Atlas-local labels; <code>/api/public-surveys</code> reads installed Resource Package v3 metadata for the public viewer only.</p>
       </section>
 
       <section id="sky-viewer" class="doc-section" aria-labelledby="sky-viewer-title" data-title-key="03 / Sky viewer">
-        <p class="section-tag">03 / Viewer</p>
-        <h2 id="sky-viewer-title">Sky viewer</h2>
-        <p class="section-lead">The frontend viewer (Vite + TypeScript + Aladin Lite v3) is the authoritative celestial explorer for Atlas. One ICRS sky contract drives coverage, density, objects, and survey layers.</p>
+        <p class="section-tag">03 / <span data-i18n="viewer.tag">Viewer</span></p>
+        <h2 id="sky-viewer-title" data-i18n="viewer.title">Sky viewer</h2>
+        <p class="section-lead" data-i18n="viewer.lead">The frontend viewer (Vite + TypeScript + Aladin Lite v3) is the authoritative celestial explorer for Atlas. One ICRS sky contract drives coverage, density, objects, and survey layers.</p>
         <div class="parameter-table-wrap" tabindex="0">
           <table class="parameter-table">
             <thead>
               <tr>
-                <th scope="col">Representation</th>
-                <th scope="col">Purpose</th>
-                <th scope="col">Source</th>
+                <th scope="col" data-i18n="viewer.th.rep">Representation</th>
+                <th scope="col" data-i18n="viewer.th.purpose">Purpose</th>
+                <th scope="col" data-i18n="viewer.th.source">Source</th>
               </tr>
             </thead>
             <tbody>
               <tr>
-                <th scope="row">Coverage</th>
-                <td>Show where public or user data exists</td>
-                <td>Assets package or user scan projection</td>
+                <th scope="row" data-i18n="viewer.coverage">Coverage</th>
+                <td data-i18n="viewer.coverage.purpose">Show where public or user data exists</td>
+                <td data-i18n="viewer.coverage.source">Assets package or user scan projection</td>
               </tr>
               <tr>
-                <th scope="row">Density</th>
-                <td>Compare occupied regions</td>
-                <td>Nested HEALPix counts</td>
+                <th scope="row" data-i18n="viewer.density">Density</th>
+                <td data-i18n="viewer.density.purpose">Compare occupied regions</td>
+                <td data-i18n="viewer.density.source">Nested HEALPix counts</td>
               </tr>
               <tr>
-                <th scope="row">Objects</th>
-                <td>Inspect rows</td>
-                <td>Valid user-source coordinates (local index)</td>
+                <th scope="row" data-i18n="viewer.objects">Objects</th>
+                <td data-i18n="viewer.objects.purpose">Inspect rows</td>
+                <td data-i18n="viewer.objects.source">Valid user-source coordinates (local index)</td>
               </tr>
               <tr>
-                <th scope="row">Survey layers</th>
-                <td>Compare public packages and user assets</td>
-                <td>Display-only shell offsets</td>
+                <th scope="row" data-i18n="viewer.layers">Survey layers</th>
+                <td data-i18n="viewer.layers.purpose">Compare public packages and user assets</td>
+                <td data-i18n="viewer.layers.source">Display-only shell offsets</td>
               </tr>
             </tbody>
           </table>
         </div>
-        <p>Shell offsets are visual layout only—they never represent distance, depth, wavelength, magnitude, or completeness. Region selection and Aladin exploration operate on the same public/user layer set. Geometric overlap (<code>POST /api/sky/overlap</code>) intersects visible public and workspace sources that already have pixel evidence; ordinary geometry overlap does not require a file reverse-lookup index.</p>
-        <div class="callout callout-warning"><p><strong>Coverage ≠ download.</strong> A verified public MOC means the survey recognizes the region. It does not guarantee that corresponding science files are readable or downloadable. Availability states (geometry-only, entrypoint-only, candidate/incomplete, tile-resolved, unavailable) stay distinct in overlap and download-plan flows.</p></div>
+        <p data-i18n="viewer.body">Shell offsets are visual layout only—they never represent distance, depth, wavelength, magnitude, or completeness. Region selection and Aladin exploration operate on the same public/user layer set. Geometric overlap (<code>POST /api/sky/overlap</code>) intersects visible public and workspace sources that already have pixel evidence; ordinary geometry overlap does not require a file reverse-lookup index.</p>
+        <div class="callout callout-warning"><p><strong data-i18n="viewer.warn.title">Coverage ≠ download.</strong> <span data-i18n="viewer.warn.body">A verified public MOC means the survey recognizes the region. It does not guarantee that corresponding science files are readable or downloadable. Availability states (geometry-only, entrypoint-only, candidate/incomplete, tile-resolved, unavailable) stay distinct in overlap and download-plan flows.</span></p></div>
       </section>
 
       <section id="user-assets" class="doc-section" aria-labelledby="user-assets-title" data-title-key="04 / User asset registry">
-        <p class="section-tag">04 / Assets</p>
-        <h2 id="user-assets-title">User asset registry</h2>
-        <p class="section-lead">Workspace is the authoritative owner of private data assets. Add, inspect, filter, edit, and delete user assets with normalized survey/release labels—catalog, image, spectrum, cube, timeseries, and related modalities as registered locally.</p>
+        <p class="section-tag">04 / <span data-i18n="assets.tag">Assets</span></p>
+        <h2 id="user-assets-title" data-i18n="assets.title">User asset registry</h2>
+        <p class="section-lead" data-i18n="assets.lead">Workspace is the authoritative owner of private data assets. Add, inspect, filter, edit, and delete user assets with normalized survey/release labels—catalog, image, spectrum, cube, timeseries, and related modalities as registered locally.</p>
         <ul>
-          <li><strong>Local labels only.</strong> User <code>surveyId</code>/<code>releaseId</code>/<code>product</code> never write back to Assets and need not exist in the public package catalog.</li>
-          <li><strong>Status is derived.</strong> <code>GET /api/data-assets/status</code> reports coverage (<code>not_started</code> / <code>pending</code> / <code>failed</code> / <code>ready</code> / <code>empty</code> / <code>unavailable</code>), object indexability, and a suggested next action. Registration alone (“acquired”) is not sky coverage.</li>
-          <li><strong>Only ready MOCs draw.</strong> Pixels appear on user sky layers when coverage is <code>ready</code>; a pending or failed latest scan keeps the previous ready artifact visible when one exists.</li>
+          <li><strong data-i18n="assets.1.title">Local labels only.</strong> <span data-i18n="assets.1.body">User <code>surveyId</code>/<code>releaseId</code>/<code>product</code> never write back to Assets and need not exist in the public package catalog.</span></li>
+          <li><strong data-i18n="assets.2.title">Status is derived.</strong> <span data-i18n="assets.2.body"><code>GET /api/data-assets/status</code> reports coverage (<code>not_started</code> / <code>pending</code> / <code>failed</code> / <code>ready</code> / <code>empty</code> / <code>unavailable</code>), object indexability, and a suggested next action. Registration alone (“acquired”) is not sky coverage.</span></li>
+          <li><strong data-i18n="assets.3.title">Only ready MOCs draw.</strong> <span data-i18n="assets.3.body">Pixels appear on user sky layers when coverage is <code>ready</code>; a pending or failed latest scan keeps the previous ready artifact visible when one exists.</span></li>
         </ul>
       </section>
 
       <section id="connectors" class="doc-section" aria-labelledby="connectors-title" data-title-key="05 / Connectors">
-        <p class="section-tag">05 / Connectors</p>
-        <h2 id="connectors-title">Connectors</h2>
-        <p class="section-lead">Register data sources and run structural connection checks. Credentials stay in the managed secret store—never in asset metadata, ScanRequest bodies, evidence, or HTTP responses.</p>
+        <p class="section-tag">05 / <span data-i18n="connectors.tag">Connectors</span></p>
+        <h2 id="connectors-title" data-i18n="connectors.title">Connectors</h2>
+        <p class="section-lead" data-i18n="connectors.lead">Register data sources and run structural connection checks. Credentials stay in the managed secret store—never in asset metadata, ScanRequest bodies, evidence, or HTTP responses.</p>
         <div class="grid-2">
           <article class="mode-card">
             <span class="mode-badge">local</span>
-            <h3 class="card-title">Local filesystem</h3>
-            <p class="card-desc">Controlled read-only connector root. Local CSV scans write objects and coverage to Workspace Elasticsearch and generate user MOC artifacts.</p>
+            <h3 class="card-title" data-i18n="conn.local.title">Local filesystem</h3>
+            <p class="card-desc" data-i18n="conn.local.body">Controlled read-only connector root. Local CSV scans write objects and coverage to Workspace Elasticsearch and generate user MOC artifacts.</p>
           </article>
           <article class="mode-card">
             <span class="mode-badge">s3</span>
-            <h3 class="card-title">S3-compatible &amp; Ali OSS</h3>
-            <p class="card-desc">Amazon S3 and Aliyun OSS endpoints (OSS handled through the <code>s3</code> connector kind with the Ali OSS SDK when the hostname matches). Used for connection checks and optional Warehouse remote scans.</p>
+            <h3 class="card-title" data-i18n="conn.s3.title">S3-compatible &amp; Ali OSS</h3>
+            <p class="card-desc" data-i18n="conn.s3.body">Amazon S3 and Aliyun OSS endpoints (OSS handled through the <code>s3</code> connector kind with the Ali OSS SDK when the hostname matches). Used for connection checks and optional Warehouse remote scans.</p>
           </article>
           <article class="mode-card">
             <span class="mode-badge">jdbc</span>
-            <h3 class="card-title">JDBC databases</h3>
-            <p class="card-desc">Workspace connectors include JDBC for structural checks and Workspace-side use. Warehouse ScanPlan v2 does not yet accept JDBC sources—remote Warehouse scans remain local/S3/OSS only.</p>
+            <h3 class="card-title" data-i18n="conn.jdbc.title">JDBC databases</h3>
+            <p class="card-desc" data-i18n="conn.jdbc.body">Workspace connectors include JDBC for structural checks and Workspace-side use. Warehouse ScanPlan v2 does not yet accept JDBC sources—remote Warehouse scans remain local/S3/OSS only.</p>
           </article>
           <article class="mode-card">
             <span class="mode-badge">check</span>
-            <h3 class="card-title">Connection tests</h3>
-            <p class="card-desc"><code>POST /api/connectors/:id/check</code> validates endpoint, bucket, prefix, or database connectivity. A successful check is not scan-completion evidence.</p>
+            <h3 class="card-title" data-i18n="conn.check.title">Connection tests</h3>
+            <p class="card-desc" data-i18n="conn.check.body"><code>POST /api/connectors/:id/check</code> validates endpoint, bucket, prefix, or database connectivity. A successful check is not scan-completion evidence.</p>
           </article>
         </div>
       </section>
 
       <section id="local-scan" class="doc-section" aria-labelledby="local-scan-title" data-title-key="06 / Local scan &amp; user MOCs">
-        <p class="section-tag">06 / Local scan</p>
-        <h2 id="local-scan-title">Local scan &amp; user MOCs</h2>
-        <p class="section-lead">The deterministic local scanner parses CSV under a local connector, validates RA/Dec, builds nested HEALPix indexes, and generates IVOA FITS MOC files through the pinned <code>astro_survey_moc_core</code> adapter.</p>
+        <p class="section-tag">06 / <span data-i18n="local.tag">Local scan</span></p>
+        <h2 id="local-scan-title" data-i18n="local.title">Local scan &amp; user MOCs</h2>
+        <p class="section-lead" data-i18n="local.lead">The deterministic local scanner parses CSV under a local connector, validates RA/Dec, builds nested HEALPix indexes, and generates IVOA FITS MOC files through the pinned <code>astro_survey_moc_core</code> adapter.</p>
         <div class="grid-3">
           <article class="card">
-            <h3 class="card-title">Local path</h3>
-            <p class="card-desc"><code>POST /api/connectors/{id}/local-scan</code> (or asset-scoped local scan). Writes Workspace ES + user MOC store. Incomplete local scans are marked failed on restart—never exposed as ready coverage.</p>
+            <h3 class="card-title" data-i18n="local.path.title">Local path</h3>
+            <p class="card-desc" data-i18n="local.path.body"><code>POST /api/connectors/{id}/local-scan</code> (or asset-scoped local scan). Writes Workspace ES + user MOC store. Incomplete local scans are marked failed on restart—never exposed as ready coverage.</p>
           </article>
           <article class="card">
-            <h3 class="card-title">MOC Core contract</h3>
-            <p class="card-desc">Normal output: ICRS, NESTED, IVOA FITS MOC, <code>maxOrder=10</code>; query order 8 and preview order 4 derived from the authoritative MOC. Empty or invalid inputs stay metadata-only or failed—no footprint inferred from a filename or survey label.</p>
+            <h3 class="card-title" data-i18n="local.moc.title">MOC Core contract</h3>
+            <p class="card-desc" data-i18n="local.moc.body">Normal output: ICRS, NESTED, IVOA FITS MOC, <code>maxOrder=10</code>; query order 8 and preview order 4 derived from the authoritative MOC. Empty or invalid inputs stay metadata-only or failed—no footprint inferred from a filename or survey label.</p>
           </article>
           <article class="card">
-            <h3 class="card-title">User MOC artifacts</h3>
-            <p class="card-desc">At least <code>moc.fits</code>, <code>query-order8.json</code>, <code>preview-order4.json</code>, and SHA-256. <code>/api/user-mocs</code> returns metadata; allowlisted artifact downloads only. <code>/api/sky/coverage</code> merges ready user layers with public packages.</p>
+            <h3 class="card-title" data-i18n="local.art.title">User MOC artifacts</h3>
+            <p class="card-desc" data-i18n="local.art.body">At least <code>moc.fits</code>, <code>query-order8.json</code>, <code>preview-order4.json</code>, and SHA-256. <code>/api/user-mocs</code> returns metadata; allowlisted artifact downloads only. <code>/api/sky/coverage</code> merges ready user layers with public packages.</p>
           </article>
         </div>
-        <p>Supported user coverage modes include <code>catalog-radec</code> (object presence), <code>nested-healpix</code>, and <code>fits-wcs</code> (image extent). Coverage role, data origin, source tier, version, and SHA-256 stay attached to the stored coverage record. Public publication of user MOCs is outside Atlas.</p>
+        <p data-i18n="local.modes">Supported user coverage modes include <code>catalog-radec</code> (object presence), <code>nested-healpix</code>, and <code>fits-wcs</code> (image extent). Coverage role, data origin, source tier, version, and SHA-256 stay attached to the stored coverage record. Public publication of user MOCs is outside Atlas.</p>
       </section>
 
       <section id="warehouse-scan" class="doc-section" aria-labelledby="warehouse-scan-title" data-title-key="07 / Optional Warehouse scans">
-        <p class="section-tag">07 / Warehouse</p>
-        <h2 id="warehouse-scan-title">Optional Warehouse remote scans</h2>
-        <p class="section-lead">When Warehouse is enabled, Workspace submits a namespaced <code>ScanRequest</code> with <code>ScanPlan</code> version 2 for one bounded S3/OSS source, polls status, reads only Warehouse <code>ast_*</code> indices, and imports evidence into Workspace for MOC generation.</p>
+        <p class="section-tag">07 / <span data-i18n="wh.tag">Warehouse</span></p>
+        <h2 id="warehouse-scan-title" data-i18n="wh.title">Optional Warehouse remote scans</h2>
+        <p class="section-lead" data-i18n="wh.lead">When Warehouse is enabled, Workspace submits a namespaced <code>ScanRequest</code> with <code>ScanPlan</code> version 2 for one bounded S3/OSS source, polls status, reads only Warehouse <code>ast_*</code> indices, and imports evidence into Workspace for MOC generation.</p>
         <ul>
-          <li><strong>Optional.</strong> With Warehouse disabled or unavailable, Workspace still starts, serves user assets, local scans, installed public packages, and existing user MOCs. Remote submit returns an explicit disabled/unavailable error.</li>
-          <li><strong>Tracking labels.</strong> Requests use <code>track-caller=workspace</code> and <code>track-task-kind=user-scan|user-coverage</code> (plus asset/connector/batch ids). History APIs return only Workspace-owned records.</li>
-          <li><strong>Two Elasticsearch planes.</strong> Workspace: <code>astro_*_index_v1</code> via <code>ASTRO_ES_URL</code>. Warehouse: <code>ast_*_index_v1</code> via <code>ASTRO_WAREHOUSE_ES_URL</code>. Neither is a fallback for the other.</li>
-          <li><strong>No remote object rows (v1).</strong> Warehouse evidence yields file/coverage cells and user MOCs—not per-row catalog objects. Object-level exploration needs a local scan into <code>astro_object_index_v1</code>.</li>
+          <li><strong data-i18n="wh.1.title">Optional.</strong> <span data-i18n="wh.1.body">With Warehouse disabled or unavailable, Workspace still starts, serves user assets, local scans, installed public packages, and existing user MOCs. Remote submit returns an explicit disabled/unavailable error.</span></li>
+          <li><strong data-i18n="wh.2.title">Tracking labels.</strong> <span data-i18n="wh.2.body">Requests use <code>track-caller=workspace</code> and <code>track-task-kind=user-scan|user-coverage</code> (plus asset/connector/batch ids). History APIs return only Workspace-owned records.</span></li>
+          <li><strong data-i18n="wh.3.title">Two Elasticsearch planes.</strong> <span data-i18n="wh.3.body">Workspace: <code>astro_*_index_v1</code> via <code>ASTRO_ES_URL</code>. Warehouse: <code>ast_*_index_v1</code> via <code>ASTRO_WAREHOUSE_ES_URL</code>. Neither is a fallback for the other.</span></li>
+          <li><strong data-i18n="wh.4.title">No remote object rows (v1).</strong> <span data-i18n="wh.4.body">Warehouse evidence yields file/coverage cells and user MOCs—not per-row catalog objects. Object-level exploration needs a local scan into <code>astro_object_index_v1</code>.</span></li>
         </ul>
-        <p>Details for ScanPlan fields and Operator behavior live in <a href="https://astro-survey-atlas.github.io/Warehouse/" target="_blank" rel="noopener noreferrer">Warehouse docs</a>. Workspace HTTP contracts for remote submit and history are summarized in the repo <a href="https://github.com/Astro-Survey-Atlas/Workspace/blob/main/docs/api-reference.md" target="_blank" rel="noopener noreferrer"><code>docs/api-reference.md</code></a>.</p>
+        <p data-i18n="wh.links">Details for ScanPlan fields and Operator behavior live in <a href="https://astro-survey-atlas.github.io/Warehouse/" target="_blank" rel="noopener noreferrer">Warehouse docs</a>. Workspace HTTP contracts for remote submit and history are summarized in the repo <a href="https://github.com/Astro-Survey-Atlas/Workspace/blob/main/docs/api-reference.md" target="_blank" rel="noopener noreferrer"><code>docs/api-reference.md</code></a>.</p>
       </section>
 
       <section id="resource-packages" class="doc-section" aria-labelledby="resource-packages-title" data-title-key="08 / Resource Package v3">
-        <p class="section-tag">08 / Public packages</p>
-        <h2 id="resource-packages-title">Resource Package v3 consume</h2>
-        <p class="section-lead">Public geometry is a one-way consume path. Workspace downloads, validates, and activates Assets-published immutable v3 packages. It never writes user records or user MOCs back to Assets.</p>
+        <p class="section-tag">08 / <span data-i18n="pkg.tag">Public packages</span></p>
+        <h2 id="resource-packages-title" data-i18n="pkg.title">Resource Package v3 consume</h2>
+        <p class="section-lead" data-i18n="pkg.lead">Public geometry is a one-way consume path. Workspace downloads, validates, and activates Assets-published immutable v3 packages. It never writes user records or user MOCs back to Assets.</p>
         <ol>
-          <li>Fetch and validate the Assets v3 catalog.</li>
-          <li>Keep the verified catalog under <code>assets-snapshots/&lt;hash&gt;/</code> and atomically expose <code>assets-current</code>.</li>
-          <li>Download packages on demand; verify archive size and SHA-256; validate every v3 manifest and FITS MOC.</li>
-          <li>Activate selected release layers for the read-only public sky view.</li>
+          <li data-i18n="pkg.1">Fetch and validate the Assets v3 catalog.</li>
+          <li data-i18n="pkg.2">Keep the verified catalog under <code>assets-snapshots/&lt;hash&gt;/</code> and atomically expose <code>assets-current</code>.</li>
+          <li data-i18n="pkg.3">Download packages on demand; verify archive size and SHA-256; validate every v3 manifest and FITS MOC.</li>
+          <li data-i18n="pkg.4">Activate selected release layers for the read-only public sky view.</li>
         </ol>
-        <p>If Assets is unavailable, a previously verified local snapshot remains usable. With no successful snapshot, public resource endpoints return <code>503</code>; user assets, local scans, indexes, and task history continue. Atlas does not scan bootstrap catalogs, parse v1/v2 packages, or keep a second public footprint generator.</p>
-        <div class="callout"><p><strong>Scoped reverse lookup (when configured).</strong> Explicit overlap-detail or download-plan sessions may call a bounded, authenticated Assets query from the Workspace server. Results are region-scoped with revision/expiry; the browser never receives the credential. Geometry-only layers can still display and participate in overlap without creating executable download items.</p></div>
+        <p data-i18n="pkg.body">If Assets is unavailable, a previously verified local snapshot remains usable. With no successful snapshot, public resource endpoints return <code>503</code>; user assets, local scans, indexes, and task history continue. Atlas does not scan bootstrap catalogs, parse v1/v2 packages, or keep a second public footprint generator.</p>
+        <div class="callout"><p><strong data-i18n="pkg.callout.title">Scoped reverse lookup (when configured).</strong> <span data-i18n="pkg.callout.body">Explicit overlap-detail or download-plan sessions may call a bounded, authenticated Assets query from the Workspace server. Results are region-scoped with revision/expiry; the browser never receives the credential. Geometry-only layers can still display and participate in overlap without creating executable download items.</span></p></div>
       </section>
 
       <section id="agent-mcp" class="doc-section" aria-labelledby="agent-mcp-title" data-title-key="09 / Agent &amp; MCP">
-        <p class="section-tag">09 / Agent</p>
-        <h2 id="agent-mcp-title">Agent &amp; MCP</h2>
-        <p class="section-lead">MCP and the Agent are adapters over the deterministic data plane. They select tools and interpret results; they do not implement a second WCS, HEALPix, or MOC algorithm.</p>
+        <p class="section-tag">09 / <span data-i18n="agent.tag">Agent</span></p>
+        <h2 id="agent-mcp-title" data-i18n="agent.title">Agent &amp; MCP</h2>
+        <p class="section-lead" data-i18n="agent.lead">MCP and the Agent are adapters over the deterministic data plane. They select tools and interpret results; they do not implement a second WCS, HEALPix, or MOC algorithm.</p>
         <ul>
-          <li><strong>MCP server</strong> (<code>asa-workspace</code>): read-only tools over Atlas-owned user assets—currently <code>list_user_assets</code> and <code>get_user_asset</code>. Public Assets packages are not included.</li>
-          <li><strong>ToolRegistry / WorkflowRegistry</strong>: validate deterministic tool contracts and versioned DAGs. Example: Euclid × DESI cross-match workflow over the configured catalog MCP client—an Atlas workflow, not a public coverage builder and not a publisher to Assets.</li>
-          <li><strong>Agent intent</strong> remains rule-based until an explicitly configured LLM integration is enabled.</li>
+          <li><strong data-i18n="agent.1.title">MCP server</strong> <span data-i18n="agent.1.body">(<code>asa-workspace</code>): read-only tools over Atlas-owned user assets—currently <code>list_user_assets</code> and <code>get_user_asset</code>. Public Assets packages are not included.</span></li>
+          <li><strong data-i18n="agent.2.title">ToolRegistry / WorkflowRegistry</strong><span data-i18n="agent.2.body">: validate deterministic tool contracts and versioned DAGs. Example: Euclid × DESI cross-match workflow over the configured catalog MCP client—an Atlas workflow, not a public coverage builder and not a publisher to Assets.</span></li>
+          <li><strong data-i18n="agent.3.title">Agent intent</strong> <span data-i18n="agent.3.body">remains rule-based until an explicitly configured LLM integration is enabled.</span></li>
         </ul>
-        <p>A global notification deck (<code>#workspace-notification-deck</code>) reports temporary progress for package sync, connector checks, scans, and errors with a single unified lifecycle.</p>
+        <p data-i18n="agent.notify">A global notification deck (<code>#workspace-notification-deck</code>) reports temporary progress for package sync, connector checks, scans, and errors with a single unified lifecycle.</p>
       </section>
 
       <section id="quick-start" class="doc-section" aria-labelledby="quick-start-title" data-title-key="10 / Quick start">
-        <p class="section-tag">10 / Run locally</p>
-        <h2 id="quick-start-title">Quick start</h2>
-        <p class="section-lead">Pointers from the repository README. Prefer the README and chart docs for full deployment contracts.</p>
-        <h3>Prerequisites</h3>
+        <p class="section-tag">10 / <span data-i18n="qs.tag">Run locally</span></p>
+        <h2 id="quick-start-title" data-i18n="qs.title">Quick start</h2>
+        <p class="section-lead" data-i18n="qs.lead">Pointers from the repository README. Prefer the README and chart docs for full deployment contracts.</p>
+        <h3 data-i18n="qs.prereq">Prerequisites</h3>
         <ul>
-          <li>Node.js <code>&gt;= 22.13</code></li>
-          <li>Python <code>3.10+</code> (MOC Core CLI wheel)</li>
-          <li>Elasticsearch <code>8.x</code> (Workspace-owned search plane)</li>
-          <li>SQLite (default) or PostgreSQL</li>
+          <li data-i18n="qs.prereq.1">Node.js <code>&gt;= 22.13</code></li>
+          <li data-i18n="qs.prereq.2">Python <code>3.10+</code> (MOC Core CLI wheel)</li>
+          <li data-i18n="qs.prereq.3">Elasticsearch <code>8.x</code> (Workspace-owned search plane)</li>
+          <li data-i18n="qs.prereq.4">SQLite (default) or PostgreSQL</li>
         </ul>
         <div class="code-box">
-          <div class="code-header"><span>Local development</span></div>
+          <div class="code-header"><span data-i18n="qs.codeHeader">Local development</span></div>
           <pre class="code-content" tabindex="0"><code>npm ci
 npm run build
 
@@ -284,42 +286,42 @@ npm run dev
 npm run dev:viewer
 # Open http://localhost:5173</code></pre>
         </div>
-        <h3>Other run paths</h3>
+        <h3 data-i18n="qs.other">Other run paths</h3>
         <ul>
-          <li><strong>Docker Compose (release image):</strong> <code>docker compose -f compose.release.yaml up -d</code> then <code>curl http://127.0.0.1:8080/healthz</code>.</li>
-          <li><strong>Helm:</strong> chart <code>charts/asa-workspace</code> on GHCR OCI; see chart README for metadata-store and search modes.</li>
-          <li><strong>Windows desktop installer:</strong> GitHub Releases setup.exe bundles API, viewer, and embedded Python/MOC Core; first launch configures data directory and Elasticsearch (external or Docker-managed).</li>
+          <li><strong data-i18n="qs.other.1.title">Docker Compose (release image):</strong><span data-i18n="qs.other.1.body"> <code>docker compose -f compose.release.yaml up -d</code> then <code>curl http://127.0.0.1:8080/healthz</code>.</span></li>
+          <li><strong data-i18n="qs.other.2.title">Helm:</strong><span data-i18n="qs.other.2.body"> chart <code>charts/asa-workspace</code> on GHCR OCI; see chart README for metadata-store and search modes.</span></li>
+          <li><strong data-i18n="qs.other.3.title">Windows desktop installer:</strong><span data-i18n="qs.other.3.body"> GitHub Releases setup.exe bundles API, viewer, and embedded Python/MOC Core; first launch configures data directory and Elasticsearch (external or Docker-managed).</span></li>
         </ul>
-        <p>Validate with <code>npm test</code>, <code>npm run test:e2e</code>, or <code>npm run validate</code>. Full steps: <a href="https://github.com/Astro-Survey-Atlas/Workspace/blob/main/README.md" target="_blank" rel="noopener noreferrer">README.md</a>.</p>
+        <p data-i18n="qs.validate">Validate with <code>npm test</code>, <code>npm run test:e2e</code>, or <code>npm run validate</code>. Full steps: <a href="https://github.com/Astro-Survey-Atlas/Workspace/blob/main/README.md" target="_blank" rel="noopener noreferrer">README.md</a>.</p>
       </section>
 
       <section id="limits" class="doc-section" aria-labelledby="limits-title" data-title-key="11 / Limits &amp; non-goals">
-        <p class="section-tag">11 / Honesty</p>
-        <h2 id="limits-title">Limits &amp; non-goals</h2>
-        <p class="section-lead">This Pages site documents landed Workspace capabilities only. The following are explicitly out of scope or not claimed here.</p>
+        <p class="section-tag">11 / <span data-i18n="limits.tag">Honesty</span></p>
+        <h2 id="limits-title" data-i18n="limits.title">Limits &amp; non-goals</h2>
+        <p class="section-lead" data-i18n="limits.lead">This Pages site documents landed Workspace capabilities only. The following are explicitly out of scope or not claimed here.</p>
         <ul>
-          <li><strong>No public catalog ownership.</strong> Assets owns public survey/release/product publication; Workspace consumes packages.</li>
-          <li><strong>No science-array proxy.</strong> Workspace does not claim to stream or proxy arbitrary FITS/science arrays as a general file server. Bounded coverage-download jobs (when configured) verify and register concrete public source units into a new local connector—they are not a substitute for survey archives.</li>
-          <li><strong>No depth maps.</strong> FITS MOC expresses where data exists, not sensitivity or quality. Depth layers are not inferred.</li>
-          <li><strong>No TAP/SIA / sky-footprint-mapper / cosmos-explorer-ui claims</strong> unless and until those land in current repo docs as implemented Workspace features.</li>
-          <li><strong>No write-back to Assets.</strong> User assets, user MOCs, and user task history never register or publish into Assets.</li>
-          <li><strong>No shared ES with Warehouse.</strong> Two independent search planes; Warehouse outage must not block Workspace startup.</li>
-          <li><strong>Remote scans ≠ object catalog.</strong> Warehouse v1 evidence is file/coverage/MOC, not per-row objects.</li>
+          <li><strong data-i18n="limits.1.title">No public catalog ownership.</strong><span data-i18n="limits.1.body"> Assets owns public survey/release/product publication; Workspace consumes packages.</span></li>
+          <li><strong data-i18n="limits.2.title">No science-array proxy.</strong><span data-i18n="limits.2.body"> Workspace does not claim to stream or proxy arbitrary FITS/science arrays as a general file server. Bounded coverage-download jobs (when configured) verify and register concrete public source units into a new local connector—they are not a substitute for survey archives.</span></li>
+          <li><strong data-i18n="limits.3.title">No depth maps.</strong><span data-i18n="limits.3.body"> FITS MOC expresses where data exists, not sensitivity or quality. Depth layers are not inferred.</span></li>
+          <li><strong data-i18n="limits.4.title">No TAP/SIA / sky-footprint-mapper / cosmos-explorer-ui claims</strong><span data-i18n="limits.4.body"> unless and until those land in current repo docs as implemented Workspace features.</span></li>
+          <li><strong data-i18n="limits.5.title">No write-back to Assets.</strong><span data-i18n="limits.5.body"> User assets, user MOCs, and user task history never register or publish into Assets.</span></li>
+          <li><strong data-i18n="limits.6.title">No shared ES with Warehouse.</strong><span data-i18n="limits.6.body"> Two independent search planes; Warehouse outage must not block Workspace startup.</span></li>
+          <li><strong data-i18n="limits.7.title">Remote scans ≠ object catalog.</strong><span data-i18n="limits.7.body"> Warehouse v1 evidence is file/coverage/MOC, not per-row objects.</span></li>
         </ul>
       </section>
 
       <section id="docs" class="doc-section" aria-labelledby="docs-title" data-title-key="12 / Canonical repo docs">
-        <p class="section-tag">12 / Source of truth</p>
-        <h2 id="docs-title">Canonical repo docs</h2>
-        <p class="section-lead">This Pages site summarizes landed architecture for browsing. Detailed HTTP contracts, labels, and acceptance rules live in the repository and remain the source of truth—do not treat Pages as a second API specification.</p>
+        <p class="section-tag">12 / <span data-i18n="docs.tag">Source of truth</span></p>
+        <h2 id="docs-title" data-i18n="docs.title">Canonical repo docs</h2>
+        <p class="section-lead" data-i18n="docs.lead">This Pages site summarizes landed architecture for browsing. Detailed HTTP contracts, labels, and acceptance rules live in the repository and remain the source of truth—do not treat Pages as a second API specification.</p>
         <ul>
-          <li><a href="https://github.com/Astro-Survey-Atlas/Workspace/blob/main/docs/architecture.md" target="_blank" rel="noopener noreferrer"><code>docs/architecture.md</code></a> — product boundary and data flow</li>
-          <li><a href="https://github.com/Astro-Survey-Atlas/Workspace/blob/main/docs/api-reference.md" target="_blank" rel="noopener noreferrer"><code>docs/api-reference.md</code></a> — Workspace-owned HTTP API</li>
-          <li><a href="https://github.com/Astro-Survey-Atlas/Workspace/blob/main/docs/atlas-boundary-plan.md" target="_blank" rel="noopener noreferrer"><code>docs/atlas-boundary-plan.md</code></a> — frozen boundary plan</li>
-          <li><a href="https://github.com/Astro-Survey-Atlas/Workspace/blob/main/docs/assets-warehouse-atlas-boundary.md" target="_blank" rel="noopener noreferrer"><code>docs/assets-warehouse-atlas-boundary.md</code></a> — Assets / Warehouse / Atlas split</li>
-          <li><a href="https://github.com/Astro-Survey-Atlas/Workspace/blob/main/docs/public-coverage-boundary.md" target="_blank" rel="noopener noreferrer"><code>docs/public-coverage-boundary.md</code></a> — package-first public geometry</li>
-          <li><a href="https://github.com/Astro-Survey-Atlas/Workspace/blob/main/docs/download-plan-workflow.md" target="_blank" rel="noopener noreferrer"><code>docs/download-plan-workflow.md</code></a> — overlap vs executable download items</li>
-          <li><a href="https://github.com/Astro-Survey-Atlas/Workspace/blob/main/README.md" target="_blank" rel="noopener noreferrer"><code>README.md</code></a> — features, local run, Compose, Helm, desktop</li>
+          <li><a href="https://github.com/Astro-Survey-Atlas/Workspace/blob/main/docs/architecture.md" target="_blank" rel="noopener noreferrer"><code>docs/architecture.md</code></a><span data-i18n="docs.arch"> — product boundary and data flow</span></li>
+          <li><a href="https://github.com/Astro-Survey-Atlas/Workspace/blob/main/docs/api-reference.md" target="_blank" rel="noopener noreferrer"><code>docs/api-reference.md</code></a><span data-i18n="docs.api"> — Workspace-owned HTTP API</span></li>
+          <li><a href="https://github.com/Astro-Survey-Atlas/Workspace/blob/main/docs/atlas-boundary-plan.md" target="_blank" rel="noopener noreferrer"><code>docs/atlas-boundary-plan.md</code></a><span data-i18n="docs.boundary"> — frozen boundary plan</span></li>
+          <li><a href="https://github.com/Astro-Survey-Atlas/Workspace/blob/main/docs/assets-warehouse-atlas-boundary.md" target="_blank" rel="noopener noreferrer"><code>docs/assets-warehouse-atlas-boundary.md</code></a><span data-i18n="docs.split"> — Assets / Warehouse / Atlas split</span></li>
+          <li><a href="https://github.com/Astro-Survey-Atlas/Workspace/blob/main/docs/public-coverage-boundary.md" target="_blank" rel="noopener noreferrer"><code>docs/public-coverage-boundary.md</code></a><span data-i18n="docs.public"> — package-first public geometry</span></li>
+          <li><a href="https://github.com/Astro-Survey-Atlas/Workspace/blob/main/docs/download-plan-workflow.md" target="_blank" rel="noopener noreferrer"><code>docs/download-plan-workflow.md</code></a><span data-i18n="docs.download"> — overlap vs executable download items</span></li>
+          <li><a href="https://github.com/Astro-Survey-Atlas/Workspace/blob/main/README.md" target="_blank" rel="noopener noreferrer"><code>README.md</code></a><span data-i18n="docs.readme"> — features, local run, Compose, Helm, desktop</span></li>
         </ul>
       </section>
     </main>
@@ -327,8 +329,8 @@ npm run dev:viewer
 
   <footer class="site-footer">
     <div class="footer-inner">
-      <p>Astro Survey Atlas / Workspace<br>Static documentation. No live service connection. Contracts live in the repository.</p>
-      <a href="https://github.com/Astro-Survey-Atlas/Workspace">Source on GitHub</a>
+      <p data-i18n="footer.copy">Astro Survey Atlas / Workspace<br>Static documentation. No live service connection. Contracts live in the repository.</p>
+      <a href="https://github.com/Astro-Survey-Atlas/Workspace" data-i18n="footer.source">Source on GitHub</a>
     </div>
   </footer>
 </body>
