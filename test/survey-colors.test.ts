@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { fallbackSurveyColor, surveyColorFor, surveyDisplayColor } from "../src/survey-colors";
+import { fallbackSurveyColor, surveyColorFor, surveyDisplayColor } from "../src/survey-colors.js";
 
 test("survey colors preserve valid catalog values", () => {
   assert.equal(surveyColorFor("euclid", "#3B82F6"), "#3b82f6");
