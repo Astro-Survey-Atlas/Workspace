@@ -437,7 +437,7 @@ async function mockRemoteCoverageApi(page: Page): Promise<{ assetId: string; req
       assetName: asset.name,
       surveyId,
       releaseId,
-      pixels: pending ? [] : [0, 1],
+      pixels: [0, 1],
       byAsset: [{ key: assetId, label: asset.name, files: 1, bytes: 1, objects: 2, objectCount: 2 }],
       status: pending ? "pending" : "ready",
       source: "asset",
@@ -446,6 +446,7 @@ async function mockRemoteCoverageApi(page: Page): Promise<{ assetId: string; req
       nativeOrders: [8],
       precision: "exact",
       coverageRole: "object_presence",
+      preview: pending,
     };
     await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ status: pending ? "pending" : "ready", index: "astro_coverage_index_v1", nside: 16, pixels: layer.pixels, byAsset: layer.byAsset, layers: [layer] }) });
   });
@@ -500,6 +501,44 @@ test("remote coverage submission keeps credentials server-side and shows a pendi
   await expect(page.locator("#workspace-notification-deck")).toContainText("远程覆盖扫描已提交");
   await expect(page.locator("#sky-layer-list .workspace-asset-card").first()).toContainText(/PENDING|处理中/);
   await expect(page.locator("#inspector-content")).toContainText("覆盖状态处理中", { timeout: 10_000 });
+});
+
+test("pending preview coverage is selectable and focusable without exploding", async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  let fixture: Awaited<ReturnType<typeof mockRemoteCoverageApi>>;
+  await openFresh(page, async () => {
+    fixture = await mockRemoteCoverageApi(page);
+  });
+
+  const assetCard = page.locator("#sky-layer-list .workspace-asset-card").first();
+  await assetCard.locator(".survey-card-body").click();
+  await page.locator("#inspector-content .command-button", { hasText: "提交远程覆盖扫描" }).click();
+  const dialog = page.locator("#remote-coverage-dialog");
+  await dialog.locator("#remote-coverage-form-submit").click();
+  await expect(dialog).toBeHidden();
+  await expect(page.locator("#inspector-content")).toContainText("覆盖状态处理中", { timeout: 10_000 });
+
+  const canvas = page.locator("#scene-canvas");
+  const findPreviewPoint = async () => findCanvasPoint(page, (state) => state.pixel === 0, { requireAsset: true });
+  await expect.poll(async () => {
+    try {
+      await findPreviewPoint();
+      return true;
+    } catch {
+      return false;
+    }
+  }, { timeout: 10_000 }).toBe(true);
+  const point = await findPreviewPoint();
+  await canvas.click({ position: point });
+  await expect(page.locator("#layer-selection-count")).toHaveText("1 CELLS");
+  await expect(page.locator("#inspector-content")).toContainText("Remote E2E Catalog");
+  await expect(page.locator("#inspector-content")).toContainText("覆盖状态处理中");
+  await expect(canvas).not.toHaveAttribute("data-exploded-pixel", /.+/);
+
+  const cameraBeforeFocus = await canvas.getAttribute("data-camera-position");
+  await page.keyboard.press("f");
+  await expect.poll(() => canvas.getAttribute("data-camera-position"), { timeout: 3_000 })
+    .not.toBe(cameraBeforeFocus);
 });
 
 test("unified sky layer stack lists each user asset with its own visibility control", async ({ page }) => {

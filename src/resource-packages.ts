@@ -28,6 +28,12 @@ function compareVersions(left: string, right: string): number {
   return (a[0]! - b[0]!) || (a[1]! - b[1]!) || (a[2]! - b[2]!);
 }
 const REQUIRED_ARCHIVE_FILES = new Set(["resource-package.json", "footprints/survey-footprints.json", "provenance.json", "README.md"]);
+const REQUIRED_MANIFEST_FILES = new Set(["footprints/survey-footprints.json", "provenance.json", "README.md"]);
+const OPTIONAL_HEALPIX_FILES = new Set(["healpix/order4.json", "healpix/order8.json"]);
+
+type ResourcePackageFilePath = "README.md" | "footprints/survey-footprints.json" | "provenance.json" | "healpix/order4.json" | "healpix/order8.json";
+type HealpixPrecision = "exact" | "estimated" | "unknown";
+type HealpixCompleteness = "complete" | "incomplete" | "unknown";
 
 function isLoadableFootprint(footprint: SurveyFootprintManifest["footprints"][number]): boolean {
   // Official overviews have verified display cells even though they are less
@@ -72,11 +78,14 @@ interface ResourcePackageManifest {
   version: string;
   id: string;
   surveyId: string;
-  files: Array<{ path: "README.md" | "footprints/survey-footprints.json" | "provenance.json"; sizeBytes: number; sha256: string }>;
+  files: Array<{ path: ResourcePackageFilePath; sizeBytes: number; sha256: string }>;
   layers: Array<{
     layerId: string;
     maxOrder?: number;
     surveyId: string;
+    productId?: string;
+    sourceId?: string;
+    product?: string;
     coverageRole: string;
     dataOrigin: string;
     sourceTier: string;
@@ -541,10 +550,10 @@ function parseManifest(value: unknown): ResourcePackageManifest {
     const filePath = text(record.path, `Resource package supporting file ${index} path`, 120);
     const sizeBytes = record.sizeBytes;
     const sha256 = text(record.sha256, `Resource package supporting file ${index} SHA-256`, 64).toLowerCase();
-    if (!(REQUIRED_ARCHIVE_FILES.has(filePath) && filePath !== "resource-package.json") || !Number.isSafeInteger(sizeBytes) || Number(sizeBytes) <= 0 || !/^[a-f0-9]{64}$/.test(sha256)) throw new Error(`Resource package supporting file ${index} is invalid`);
-    return { path: filePath as "README.md" | "footprints/survey-footprints.json" | "provenance.json", sizeBytes: Number(sizeBytes), sha256 };
+    if (!(REQUIRED_MANIFEST_FILES.has(filePath) || OPTIONAL_HEALPIX_FILES.has(filePath)) || !Number.isSafeInteger(sizeBytes) || Number(sizeBytes) <= 0 || !/^[a-f0-9]{64}$/.test(sha256)) throw new Error(`Resource package supporting file ${index} is invalid`);
+    return { path: filePath as ResourcePackageFilePath, sizeBytes: Number(sizeBytes), sha256 };
   }) : [];
-  if (files.length !== 3 || new Set(files.map((file) => file.path)).size !== 3 || !files.every((file) => ["README.md", "footprints/survey-footprints.json", "provenance.json"].includes(file.path))) throw new Error("Resource package supporting files are invalid");
+  if (files.length < REQUIRED_MANIFEST_FILES.size || files.length > REQUIRED_MANIFEST_FILES.size + OPTIONAL_HEALPIX_FILES.size || new Set(files.map((file) => file.path)).size !== files.length || [...REQUIRED_MANIFEST_FILES].some((filePath) => !files.some((file) => file.path === filePath))) throw new Error("Resource package supporting files are invalid");
   const layers = Array.isArray(manifest.layers) ? manifest.layers.map((item, index) => {
     const layer = object(item, `Resource package layer ${index}`);
     const layerId = text(layer.layerId, `Resource package layer ${index} layer id`, 160);
@@ -560,6 +569,9 @@ function parseManifest(value: unknown): ResourcePackageManifest {
       layerId,
       ...(Number.isInteger(layer.maxOrder) && Number(layer.maxOrder) >= 0 && Number(layer.maxOrder) <= 29 ? { maxOrder: Number(layer.maxOrder) } : {}),
       surveyId: text(layer.surveyId, `Resource package layer ${index} survey id`, 80),
+      ...(layer.productId === undefined ? {} : { productId: text(layer.productId, `Resource package layer ${index} product id`, 160) }),
+      ...(layer.sourceId === undefined ? {} : { sourceId: text(layer.sourceId, `Resource package layer ${index} source id`, 160) }),
+      ...(layer.product === undefined ? {} : { product: text(layer.product, `Resource package layer ${index} product`, 200) }),
       coverageRole: text(layer.coverageRole, `Resource package layer ${index} coverage role`, 80),
       dataOrigin: text(layer.dataOrigin, `Resource package layer ${index} data origin`, 80),
       sourceTier: text(layer.sourceTier, `Resource package layer ${index} source tier`, 80),
@@ -574,6 +586,89 @@ function parseManifest(value: unknown): ResourcePackageManifest {
   const surveyId = text(manifest.surveyId, "Resource package survey id", 80);
   if (layers.some((layer) => layer.surveyId !== surveyId)) throw new Error("Resource package layers do not match the declared survey");
   return { schemaVersion: PACKAGE_SCHEMA_VERSION, version, id, surveyId, files, layers };
+}
+
+function healpixCells(value: unknown, label: string, order: 4 | 8): number[] {
+  if (!Array.isArray(value)) throw new Error(`${label} must be an array`);
+  const limit = 12 * 4 ** order;
+  let previous = -1;
+  for (const cell of value) {
+    if (!Number.isSafeInteger(cell) || Number(cell) < 0 || Number(cell) >= limit || Number(cell) <= previous) {
+      throw new Error(`${label} must contain valid, sorted, unique NESTED HEALPix cells for order ${order}`);
+    }
+    previous = Number(cell);
+  }
+  return value as number[];
+}
+
+function validateHealpixSidecar(value: unknown, manifest: ResourcePackageManifest, expectedOrder: 4 | 8): void {
+  const document = object(value, `Resource package order ${expectedOrder} HEALPix list`);
+  if (document.schemaVersion !== 1 || document.surveyId !== manifest.surveyId || document.packageId !== manifest.id || document.packageVersion !== manifest.version || document.coordinateFrame !== "ICRS" || document.ordering !== "NESTED" || document.order !== expectedOrder) {
+    throw new Error(`Resource package order ${expectedOrder} HEALPix list identity or coordinate metadata is invalid`);
+  }
+  text(document.revision, `Resource package order ${expectedOrder} revision`, 160);
+  if (!Array.isArray(document.layers)) throw new Error(`Resource package order ${expectedOrder} layers are invalid`);
+  const manifestLayers = new Map(manifest.layers.map((layer) => [layer.layerId, layer]));
+  const listed = new Set<string>();
+  const union = new Set<number>();
+  const layerPrecisions: HealpixPrecision[] = [];
+  const layerCompleteness: HealpixCompleteness[] = [];
+  for (const [index, raw] of document.layers.entries()) {
+    const entry = object(raw, `Resource package order ${expectedOrder} layer ${index}`);
+    const layerId = text(entry.layerId, `Resource package order ${expectedOrder} layer ${index} layer id`, 160);
+    const layer = manifestLayers.get(layerId);
+    if (!layer || listed.has(layerId) || entry.surveyId !== layer.surveyId || entry.releaseId !== layer.releaseId || typeof layer.productId !== "string" || entry.productId !== layer.productId || typeof layer.product !== "string" || entry.product !== layer.product) {
+      throw new Error(`Resource package order ${expectedOrder} layer identity does not match its manifest`);
+    }
+    if (layer.maxOrder === undefined || layer.maxOrder < expectedOrder) throw new Error(`Resource package order ${expectedOrder} layer exceeds its manifest precision`);
+    if (layer.sourceId === undefined ? entry.sourceId !== undefined : entry.sourceId !== layer.sourceId) {
+      throw new Error(`Resource package order ${expectedOrder} layer source identity does not match its manifest`);
+    }
+    const precision = entry.precision;
+    const completeness = entry.completeness;
+    if (!(precision === "exact" || precision === "estimated" || precision === "unknown") || !(completeness === "complete" || completeness === "incomplete" || completeness === "unknown")) {
+      throw new Error(`Resource package order ${expectedOrder} layer precision or completeness is invalid`);
+    }
+    layerPrecisions.push(precision as HealpixPrecision);
+    layerCompleteness.push(completeness as HealpixCompleteness);
+    const cells = healpixCells(entry.cells, `Resource package order ${expectedOrder} layer ${layerId} cells`, expectedOrder);
+    for (const cell of cells) union.add(cell);
+    listed.add(layerId);
+  }
+
+  const unionRecord = object(document.surveyUnion, `Resource package order ${expectedOrder} survey union`);
+  const unionCells = healpixCells(unionRecord.cells, `Resource package order ${expectedOrder} survey union cells`, expectedOrder);
+  const precision = unionRecord.precision;
+  const completeness = unionRecord.completeness;
+  if (!(precision === "exact" || precision === "estimated" || precision === "unknown") || !(completeness === "complete" || completeness === "incomplete" || completeness === "unknown") || !Array.isArray(unionRecord.omittedLayers)) {
+    throw new Error(`Resource package order ${expectedOrder} survey union metadata is invalid`);
+  }
+  const omitted = new Set<string>();
+  for (const [index, raw] of unionRecord.omittedLayers.entries()) {
+    const entry = object(raw, `Resource package order ${expectedOrder} omitted layer ${index}`);
+    const layerId = text(entry.layerId, `Resource package order ${expectedOrder} omitted layer ${index} layer id`, 160);
+    const layer = manifestLayers.get(layerId);
+    if (!layer || listed.has(layerId) || omitted.has(layerId)) throw new Error(`Resource package order ${expectedOrder} omitted layer identity is invalid`);
+    if (layer.maxOrder === undefined || layer.maxOrder >= expectedOrder) throw new Error(`Resource package order ${expectedOrder} omitted layer ${layerId} has sufficient manifest maxOrder`);
+    text(entry.reason, `Resource package order ${expectedOrder} omitted layer ${index} reason`, 1000);
+    omitted.add(layerId);
+  }
+  if (listed.size + omitted.size !== manifestLayers.size || [...manifestLayers.keys()].some((layerId) => !listed.has(layerId) && !omitted.has(layerId))) {
+    throw new Error(`Resource package order ${expectedOrder} does not account for every manifest layer`);
+  }
+  const expectedUnion = [...union].sort((left, right) => left - right);
+  if (unionCells.length !== expectedUnion.length || unionCells.some((cell, index) => cell !== expectedUnion[index])) {
+    throw new Error(`Resource package order ${expectedOrder} survey union does not match its layer cells`);
+  }
+  const expectedPrecision: HealpixPrecision = !layerPrecisions.length || layerPrecisions.includes("unknown")
+    ? "unknown"
+    : layerPrecisions.includes("estimated") ? "estimated" : "exact";
+  const expectedCompleteness: HealpixCompleteness = omitted.size || layerCompleteness.includes("incomplete")
+    ? "incomplete"
+    : layerCompleteness.length && layerCompleteness.every((value) => value === "complete") ? "complete" : "unknown";
+  if (precision !== expectedPrecision || completeness !== expectedCompleteness) {
+    throw new Error(`Resource package order ${expectedOrder} survey union precision or completeness does not match its layers`);
+  }
 }
 
 function parseState(value: unknown): ResourcePackageState {
@@ -665,7 +760,7 @@ async function extractArchive(archivePath: string, destination: string, maximumB
         entries += 1;
         const name = entry.fileName.replaceAll("\\", "/");
         const mode = (entry.externalFileAttributes >>> 16) & 0xffff;
-        const allowed = REQUIRED_ARCHIVE_FILES.has(name) || /^mocs\/[a-zA-Z0-9._-]+\.moc\.fits$/.test(name);
+        const allowed = REQUIRED_ARCHIVE_FILES.has(name) || OPTIONAL_HEALPIX_FILES.has(name) || /^mocs\/[a-zA-Z0-9._-]+\.moc\.fits$/.test(name);
         if (entries > MAX_ZIP_ENTRIES || !allowed || name.startsWith("/") || name.split("/").includes("..") || (mode & 0o170000) === 0o120000 || seen.has(name)) throw new Error(`Resource package contains an unsafe ZIP entry: ${name}`);
         seen.add(name);
         extractedBytes += entry.uncompressedSize;
@@ -703,7 +798,7 @@ function validateFitsMoc(bytes: Buffer, label: string): void {
 }
 
 async function validateManifestFiles(stagingPath: string, manifest: ResourcePackageManifest): Promise<void> {
-  const expected = new Set([...REQUIRED_ARCHIVE_FILES, ...manifest.layers.map((layer) => layer.path)]);
+  const expected = new Set([...REQUIRED_ARCHIVE_FILES, ...manifest.files.map((file) => file.path), ...manifest.layers.map((layer) => layer.path)]);
   const actual = await filesUnder(stagingPath);
   if (actual.length !== expected.size || actual.some((file) => !expected.has(file))) throw new Error("Resource package contains extra or undeclared ZIP entries");
   const provenance = object(JSON.parse(await readFile(path.join(stagingPath, "provenance.json"), "utf8")) as unknown, "Resource package provenance");
@@ -712,6 +807,10 @@ async function validateManifestFiles(stagingPath: string, manifest: ResourcePack
     const bytes = await readFile(path.join(stagingPath, file.path));
     if (bytes.length !== file.sizeBytes) throw new Error(`Supporting file size does not match manifest: ${file.path}`);
     if (createHash("sha256").update(bytes).digest("hex") !== file.sha256) throw new Error(`Supporting file SHA-256 does not match manifest: ${file.path}`);
+    if (file.path === "healpix/order4.json" || file.path === "healpix/order8.json") {
+      const order = file.path === "healpix/order4.json" ? 4 : 8;
+      validateHealpixSidecar(JSON.parse(bytes.toString("utf8")) as unknown, manifest, order);
+    }
   }
   for (const layer of manifest.layers) {
     const bytes = await readFile(path.join(stagingPath, layer.path));

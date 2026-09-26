@@ -54,6 +54,7 @@ import { ConnectorPanel, type ConnectorMetrics } from "./connector-panel";
 import { ResourcePackagePanel, type ResourcePackageSelectionCallbacks } from "./resource-package-panel";
 import { AladinExplorer, type AladinAssetTarget, type AladinExplorerSnapshot, type AladinExplorerStatus } from "./aladin-explorer";
 import { nestedSkyRegion } from "./sky-region";
+import { summarizeCoverageEvidence, summarizeCoverageMatches, summarizeScanScopes } from "./reverse-lookup-summary";
 import { normalizeLayerOrder } from "./layer-order";
 import { notifyWorkspace, notifyWorkspaceError } from "./notifications";
 
@@ -1433,6 +1434,21 @@ function renderOverlapComponent(component: SurveyLayerOverlapComponent): void {
       if (!overlapModeActive) return;
       const actions: HTMLButtonElement[] = [];
       const executableSourceIds = executablePublicSourceIds(sourceIds);
+      const precisionLabels = {
+        exact: "精确",
+        estimated: "估算",
+        "entrypoint-only": "仅来源入口",
+        truncated: "截断",
+      } as const;
+      const coverageMatches = lookup.fileEvidence?.flatMap((file) => file.matchingCoverage) ?? [];
+      const precisionSummaries = summarizeCoverageMatches(coverageMatches);
+      const coverageEvidenceSummaries = summarizeCoverageEvidence(lookup.coverageEvidence);
+      const scanScopeSummaries = summarizeScanScopes(lookup.scanScopes);
+      const observations = lookup.fileEvidence?.flatMap((file) => (file.observations ?? []).map((observation) => ({ fileId: file.fileId, observation }))) ?? [];
+      const observationSummaries = observations.slice(0, 4).map(({ fileId, observation }) => `${observation.fileName ?? fileId} · 逻辑层 ${observation.layerId ?? "--"} · 候选层 ${observation.observationLayerId ?? "--"} · run ${observation.scanRunId ?? "--"} · input SHA-256 ${observation.sourceSnapshotSha256 ?? "--"}`);
+      if (observations.length > observationSummaries.length) observationSummaries.push(`另有 ${formatInteger(observations.length - observationSummaries.length)} 条观测记录`);
+      const fileEvidenceSummaries = (lookup.fileEvidence ?? []).slice(0, 6).map((file) => `${file.fileName ?? file.fileId}${file.sizeBytes === undefined ? "" : ` · ${formatBytes(file.sizeBytes)}`}${file.sourceUri ? ` · 来源 ${file.sourceUri}` : " · 无来源定位符"}${file.downloadUrl ? ` · 下载 ${file.downloadUrl}` : ""}${file.matchingCoverageTruncated ? " · 此文件的覆盖匹配未完整列出" : ""}`);
+      if ((lookup.fileEvidence?.length ?? 0) > fileEvidenceSummaries.length) fileEvidenceSummaries.push(`另有 ${formatInteger((lookup.fileEvidence?.length ?? 0) - fileEvidenceSummaries.length)} 个文件证据`);
       const download = actionButton("构建数据下载任务", () => {
         productionPanel.setContext({ nside: overlapResponse?.nside ?? 16, pixels: selected.cells, sourceIds: executableSourceIds, componentId: selected.id }, "overlap-download@1");
         void activateMode("workflow").catch(showFatal);
@@ -1449,7 +1465,12 @@ function renderOverlapComponent(component: SurveyLayerOverlapComponent): void {
         ["来源", sourceLabels],
         ...(selected.areaDeg2 === undefined ? [] : [["面积", `${selected.areaDeg2.toFixed(3)} deg²`] as [string, string]]),
         ["反查文件", lookup.files.length ? `${lookup.files.length} 个可下载文件` : "未找到可下载文件"],
-        ...(lookup.fileEvidence?.length ? [["已定位文件", lookup.fileEvidence.map((file) => `${file.fileName}${file.sizeBytes === undefined ? "" : ` · ${formatBytes(file.sizeBytes)}`}`).join("；")] as [string, string]] : []),
+        ...(lookup.assetsLookup ? [["Assets 反查", `${lookup.assetsLookup.available ? "索引可用" : "索引不可用"} · ${precisionLabels[lookup.assetsLookup.precision]}${lookup.assetsLookup.truncated ? " · 结果截断" : ""}`] as [string, string]] : []),
+        ...(fileEvidenceSummaries.length ? [["已定位文件", fileEvidenceSummaries.join("；")] as [string, string]] : []),
+        ...(coverageEvidenceSummaries.length ? [["覆盖依据", coverageEvidenceSummaries.join("；")] as [string, string]] : []),
+        ...(precisionSummaries.length ? [["覆盖精度", precisionSummaries.join("；")] as [string, string]] : []),
+        ...(scanScopeSummaries.length ? [["批次范围", scanScopeSummaries.join("；")] as [string, string]] : []),
+        ...(observationSummaries.length ? [["文件观测", observationSummaries.join("；")] as [string, string]] : []),
         ...(lookup.unavailable.length ? [["不可下载", lookup.unavailable.map((entry) => entry.reason).join("；")] as [string, string]] : []),
         ...(lookup.warnings?.length ? [["提示", lookup.warnings.join("；")] as [string, string]] : []),
       ], actions);

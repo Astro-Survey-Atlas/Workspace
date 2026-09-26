@@ -30,6 +30,13 @@ metadata, provenance, display footprints, and native MOC files. Workspace may
 derive coarser display resolutions from a MOC, but must not claim precision
 finer than the supplied geometry.
 
+Packages may also carry manifest-declared `healpix/order4.json` and
+`healpix/order8.json` cell-list sidecars for clients that need a direct list of
+published cells. Workspace verifies their package/layer identities, declared
+order, ICRS/NESTED metadata, file hashes, cell ordering and union. These are
+optional convenience exports; native MOCs remain the geometry source used by
+Workspace drawing and overlap.
+
 The package layer identity remains explicit:
 
 ```text
@@ -71,6 +78,12 @@ When a user asks for public data units, Workspace's server may call an
 authenticated Assets endpoint for the requested region and explicit
 survey/release/product/source identity. Results are scoped to the operation,
 record the Assets revision and expiry, and are not exposed as a general index.
+
+File evidence retains `matchingCoverageTruncated` and file warnings separately
+from response pagination. A completed file list can still have incomplete
+coverage matches for an individual file; Workspace displays that limitation
+and preserves it in the returned evidence even when the response-level
+`truncated` flag is false.
 
 User assets constrain the region and overlap calculation; they are never
 converted into public download items.

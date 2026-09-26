@@ -8,24 +8,99 @@ export interface AssetsRegionLookupRequest {
 }
 
 export interface AssetsRegionFileMatch {
-  layerId: string;
+  layerId?: string;
+  evidenceLayerId?: string;
+  observationLayerId?: string;
+  scopeId?: string;
+  partitionId?: string;
   order: number;
   ipix: number;
   precision: "exact" | "estimated" | "entrypoint-only" | "truncated";
   coverageMethod?: string;
   coverageRole?: string;
+  sourceOrder?: number;
+  scanRunId?: string;
+  sourceSnapshotSha256?: string;
+}
+
+export interface AssetsRegionFileObservation {
+  /** Logical public layer identity. */
+  layerId?: string;
+  /** Immutable candidate index layer used to retrieve this observation. */
+  observationLayerId?: string;
+  scanRunId?: string;
+  sourceSnapshotSha256?: string;
+  fileName?: string;
+  sizeBytes?: number;
+  lastModified?: string;
+  sourceUri?: string;
+  metadataState?: "complete" | "missing";
+}
+
+export interface AssetsRegionScanScope {
+  /** Logical scan/evidence layer identity. */
+  layerId: string;
+  publishedLayerId?: string;
+  scopeId: string;
+  scopeSnapshotSha256: string;
+  expectedPartitions: number;
+  committedPartitions: number;
+  /** Completeness of this frozen scope only, not the complete survey. */
+  completeness: "complete" | "incomplete";
+}
+
+export interface AssetsRegionCoverageEvidence {
+  layerId: string;
+  productId: string;
+  surveyId: string;
+  releaseId: string;
+  product: string;
+  modality?: string;
+  evidenceKind: "observation-footprint" | "published-moc" | "tile-footprint" | "wcs-coverage";
+  order: number;
+  nside: number;
+  nativeMaxOrder: number;
+  availableOrders: number[];
+  matchedCells: number[];
+  precision: "exact" | "estimated";
+  completeness?: "complete" | "incomplete" | "unknown";
+  scienceFileScan?: "not-scanned" | "partial" | "complete";
+  sourceIdentity?: string;
+  instrument?: string;
+  filters?: string;
+  sourceSnapshotSha256?: string;
+  sourceLabel?: string;
+  sourceUrl?: string;
+  geometrySourceUrl?: string;
+  coverageUrl?: string;
+  summary: string;
+}
+
+export interface AssetsRegionLookupSummary {
+  available: boolean;
+  precision: "exact" | "estimated" | "entrypoint-only" | "truncated";
+  truncated: boolean;
+  expiresAt?: string;
 }
 
 export interface AssetsRegionFileEvidence {
   fileId: string;
-  fileName: string;
+  metadataState?: "complete" | "missing";
+  fileName?: string;
+  unitKind?: string;
+  unitId?: string;
+  downloadProvider?: string;
   sourceUri?: string;
+  downloadUrl?: string;
   parentUri?: string;
   fileType?: string;
   sizeBytes?: number;
   lastModified?: string;
   downloadable: boolean;
   matchingCoverage: AssetsRegionFileMatch[];
+  matchingCoverageTruncated?: boolean;
+  warnings?: string[];
+  observations?: AssetsRegionFileObservation[];
 }
 
 export interface AssetsRegionLookupResponse {
@@ -36,6 +111,8 @@ export interface AssetsRegionLookupResponse {
   expiresAt?: string;
   notes: string[];
   files: AssetsRegionFileEvidence[];
+  coverageEvidence?: AssetsRegionCoverageEvidence[];
+  scanScopes?: AssetsRegionScanScope[];
 }
 
 interface AssetsRegionClientOptions {
@@ -62,6 +139,132 @@ function integer(value: unknown): number | undefined {
   return Number.isSafeInteger(value) && Number(value) >= 0 ? Number(value) : undefined;
 }
 
+function parseScanScopes(value: unknown): AssetsRegionScanScope[] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((item): AssetsRegionScanScope[] => {
+    if (!item || typeof item !== "object" || Array.isArray(item)) return [];
+    const scope = item as Record<string, unknown>;
+    const layerId = text(scope.layerId);
+    const scopeId = text(scope.scopeId);
+    const scopeSnapshotSha256 = text(scope.scopeSnapshotSha256);
+    const expectedPartitions = integer(scope.expectedPartitions);
+    const committedPartitions = integer(scope.committedPartitions);
+    const completeness = scope.completeness;
+    if (!layerId || !scopeId || !scopeSnapshotSha256 || !/^[a-f0-9]{64}$/.test(scopeSnapshotSha256)
+      || expectedPartitions === undefined || expectedPartitions < 1 || committedPartitions === undefined
+      || committedPartitions > expectedPartitions || (completeness !== "complete" && completeness !== "incomplete")) return [];
+    const publishedLayerId = text(scope.publishedLayerId);
+    return [{
+      layerId,
+      ...(publishedLayerId ? { publishedLayerId } : {}),
+      scopeId,
+      scopeSnapshotSha256,
+      expectedPartitions,
+      committedPartitions,
+      completeness,
+    }];
+  });
+}
+
+function parseCoverageEvidence(value: unknown): AssetsRegionCoverageEvidence[] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((item): AssetsRegionCoverageEvidence[] => {
+    if (!item || typeof item !== "object" || Array.isArray(item)) return [];
+    const evidence = item as Record<string, unknown>;
+    const layerId = text(evidence.layerId);
+    const productId = text(evidence.productId);
+    const surveyId = text(evidence.surveyId);
+    const releaseId = text(evidence.releaseId);
+    const product = text(evidence.product);
+    const evidenceKind = evidence.evidenceKind;
+    const order = integer(evidence.order);
+    const nside = integer(evidence.nside);
+    const nativeMaxOrder = integer(evidence.nativeMaxOrder);
+    const availableOrders = Array.isArray(evidence.availableOrders) ? evidence.availableOrders.map(integer).filter((value): value is number => value !== undefined) : [];
+    const matchedCells = Array.isArray(evidence.matchedCells) ? evidence.matchedCells.map(integer).filter((value): value is number => value !== undefined) : [];
+    const precision = evidence.precision;
+    const summary = text(evidence.summary);
+    if (!layerId || !productId || !surveyId || !releaseId || !product
+      || !(evidenceKind === "observation-footprint" || evidenceKind === "published-moc" || evidenceKind === "tile-footprint" || evidenceKind === "wcs-coverage")
+      || order === undefined || nside === undefined || nside < 1 || nativeMaxOrder === undefined
+      || !availableOrders.length || !matchedCells.length
+      || !(precision === "exact" || precision === "estimated") || !summary) return [];
+    const completeness = evidence.completeness;
+    const scienceFileScan = evidence.scienceFileScan;
+    const sourceSnapshotSha256 = text(evidence.sourceSnapshotSha256);
+    return [{
+      layerId,
+      productId,
+      surveyId,
+      releaseId,
+      product,
+      ...(text(evidence.modality) ? { modality: text(evidence.modality) } : {}),
+      evidenceKind,
+      order,
+      nside,
+      nativeMaxOrder,
+      availableOrders,
+      matchedCells,
+      precision,
+      ...(completeness === "complete" || completeness === "incomplete" || completeness === "unknown" ? { completeness } : {}),
+      ...(scienceFileScan === "not-scanned" || scienceFileScan === "partial" || scienceFileScan === "complete" ? { scienceFileScan } : {}),
+      ...(text(evidence.sourceIdentity) ? { sourceIdentity: text(evidence.sourceIdentity) } : {}),
+      ...(text(evidence.instrument) ? { instrument: text(evidence.instrument) } : {}),
+      ...(text(evidence.filters) ? { filters: text(evidence.filters) } : {}),
+      ...(sourceSnapshotSha256 && /^[a-f0-9]{64}$/.test(sourceSnapshotSha256) ? { sourceSnapshotSha256 } : {}),
+      ...(text(evidence.sourceLabel) ? { sourceLabel: text(evidence.sourceLabel) } : {}),
+      ...(text(evidence.sourceUrl) ? { sourceUrl: text(evidence.sourceUrl) } : {}),
+      ...(text(evidence.geometrySourceUrl) ? { geometrySourceUrl: text(evidence.geometrySourceUrl) } : {}),
+      ...(text(evidence.coverageUrl) ? { coverageUrl: text(evidence.coverageUrl) } : {}),
+      summary,
+    }];
+  });
+}
+
+interface ResponseCoverageEdge {
+  sourceFileId?: string;
+  layerId?: string;
+  observationLayerId?: string;
+  order?: number;
+  ipix?: number;
+  scanRunId?: string;
+}
+
+function parseCoverageEdges(value: unknown): ResponseCoverageEdge[] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((item): ResponseCoverageEdge[] => {
+    if (!item || typeof item !== "object" || Array.isArray(item)) return [];
+    const edge = item as Record<string, unknown>;
+    return [{
+      sourceFileId: text(edge.sourceFileId) ?? text(edge.source_file_id),
+      layerId: text(edge.layerId) ?? text(edge.layer_id),
+      observationLayerId: text(edge.observationLayerId) ?? text(edge.observation_layer_id),
+      order: integer(edge.order),
+      ipix: integer(edge.ipix),
+      scanRunId: text(edge.scanRunId) ?? text(edge.scan_run_id),
+    }];
+  });
+}
+
+function observationLayerForFile(
+  edges: ResponseCoverageEdge[],
+  fileId: string,
+  layerId?: string,
+  scanRunId?: string,
+  order?: number,
+  ipix?: number,
+): string | undefined {
+  const matches = new Set(edges.flatMap((edge) => {
+    if (edge.sourceFileId !== fileId || !edge.observationLayerId) return [];
+    if (layerId && edge.layerId !== layerId) return [];
+    if (scanRunId && edge.scanRunId !== scanRunId) return [];
+    if (order !== undefined && edge.order !== order) return [];
+    if (ipix !== undefined && edge.ipix !== ipix) return [];
+    return [edge.observationLayerId];
+  }));
+  return matches.size === 1 ? [...matches][0] : undefined;
+}
+
 function endpointForCatalog(value: string): URL | undefined {
   try {
     const catalog = new URL(value);
@@ -85,12 +288,13 @@ function parseResponse(value: unknown): AssetsRegionLookupResponse {
   const plan = root.downloadPlan && typeof root.downloadPlan === "object" && !Array.isArray(root.downloadPlan)
     ? root.downloadPlan as Record<string, unknown>
     : {};
+  const edges = parseCoverageEdges(root.edges);
   const files = Array.isArray(plan.files) ? plan.files.flatMap((item): AssetsRegionFileEvidence[] => {
     if (!item || typeof item !== "object" || Array.isArray(item)) return [];
     const file = item as Record<string, unknown>;
     const fileId = text(file.fileId);
+    if (!fileId) return [];
     const fileName = text(file.fileName);
-    if (!fileId || !fileName) return [];
     const matchingCoverage = Array.isArray(file.matchingCoverage)
       ? file.matchingCoverage.flatMap((match): AssetsRegionFileMatch[] => {
         if (!match || typeof match !== "object" || Array.isArray(match)) return [];
@@ -98,23 +302,73 @@ function parseResponse(value: unknown): AssetsRegionLookupResponse {
         const layerId = text(entry.layerId);
         const matchOrder = integer(entry.order);
         const ipix = integer(entry.ipix);
-        if (!layerId || matchOrder === undefined || ipix === undefined) return [];
-        return [{ layerId, order: matchOrder, ipix, precision: precision(entry.precision), ...(text(entry.coverageMethod) ? { coverageMethod: text(entry.coverageMethod) } : {}), ...(text(entry.coverageRole) ? { coverageRole: text(entry.coverageRole) } : {}) }];
+        if (matchOrder === undefined || ipix === undefined) return [];
+        const scanRunId = text(entry.scanRunId);
+        const observationLayerId = text(entry.observationLayerId)
+          ?? observationLayerForFile(edges, fileId, layerId, scanRunId, matchOrder, ipix);
+        return [{
+          ...(layerId ? { layerId } : {}),
+          ...(text(entry.evidenceLayerId) ? { evidenceLayerId: text(entry.evidenceLayerId) } : {}),
+          ...(observationLayerId ? { observationLayerId } : {}),
+          ...(text(entry.scopeId) ? { scopeId: text(entry.scopeId) } : {}),
+          ...(text(entry.partitionId) ? { partitionId: text(entry.partitionId) } : {}),
+          order: matchOrder,
+          ipix,
+          precision: precision(entry.precision),
+          ...(text(entry.coverageMethod) ? { coverageMethod: text(entry.coverageMethod) } : {}),
+          ...(text(entry.coverageRole) ? { coverageRole: text(entry.coverageRole) } : {}),
+          ...(integer(entry.sourceOrder) !== undefined ? { sourceOrder: integer(entry.sourceOrder) } : {}),
+          ...(scanRunId ? { scanRunId } : {}),
+          ...(text(entry.sourceSnapshotSha256) ? { sourceSnapshotSha256: text(entry.sourceSnapshotSha256) } : {}),
+        }];
       })
       : [];
+    const observations = Array.isArray(file.observations)
+      ? file.observations.flatMap((observation): AssetsRegionFileObservation[] => {
+        if (!observation || typeof observation !== "object" || Array.isArray(observation)) return [];
+        const entry = observation as Record<string, unknown>;
+        const layerId = text(entry.layerId);
+        const scanRunId = text(entry.scanRunId);
+        const observationLayerId = text(entry.observationLayerId)
+          ?? observationLayerForFile(edges, fileId, layerId, scanRunId);
+        return [{
+          ...(layerId ? { layerId } : {}),
+          ...(observationLayerId ? { observationLayerId } : {}),
+          ...(scanRunId ? { scanRunId } : {}),
+          ...(text(entry.sourceSnapshotSha256) ? { sourceSnapshotSha256: text(entry.sourceSnapshotSha256) } : {}),
+          ...(text(entry.fileName) ? { fileName: text(entry.fileName) } : {}),
+          ...(integer(entry.sizeBytes) !== undefined ? { sizeBytes: integer(entry.sizeBytes) } : {}),
+          ...(text(entry.lastModified) ? { lastModified: text(entry.lastModified) } : {}),
+          ...(text(entry.sourceUri) ? { sourceUri: text(entry.sourceUri) } : {}),
+          ...(entry.metadataState === "complete" || entry.metadataState === "missing" ? { metadataState: entry.metadataState } : {}),
+        }];
+      })
+      : [];
+    const metadataState = file.metadataState === "complete" || file.metadataState === "missing" ? file.metadataState : undefined;
     return [{
       fileId,
-      fileName,
+      ...(metadataState ? { metadataState } : {}),
+      ...(fileName ? { fileName } : {}),
+      ...(text(file.unitKind) ? { unitKind: text(file.unitKind) } : {}),
+      ...(text(file.unitId) ? { unitId: text(file.unitId) } : {}),
+      ...(text(file.downloadProvider) ? { downloadProvider: text(file.downloadProvider) } : {}),
       ...(text(file.sourceUri) ? { sourceUri: text(file.sourceUri) } : {}),
+      ...(text(file.downloadUrl) ? { downloadUrl: text(file.downloadUrl) } : {}),
       ...(text(file.parentUri) ? { parentUri: text(file.parentUri) } : {}),
       ...(text(file.fileType) ? { fileType: text(file.fileType) } : {}),
       ...(integer(file.sizeBytes) !== undefined ? { sizeBytes: integer(file.sizeBytes) } : {}),
       ...(text(file.lastModified) ? { lastModified: text(file.lastModified) } : {}),
       downloadable: file.downloadable === true,
       matchingCoverage,
+      ...(typeof file.matchingCoverageTruncated === "boolean" ? { matchingCoverageTruncated: file.matchingCoverageTruncated } : {}),
+      ...(Array.isArray(file.warnings) ? { warnings: file.warnings.filter((item): item is string => typeof item === "string") } : {}),
+      ...(Array.isArray(file.observations) ? { observations } : {}),
     }];
   }) : [];
   const notes = Array.isArray(root.notes) ? root.notes.filter((item): item is string => typeof item === "string").slice(0, 32) : [];
+  const planScanScopes = parseScanScopes(plan.scanScopes);
+  const scanScopes = planScanScopes.length ? planScanScopes : parseScanScopes(root.scanScopes);
+  const coverageEvidence = parseCoverageEvidence(plan.coverageEvidence);
   return {
     available: root.available === true,
     precision: precision(root.precision),
@@ -123,6 +377,8 @@ function parseResponse(value: unknown): AssetsRegionLookupResponse {
     ...(text(root.expiresAt) ? { expiresAt: text(root.expiresAt) } : {}),
     notes,
     files,
+    ...(coverageEvidence.length ? { coverageEvidence } : {}),
+    ...(scanScopes.length ? { scanScopes } : {}),
   };
 }
 

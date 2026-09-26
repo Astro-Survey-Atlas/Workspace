@@ -43,7 +43,7 @@ import { buildProvenance } from "./build-metadata.js";
 import { InstallationService } from "./installation.js";
 import { SystemConfigStore } from "./system-config.js";
 import { WorkspaceAgentService } from "./workspace-agent.js";
-import { AssetsRegionClient, assetsLayerIdForIdentity, type AssetsRegionFileEvidence } from "./assets-region-client.js";
+import { AssetsRegionClient, assetsLayerIdForIdentity, type AssetsRegionCoverageEvidence, type AssetsRegionFileEvidence, type AssetsRegionLookupSummary, type AssetsRegionScanScope } from "./assets-region-client.js";
 
 const projectRoot = fileURLToPath(new URL("../", import.meta.url));
 const port = Number(process.env.PORT ?? "3000");
@@ -52,7 +52,7 @@ const stateRoot = path.resolve(process.env.ASTRO_STATE_ROOT
   ?? (process.env.ASTRO_SQLITE_PATH ? path.dirname(process.env.ASTRO_SQLITE_PATH) : path.join(projectRoot, "data")));
 const allowedHosts = (
   process.env.ASTRO_ALLOWED_HOSTS ??
-  "localhost,127.0.0.1,asa-workspace-mcp,asa-workspace-mcp.asa-workspace,asa-workspace-mcp.asa-workspace.svc,asa-workspace-mcp.asa-workspace.svc.cluster.local"
+  "localhost,127.0.0.1,asa-workspace,asa-workspace.asa-workspace,asa-workspace.asa-workspace.svc,asa-workspace.asa-workspace.svc.cluster.local"
 )
   .split(",")
   .map((value) => value.trim())
@@ -1448,6 +1448,9 @@ interface ReverseLookupResult {
   files: CoverageDownloadFile[];
   unavailable: ReverseLookupUnavailable[];
   fileEvidence?: AssetsRegionFileEvidence[];
+  coverageEvidence?: AssetsRegionCoverageEvidence[];
+  assetsLookup?: AssetsRegionLookupSummary;
+  scanScopes?: AssetsRegionScanScope[];
   warnings?: string[];
 }
 
@@ -1467,6 +1470,9 @@ async function reverseLookupFiles(sources: readonly SkyOverlapSource[], region?:
   const usedNames = new Set<string>();
   const warnings: string[] = [];
   const fileEvidence: AssetsRegionFileEvidence[] = [];
+  const coverageEvidence: AssetsRegionCoverageEvidence[] = [];
+  let assetsLookup: AssetsRegionLookupSummary | undefined;
+  const scanScopes: AssetsRegionScanScope[] = [];
   const assetsHandledSources = new Set<string>();
   if (region) {
     const publicSources = sources.filter((source) => source.kind === "public" && source.sourceIdentity);
@@ -1477,21 +1483,30 @@ async function reverseLookupFiles(sources: readonly SkyOverlapSource[], region?:
         if (lookup) {
           lookup.requested.layerIds.forEach((layerId) => assetsHandledSources.add(layerId));
           fileEvidence.push(...lookup.files);
+          coverageEvidence.push(...lookup.coverageEvidence ?? []);
+          assetsLookup = {
+            available: lookup.available,
+            precision: lookup.precision,
+            truncated: lookup.truncated,
+            ...(lookup.expiresAt ? { expiresAt: lookup.expiresAt } : {}),
+          };
+          scanScopes.push(...lookup.scanScopes ?? []);
           warnings.push(...lookup.notes);
           lookup.files.forEach((evidence) => {
-            const sourceIds = [...new Set(evidence.matchingCoverage.map((match) => match.layerId))];
+            const sourceIds = [...new Set(evidence.matchingCoverage.map((match) => match.layerId).filter((layerId): layerId is string => Boolean(layerId)))];
             const sourceId = sourceIds[0] ?? "assets-region-query";
-            if (evidence.downloadable && /^https?:\/\//i.test(evidence.sourceUri ?? "")) {
-              const key = `${evidence.sourceUri}\u0000${sourceId}`;
+            const downloadUrl = evidence.downloadUrl ?? evidence.sourceUri;
+            if (evidence.downloadable && /^https?:\/\//i.test(downloadUrl ?? "")) {
+              const key = `${downloadUrl}\u0000${sourceId}`;
               files.set(key, {
-                url: evidence.sourceUri!,
-                name: evidence.fileName,
+                url: downloadUrl!,
+                name: evidence.fileName ?? evidence.fileId,
                 ...(evidence.sizeBytes === undefined ? {} : { sizeBytes: evidence.sizeBytes }),
                 sourceId,
               });
               return;
             }
-            mergeUnavailable(unavailable, sourceId, `Assets 已定位 ${evidence.fileName}，但该文件当前没有可直接下载的 HTTP 地址`);
+            mergeUnavailable(unavailable, sourceId, `Assets 已定位 ${evidence.fileName ?? evidence.fileId}${evidence.sourceUri ? `（来源 ${evidence.sourceUri}）` : ""}，但该文件当前没有可直接下载的 HTTP 地址`);
           });
           if (!lookup.files.length) {
             layerIds.forEach((layerId) => mergeUnavailable(unavailable, layerId, "Assets 反查未找到该区域的文件证据"));
@@ -1550,6 +1565,9 @@ async function reverseLookupFiles(sources: readonly SkyOverlapSource[], region?:
     files: [...files.values()].sort((left, right) => left.url.localeCompare(right.url)),
     unavailable: [...unavailable.values()].sort((left, right) => left.sourceId.localeCompare(right.sourceId)),
     ...(fileEvidence.length ? { fileEvidence } : {}),
+    ...(coverageEvidence.length ? { coverageEvidence } : {}),
+    ...(assetsLookup ? { assetsLookup } : {}),
+    ...(scanScopes.length ? { scanScopes } : {}),
     ...(warnings.length ? { warnings } : {}),
   };
 }

@@ -229,13 +229,13 @@ The production deployment manifest targets k3s under the `asa-workspace` namespa
 
 ```bash
 # 1. Build the Docker image
-docker build -t ay-dev/asa-workspace-mcp:latest .
+docker build -t ay-dev/asa-workspace:latest .
 
 # 2. Apply the manifest
 kubectl apply -f deploy/k3s.yaml
 
 # 3. Wait for the roll-out to complete
-kubectl -n asa-workspace rollout status deployment/asa-workspace-mcp
+kubectl -n asa-workspace rollout status deployment/asa-workspace
 ```
 * **Ingress endpoint**: `http://astro.workspace.dev.72602.space:32080/`
 * **Direct NodePort access**: Port `32082` (maps directly to container port `3000`)

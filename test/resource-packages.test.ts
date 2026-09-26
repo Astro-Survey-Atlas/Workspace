@@ -48,7 +48,7 @@ interface PackageFixture {
   releases: string[];
 }
 
-async function createPackage(directory: string, id: string, surveyId: string, options: { unsafeSymlink?: boolean; missingFile?: string; footprintSurveyId?: string; version?: string; releases?: string[]; reviewedPreview?: boolean; previewOrdering?: string; previewLayerId?: string; nside?: number; quality?: "moc" | "official_overview" } = {}): Promise<PackageFixture> {
+async function createPackage(directory: string, id: string, surveyId: string, options: { unsafeSymlink?: boolean; missingFile?: string; footprintSurveyId?: string; version?: string; releases?: string[]; reviewedPreview?: boolean; previewOrdering?: string; previewLayerId?: string; nside?: number; quality?: "moc" | "official_overview"; includeHealpix?: boolean; layerMaxOrder?: number; sidecarPrecision?: "exact" | "estimated" | "unknown"; sidecarCompleteness?: "complete" | "incomplete" | "unknown"; omitEligibleLayerAtOrder8?: boolean; invalidHealpixManifestPath?: boolean; tamperHealpixHash?: boolean; extraHealpixPath?: boolean; healpixOrder4?: Record<string, unknown>; healpixOrder8?: Record<string, unknown> } = {}): Promise<PackageFixture> {
   const version = options.version ?? "3.0.0";
   const releases = options.releases ?? ["release-a", "release-b"];
   const mocBytes = fitsMoc();
@@ -57,6 +57,33 @@ async function createPackage(directory: string, id: string, surveyId: string, op
   const footprintBytes = Buffer.from(`${JSON.stringify(preview, null, 2)}\n`);
   const provenanceBytes = Buffer.from(JSON.stringify({ schemaVersion: 3, version: "3.0.0", files: [] }));
   const readmeBytes = Buffer.from("# README\n");
+  const layer = { layerId: `${surveyId}-coverage`, maxOrder: options.layerMaxOrder ?? 8, surveyId, releaseId: releases[0]!, productId: `${surveyId}-product`, sourceId: `${surveyId}-source`, product: `Fixture ${surveyId}`, coverageRole: "image_extent", dataOrigin: "observed", sourceTier: "official_geometry", modality: "imaging", path: `mocs/${surveyId}-coverage.moc.fits`, sizeBytes: mocBytes.length, sha256: createHash("sha256").update(mocBytes).digest("hex") };
+  const sidecar = (order: 4 | 8) => {
+    const omitted = layer.maxOrder < order || (order === 8 && options.omitEligibleLayerAtOrder8 === true);
+    const precision = options.sidecarPrecision ?? "estimated";
+    const completeness = options.sidecarCompleteness ?? "complete";
+    const cells = omitted ? [] : [1, 2];
+    const layerEntry = { layerId: layer.layerId, surveyId, releaseId: layer.releaseId, productId: layer.productId, sourceId: layer.sourceId, product: layer.product, cells, precision, completeness };
+    const omittedLayers = omitted ? [{ layerId: layer.layerId, reason: `Native MOC maximum is O${layer.maxOrder}; no O${order} list is produced for this layer.` }] : [];
+    const unionPrecision = omitted ? "unknown" : precision;
+    const unionCompleteness = omitted || completeness === "incomplete" ? "incomplete" : completeness;
+    return {
+      schemaVersion: 1,
+      surveyId,
+      packageId: id,
+      packageVersion: version,
+      revision: `${id}@${version}:coverage`,
+      coordinateFrame: "ICRS",
+      ordering: "NESTED",
+      order,
+      layers: omitted ? [] : [layerEntry],
+      surveyUnion: { cells, precision: unionPrecision, completeness: unionCompleteness, omittedLayers },
+    };
+  };
+  const healpixFiles = options.includeHealpix ? [
+    { path: "healpix/order4.json", bytes: Buffer.from(`${JSON.stringify(options.healpixOrder4 ?? sidecar(4), null, 2)}\n`) },
+    { path: "healpix/order8.json", bytes: Buffer.from(`${JSON.stringify(options.healpixOrder8 ?? sidecar(8), null, 2)}\n`) },
+  ] : [];
   const packageManifest = {
     schemaVersion: 3,
     version,
@@ -66,14 +93,17 @@ async function createPackage(directory: string, id: string, surveyId: string, op
       { path: "README.md", sizeBytes: readmeBytes.length, sha256: createHash("sha256").update(readmeBytes).digest("hex") },
       { path: "footprints/survey-footprints.json", sizeBytes: footprintBytes.length, sha256: createHash("sha256").update(footprintBytes).digest("hex") },
       { path: "provenance.json", sizeBytes: provenanceBytes.length, sha256: createHash("sha256").update(provenanceBytes).digest("hex") },
+      ...healpixFiles.map(({ path: filePath, bytes }) => ({ path: options.invalidHealpixManifestPath ? "healpix/order16.json" : filePath, sizeBytes: bytes.length, sha256: options.tamperHealpixHash && filePath === "healpix/order4.json" ? "0".repeat(64) : createHash("sha256").update(bytes).digest("hex") })),
     ],
-    layers: [{ layerId: `${surveyId}-coverage`, surveyId, coverageRole: "image_extent", dataOrigin: "observed", sourceTier: "official_geometry", modality: "imaging", releaseId: releases[0]!, path: `mocs/${surveyId}-coverage.moc.fits`, sizeBytes: mocBytes.length, sha256: createHash("sha256").update(mocBytes).digest("hex") }],
+    layers: [layer],
   };
   const zip = new yazl.ZipFile();
   zip.addBuffer(Buffer.from(`${JSON.stringify(packageManifest, null, 2)}\n`), "resource-package.json");
   zip.addBuffer(footprintBytes, "footprints/survey-footprints.json");
   zip.addBuffer(mocBytes, `mocs/${surveyId}-coverage.moc.fits`);
   zip.addBuffer(provenanceBytes, "provenance.json");
+  for (const file of healpixFiles) zip.addBuffer(file.bytes, file.path);
+  if (options.extraHealpixPath) zip.addBuffer(Buffer.from("{}\n"), "healpix/order16.json");
   if (options.unsafeSymlink) zip.addBuffer(Buffer.from("evil"), "evil-link", { mode: 0o120777 });
   if (options.missingFile !== "README.md") zip.addBuffer(readmeBytes, "README.md");
   if (options.missingFile === "footprints/survey-footprints.json") zip.addBuffer(Buffer.from("{}"), "footprints/survey-footprints.json");
@@ -788,6 +818,128 @@ test("reviewed previews reject RING ordering and mismatched native layer identit
       assert.equal(job.status, "failed");
       assert.match(job.error ?? "", /NESTED|identity/);
       assert.equal(manager.list()[0]?.installedVersion, undefined);
+    }
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
+test("optional order-4 and order-8 HEALPix lists install without changing MOC activation", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "resource-package-healpix-"));
+  try {
+    const pkg = await createPackage(directory, "public-healpix-fixture", "healpix-fixture", { releases: ["release-a"], reviewedPreview: true, includeHealpix: true });
+    const manager = new ResourcePackageManager({ catalogUrl: await writeCatalog(directory, [pkg]), root: path.join(directory, "packages"), statePath: path.join(directory, "state.json") });
+    await manager.initialize();
+    const job = await waitForJob(manager, manager.install(pkg.id));
+    assert.equal(job.status, "completed", job.error);
+    await manager.activate(pkg.id);
+    assert.equal((await manager.mocLayers(pkg.id))[0]?.layerId, "healpix-fixture-coverage");
+    assert.equal((await manager.activeFootprints()).footprints[0]?.layerId, "healpix-fixture-coverage");
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
+test("invalid optional HEALPix sidecar keeps the installed package and active releases", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "resource-package-healpix-update-"));
+  try {
+    const initial = await createPackage(directory, "public-healpix-update", "healpix-update", { version: "3.0.0", releases: ["release-a"] });
+    const catalogUrl = await writeCatalog(directory, [initial]);
+    const options = { catalogUrl, root: path.join(directory, "packages"), statePath: path.join(directory, "state.json") };
+    const manager = new ResourcePackageManager(options);
+    await manager.initialize();
+    assert.equal((await waitForJob(manager, manager.install(initial.id))).status, "completed");
+    await manager.activate(initial.id);
+
+    const invalid = await createPackage(directory, initial.id, initial.surveyId, {
+      version: "3.1.0",
+      releases: ["release-a"],
+      includeHealpix: true,
+      healpixOrder8: { schemaVersion: 1 },
+    });
+    await writeCatalog(directory, [invalid]);
+    const updater = new ResourcePackageManager(options);
+    await updater.initialize();
+    const failed = await waitForJob(updater, updater.install(invalid.id));
+    assert.equal(failed.status, "failed");
+    assert.match(failed.error ?? "", /identity or coordinate metadata/);
+    assert.equal(updater.get(invalid.id).installedVersion, "3.0.0");
+    assert.deepEqual(updater.get(invalid.id).activeReleaseIds, ["release-a"]);
+    assert.deepEqual((await readdir(path.join(options.root, "installed", invalid.id))).sort(), ["3.0.0"]);
+    assert.equal((await updater.mocLayers(invalid.id))[0]?.layerId, "healpix-update-coverage");
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
+test("HEALPix sidecars preserve unknown metadata and explicitly omit layers below the requested order", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "resource-package-healpix-orders-"));
+  try {
+    const coarse = await createPackage(directory, "public-healpix-coarse", "healpix-coarse", { releases: ["release-a"], includeHealpix: true, layerMaxOrder: 3 });
+    const unknown = await createPackage(directory, "public-healpix-unknown", "healpix-unknown", { releases: ["release-a"], includeHealpix: true, sidecarPrecision: "unknown", sidecarCompleteness: "unknown" });
+    const manager = new ResourcePackageManager({ catalogUrl: await writeCatalog(directory, [coarse, unknown]), root: path.join(directory, "packages"), statePath: path.join(directory, "state.json") });
+    await manager.initialize();
+    for (const pkg of [coarse, unknown]) {
+      const job = await waitForJob(manager, manager.install(pkg.id));
+      assert.equal(job.status, "completed", job.error);
+    }
+
+    const coarseOrder4 = JSON.parse(await readFile(path.join(directory, "packages", "installed", coarse.id, coarse.version, "healpix", "order4.json"), "utf8")) as { layers: unknown[]; surveyUnion: { cells: number[]; precision: string; completeness: string; omittedLayers: Array<{ layerId: string }> } };
+    assert.deepEqual(coarseOrder4.layers, []);
+    assert.deepEqual(coarseOrder4.surveyUnion.cells, []);
+    assert.equal(coarseOrder4.surveyUnion.precision, "unknown");
+    assert.equal(coarseOrder4.surveyUnion.completeness, "incomplete");
+    assert.deepEqual(coarseOrder4.surveyUnion.omittedLayers.map((entry) => entry.layerId), ["healpix-coarse-coverage"]);
+
+    const unknownOrder4 = JSON.parse(await readFile(path.join(directory, "packages", "installed", unknown.id, unknown.version, "healpix", "order4.json"), "utf8")) as { layers: Array<{ precision: string; completeness: string }>; surveyUnion: { precision: string; completeness: string } };
+    assert.deepEqual(unknownOrder4.layers.map(({ precision, completeness }) => [precision, completeness]), [["unknown", "unknown"]]);
+    assert.equal(unknownOrder4.surveyUnion.precision, "unknown");
+    assert.equal(unknownOrder4.surveyUnion.completeness, "unknown");
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
+test("HEALPix sidecars reject sufficient-order omissions and overstated union metadata", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "resource-package-healpix-invalid-semantics-"));
+  try {
+    const eligibleOmission = await createPackage(directory, "public-healpix-eligible-omission", "healpix-eligible-omission", {
+      releases: ["release-a"], includeHealpix: true, omitEligibleLayerAtOrder8: true,
+    });
+    const unknownUnion = {
+      schemaVersion: 1,
+      surveyId: "healpix-union-lie",
+      packageId: "public-healpix-union-lie",
+      packageVersion: "3.0.0",
+      revision: "public-healpix-union-lie@3.0.0",
+      coordinateFrame: "ICRS",
+      ordering: "NESTED",
+      order: 8,
+      layers: [{ layerId: "healpix-union-lie-coverage", surveyId: "healpix-union-lie", releaseId: "release-a", productId: "healpix-union-lie-product", sourceId: "healpix-union-lie-source", product: "Fixture healpix-union-lie", cells: [1, 2], precision: "unknown", completeness: "unknown" }],
+      surveyUnion: { cells: [1, 2], precision: "estimated", completeness: "complete", omittedLayers: [] },
+    };
+    const overstatedUnion = await createPackage(directory, "public-healpix-union-lie", "healpix-union-lie", {
+      releases: ["release-a"], includeHealpix: true, sidecarPrecision: "unknown", sidecarCompleteness: "unknown", healpixOrder8: unknownUnion,
+    });
+
+    for (const [pkg, expectedError] of [[eligibleOmission, /sufficient manifest maxOrder/], [overstatedUnion, /union precision or completeness/]] as const) {
+      const manager = new ResourcePackageManager({ catalogUrl: await writeCatalog(directory, [pkg]), root: path.join(directory, `${pkg.id}-packages`), statePath: path.join(directory, `${pkg.id}-state.json`) });
+      await manager.initialize();
+      const job = await waitForJob(manager, manager.install(pkg.id));
+      assert.equal(job.status, "failed");
+      assert.match(job.error ?? "", expectedError);
+      assert.equal(manager.get(pkg.id).installedVersion, undefined);
+    }
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
+test("HEALPix sidecar paths, declared hashes, and ZIP members are checked", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "resource-package-healpix-files-"));
+  try {
+    const invalidPackages = [
+      [await createPackage(directory, "public-healpix-path", "healpix-path", { includeHealpix: true, invalidHealpixManifestPath: true }), /supporting file .* is invalid/],
+      [await createPackage(directory, "public-healpix-hash", "healpix-hash", { includeHealpix: true, tamperHealpixHash: true }), /Supporting file SHA-256/],
+      [await createPackage(directory, "public-healpix-extra", "healpix-extra", { includeHealpix: true, extraHealpixPath: true }), /unsafe ZIP entry/],
+    ] as const;
+    for (const [pkg, expectedError] of invalidPackages) {
+      const manager = new ResourcePackageManager({ catalogUrl: await writeCatalog(directory, [pkg]), root: path.join(directory, `${pkg.id}-packages`), statePath: path.join(directory, `${pkg.id}-state.json`) });
+      await manager.initialize();
+      const job = await waitForJob(manager, manager.install(pkg.id));
+      assert.equal(job.status, "failed");
+      assert.match(job.error ?? "", expectedError);
+      assert.equal(manager.get(pkg.id).installedVersion, undefined);
     }
   } finally { await rm(directory, { recursive: true, force: true }); }
 });

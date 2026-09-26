@@ -14,7 +14,7 @@ concurrency:
 
 env:
   ALIYUN_REGISTRY: crpi-wixjy6gci86ms14e.cn-hongkong.personal.cr.aliyuncs.com
-  ALIYUN_NAMESPACE_IMAGE: ay-dev/asa-workspace-mcp
+  ALIYUN_NAMESPACE_IMAGE: ay-dev/asa-workspace
   GHCR_IMAGE: ghcr.io/astro-survey-atlas/asa-workspace
   CHART_OCI: oci://ghcr.io/astro-survey-atlas/charts
 
