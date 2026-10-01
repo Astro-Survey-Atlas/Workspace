@@ -48,16 +48,17 @@ interface PackageFixture {
   releases: string[];
 }
 
-async function createPackage(directory: string, id: string, surveyId: string, options: { unsafeSymlink?: boolean; missingFile?: string; footprintSurveyId?: string; version?: string; releases?: string[]; reviewedPreview?: boolean; previewOrdering?: string; previewLayerId?: string; nside?: number; quality?: "moc" | "official_overview"; includeHealpix?: boolean; layerMaxOrder?: number; sidecarPrecision?: "exact" | "estimated" | "unknown"; sidecarCompleteness?: "complete" | "incomplete" | "unknown"; omitEligibleLayerAtOrder8?: boolean; invalidHealpixManifestPath?: boolean; tamperHealpixHash?: boolean; extraHealpixPath?: boolean; healpixOrder4?: Record<string, unknown>; healpixOrder8?: Record<string, unknown> } = {}): Promise<PackageFixture> {
+async function createPackage(directory: string, id: string, surveyId: string, options: { unsafeSymlink?: boolean; missingFile?: string; footprintSurveyId?: string; version?: string; releases?: string[]; reviewedPreview?: boolean; previewOrdering?: string; previewLayerId?: string; layerId?: string; nside?: number; quality?: "moc" | "official_overview"; includeHealpix?: boolean; layerMaxOrder?: number; sidecarPrecision?: "exact" | "estimated" | "unknown"; sidecarCompleteness?: "complete" | "incomplete" | "unknown"; omitEligibleLayerAtOrder8?: boolean; invalidHealpixManifestPath?: boolean; tamperHealpixHash?: boolean; extraHealpixPath?: boolean; healpixOrder4?: Record<string, unknown>; healpixOrder8?: Record<string, unknown> } = {}): Promise<PackageFixture> {
   const version = options.version ?? "3.0.0";
   const releases = options.releases ?? ["release-a", "release-b"];
   const mocBytes = fitsMoc();
+  const layerId = options.layerId ?? `${surveyId}-coverage`;
   const footprints = manifestFor(options.footprintSurveyId ?? surveyId, releases, options.nside, options.quality);
-  const preview = options.reviewedPreview ? { schemaVersion: 1, coordinateFrame: "ICRS", ordering: options.previewOrdering ?? "NESTED", generatedAt: now, footprints: footprints.footprints.map(f => ({ surveyId: f.surveyId, releaseId: f.releaseId, product: f.product, layerId: options.previewLayerId ?? `${surveyId}-coverage`, nside: f.nside, pixels: f.pixels })) } : footprints;
+  const preview = options.reviewedPreview ? { schemaVersion: 1, coordinateFrame: "ICRS", ordering: options.previewOrdering ?? "NESTED", generatedAt: now, footprints: footprints.footprints.map(f => ({ surveyId: f.surveyId, releaseId: f.releaseId, product: f.product, layerId: options.previewLayerId ?? layerId, nside: f.nside, pixels: f.pixels })) } : footprints;
   const footprintBytes = Buffer.from(`${JSON.stringify(preview, null, 2)}\n`);
   const provenanceBytes = Buffer.from(JSON.stringify({ schemaVersion: 3, version: "3.0.0", files: [] }));
   const readmeBytes = Buffer.from("# README\n");
-  const layer = { layerId: `${surveyId}-coverage`, maxOrder: options.layerMaxOrder ?? 8, surveyId, releaseId: releases[0]!, productId: `${surveyId}-product`, sourceId: `${surveyId}-source`, product: `Fixture ${surveyId}`, coverageRole: "image_extent", dataOrigin: "observed", sourceTier: "official_geometry", modality: "imaging", path: `mocs/${surveyId}-coverage.moc.fits`, sizeBytes: mocBytes.length, sha256: createHash("sha256").update(mocBytes).digest("hex") };
+  const layer = { layerId, maxOrder: options.layerMaxOrder ?? 8, surveyId, releaseId: releases[0]!, productId: `${surveyId}-product`, sourceId: `${surveyId}-source`, product: `Fixture ${surveyId}`, coverageRole: "image_extent", dataOrigin: "observed", sourceTier: "official_geometry", modality: "imaging", path: `mocs/${layerId}.moc.fits`, sizeBytes: mocBytes.length, sha256: createHash("sha256").update(mocBytes).digest("hex") };
   const sidecar = (order: 4 | 8) => {
     const omitted = layer.maxOrder < order || (order === 8 && options.omitEligibleLayerAtOrder8 === true);
     const precision = options.sidecarPrecision ?? "estimated";
@@ -100,7 +101,7 @@ async function createPackage(directory: string, id: string, surveyId: string, op
   const zip = new yazl.ZipFile();
   zip.addBuffer(Buffer.from(`${JSON.stringify(packageManifest, null, 2)}\n`), "resource-package.json");
   zip.addBuffer(footprintBytes, "footprints/survey-footprints.json");
-  zip.addBuffer(mocBytes, `mocs/${surveyId}-coverage.moc.fits`);
+  zip.addBuffer(mocBytes, layer.path);
   zip.addBuffer(provenanceBytes, "provenance.json");
   for (const file of healpixFiles) zip.addBuffer(file.bytes, file.path);
   if (options.extraHealpixPath) zip.addBuffer(Buffer.from("{}\n"), "healpix/order16.json");
@@ -565,6 +566,24 @@ test("updating a package preserves only selected releases still installed", asyn
   }
 });
 
+test("loading a current package preserves unchanged trusted selections in unrelated older packages", async () => {
+  const paths = await fixture();
+  try {
+    await waitForJob(paths.manager, paths.manager.install("public-legacy-surveys-footprints"));
+    await paths.manager.activate("public-legacy-surveys-footprints");
+    const older = paths.manager.get("public-legacy-surveys-footprints");
+    const updated = await createPackage(paths.directory, older.id, "legacy-surveys", { version: "3.1.0", releases: ["release-b", "release-c"] });
+    await writeCatalog(paths.directory, [updated, paths.packages[1]!]);
+    await paths.manager.sync();
+    await waitForJob(paths.manager, paths.manager.install(paths.packages[1]!.id));
+    await paths.manager.activate(paths.packages[1]!.id);
+    assert.deepEqual(paths.manager.get(older.id).activeReleaseIds, older.activeReleaseIds);
+    assert.equal(paths.manager.get(older.id).installedVersion, older.installedVersion);
+    assert.equal(paths.manager.get(older.id).status, "update_available");
+    await assert.rejects(() => paths.manager.setActive([{ packageId: older.id, releaseIds: ["release-b"] }]), /version must be current/);
+  } finally { await rm(paths.directory, { recursive: true, force: true }); }
+});
+
 test("same-version catalog checksum changes preserve the old install as update available", async () => {
   const paths = await fixture();
   try {
@@ -798,11 +817,27 @@ test("reviewed per-layer NESTED previews install and remain readable after resta
     const before = await manager.activeFootprints();
     assert.equal(before.nside, 16);
     assert.equal(before.footprints[0]?.layerId, "reviewed-coverage");
+    assert.equal(before.footprints[0]?.modality, "imaging");
     assert.deepEqual(before.footprints[0]?.pixels, manifestFor("reviewed", ["release-a"]).footprints[0]?.pixels);
     const restarted = new ResourcePackageManager(options);
     await restarted.initialize();
     assert.equal((await restarted.mocLayers(pkg.id))[0]?.layerId, "reviewed-coverage");
     assert.deepEqual((await restarted.activeFootprints()).footprints, before.footprints);
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
+test("published HST archive layer IDs with consecutive hyphens retain their immutable identity", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "hst-published-identity-"));
+  try {
+    const layerId = "moc-hst-hst-archive--a3f34784c95b";
+    const pkg = await createPackage(directory, "public-hst-footprints", "hst", { releases: ["hst-archive-coverage"], reviewedPreview: true, includeHealpix: true, layerId });
+    const manager = new ResourcePackageManager({ catalogUrl: await writeCatalog(directory, [pkg]), root: path.join(directory, "packages"), statePath: path.join(directory, "state.json") });
+    await manager.initialize();
+    const job = await waitForJob(manager, manager.install(pkg.id));
+    assert.equal(job.status, "completed", job.error);
+    await manager.activate(pkg.id);
+    assert.equal((await manager.mocLayers(pkg.id))[0]?.layerId, layerId);
+    assert.equal((await manager.activeFootprints()).footprints[0]?.layerId, layerId);
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
 

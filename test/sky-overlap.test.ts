@@ -1,7 +1,18 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { calculateSkyOverlap as mvpOverlap } from "../src/sky-overlap.js";
 
-import { commonOverlapNside, calculateSkyOverlap, type SkyOverlapSource } from "../src/sky-overlap.js";
+test("all public MVP subsets intersect with local CSST while retaining local identity", () => {
+  const ids = ["euclid", "desi", "legacy-surveys", "hst"];
+  for (let mask = 1; mask < 16; mask++) {
+    const selected = ids.filter((_, index) => mask & (1 << index));
+    const sources = [...selected.map((id) => ({ id, surveyId: id, label: id, kind: "public" as const, nside: 256, pixels: [202250, 202272] })),
+      { id: "workspace:asset:csst", surveyId: "csst", label: "CSST", kind: "workspace" as const, nside: 256, pixels: [202250] }];
+    const overlap = mvpOverlap(sources, 256); assert.deepEqual(overlap.pixels, [202250]); assert.ok(overlap.sourceIds.includes("workspace:asset:csst"));
+  }
+});
+
+import { commonOverlapNside, calculateSkyOverlap, privateOverlapOrders, type SkyOverlapSource } from "../src/sky-overlap.js";
 
 function source(id: string, pixels: number[], nside = 4): SkyOverlapSource {
   return { id, label: id, kind: "workspace", nside, pixels };
@@ -36,6 +47,15 @@ test("unions products within a survey before intersecting surveys", () => {
   assert.deepEqual(result.sourceIds, ["a-one", "a-two", "b-one"]);
 });
 
+test("a selected survey with empty coverage cannot disappear from the intersection", () => {
+  const selected = [surveySource("a", "survey-a", [0]), surveySource("b", "survey-b", [0]), surveySource("empty", "survey-c", [])];
+  const result = calculateSkyOverlap(selected, 4);
+  assert.equal(result.status, "empty");
+  assert.deepEqual(result.sourceIds, ["a", "b", "empty"]);
+  assert.deepEqual(result.components, []);
+  assert.deepEqual(calculateSkyOverlap([...selected, surveySource("c", "survey-c", [0])], 4).pixels, [0]);
+});
+
 test("returns an empty result when there is no common cell or fewer than two sources", () => {
   assert.equal(calculateSkyOverlap([source("a", [0]), source("b", [1])], 4).status, "empty");
   assert.deepEqual(calculateSkyOverlap([source("a", [0])], 4).components, []);
@@ -59,4 +79,24 @@ test("automatic overlap uses native order 8 but keeps a selected preview-only so
   assert.equal(commonOverlapNside([native, { ...native, id: "second" }]), 256);
   assert.equal(commonOverlapNside([native, source("legacy", [1], 16)]), 16);
   assert.equal(commonOverlapNside([]), 16);
+});
+
+test("an O10 private scan supplies an O8 query projection without refining a coarse scan", () => {
+  const publicSource = { ...source("public", [1], 16), kind: "public" as const, availableOrders: [4, 8] };
+  const privateSource = { ...source("csst", [1], 16), availableOrders: privateOverlapOrders([10]) };
+  assert.deepEqual(privateSource.availableOrders, [4, 8]);
+  assert.equal(commonOverlapNside([publicSource, privateSource]), 256);
+  assert.deepEqual(privateOverlapOrders([4]), [4]);
+  assert.equal(commonOverlapNside([publicSource, { ...privateSource, availableOrders: privateOverlapOrders([4]) }]), 16);
+  assert.deepEqual(privateOverlapOrders([]), []);
+});
+
+test("common order unions product capabilities within each survey before intersecting surveys", () => {
+  const sources = [
+    { ...surveySource("desi-spectra", "desi", [1], 16), availableOrders: [4, 8] },
+    { ...surveySource("desi-redrock", "desi", [1], 16), availableOrders: [4] },
+    { ...surveySource("euclid", "euclid", [1], 16), availableOrders: [4, 8] },
+  ];
+  assert.equal(commonOverlapNside(sources), 256);
+  assert.equal(commonOverlapNside([...sources, { ...surveySource("csst", "csst", [1], 16), availableOrders: [4] }]), 16);
 });

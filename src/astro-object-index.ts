@@ -5,6 +5,7 @@ import {
 } from "./local-scan.js";
 import { COVERAGE_ROLES, DATA_ORIGINS, SOURCE_TIERS, type CoverageDataOrigin, type CoverageRole, type CoverageSourceTier } from "./assets-core.js";
 import { parseElasticsearchEndpoint } from "./es-endpoint.js";
+import { regionPixelFilter } from "./workspace-directories.js";
 
 export const ASTRO_OBJECT_INDEX = LOCAL_OBJECT_INDEX;
 export const ASTRO_COVERAGE_INDEX = LOCAL_COVERAGE_INDEX;
@@ -114,6 +115,8 @@ export interface AstroCoverageFactQueryInput {
   products?: string[];
   modalities?: string[];
   assetIds?: string[];
+  cells?: number[];
+  preserveSources?: boolean;
 }
 
 export interface AstroCoverageFactQueryResult {
@@ -592,6 +595,8 @@ function validateCoverageInput(input: AstroCoverageFactQueryInput): AstroCoverag
     products: validateFilterValues(input.products, "products"),
     modalities: validateFilterValues(input.modalities, "modalities"),
     assetIds: validateFilterValues(input.assetIds, "assetIds"),
+    ...(input.cells ? { cells: input.cells } : {}),
+    ...(input.preserveSources ? { preserveSources: true } : {}),
   };
 }
 
@@ -606,6 +611,13 @@ function coverageQueryBody(input: AstroCoverageFactQueryInput): Record<string, u
   }
   const visibility = layerVisibilityFilter(input.surveys, input.assetIds);
   if (visibility) filters.push(visibility);
+  if (input.cells?.length) {
+    const queryOrder = Math.log2(input.nside);
+    filters.push({ bool: { should: Array.from({ length: 9 - queryOrder }, (_, index) => {
+      const actualOrder = queryOrder + index;
+      return { bool: { filter: [{ term: { healpix_order: actualOrder } }, regionPixelFilter("healpix_pixel", actualOrder, queryOrder, input.cells!)] } };
+    }), minimum_should_match: 1 } });
+  }
   return {
     track_total_hits: true,
     size: 10_000,
@@ -1211,9 +1223,11 @@ export class AstroObjectIndexService {
       ) as ElasticsearchSearchResponse;
       const merged = new Map<string, AstroCoverageFact>();
       for (const hit of hitsFromResponse(response)) {
-        const fact = coverageFactFromHit(hit, normalized.nside);
+        const nativeOrder = isRecord(hit._source) ? hit._source.healpix_order : undefined;
+        const fact = coverageFactFromHit(hit, normalized.preserveSources && typeof nativeOrder === "number" ? 2 ** nativeOrder : normalized.nside);
         if (!fact) continue;
-        const key = [fact.asset_id, fact.survey, fact.release, fact.product, fact.modality, fact.healpix_pixel].join("\n");
+        const key = [fact.asset_id, fact.survey, fact.release, fact.product, fact.modality, fact.healpix_pixel,
+          ...(normalized.preserveSources ? [fact.source_file_id, fact.scan_run_id] : [])].join("\n");
         const existing = merged.get(key);
         if (existing) existing.objectCount += fact.objectCount;
         else merged.set(key, fact);
@@ -1229,6 +1243,7 @@ export class AstroObjectIndexService {
         nside: normalized.nside,
         facts,
         pixels: [...new Set(facts.map((fact) => fact.healpix_pixel))].sort((left, right) => left - right),
+        ...(hitsFromResponse(response).length === 10_000 ? { message: "Local coverage metadata reached its 10,000 record limit; directory results may be incomplete." } : {}),
       };
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);

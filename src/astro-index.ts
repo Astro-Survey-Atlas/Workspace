@@ -1,4 +1,5 @@
 import { parseElasticsearchEndpoint } from "./es-endpoint.js";
+import { regionContainsCell, regionPixelFilter, type WorkspaceFileLocation } from "./workspace-directories.js";
 
 export const ASTRO_FILE_INDEX = "astro_file_index_v1";
 export const ASTRO_HEALPIX_ORDER = 8;
@@ -136,7 +137,7 @@ interface ElasticsearchAggregations {
 }
 
 interface ElasticsearchSearchResponse {
-  hits?: { total?: number | ElasticsearchTotal };
+  hits?: { total?: number | ElasticsearchTotal; hits?: Array<{ _source?: Record<string, unknown> }> };
   aggregations?: ElasticsearchAggregations;
 }
 
@@ -339,6 +340,25 @@ export class AstroIndexService {
     return result.summary;
   }
 
+  async reverseFiles(input: { assetIds: string[]; order: number; cells: number[] }): Promise<{ files: WorkspaceFileLocation[]; truncated: boolean }> {
+    if (!this.configured || !input.assetIds.length) return { files: [], truncated: false };
+    const response = await this.#request({ size: 5000, track_total_hits: true,
+      query: { bool: { filter: [{ terms: { asset_id: input.assetIds } }, { term: { spatial_status: "known" } },
+        regionPixelFilter("coverage_cells", 8, input.order, input.cells)] } } });
+    const selected = new Set(input.cells);
+    const files = (response.hits?.hits ?? []).flatMap((hit): WorkspaceFileLocation[] => {
+      const file = hit._source ?? {};
+      if (typeof file.asset_id !== "string" || !input.assetIds.includes(file.asset_id)) return [];
+      const uri = [file.source_uri, file.sourceUri, file.uri, file.path, file.file_path].find((value): value is string => typeof value === "string" && value.length > 0);
+      const matchingCells = Array.isArray(file.coverage_cells) ? file.coverage_cells.filter((cell): cell is number => Number.isSafeInteger(cell) && regionContainsCell(8, Number(cell), input.order, selected)) : [];
+      if (!uri || !matchingCells.length) return [];
+      return [{ layerId: file.asset_id, sourceUri: uri, order: 8, matchingCells, precision: file.precision === "exact" ? "exact" : "estimated",
+        surveyId: typeof file.survey === "string" ? file.survey : undefined, releaseId: typeof file.release === "string" ? file.release : undefined,
+        modality: typeof file.modality === "string" ? file.modality : undefined, product: typeof file.product === "string" ? file.product : undefined }];
+    });
+    return { files, truncated: totalHits(response) > 5000 };
+  }
+
   async overview(input: AstroSkyOverviewInput): Promise<AstroOverviewResponse> {
     const cells = validateCells(input.cells);
     validateNside(input.nside);
@@ -369,7 +389,7 @@ export class AstroIndexService {
   }
 
   async coverage(input: AstroCoverageInput): Promise<AstroCoverageResponse> {
-    validateNside(input.nside);
+    if (!isPowerOfTwo(input.nside) || input.nside > 256) throw new RangeError("coverage nside must be a power of two no greater than 256");
     const assetIds = input.assetIds?.filter(Boolean);
     const must: unknown[] = [{ term: { spatial_status: "known" } }];
     if (assetIds?.length) must.push({ terms: { asset_id: assetIds } });

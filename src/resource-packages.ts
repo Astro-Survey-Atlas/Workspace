@@ -524,7 +524,12 @@ function parseCatalog(value: unknown): ResourcePackageCatalogDocument {
 /** Adapt the reviewed per-layer preview only after its package hashes and native MOCs validate. */
 function packageFootprints(value: unknown, manifest: ResourcePackageManifest, retrievedAt: string): SurveyFootprintManifest {
   const document = object(value, "Resource package preview");
-  if (document.nside !== undefined) return normalizeSurveyFootprintManifest(value);
+  if (document.nside !== undefined) {
+    const normalized = normalizeSurveyFootprintManifest(value);
+    return { ...normalized, footprints: normalized.footprints.map(footprint => ({ ...footprint,
+      modality: manifest.layers.find(layer => layer.layerId === (footprint.layerId ?? footprint.sourceId))?.modality ?? footprint.modality,
+    })) };
+  }
   if (document.schemaVersion !== 1 || document.coordinateFrame !== "ICRS" || document.ordering !== "NESTED" || !Array.isArray(document.footprints) || !document.footprints.length) throw new Error("Resource package preview must declare ICRS/NESTED per-layer cells");
   const seen = new Set<string>();
   const footprints = document.footprints.map(raw => {
@@ -532,7 +537,7 @@ function packageFootprints(value: unknown, manifest: ResourcePackageManifest, re
     const layer = manifest.layers.find(layer => layer.layerId === f.layerId);
     if (!layer || layer.surveyId !== f.surveyId || layer.releaseId !== f.releaseId || seen.has(layer.layerId)) throw new Error("Resource package preview identity does not match native MOC layer");
     seen.add(layer.layerId);
-    return { ...f, nside: f.nside, label: f.label ?? f.product, quality: "moc", sourceId: layer.layerId, retrievedAt,
+    return { ...f, nside: f.nside, modality: layer.modality, label: f.label ?? f.product, quality: "moc", sourceId: layer.layerId, retrievedAt,
       notes: "Assets package display preview at its declared NSIDE; use the manifest native MOC for scientific queries. No finer cells are inferred." };
   });
   if (seen.size !== manifest.layers.length) throw new Error("Resource package preview omits a native MOC layer");
@@ -560,7 +565,7 @@ function parseManifest(value: unknown): ResourcePackageManifest {
     const layerPath = text(layer.path, `Resource package layer ${index} path`, 512);
     const sizeBytes = layer.sizeBytes;
     const sha256 = text(layer.sha256, `Resource package layer ${index} SHA-256`, 64).toLowerCase();
-    if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(layerId) || layerPath !== `mocs/${layerId}.moc.fits` || !Number.isSafeInteger(sizeBytes) || Number(sizeBytes) <= 0 || !/^[a-f0-9]{64}$/.test(sha256)) throw new Error(`Resource package layer ${index} is invalid`);
+    if (!/^[a-z0-9]+(?:-+[a-z0-9]+)*$/.test(layerId) || layerPath !== `mocs/${layerId}.moc.fits` || !Number.isSafeInteger(sizeBytes) || Number(sizeBytes) <= 0 || !/^[a-f0-9]{64}$/.test(sha256)) throw new Error(`Resource package layer ${index} is invalid`);
     for (const field of ["surveyId", "coverageRole", "dataOrigin", "sourceTier", "modality", "releaseId"]) text(layer[field], `Resource package layer ${index} ${field}`, 160);
     if (!(COVERAGE_ROLES as readonly unknown[]).includes(layer.coverageRole)) throw new Error(`Resource package layer ${index} has an invalid coverageRole`);
     if (!(DATA_ORIGINS as readonly unknown[]).includes(layer.dataOrigin)) throw new Error(`Resource package layer ${index} has an invalid dataOrigin`);
@@ -1080,8 +1085,11 @@ export class ResourcePackageManager {
         const installed = draft.find((record) => record.id === load.packageId);
         if (!entry) throw new Error(`Resource package not found: ${load.packageId}`);
         if (!installed) throw new RangeError(`Resource package must be installed before loading: ${load.packageId}`);
-        if (installed.version !== entry.version) throw new RangeError(`Resource package version must be current before loading: ${load.packageId}`);
-        if (installed.sha256 !== entry.sha256) throw new RangeError(`Resource package checksum must be current before loading: ${load.packageId}`);
+        const previous = this.#state.packages.find(record => record.id === load.packageId);
+        const retained = Boolean(previous?.activeReleaseIds.length && previous.activeReleaseIds.length === load.releaseIds.length
+          && load.releaseIds.every(releaseId => previous.activeReleaseIds.includes(releaseId)));
+        if (!retained && installed.version !== entry.version) throw new RangeError(`Resource package version must be current before loading: ${load.packageId}`);
+        if (!retained && installed.sha256 !== entry.sha256) throw new RangeError(`Resource package checksum must be current before loading: ${load.packageId}`);
         if (new Set(load.releaseIds).size !== load.releaseIds.length) throw new RangeError(`releaseIds must be unique for resource package: ${load.packageId}`);
         const manifest = this.#installedFootprints.get(load.packageId);
         if (!manifest) throw new Error(`Installed resource package manifest is unavailable: ${load.packageId}`);

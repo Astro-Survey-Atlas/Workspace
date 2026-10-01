@@ -6620,6 +6620,17 @@ a:focus-visible {
   margin-top: 14px;
 }
 
+.native-unit-results { list-style: none; padding: 0; margin: 16px 0; }
+.native-unit-result { display: grid; gap: 7px; min-width: 0; padding: 12px 0; border-bottom: 1px solid var(--line-subtle); }
+.native-unit-result strong { font-size: 15px; }
+.native-unit-result small { color: var(--quiet); font-size: 12px; }
+.native-unit-result a { color: var(--accent); }
+.native-unit-result a, .native-unit-result code, .native-unit-result small { overflow-wrap: anywhere; word-break: break-word; white-space: normal; }
+.native-unit-facts { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; font-size: 12px; }
+.native-unit-facts svg, .native-unit-info svg, .inspector-actions svg { width: 15px; height: 15px; flex: 0 0 15px; }
+.native-unit-info { display: grid; place-items: center; width: 24px; height: 24px; padding: 0; border: 0; color: var(--quiet); background: transparent; }
+.inspector-actions { flex-wrap: wrap; }
+
 .tag-option,
 .connector-option,
 .resource-filter-chip,

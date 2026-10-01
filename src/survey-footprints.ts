@@ -7,6 +7,7 @@ export interface SurveyFootprint {
   /** A footprint belongs to exactly one registered data release. Survey coverage is its release union. */
   releaseId: string;
   product: string;
+  modality?: string;
   label: string;
   nside: number;
   pixels: number[];
@@ -34,7 +35,7 @@ function assertManifest(value: unknown): asserts value is SurveyFootprintManifes
   }
   const identities = new Set<string>();
   for (const footprint of manifest.footprints) {
-    if (!footprint || !footprint.surveyId?.trim() || !footprint.releaseId?.trim() || !footprint.product?.trim() || !footprint.label?.trim() || !footprint.notes?.trim() || !Array.isArray(footprint.pixels) || footprint.nside !== manifest.nside || !["moc", "official_overview"].includes(footprint.quality) || !Number.isFinite(Date.parse(footprint.retrievedAt))) {
+    if (!footprint || !footprint.surveyId?.trim() || !footprint.releaseId?.trim() || !footprint.product?.trim() || !footprint.label?.trim() || !footprint.notes?.trim() || !Array.isArray(footprint.pixels) || footprint.nside !== manifest.nside || !["moc", "official_overview"].includes(footprint.quality) || !Number.isFinite(Date.parse(footprint.retrievedAt)) || (footprint.modality !== undefined && (typeof footprint.modality !== "string" || !footprint.modality.trim()))) {
       throw new Error("Survey footprint manifest contains an invalid footprint");
     }
     try {

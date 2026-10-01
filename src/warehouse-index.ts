@@ -1,5 +1,6 @@
 import type { ScanPrecision } from "./connector-history.js";
 import { parseElasticsearchEndpoint } from "./es-endpoint.js";
+import { regionContainsCell, regionPixelFilter, type WorkspaceFileLocation } from "./workspace-directories.js";
 
 export const WAREHOUSE_LAYER_INDEX = "ast_layer_index_v1";
 export const WAREHOUSE_FILE_INDEX = "ast_file_index_v1";
@@ -25,6 +26,9 @@ export interface WarehouseLayerSnapshot {
   errorCount: number;
   errorSummary?: string;
   updatedAt?: string;
+  layerMode?: string;
+  activeScopeId?: string;
+  scopeSnapshotSha256?: string;
 }
 
 export interface WarehouseCoverageSnapshot {
@@ -141,6 +145,7 @@ function layerFromHit(hit: SearchHit): WarehouseLayerSnapshot | undefined {
     availableOrders: [...new Set(availableOrders)].sort((a, b) => a - b), maxOrder: order(source.max_order),
     fileCount: number(source.file_count) ?? 0, coverageCount: number(source.coverage_count) ?? 0, errorCount: number(source.error_count) ?? 0,
     errorSummary: text(source.error_summary), updatedAt: text(source.updated_at),
+    layerMode: text(source.layer_mode), activeScopeId: text(source.active_scope_id), scopeSnapshotSha256: text(source.scope_snapshot_sha256),
   };
 }
 
@@ -206,7 +211,7 @@ export class WarehouseIndexService {
       const pageSize = Math.min(1_000, this.#maxDocuments - layerHits.length);
       const layerResponse = await this.#search(this.layerIndex, {
         size: pageSize, track_total_hits: true,
-        query: { match_all: {} }, sort: [{ layer_id: "asc" }],
+        query: allowedLayerIds === undefined ? { match_all: {} } : { terms: { layer_id: [...allowedLayerIds] } }, sort: [{ layer_id: "asc" }],
         ...(layerSearchAfter ? { search_after: layerSearchAfter } : {}),
       });
       const hits = layerResponse.hits?.hits ?? [];
@@ -227,7 +232,8 @@ export class WarehouseIndexService {
       if (!cursor?.length) throw new WarehouseIndexError("Warehouse layer page is missing a stable sort cursor");
       layerSearchAfter = cursor;
     }
-    const layers = layerHits.map(layerFromHit).filter((value): value is WarehouseLayerSnapshot => Boolean(value));
+    const layers = layerHits.map(layerFromHit).filter((value): value is WarehouseLayerSnapshot => Boolean(value)
+      && (allowedLayerIds === undefined || allowedLayerIds.has(value!.layerId)) && value!.layerMode !== "CANDIDATE");
     const coverages: WarehouseCoverageSnapshot[] = [];
     for (const layer of layers.filter((candidate) => candidate.state === "ACTIVE" && (allowedLayerIds === undefined || allowedLayerIds.has(candidate.layerId)))) {
       let searchAfter: unknown[] | undefined;
@@ -316,6 +322,105 @@ export class WarehouseIndexService {
     } catch (error) {
       return { status: "error", index: this.coverageIndex, nside: input.nside, pixels: [], layers: [], inactiveLayers: [], message: error instanceof Error ? error.message : String(error) };
     }
+  }
+
+  async reverseFiles(input: { layerIds: readonly string[]; order: number; cells: readonly number[] }): Promise<{ files: WorkspaceFileLocation[]; truncated: boolean; notes: string[] }> {
+    const files: WorkspaceFileLocation[] = [];
+    const notes: string[] = [];
+    let truncated = false;
+    if (!this.configured || !input.layerIds.length) return { files, truncated, notes };
+    const allowed = new Set(input.layerIds);
+    const layerHits = await this.#search(this.layerIndex, { size: 1000, query: { terms: { layer_id: [...allowed] } } });
+    const layers = (layerHits.hits?.hits ?? []).map(layerFromHit).filter((layer): layer is WarehouseLayerSnapshot => Boolean(layer)
+      && allowed.has(layer!.layerId) && layer!.state === "ACTIVE" && layer!.layerMode !== "CANDIDATE");
+    const selected = new Set(input.cells);
+    for (const layer of layers) {
+      const bindings = new Map<string, { scanRunId?: string; observation: boolean }>();
+      if (layer.layerMode === "PARTITIONED") {
+        if (!layer.activeScopeId || !layer.scopeSnapshotSha256) { notes.push(`${layer.layerId}: missing committed scan scope`); truncated = true; continue; }
+        const members = await this.#pages(process.env.ASTRO_WAREHOUSE_PARTITION_INDEX ?? "ast_partition_index_v1", {
+          bool: { filter: [{ term: { layer_id: layer.layerId } }, { term: { scope_id: layer.activeScopeId } }, { term: { state: "ACTIVE" } }] },
+        }, [{ partition_id: "asc" }]);
+        truncated ||= members.truncated;
+        for (const hit of members.hits) {
+          const member = hit._source ?? {};
+          const candidate = text(member.active_layer_id);
+          if (member.layer_id !== layer.layerId || member.scope_id !== layer.activeScopeId || member.state !== "ACTIVE"
+            || member.scope_snapshot_sha256 !== layer.scopeSnapshotSha256 || !candidate) { truncated = true; continue; }
+          bindings.set(candidate, { scanRunId: text(member.active_scan_run_id), observation: true });
+        }
+        if (bindings.size) {
+          const pointed = await this.#search(this.layerIndex, { size: bindings.size, query: { terms: { layer_id: [...bindings.keys()] } } });
+          const active = new Set((pointed.hits?.hits ?? []).flatMap((hit) => hit._source?.state === "ACTIVE" ? [text(hit._source.layer_id) ?? hit._id!] : []));
+          for (const id of bindings.keys()) if (!active.has(id)) { bindings.delete(id); truncated = true; }
+        }
+      } else bindings.set(layer.layerId, { scanRunId: layer.scanRunId, observation: false });
+      if (!bindings.size) continue;
+      const actualOrders = layer.availableOrders.length ? layer.availableOrders : [input.order];
+      const coverage = await this.#pages(this.coverageIndex, { bool: { filter: [
+        { terms: { layer_id: [...bindings.keys()] } },
+        { bool: { should: actualOrders.map((actualOrder) => ({ bool: { filter: [
+          { term: { healpix_order: actualOrder } }, regionPixelFilter("healpix_cell", actualOrder, input.order, input.cells),
+        ] } })), minimum_should_match: 1 } },
+      ] } }, [{ source_file_id: "asc" }, { layer_id: "asc" }, { healpix_order: "asc" }, { healpix_cell: "asc" }, { coverage_role: "asc" }]);
+      truncated ||= coverage.truncated;
+      const edges = coverage.hits.flatMap((hit) => {
+        const edge = coverageFromHit(hit);
+        return edge && bindings.has(edge.layerId) && edge.sourceFileId && regionContainsCell(edge.order, edge.ipix, input.order, selected)
+          && (!edge.coordinateFrame || edge.coordinateFrame.toUpperCase() === "ICRS") && (!edge.nesting || edge.nesting.toUpperCase() === "NESTED") ? [edge] : [];
+      });
+      for (const [candidateId, binding] of bindings) {
+        const candidateEdges = edges.filter((edge) => edge.layerId === candidateId);
+        const ids = [...new Set(candidateEdges.flatMap((edge) => edge.sourceFileId ? [edge.sourceFileId] : []))];
+        const metadata = new Map<string, Record<string, unknown>>();
+        for (let start = 0; start < ids.length; start += 500) {
+          const batch = ids.slice(start, start + 500);
+          const result = await this.#search(binding.observation ? process.env.ASTRO_WAREHOUSE_FILE_OBSERVATION_INDEX ?? "ast_file_observation_index_v1" : this.fileIndex, {
+            size: 500,
+            query: binding.observation ? { bool: { filter: [{ term: { layer_id: candidateId } }, { terms: { file_id: batch } },
+              ...(binding.scanRunId ? [{ term: { scan_run_id: binding.scanRunId } }] : [])] } }
+              : { bool: { should: [{ ids: { values: batch } }, { terms: { file_id: batch } }], minimum_should_match: 1 } },
+          });
+          for (const hit of result.hits?.hits ?? []) {
+            const value = hit._source ?? {};
+            const id = text(value.file_id) ?? hit._id;
+            if (id && batch.includes(id)) metadata.set(id, value);
+          }
+        }
+        for (const id of ids) {
+          const matching = candidateEdges.filter((edge) => edge.sourceFileId === id);
+          const file = metadata.get(id);
+          const uri = text(file?.canonical_source_uri) ?? text(file?.source_uri) ?? text(file?.sourceUri) ?? matching.find((edge) => edge.sourceUri)?.sourceUri;
+          if (!uri) { notes.push(`${layer.layerId}: indexed file has no source locator`); continue; }
+          for (const actualOrder of new Set(matching.map((edge) => edge.order))) {
+            const matches = matching.filter((edge) => edge.order === actualOrder);
+            files.push({ layerId: layer.layerId, surveyId: layer.surveyId, releaseId: layer.releaseId, product: layer.productId,
+              modality: layer.modality, sourceUri: uri, order: actualOrder, matchingCells: matches.map((edge) => edge.ipix),
+              precision: matches.some((edge) => edge.precision === "estimated") ? "estimated" : matches.some((edge) => edge.precision === "entrypoint-only") ? "entrypoint-only" : "exact",
+              scanRunId: binding.scanRunId });
+          }
+        }
+      }
+    }
+    if (truncated) notes.push("Private directory lookup is incomplete at the configured metadata query limit or scan scope.");
+    return { files, truncated, notes };
+  }
+
+  async #pages(index: string, query: unknown, sort: unknown[]): Promise<{ hits: SearchHit[]; truncated: boolean }> {
+    const hits: SearchHit[] = [];
+    let after: unknown[] | undefined;
+    const maximum = Math.min(this.#maxDocuments, 50_000);
+    while (hits.length < maximum) {
+      const size = Math.min(1000, maximum - hits.length);
+      const response = await this.#search(index, { size, track_total_hits: true, query, sort, ...(after ? { search_after: after } : {}) });
+      const page = response.hits?.hits ?? [];
+      hits.push(...page);
+      if (!page.length || (total(response) === undefined ? page.length < size : hits.length >= total(response)!)) return { hits, truncated: false };
+      const next = page.at(-1)?.sort;
+      if (!next?.length || JSON.stringify(next) === JSON.stringify(after)) return { hits, truncated: true };
+      after = next;
+    }
+    return { hits, truncated: true };
   }
 
   async #search(index: string, body: unknown): Promise<SearchResponse> {

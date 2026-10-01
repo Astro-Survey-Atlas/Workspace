@@ -2,10 +2,70 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { WarehouseIndexService } from "../src/warehouse-index.js";
+import { directoryLocations } from "../src/workspace-directories.js";
 
 function esResponse(value: unknown, status = 200): Response {
   return new Response(JSON.stringify(value), { status, headers: { "content-type": "application/json" } });
 }
+
+test("private directories follow committed partition pointers and candidate observations", async () => {
+  const snapshot = "a".repeat(64);
+  const service = new WarehouseIndexService({ url: "https://warehouse.example", fetchImpl: async (input, init) => {
+    const index = String(input).split("/").at(-2)!;
+    const body = JSON.parse(String(init?.body));
+    if (index === "ast_layer_index_v1") {
+      return esResponse({ hits: { hits: body.query.terms.layer_id[0] === "workspace-csst" ? [{ _source: {
+        layer_id: "workspace-csst", state: "ACTIVE", layer_mode: "PARTITIONED", active_scope_id: "scope", scope_snapshot_sha256: snapshot,
+        survey_id: "csst", release_id: "local", product_id: "image", modality: "imaging", available_orders: [8],
+      } }] : [{ _source: { layer_id: "candidate-1", state: "ACTIVE" } }] } });
+    }
+    if (index === "ast_partition_index_v1") return esResponse({ hits: { hits: [{ _source: {
+      layer_id: "workspace-csst", scope_id: "scope", scope_snapshot_sha256: snapshot, state: "ACTIVE", partition_id: "visit42",
+      active_layer_id: "candidate-1", active_scan_run_id: "run-1",
+    } }] } });
+    if (index === "ast_coverage_index_v1") {
+      assert.deepEqual(body.query.bool.filter[0].terms.layer_id, ["candidate-1"]);
+      return esResponse({ hits: { hits: ["file-1", "file-2"].map(id => ({ _source: {
+        layer_id: "candidate-1", source_file_id: id, healpix_order: 8, healpix_cell: 202250, precision: "estimated",
+      } })) } });
+    }
+    assert.equal(index, "ast_file_observation_index_v1");
+    assert.deepEqual(body.query.bool.filter[0], { term: { layer_id: "candidate-1" } });
+    assert.deepEqual(body.query.bool.filter[2], { term: { scan_run_id: "run-1" } });
+    return esResponse({ hits: { hits: ["file-1", "file-2"].map(id => ({ _source: {
+      file_id: id, layer_id: "candidate-1", scan_run_id: "run-1", source_uri: `/data/csst/visit42/${id}.fits`,
+    } })) } });
+  } });
+  const result = await service.reverseFiles({ layerIds: ["workspace-csst"], order: 8, cells: [202250] });
+  const directories = directoryLocations(result.files, id => id === "workspace-csst" ? "workspace:csst" : undefined);
+  assert.equal(result.truncated, false);
+  assert.equal(directories.length, 1);
+  assert.equal(directories[0]!.directoryUri, "/data/csst/visit42");
+  assert.equal(directories[0]!.modality, "imaging");
+});
+
+test("private region reverse lookup only joins owned ACTIVE layers and retains native edge order", async () => {
+  const requests: string[] = [];
+  const service = new WarehouseIndexService({ url: "https://warehouse.example", fetchImpl: async (input, init) => {
+    const index = String(input).split("/").at(-2)!; const body = JSON.parse(String(init?.body)); requests.push(index);
+    if (index === "ast_layer_index_v1") {
+      assert.deepEqual(body.query.terms.layer_id, ["workspace-csst"]);
+      return esResponse({ hits: { hits: ["workspace-csst", "assets-public"].map((id) => ({ _source: { layer_id: id, survey_id: "csst", release_id: "local", product_id: "image", state: "ACTIVE", available_orders: [8] } })) } });
+    }
+    if (index === "ast_coverage_index_v1") {
+      assert.deepEqual(body.query.bool.filter[0].terms.layer_id, ["workspace-csst"]);
+      return esResponse({ hits: { total: 2, hits: [
+        { _source: { layer_id: "workspace-csst", source_file_id: "file", healpix_order: 8, healpix_cell: 512, precision: "estimated" } },
+        { _source: { layer_id: "assets-public", source_file_id: "public", healpix_order: 8, healpix_cell: 512 } },
+      ] } });
+    }
+    assert.equal(index, "ast_file_index_v1");
+    return esResponse({ hits: { hits: [{ _source: { file_id: "file", source_uri: "/data/csst/visit/image.fits" } }] } });
+  } });
+  const result = await service.reverseFiles({ layerIds: ["workspace-csst"], order: 4, cells: [2] });
+  assert.equal(result.files.length, 1); assert.equal(result.files[0]!.order, 8);
+  assert.equal(result.files[0]!.sourceUri, "/data/csst/visit/image.fits"); assert.equal(result.truncated, false);
+});
 
 test("loads paginated active Warehouse layers and projects real NESTED coverage", async () => {
   const requests: Array<{ index: string; body: Record<string, unknown> }> = [];

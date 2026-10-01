@@ -94,7 +94,7 @@ test("AssetsRegionClient sends the scoped key and preserves file evidence", asyn
   assert.ok(request);
   assert.equal(request.url, "http://assets.test/api/v1/coverage/reverse-lookup");
   assert.equal((request.init.headers as Record<string, string>)["X-Assets-API-Key"], "asa_live_test");
-  assert.deepEqual(JSON.parse(String(request.init.body)), { layerIds: ["euclid-layer"], order: 8, cells: [549009], limit: 1000 });
+  assert.deepEqual(JSON.parse(String(request.init.body)), { layerIds: ["euclid-layer"], order: 8, cells: [549009], limit: 1000, pageSize: 100 });
   assert.equal(result?.available, true);
   assert.equal(result?.precision, "estimated");
   assert.equal(result?.truncated, false);

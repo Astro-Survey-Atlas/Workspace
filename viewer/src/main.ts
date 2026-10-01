@@ -1,4 +1,6 @@
-import { ChevronLeft, ChevronRight, createIcons, Download, Globe2, GripVertical, Info, Layers3, Maximize2, MessageSquare, Minimize2, Moon, Play, Plus, RefreshCw, RotateCcw, Send, Settings2, SlidersHorizontal, Sun, Undo2, X } from "lucide";
+import { ChevronLeft, ChevronRight, createIcons, Download, Globe2, GripVertical, Info, Layers3, Maximize2, MessageSquare, Minimize2, Moon, Play, Plus, RefreshCw, RotateCcw, Send, Settings2, SlidersHorizontal, Sun, Undo2, X, Image, Telescope, ScanLine, Database, CircleHelp, ListChecks, Box, Radio, FileJson2 } from "lucide";
+import { mergePublicPages, workspaceManifestCsv } from "./overlap-manifest.js";
+import type { SkyReverseLookupResponse } from "./api.js";
 
 import "./styles.css";
 import {
@@ -391,6 +393,7 @@ let layerViewer: SurveyLayerViewer | null = null;
 let overlapResponse: SkyOverlapResponse | null = null;
 let overlapModeActive = false;
 let overlapRequestGeneration = 0;
+let overlapInspectionGeneration = 0;
 let aladinExplorer: AladinExplorer | null = null;
 let aladinSnapshot: AladinExplorerSnapshot | null = null;
 let latestAladinStatus: AladinExplorerStatus | null = null;
@@ -1414,68 +1417,138 @@ function overlapSourceIdsForState(state: SurveyLayerState): string[] {
 
 function renderOverlapComponent(component: SurveyLayerOverlapComponent): void {
   const selected = overlapResponse?.components.find((candidate) => candidate.id === component.id) ?? component;
+  const generation = ++overlapInspectionGeneration;
+  const modeGeneration = overlapRequestGeneration;
   layerViewer?.setActiveOverlapComponent(selected.id);
   const sourceIds = selected.sourceIds ?? overlapResponse?.sourceIds ?? [];
-  const sourceLabels = (overlapResponse?.sources ?? [])
-    .filter((source) => sourceIds.includes(source.id))
-    .map((source) => source.label)
-    .join(" / ") || sourceIds.join(" / ") || "--";
-  const rows: Array<[string, string]> = [
-    ["模式", "G · 天区重合"],
-    ["区块", selected.id],
-    ["HEALPix 单元", formatInteger(selected.cells.length)],
-    ["来源", sourceLabels],
-    ...(selected.areaDeg2 === undefined ? [] : [["面积", `${selected.areaDeg2.toFixed(3)} deg²`] as [string, string]]),
-    ["反查", "正在读取来源文件…"],
-  ];
-  inspectorRows(`重合区块 ${selected.id}`, rows);
-  void workspaceApi.skyReverseLookup({ componentId: selected.id, sourceIds, nside: overlapResponse?.nside ?? 16 })
-    .then((lookup) => {
-      if (!overlapModeActive) return;
-      const actions: HTMLButtonElement[] = [];
-      const executableSourceIds = executablePublicSourceIds(sourceIds);
-      const precisionLabels = {
-        exact: "精确",
-        estimated: "估算",
-        "entrypoint-only": "仅来源入口",
-        truncated: "截断",
-      } as const;
-      const coverageMatches = lookup.fileEvidence?.flatMap((file) => file.matchingCoverage) ?? [];
-      const precisionSummaries = summarizeCoverageMatches(coverageMatches);
-      const coverageEvidenceSummaries = summarizeCoverageEvidence(lookup.coverageEvidence);
-      const scanScopeSummaries = summarizeScanScopes(lookup.scanScopes);
-      const observations = lookup.fileEvidence?.flatMap((file) => (file.observations ?? []).map((observation) => ({ fileId: file.fileId, observation }))) ?? [];
-      const observationSummaries = observations.slice(0, 4).map(({ fileId, observation }) => `${observation.fileName ?? fileId} · 逻辑层 ${observation.layerId ?? "--"} · 候选层 ${observation.observationLayerId ?? "--"} · run ${observation.scanRunId ?? "--"} · input SHA-256 ${observation.sourceSnapshotSha256 ?? "--"}`);
-      if (observations.length > observationSummaries.length) observationSummaries.push(`另有 ${formatInteger(observations.length - observationSummaries.length)} 条观测记录`);
-      const fileEvidenceSummaries = (lookup.fileEvidence ?? []).slice(0, 6).map((file) => `${file.fileName ?? file.fileId}${file.sizeBytes === undefined ? "" : ` · ${formatBytes(file.sizeBytes)}`}${file.sourceUri ? ` · 来源 ${file.sourceUri}` : " · 无来源定位符"}${file.downloadUrl ? ` · 下载 ${file.downloadUrl}` : ""}${file.matchingCoverageTruncated ? " · 此文件的覆盖匹配未完整列出" : ""}`);
-      if ((lookup.fileEvidence?.length ?? 0) > fileEvidenceSummaries.length) fileEvidenceSummaries.push(`另有 ${formatInteger((lookup.fileEvidence?.length ?? 0) - fileEvidenceSummaries.length)} 个文件证据`);
-      const download = actionButton("构建数据下载任务", () => {
-        productionPanel.setContext({ nside: overlapResponse?.nside ?? 16, pixels: selected.cells, sourceIds: executableSourceIds, componentId: selected.id }, "overlap-download@1");
-        void activateMode("workflow").catch(showFatal);
+  const nside = overlapResponse?.nside ?? 16;
+  const sourceLabels = (overlapResponse?.sources ?? []).filter((source) => sourceIds.includes(source.id)).map((source) => source.label).join(" / ") || "--";
+  const current = () => overlapModeActive && generation === overlapInspectionGeneration && modeGeneration === overlapRequestGeneration;
+  const baseRows: Array<[string, string]> = [["区块", selected.id], ["HEALPix", `O${Math.log2(nside)} · ${formatInteger(selected.cells.length)} cells`], ["来源", sourceLabels]];
+  inspectorRows(`重合区块 ${selected.id}`, [...baseRows, ["反查", "正在读取空间分块与本地目录…"]]);
+  const tooLarge = selected.cells.length > 4096 || (selected.areaDeg2 ?? selected.cells.length * 41252.96124941927 / (12 * nside ** 2)) > 100;
+  if (tooLarge) {
+    inspectorRows(`重合区块 ${selected.id}`, [...baseRows, ["反查", "区域超过 4096 cells / 100 deg²，请选择更小天区。"]]);
+    return;
+  }
+  let lookup: SkyReverseLookupResponse;
+  const request = (cursor?: string) => workspaceApi.skyReverseLookup({ sourceIds, nside, pixels: selected.cells, pageSize: 100, ...(cursor ? { cursor } : {}) });
+  const precisionLabels: Record<string, string> = { exact: "精确", estimated: "估算", "entrypoint-only": "仅入口", truncated: "截断" };
+  const render = () => {
+    if (!current()) return;
+    const actions: HTMLButtonElement[] = [];
+    const exportPlan = async (format: "json" | "csv", button: HTMLButtonElement) => {
+      button.disabled = true;
+      try {
+        const cursors = new Set<string>();
+        while (lookup.assetsResult?.page?.hasMore) {
+          const cursor = lookup.assetsResult.page.nextCursor;
+          if (!cursor || cursors.has(cursor)) throw new Error("Assets pagination did not advance");
+          cursors.add(cursor);
+          const next = await request(cursor);
+          if (!current()) return;
+          if (!next.assetsResult) throw new Error(next.unavailable.map((item) => item.reason).join("; ") || "Assets page unavailable");
+          lookup = { ...lookup, assetsResult: mergePublicPages(lookup.assetsResult, next.assetsResult) };
+        }
+        if (!current()) return;
+        render();
+        const text = format === "json" ? JSON.stringify({ schemaVersion: 1, coordinateFrame: "ICRS", ordering: "NESTED",
+          componentId: selected.id, order: Math.log2(nside), cells: selected.cells, public: lookup.assetsResult,
+          workspaceDirectories: lookup.workspaceDirectories ?? [], directoriesTruncated: lookup.directoriesTruncated ?? false,
+          unavailable: lookup.unavailable, warnings: lookup.warnings }, null, 2)
+          : workspaceManifestCsv(lookup.assetsResult, lookup.workspaceDirectories ?? [], lookup.directoriesTruncated ?? false,
+            { componentId: selected.id, order: Math.log2(nside), cells: selected.cells, unavailable: lookup.unavailable, warnings: lookup.warnings });
+        const url = URL.createObjectURL(new Blob([format === "csv" ? "\uFEFF" : "", text], { type: format === "json" ? "application/json" : "text/csv;charset=utf-8" }));
+        const anchor = document.createElement("a"); anchor.href = url; anchor.download = `overlap-${selected.id}.${format}`; anchor.click(); URL.revokeObjectURL(url);
+      } catch (error) { notifyWorkspace("清单导出失败", error instanceof Error ? error.message : String(error), { tone: "warning" }); }
+      finally { button.disabled = false; }
+    };
+    for (const format of ["json", "csv"] as const) {
+      const button = actionButton(`导出 ${format.toUpperCase()}`, () => { void exportPlan(format, button); });
+      const icon = document.createElement("i"); icon.dataset.lucide = format === "json" ? "file-json-2" : "download"; button.prepend(icon);
+      button.title = `导出 ${format.toUpperCase()} 来源清单`; actions.push(button);
+    }
+    if (lookup.assetsResult?.page?.hasMore) {
+      const nextButton = actionButton("继续浏览", () => {
+        nextButton.disabled = true;
+        void request(lookup.assetsResult?.page?.nextCursor).then((next) => {
+          if (!current()) return;
+          if (!next.assetsResult || !lookup.assetsResult) throw new Error(next.unavailable.map((item) => item.reason).join("; "));
+          lookup = { ...lookup, assetsResult: mergePublicPages(lookup.assetsResult, next.assetsResult) }; render();
+        }).catch((error) => { if (current()) notifyWorkspace("反查续页失败", String(error), { tone: "warning" }); })
+          .finally(() => { nextButton.disabled = false; });
       });
-      download.disabled = executableSourceIds.length === 0;
-      download.title = download.disabled
-        ? "当前重合来源没有具体 sourceId/layerId，无法构建下载任务"
-        : "把具体公开来源交给数据生产工作台";
-      actions.push(download);
-      inspectorRows(`重合区块 ${selected.id}`, [
-        ["模式", "G · 天区重合"],
-        ["区块", selected.id],
-        ["HEALPix 单元", formatInteger(selected.cells.length)],
-        ["来源", sourceLabels],
-        ...(selected.areaDeg2 === undefined ? [] : [["面积", `${selected.areaDeg2.toFixed(3)} deg²`] as [string, string]]),
-        ["反查文件", lookup.files.length ? `${lookup.files.length} 个可下载文件` : "未找到可下载文件"],
-        ...(lookup.assetsLookup ? [["Assets 反查", `${lookup.assetsLookup.available ? "索引可用" : "索引不可用"} · ${precisionLabels[lookup.assetsLookup.precision]}${lookup.assetsLookup.truncated ? " · 结果截断" : ""}`] as [string, string]] : []),
-        ...(fileEvidenceSummaries.length ? [["已定位文件", fileEvidenceSummaries.join("；")] as [string, string]] : []),
-        ...(coverageEvidenceSummaries.length ? [["覆盖依据", coverageEvidenceSummaries.join("；")] as [string, string]] : []),
-        ...(precisionSummaries.length ? [["覆盖精度", precisionSummaries.join("；")] as [string, string]] : []),
-        ...(scanScopeSummaries.length ? [["批次范围", scanScopeSummaries.join("；")] as [string, string]] : []),
-        ...(observationSummaries.length ? [["文件观测", observationSummaries.join("；")] as [string, string]] : []),
-        ...(lookup.unavailable.length ? [["不可下载", lookup.unavailable.map((entry) => entry.reason).join("；")] as [string, string]] : []),
-        ...(lookup.warnings?.length ? [["提示", lookup.warnings.join("；")] as [string, string]] : []),
-      ], actions);
-    })
-    .catch((error) => notifyWorkspace("重合区块反查失败", error instanceof Error ? error.message : String(error), { tone: "warning" }));
+      const icon = document.createElement("i"); icon.dataset.lucide = "chevron-right"; nextButton.prepend(icon); actions.push(nextButton);
+    }
+    const missingNativeSurveys = lookup.assetsResult && !lookup.assetsResult.page?.hasMore
+      ? [...new Set(lookup.sources.filter((source) => source.kind === "public" && source.surveyId
+        && !lookup.assetsResult!.spatialUnits?.some((unit) => unit.surveyId === source.surveyId)).map((source) => source.surveyId!))]
+      : [];
+    inspectorRows(`重合区块 ${selected.id}`, [...baseRows,
+      ["公开分块", String(lookup.assetsResult?.spatialUnits?.length ?? 0)], ["本地目录", String(lookup.workspaceDirectories?.length ?? 0)],
+      ...(missingNativeSurveys.length ? [["未返回原生分块", missingNativeSurveys.join(" / ")] as [string, string]] : []),
+      ...(lookup.directoriesTruncated ? [["本地状态", "目录结果不完整"] as [string, string]] : []),
+      ...(lookup.assetsResult?.querySnapshot ? [["公开查询", lookup.assetsResult.querySnapshot.queryExhausted ? "查询已穷尽，巡天完整性未知" : "结果受来源范围或查询限制"] as [string, string]] : []),
+      ...(lookup.unavailable.length ? [["不可用", lookup.unavailable.map((item) => item.reason).join("\n")] as [string, string]] : []),
+    ], actions);
+    const host = byId("inspector-content");
+    const units = document.createElement("ul"); units.className = "native-unit-results";
+    for (const unit of lookup.assetsResult?.spatialUnits ?? []) {
+      const row = document.createElement("li"); row.className = "native-unit-result";
+      const source = document.createElement("small"); source.textContent = `${unit.surveyId} · ${unit.releaseId} · ${unit.product}`;
+      const title = document.createElement("strong"); title.textContent = `${unit.unitKind.toUpperCase()} ${unit.unitId}`;
+      const facts = document.createElement("span"); facts.className = "native-unit-facts";
+      const modality = unit.modality ?? "unknown";
+      const modalityIcon = document.createElement("i");
+      modalityIcon.dataset.lucide = ({ imaging: "image", spectroscopy: "telescope", redshift: "scan-line", photometry: "database", "time-domain": "rotate-ccw", "integral-field": "layers-3", ultraviolet: "sun", infrared: "circle-help", catalog: "list-checks", simulation: "box", radio: "radio" } as Record<string, string>)[modality] ?? "circle-help";
+      modalityIcon.title = modality;
+      facts.append(modalityIcon, document.createTextNode(`${modality} · O${unit.order} · ${unit.matchingCells.length} cells · ${precisionLabels[unit.precision] ?? unit.precision}`));
+      const info = document.createElement("button"); info.type = "button"; info.className = "native-unit-info"; info.title = [unit.note, unit.accessAvailability, unit.instrument, unit.filters, unit.sRegion].filter(Boolean).join("\n");
+      info.setAttribute("aria-label", "覆盖与访问依据"); const infoIcon = document.createElement("i"); infoIcon.dataset.lucide = "info"; info.append(infoIcon); facts.append(info);
+      row.append(source, title, facts);
+      const uris = unit.accessUris?.length ? unit.accessUris : unit.accessUri ? [{ uri: unit.accessUri }] : [];
+      for (const entry of uris) {
+        if (entry.fileName) row.append(Object.assign(document.createElement("small"), { textContent: entry.fileName }));
+        const url = (() => { try { const value = new URL(entry.uri); return /^https?:$/.test(value.protocol) && !value.username && !value.password ? value.toString() : undefined; } catch { return undefined; } })();
+        const locator = url ? document.createElement("a") : document.createElement("code"); locator.textContent = entry.uri;
+        if (locator instanceof HTMLAnchorElement) { locator.href = url!; locator.target = "_blank"; locator.rel = "noopener noreferrer"; }
+        row.append(locator);
+      }
+      if (!uris.length) row.append(Object.assign(document.createElement("small"), { textContent: "暂无核实过的访问 URI" }));
+      units.append(row);
+    }
+    host.append(units);
+    if (lookup.workspaceDirectories?.length) {
+      host.append(Object.assign(document.createElement("h3"), { textContent: "CSST / 本地目录" }));
+      const list = document.createElement("ul"); list.className = "native-unit-results";
+      for (const directory of lookup.workspaceDirectories) {
+        const row = document.createElement("li"); row.className = "native-unit-result";
+        row.append(Object.assign(document.createElement("small"), { textContent: `${directory.surveyId ?? "local"} · ${directory.releaseId ?? "--"} · ${directory.modality ?? "--"} · O${directory.order} · ${precisionLabels[directory.precision]}` }),
+          Object.assign(document.createElement("code"), { textContent: directory.directoryUri }));
+        list.append(row);
+      }
+      host.append(list);
+    }
+    const supporting = document.createElement("details"); const summary = document.createElement("summary"); summary.textContent = "来源与覆盖依据"; supporting.append(summary);
+    for (const entry of lookup.assetsResult?.entrypoints ?? []) {
+      const row = document.createElement("div"); row.className = "native-unit-result";
+      row.append(Object.assign(document.createElement("small"), { textContent: `${entry.surveyId ?? ""} · ${entry.releaseId ?? ""} · ${entry.kind}` }));
+      const uri = entry.url ?? entry.sourceUri;
+      if (uri) {
+        const url = (() => { try { const value = new URL(uri); return /^https?:$/.test(value.protocol) && !value.username && !value.password ? value.toString() : undefined; } catch { return undefined; } })();
+        const locator = url ? document.createElement("a") : document.createElement("code"); locator.textContent = uri;
+        if (locator instanceof HTMLAnchorElement) { locator.href = url!; locator.target = "_blank"; locator.rel = "noopener noreferrer"; }
+        row.append(locator);
+      }
+      if (entry.note) row.append(Object.assign(document.createElement("small"), { textContent: entry.note }));
+      supporting.append(row);
+    }
+    for (const note of [...new Set([...(lookup.warnings ?? []), ...(lookup.assetsResult?.notes ?? []), ...(lookup.assetsResult?.downloadPlan?.warnings ?? [])])]) supporting.append(Object.assign(document.createElement("p"), { textContent: note }));
+    host.append(supporting);
+    createIcons({ icons: { Image, Telescope, ScanLine, Database, RotateCcw, Layers3, Sun, CircleHelp, ListChecks, Box, Radio, Info, Download, FileJson2, ChevronRight }, attrs: { "aria-hidden": "true" } });
+  };
+  void request().then((result) => { if (!current()) return; lookup = result; render(); })
+    .catch((error) => { if (current()) inspectorRows(`重合区块 ${selected.id}`, [...baseRows, ["反查失败", error instanceof Error ? error.message : String(error)]]); });
 }
 
 async function enterSkyOverlapMode(): Promise<void> {

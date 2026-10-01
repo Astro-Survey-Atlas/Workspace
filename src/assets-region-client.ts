@@ -5,7 +5,27 @@ export interface AssetsRegionLookupRequest {
   order: number;
   cells: number[];
   limit?: number;
+  cursor?: string;
+  querySnapshotId?: string;
+  pageSize?: number;
 }
+
+export interface AssetsRegionSpatialUnit {
+  layerId: string; productId: string; surveyId: string; releaseId: string; product: string; modality?: string;
+  unitKind: string; unitId: string; order: number; nside: number; matchingCells: number[];
+  precision: "exact" | "estimated" | "entrypoint-only" | "truncated";
+  accessUri?: string; accessUris?: Array<{ uri: string; fileName?: string }>;
+  accessAvailability?: "public" | "source-policy" | "unverified";
+  sourceSnapshotSha256?: string; note?: string; sRegion?: string; instrument?: string; filters?: string; sourceUrl?: string;
+  scannedFiles?: Array<{ fileId: string; fileName?: string; sourceUri?: string; scanRunId?: string; sourceSnapshotSha256?: string }>;
+}
+
+export interface AssetsRegionEntrypoint {
+  kind: string; purpose: string; layerId?: string; surveyId?: string; releaseId?: string; productId?: string; product?: string;
+  precision: string; url?: string; sourceUri?: string; note?: string; [key: string]: unknown;
+}
+
+export interface AssetsRegionPage { pageSize: number; shown: number; omitted: number; hasMore: boolean; nextCursor?: string }
 
 export interface AssetsRegionFileMatch {
   layerId?: string;
@@ -56,7 +76,7 @@ export interface AssetsRegionCoverageEvidence {
   releaseId: string;
   product: string;
   modality?: string;
-  evidenceKind: "observation-footprint" | "published-moc" | "tile-footprint" | "wcs-coverage";
+  evidenceKind: "observation-footprint" | "published-moc" | "tile-footprint" | "source-unit-footprint" | "wcs-coverage";
   order: number;
   nside: number;
   nativeMaxOrder: number;
@@ -113,6 +133,14 @@ export interface AssetsRegionLookupResponse {
   files: AssetsRegionFileEvidence[];
   coverageEvidence?: AssetsRegionCoverageEvidence[];
   scanScopes?: AssetsRegionScanScope[];
+  spatialUnits?: AssetsRegionSpatialUnit[];
+  entrypoints?: AssetsRegionEntrypoint[];
+  page?: AssetsRegionPage;
+  querySnapshot?: { id: string; expiresAt: string; queryExhausted: boolean; inventoryComplete: false };
+  downloadPlan?: {
+    schemaVersion: 1; spatialUnits: AssetsRegionSpatialUnit[]; files: AssetsRegionFileEvidence[]; entrypoints: AssetsRegionEntrypoint[];
+    coverageEvidence: AssetsRegionCoverageEvidence[]; scanScopes: AssetsRegionScanScope[]; truncated: boolean; warnings: string[];
+  };
 }
 
 interface AssetsRegionClientOptions {
@@ -185,7 +213,7 @@ function parseCoverageEvidence(value: unknown): AssetsRegionCoverageEvidence[] {
     const precision = evidence.precision;
     const summary = text(evidence.summary);
     if (!layerId || !productId || !surveyId || !releaseId || !product
-      || !(evidenceKind === "observation-footprint" || evidenceKind === "published-moc" || evidenceKind === "tile-footprint" || evidenceKind === "wcs-coverage")
+      || !(evidenceKind === "observation-footprint" || evidenceKind === "published-moc" || evidenceKind === "tile-footprint" || evidenceKind === "source-unit-footprint" || evidenceKind === "wcs-coverage")
       || order === undefined || nside === undefined || nside < 1 || nativeMaxOrder === undefined
       || !availableOrders.length || !matchedCells.length
       || !(precision === "exact" || precision === "estimated") || !summary) return [];
@@ -369,16 +397,36 @@ function parseResponse(value: unknown): AssetsRegionLookupResponse {
   const planScanScopes = parseScanScopes(plan.scanScopes);
   const scanScopes = planScanScopes.length ? planScanScopes : parseScanScopes(root.scanScopes);
   const coverageEvidence = parseCoverageEvidence(plan.coverageEvidence);
+  const spatialUnits = Array.isArray(plan.spatialUnits) ? plan.spatialUnits.flatMap((item): AssetsRegionSpatialUnit[] => {
+    if (!item || typeof item !== "object" || Array.isArray(item)) return [];
+    const unit = item as Record<string, unknown>;
+    if (!["layerId", "productId", "surveyId", "releaseId", "product", "unitKind", "unitId"].every((key) => text(unit[key]))
+      || !layerIds.includes(String(unit.layerId)) || integer(unit.order) === undefined || unit.nside !== 2 ** Number(unit.order)
+      || !Array.isArray(unit.matchingCells) || unit.matchingCells.some((cell) => !Number.isSafeInteger(cell) || Number(cell) < 0)) return [];
+    return [{ ...unit, precision: precision(unit.precision) } as unknown as AssetsRegionSpatialUnit];
+  }) : [];
+  const entrypoints = Array.isArray(plan.entrypoints) ? plan.entrypoints.flatMap((item): AssetsRegionEntrypoint[] => {
+    if (!item || typeof item !== "object" || Array.isArray(item)) return [];
+    const entry = item as Record<string, unknown>;
+    return text(entry.kind) && text(entry.purpose) ? [entry as unknown as AssetsRegionEntrypoint] : [];
+  }) : [];
+  const page = root.page && typeof root.page === "object" ? root.page as AssetsRegionPage : undefined;
+  const snapshot = root.querySnapshot && typeof root.querySnapshot === "object" ? root.querySnapshot as NonNullable<AssetsRegionLookupResponse["querySnapshot"]> : undefined;
+  const warnings = Array.isArray(plan.warnings) ? plan.warnings.filter((item): item is string => typeof item === "string") : [];
   return {
     available: root.available === true,
     precision: precision(root.precision),
     truncated: root.truncated === true,
     requested: { layerIds, order, cells },
     ...(text(root.expiresAt) ? { expiresAt: text(root.expiresAt) } : {}),
-    notes,
+    notes: [...new Set([...notes, ...warnings])],
     files,
     ...(coverageEvidence.length ? { coverageEvidence } : {}),
     ...(scanScopes.length ? { scanScopes } : {}),
+    spatialUnits, entrypoints,
+    ...(page ? { page } : {}),
+    ...(snapshot ? { querySnapshot: snapshot } : {}),
+    downloadPlan: { schemaVersion: 1, spatialUnits, files, entrypoints, coverageEvidence, scanScopes, truncated: plan.truncated === true, warnings },
   };
 }
 
@@ -393,7 +441,7 @@ export class AssetsRegionClient {
     this.#endpoint = endpointForCatalog(options.catalogUrl);
     this.#getApiKey = options.getApiKey;
     this.#fetch = options.fetchImpl ?? fetch;
-    this.#timeoutMs = options.timeoutMs ?? 15_000;
+    this.#timeoutMs = options.timeoutMs ?? 60_000;
   }
 
   async lookup(input: AssetsRegionLookupRequest): Promise<AssetsRegionLookupResponse | undefined> {
@@ -403,7 +451,10 @@ export class AssetsRegionClient {
     const response = await this.#fetch(this.#endpoint, {
       method: "POST",
       headers: { Accept: "application/json", "Content-Type": "application/json", "X-Assets-API-Key": key },
-      body: JSON.stringify(input),
+      // Deliberately construct the public request: no private IDs, paths or scan metadata cross this boundary.
+      body: JSON.stringify({ layerIds: input.layerIds, order: input.order, cells: input.cells,
+        ...(input.limit === undefined ? {} : { limit: input.limit }), pageSize: input.pageSize ?? 100,
+        ...(input.cursor ? { cursor: input.cursor } : {}), ...(input.querySnapshotId ? { querySnapshotId: input.querySnapshotId } : {}) }),
       signal: AbortSignal.timeout(this.#timeoutMs),
     });
     const bytes = Buffer.from(await response.arrayBuffer());

@@ -34,6 +34,7 @@ export function summarizeCoverageEvidence(evidence: readonly AssetsRegionCoverag
     "observation-footprint": "观测边界",
     "published-moc": "已发布 MOC",
     "tile-footprint": "Tile 边界",
+    "source-unit-footprint": "原生分块边界",
     "wcs-coverage": "WCS 覆盖",
   } as const;
   const completenessLabels = { complete: "范围内完整", incomplete: "范围不完整", unknown: "完整性未知" } as const;

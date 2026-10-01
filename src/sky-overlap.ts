@@ -19,6 +19,7 @@ export interface SkyOverlapSource {
   executable?: boolean;
   availability?: SkyOverlapAvailability;
   availableOrders?: number[];
+  layerIds?: string[];
 }
 
 export interface SkyOverlapComponent {
@@ -58,7 +59,6 @@ function groupSources(sources: readonly SkyOverlapSource[], nside: number): Over
   const groups = new Map<string, OverlapSourceGroup>();
   sources.forEach((source) => {
     const pixels = sourcePixels(source, nside);
-    if (!pixels.size) return;
     // A survey can publish several releases/products covering complementary
     // regions. Treat those products as one logical survey for G-mode overlap.
     // Sources without a survey identity retain the previous source-level
@@ -129,7 +129,7 @@ function components(pixels: readonly number[], nside: number, sourceIds: readonl
 
 /** Intersect all valid source layers and split the result into side-connected regions. */
 export function calculateSkyOverlap(sources: readonly SkyOverlapSource[], requestedNside?: number): SkyOverlapResult {
-  const validSources = sources.filter((source) => validNside(source.nside) && source.pixels.length > 0);
+  const validSources = sources.filter((source) => validNside(source.nside));
   const nside = requestedNside ?? validSources[0]?.nside ?? 16;
   if (!validNside(nside)) throw new RangeError("nside must be a power of two between 1 and 256");
   const selected = validSources.filter((source) => source.nside === nside);
@@ -156,7 +156,21 @@ export function calculateSkyOverlap(sources: readonly SkyOverlapSource[], reques
 /** A lower-resolution selected source limits the whole result; never drop it. */
 export function commonOverlapNside(sources: readonly SkyOverlapSource[], fallback = 16): number {
   if (!sources.length) return fallback;
-  const orders = sources.map(source => source.availableOrders ?? [Math.log2(source.nside)]);
+  const groups = new Map<string, Set<number>>();
+  for (const source of sources) {
+    const key = source.surveyId?.trim() ? `survey:${source.surveyId.trim()}` : `source:${source.id}`;
+    const orders = groups.get(key) ?? new Set<number>();
+    (source.availableOrders ?? [Math.log2(source.nside)]).forEach(order => orders.add(order));
+    groups.set(key, orders);
+  }
+  const orders = [...groups.values()].map(values => [...values]);
   const common = orders[0]!.filter(order => orders.every(values => values.includes(order)));
   return common.length ? 2 ** Math.max(...common) : fallback;
+}
+
+/** Private native cells can supply coarser query projections without changing their evidence order. */
+export function privateOverlapOrders(nativeOrders: readonly number[]): number[] {
+  const maximum = nativeOrders.length ? Math.max(...nativeOrders) : -1;
+  return [...new Set([...nativeOrders.filter(order => Number.isInteger(order) && order >= 0 && order <= 8),
+    ...[4, 8].filter(order => order <= maximum)])].sort((a, b) => a - b);
 }

@@ -34,7 +34,7 @@ import { LocalCsvScanExecutor, LocalScanCapabilityError, LocalScanDisabledError,
 import { UserMocArtifactStore, type UserMocArtifact } from "./user-moc-artifacts.js";
 import { WarehouseIndexService, type WarehouseCoverageLayer } from "./warehouse-index.js";
 import { WarehouseScanService } from "./warehouse-scan.js";
-import { commonOverlapNside, calculateSkyOverlap, type SkyOverlapSource } from "./sky-overlap.js";
+import { commonOverlapNside, calculateSkyOverlap, privateOverlapOrders, type SkyOverlapSource } from "./sky-overlap.js";
 import { CoverageDownloadService, type CoverageDownloadFile } from "./coverage-downloads.js";
 import { discoverSourceFiles, type SourceUnit } from "./source-crawler.js";
 import { ProductionService, ProductionStateError, type ProductionSourceResolver, type ProductionWarehouseHandoff } from "./production.js";
@@ -43,7 +43,8 @@ import { buildProvenance } from "./build-metadata.js";
 import { InstallationService } from "./installation.js";
 import { SystemConfigStore } from "./system-config.js";
 import { WorkspaceAgentService } from "./workspace-agent.js";
-import { AssetsRegionClient, assetsLayerIdForIdentity, type AssetsRegionCoverageEvidence, type AssetsRegionFileEvidence, type AssetsRegionLookupSummary, type AssetsRegionScanScope } from "./assets-region-client.js";
+import { AssetsRegionClient, assetsLayerIdForIdentity, type AssetsRegionCoverageEvidence, type AssetsRegionFileEvidence, type AssetsRegionLookupSummary, type AssetsRegionScanScope, type AssetsRegionLookupResponse } from "./assets-region-client.js";
+import { directoryLocations, regionContainsCell, type WorkspaceDirectory, type WorkspaceFileLocation } from "./workspace-directories.js";
 
 const projectRoot = fileURLToPath(new URL("../", import.meta.url));
 const port = Number(process.env.PORT ?? "3000");
@@ -1240,9 +1241,9 @@ interface SkyOverlapRequest {
   includeWorkspace?: unknown;
 }
 
-function stringArrayInput(value: unknown, name: string, maximum = 256): string[] | undefined {
+function stringArrayInput(value: unknown, name: string, maximum = 256, maximumLength = 160): string[] | undefined {
   if (value === undefined) return undefined;
-  if (!Array.isArray(value) || value.length > maximum || value.some((entry) => typeof entry !== "string" || !entry.trim() || entry.length > 160)) {
+  if (!Array.isArray(value) || value.length > maximum || value.some((entry) => typeof entry !== "string" || !entry.trim() || entry.length > maximumLength)) {
     throw new RangeError(`${name} must be an array of non-empty strings`);
   }
   return [...new Set(value.map((entry) => entry.trim()))];
@@ -1304,7 +1305,7 @@ async function overlapSources(context: OverlapSourceContext): Promise<SkyOverlap
   }
   const result = new Map<string, SkyOverlapSource>();
   const accept = (source: SkyOverlapSource): void => {
-    if (!source.pixels.length || !overlapSourceMatches(source, context)) return;
+    if (!overlapSourceMatches(source, context)) return;
     result.set(source.id, { ...source, pixels: [...new Set(source.pixels)].sort((left, right) => left - right) });
   };
 
@@ -1323,6 +1324,7 @@ async function overlapSources(context: OverlapSourceContext): Promise<SkyOverlap
           surveyId: identities.find((entry) => entry.source === "assets" && entry.sourceId === footprint.surveyId)?.id ?? footprint.surveyId,
           releaseId: footprint.releaseId,
           product: footprint.product,
+          modality: footprint.modality,
           sourceUrl: footprint.sourceUrl,
           ...(sourceIdentity ? { sourceIdentity, executable: true, availability: "entrypoint-only" as const } : {
             executable: false,
@@ -1331,14 +1333,18 @@ async function overlapSources(context: OverlapSourceContext): Promise<SkyOverlap
         };
         if (!overlapSourceMatches(source, context)) continue;
         source.availableOrders = await resourcePackages.footprintOrders(footprint);
-        source.pixels = await resourcePackages.footprintPixels(footprint, Math.log2(context.nside));
+        source.pixels = source.availableOrders.includes(Math.log2(context.nside))
+          ? await resourcePackages.footprintPixels(footprint, Math.log2(context.nside)) : [];
         source.nside = context.nside;
         accept(source);
     }
   }
 
-  if (!context.includeWorkspace) return [...result.values()].sort((left, right) => left.id.localeCompare(right.id));
+  if (!context.includeWorkspace || (context.sourceIds?.size && ![...context.sourceIds].some((id) => id.startsWith("workspace:")))) {
+    return [...result.values()].sort((left, right) => left.id.localeCompare(right.id));
+  }
   const assets = (await dataCatalog.list()).filter((asset) => {
+    if (context.sourceIds?.size && !context.sourceIds.has(overlapSourceIdForAsset(asset.id))) return false;
     if (context.assetIds?.size && !context.assetIds.has(asset.id)) return false;
     if (context.surveyIds?.size && (!asset.surveyId || !context.surveyIds.has(asset.surveyId))) return false;
     if (context.releaseIds?.size && (!asset.releaseId || !context.releaseIds.has(asset.releaseId))) return false;
@@ -1346,7 +1352,13 @@ async function overlapSources(context: OverlapSourceContext): Promise<SkyOverlap
   });
   const artifacts = await userMocs.list();
   const runs = await connectorRuns.list();
-  const warehouseLayerIds = workspaceWarehouseLayerIds(assets, artifacts, runs);
+  const requestedLayers = context.sourceIds?.size ? new Set([
+    ...assets.flatMap((asset) => [asset.id, workspaceLayerIdForAsset(asset.id), `user-${asset.id}`]),
+    ...artifacts.filter((artifact) => context.sourceIds!.has(`workspace:moc:${artifact.id}`)).map((artifact) => artifact.layerId),
+    ...[...context.sourceIds].filter((id) => id.startsWith("workspace:warehouse:")).map((id) => id.slice("workspace:warehouse:".length)),
+  ]) : undefined;
+  const warehouseLayerIds = workspaceWarehouseLayerIds(assets, artifacts, runs)
+    .filter((id) => !requestedLayers || requestedLayers.has(id));
   const warehouse = await warehouseIndex.coverage({
     nside: context.nside,
     ...(assets.length ? { assetIds: assets.map((asset) => asset.id) } : {}),
@@ -1355,7 +1367,7 @@ async function overlapSources(context: OverlapSourceContext): Promise<SkyOverlap
   const artifactSelections = selectUserMocArtifacts(artifacts);
   await Promise.all(assets.map(async (asset) => {
     const [legacy, local] = await Promise.all([
-      context.nside <= ASTRO_OVERVIEW_NSIDE
+      context.nside <= 256
         ? astroIndex.coverage({ nside: context.nside, assetIds: [asset.id] })
         : Promise.resolve({ status: "unavailable" as const, index: ASTRO_FILE_INDEX, nside: context.nside, pixels: [], byAsset: [], message: "legacy coverage supports NSIDE up to 16" }),
       astroObjectIndex.queryCoverageFacts({ nside: context.nside, assetIds: [asset.id] }),
@@ -1380,10 +1392,17 @@ async function overlapSources(context: OverlapSourceContext): Promise<SkyOverlap
       product: asset.product,
       modality: asset.modalities[0],
       sourceUrl: access?.uri,
+      availableOrders: privateOverlapOrders([
+        ...warehouse.layers.filter((layer) => warehouseLayerForAsset(layer, asset)).flatMap((layer) => layer.availableOrders),
+        ...(mocSelection?.renderable.availableOrders ?? []),
+        ...(legacy.pixels.length || local.pixels.length ? [4, 8] : []),
+      ]),
+      layerIds: warehouseLayerIds.filter((id) => [asset.id, workspaceLayerIdForAsset(asset.id), `user-${asset.id}`].includes(id)),
     });
   }));
   const unassignedMocSources = await Promise.all([...artifactSelections.values()]
     .filter(({ latest }) => !assets.some((asset) => [asset.id, workspaceLayerIdForAsset(asset.id), `user-${asset.id}`].includes(latest.layerId)))
+    .filter(({ latest }) => !context.sourceIds?.size || context.sourceIds.has(`workspace:moc:${latest.id}`))
     .map(async ({ latest, renderable }) => {
       const projection = await userMocs.projection(renderable.layerId, renderable.scanRunId, Math.log2(context.nside)).catch(() => ({ order: Math.log2(context.nside), pixels: [] }));
       return {
@@ -1393,13 +1412,15 @@ async function overlapSources(context: OverlapSourceContext): Promise<SkyOverlap
         nside: context.nside,
         pixels: projection.pixels,
         product: latest.layerId,
+        availableOrders: privateOverlapOrders(renderable.availableOrders),
+        layerIds: [latest.layerId],
       } satisfies SkyOverlapSource;
     }));
   unassignedMocSources.forEach(accept);
   // Keep unassigned Warehouse/MOC layers discoverable for workspaces that have
   // no Atlas asset row yet. They are still explicit workspace sources, never
   // folded into a public footprint.
-  warehouse.layers.filter((layer) => !layer.assetIds.length && layer.pixels.length).forEach((layer) => accept({
+  warehouse.layers.filter((layer) => !layer.assetIds.length && layer.state === "ACTIVE").forEach((layer) => accept({
     id: `workspace:warehouse:${layer.layerId}`,
     label: layer.productId || layer.layerId,
     kind: "workspace",
@@ -1409,6 +1430,8 @@ async function overlapSources(context: OverlapSourceContext): Promise<SkyOverlap
     releaseId: layer.releaseId,
     product: layer.productId,
     modality: layer.modality,
+    availableOrders: privateOverlapOrders(layer.availableOrders),
+    layerIds: [layer.layerId],
   }));
   return [...result.values()].sort((left, right) => left.id.localeCompare(right.id));
 }
@@ -1416,13 +1439,13 @@ async function overlapSources(context: OverlapSourceContext): Promise<SkyOverlap
 function overlapContext(body: SkyOverlapRequest): OverlapSourceContext {
   const nside = Number(body.nside ?? ASTRO_OVERVIEW_NSIDE);
   nsideOrderForCoverage(nside);
-  const toSet = (value: unknown, name: string): ReadonlySet<string> | undefined => {
-    const values = stringArrayInput(value, name);
+  const toSet = (value: unknown, name: string, maximumLength = 160): ReadonlySet<string> | undefined => {
+    const values = stringArrayInput(value, name, 256, maximumLength);
     return values === undefined ? undefined : new Set(values);
   };
   return {
     nside,
-    sourceIds: toSet(body.sourceIds, "sourceIds"),
+    sourceIds: toSet(body.sourceIds, "sourceIds", 8192),
     surveyIds: toSet(body.surveyIds, "surveyIds"),
     releaseIds: toSet(body.releaseIds, "releaseIds"),
     assetIds: toSet(body.assetIds, "assetIds"),
@@ -1452,11 +1475,17 @@ interface ReverseLookupResult {
   assetsLookup?: AssetsRegionLookupSummary;
   scanScopes?: AssetsRegionScanScope[];
   warnings?: string[];
+  assetsResult?: AssetsRegionLookupResponse;
+  workspaceDirectories?: WorkspaceDirectory[];
+  directoriesTruncated?: boolean;
 }
 
 interface ReverseLookupRegion {
   order: number;
   cells: number[];
+  cursor?: string;
+  querySnapshotId?: string;
+  pageSize?: number;
 }
 
 function mergeUnavailable(unavailable: Map<string, ReverseLookupUnavailable>, sourceId: string, reason: string): void {
@@ -1464,112 +1493,94 @@ function mergeUnavailable(unavailable: Map<string, ReverseLookupUnavailable>, so
   unavailable.set(sourceId, current ? { ...current, reason: `${current.reason}；${reason}` } : { sourceId, reason });
 }
 
-async function reverseLookupFiles(sources: readonly SkyOverlapSource[], region?: ReverseLookupRegion): Promise<ReverseLookupResult> {
-  const files = new Map<string, CoverageDownloadFile>();
-  const unavailable = new Map<string, ReverseLookupUnavailable>();
-  const usedNames = new Set<string>();
+async function reverseLookupFiles(sources: readonly SkyOverlapSource[], region: ReverseLookupRegion): Promise<ReverseLookupResult> {
+  const unavailable: ReverseLookupUnavailable[] = [];
   const warnings: string[] = [];
-  const fileEvidence: AssetsRegionFileEvidence[] = [];
-  const coverageEvidence: AssetsRegionCoverageEvidence[] = [];
-  let assetsLookup: AssetsRegionLookupSummary | undefined;
-  const scanScopes: AssetsRegionScanScope[] = [];
-  const assetsHandledSources = new Set<string>();
-  if (region) {
-    const publicSources = sources.filter((source) => source.kind === "public" && source.sourceIdentity);
-    const layerIds = [...new Set(publicSources.map((source) => assetsLayerIdForIdentity(source.sourceIdentity)).filter((value): value is string => Boolean(value)))];
-    if (layerIds.length) {
+  const locations: WorkspaceFileLocation[] = [];
+  let assetsResult: AssetsRegionLookupResponse | undefined;
+  let directoriesTruncated = false;
+  const publicSources = sources.filter((source) => source.kind === "public");
+  const layerIds = [...new Set(publicSources.flatMap((source) => {
+    const id = assetsLayerIdForIdentity(source.sourceIdentity); return id ? [id] : [];
+  }))];
+  const privateSources = sources.filter((source) => source.kind === "workspace");
+  await Promise.all([
+    (async () => {
+      if (!layerIds.length) return;
       try {
-        const lookup = await assetsRegionClient.lookup({ layerIds, order: region.order, cells: region.cells, limit: 1000 });
-        if (lookup) {
-          lookup.requested.layerIds.forEach((layerId) => assetsHandledSources.add(layerId));
-          fileEvidence.push(...lookup.files);
-          coverageEvidence.push(...lookup.coverageEvidence ?? []);
-          assetsLookup = {
-            available: lookup.available,
-            precision: lookup.precision,
-            truncated: lookup.truncated,
-            ...(lookup.expiresAt ? { expiresAt: lookup.expiresAt } : {}),
-          };
-          scanScopes.push(...lookup.scanScopes ?? []);
-          warnings.push(...lookup.notes);
-          lookup.files.forEach((evidence) => {
-            const sourceIds = [...new Set(evidence.matchingCoverage.map((match) => match.layerId).filter((layerId): layerId is string => Boolean(layerId)))];
-            const sourceId = sourceIds[0] ?? "assets-region-query";
-            const downloadUrl = evidence.downloadUrl ?? evidence.sourceUri;
-            if (evidence.downloadable && /^https?:\/\//i.test(downloadUrl ?? "")) {
-              const key = `${downloadUrl}\u0000${sourceId}`;
-              files.set(key, {
-                url: downloadUrl!,
-                name: evidence.fileName ?? evidence.fileId,
-                ...(evidence.sizeBytes === undefined ? {} : { sizeBytes: evidence.sizeBytes }),
-                sourceId,
-              });
-              return;
-            }
-            mergeUnavailable(unavailable, sourceId, `Assets 已定位 ${evidence.fileName ?? evidence.fileId}${evidence.sourceUri ? `（来源 ${evidence.sourceUri}）` : ""}，但该文件当前没有可直接下载的 HTTP 地址`);
-          });
-          if (!lookup.files.length) {
-            layerIds.forEach((layerId) => mergeUnavailable(unavailable, layerId, "Assets 反查未找到该区域的文件证据"));
-          }
-        }
+        assetsResult = await assetsRegionClient.lookup({ layerIds, order: region.order, cells: region.cells,
+          cursor: region.cursor, querySnapshotId: region.querySnapshotId, pageSize: region.pageSize ?? 100 });
+        if (!assetsResult) publicSources.forEach((source) => unavailable.push({ sourceId: source.id, reason: "公开分块反查需要 Workspace 配置有效的 Assets API Key；几何重合仍可用。" }));
+        else warnings.push(...assetsResult.notes);
       } catch (error) {
-        warnings.push(error instanceof Error ? error.message : String(error));
+        const reason = error instanceof Error ? error.message : String(error);
+        publicSources.forEach((source) => unavailable.push({ sourceId: source.id, reason }));
       }
-    }
-  }
-  const discoveredSources = await Promise.all([...sources]
-    .sort((left, right) => left.id.localeCompare(right.id))
-    .map(async (source) => ({ source, discovered: /^https?:\/\//i.test(source.sourceUrl ?? "") ? await discoverSourceFiles(source.sourceUrl!) : undefined })));
-  discoveredSources.forEach(({ source, discovered }) => {
-    if (source.sourceIdentity && assetsHandledSources.has(assetsLayerIdForIdentity(source.sourceIdentity) ?? "")) return;
-    if (!source.sourceUrl) {
-      unavailable.set(source.id, { sourceId: source.id, reason: "来源没有可反查的文件 URL" });
-      return;
-    }
-    if (!/^https?:\/\//i.test(source.sourceUrl)) {
-      unavailable.set(source.id, {
-        sourceId: source.id,
-        url: source.sourceUrl,
-        reason: /^s3:\/\//i.test(source.sourceUrl)
-          ? "S3 URL 需要配置凭据后才能下载"
-          : "仅支持 HTTP/HTTPS 文件 URL",
-      });
-      return;
-    }
-    if (!discovered) return;
-    if (!discovered.files.length) {
-      unavailable.set(source.id, {
-        sourceId: source.id,
-        url: source.sourceUrl,
-        reason: discovered.reason ?? "爬虫未发现可下载文件",
-      });
-      return;
-    }
-    discovered.files.forEach((candidate, index) => {
-      let name = candidate.name;
-      if (usedNames.has(name)) {
-        const suffix = source.id.replace(/[^a-z0-9._-]+/gi, "-").replace(/^-+|-+$/g, "").slice(-24) || "source";
-        const extension = name.match(/\.[a-z0-9]{1,8}(?:\.gz)?$/i)?.[0] ?? "";
-        const stem = extension ? name.slice(0, -extension.length) : name;
-        name = `${stem}-${suffix}${extension}`;
-        let serial = 2;
-        while (usedNames.has(name)) name = `${stem}-${suffix}-${serial++}${extension}`;
-      }
-      usedNames.add(name);
-      const key = `${candidate.url}\u0000${source.id}\u0000${index}`;
-      files.set(key, { ...candidate, name, sourceId: source.id });
-    });
-    if (discovered.truncated) warnings.push(`${source.label}：来源文件过多，仅返回前 128 个文件`);
-  });
-  return {
-    files: [...files.values()].sort((left, right) => left.url.localeCompare(right.url)),
-    unavailable: [...unavailable.values()].sort((left, right) => left.sourceId.localeCompare(right.sourceId)),
-    ...(fileEvidence.length ? { fileEvidence } : {}),
-    ...(coverageEvidence.length ? { coverageEvidence } : {}),
-    ...(assetsLookup ? { assetsLookup } : {}),
-    ...(scanScopes.length ? { scanScopes } : {}),
-    ...(warnings.length ? { warnings } : {}),
-  };
+    })(),
+    (async () => {
+      if (!privateSources.length) return;
+      const [assets, artifacts, runs] = await Promise.all([dataCatalog.list(), userMocs.list(), connectorRuns.list()]);
+      const owned = new Set(workspaceWarehouseLayerIds(assets, artifacts, runs));
+      const requested = new Set(privateSources.flatMap((source) => source.layerIds ?? []));
+      const selectedLayerIds = [...requested].filter((id) => owned.has(id));
+      const assetIds = privateSources.flatMap((source) => source.assetId ? [source.assetId] : []);
+      await Promise.all([
+        (async () => {
+          try {
+            const result = await warehouseIndex.reverseFiles({ layerIds: selectedLayerIds, order: region.order, cells: region.cells });
+            locations.push(...result.files); directoriesTruncated ||= result.truncated; warnings.push(...result.notes);
+          } catch (error) { directoriesTruncated = true; warnings.push(`私有 Warehouse 目录反查：${error instanceof Error ? error.message : String(error)}`); }
+        })(),
+        (async () => {
+          if (!assetIds.length) return;
+          try {
+            const result = await astroIndex.reverseFiles({ assetIds, order: region.order, cells: region.cells });
+            locations.push(...result.files); directoriesTruncated ||= result.truncated;
+          } catch (error) { directoriesTruncated = true; warnings.push(`本地文件目录反查：${error instanceof Error ? error.message : String(error)}`); }
+        })(),
+        (async () => {
+          if (!assetIds.length) return;
+          const facts = await astroObjectIndex.queryCoverageFacts({ assetIds, nside: 2 ** region.order, cells: region.cells, preserveSources: true });
+          if (facts.message) warnings.push(facts.message);
+          directoriesTruncated ||= facts.status === "error" || Boolean(facts.message?.includes("limit"));
+          const selectedCells = new Set(region.cells);
+          for (const fact of facts.facts) {
+            if (!regionContainsCell(fact.healpix_order, fact.healpix_pixel, region.order, selectedCells)) continue;
+            const run = runs.find((candidate) => candidate.id === fact.scan_run_id && candidate.backend === "local"
+              && candidate.executor === LOCAL_CSV_SCAN_EXECUTOR && candidate.status === "succeeded" && candidate.fileCount === 1
+              && (candidate.assetId === fact.asset_id || candidate.assetIds?.includes(fact.asset_id)));
+            const sourceUri = run?.target?.uri ?? run?.sourcePath;
+            if (!sourceUri) continue;
+            locations.push({ layerId: workspaceLayerIdForAsset(fact.asset_id), surveyId: fact.survey, releaseId: fact.release,
+              product: fact.product, modality: fact.modality, sourceUri, order: fact.healpix_order,
+              matchingCells: [fact.healpix_pixel], precision: run?.precision ?? "exact", scanRunId: run!.id });
+          }
+        })(),
+      ]);
+    })(),
+  ]);
+  const sourceForLayer = (id: string): string | undefined => privateSources.find((source) => source.layerIds?.includes(id)
+    || (source.assetId && [source.assetId, workspaceLayerIdForAsset(source.assetId), `user-${source.assetId}`].includes(id)))?.id;
+  const workspaceDirectories = directoryLocations(locations, sourceForLayer);
+  privateSources.filter((source) => !workspaceDirectories.some((directory) => directory.sourceId === source.id))
+    .forEach((source) => unavailable.push({ sourceId: source.id, reason: "该区域没有已确认的本地文件父目录映射；覆盖几何仍保留。" }));
+  return { files: [], unavailable, warnings: [...new Set(warnings)], workspaceDirectories, directoriesTruncated,
+    ...(assetsResult ? { assetsResult, fileEvidence: assetsResult.files, coverageEvidence: assetsResult.coverageEvidence,
+      scanScopes: assetsResult.scanScopes, assetsLookup: { available: assetsResult.available, precision: assetsResult.precision,
+        truncated: assetsResult.truncated, expiresAt: assetsResult.expiresAt } } : {}) };
+}
+
+function reverseRegionInput(nside: number, pixels: number[], body: { cursor?: unknown; querySnapshotId?: unknown; pageSize?: unknown }): ReverseLookupRegion {
+  const order = nsideOrderForCoverage(nside);
+  const cells = overlapPixelsInput(pixels);
+  if (cells.some((cell) => cell >= 12 * nside ** 2)) throw new RangeError("Invalid HEALPix cell for this order");
+  if (cells.length * 41252.96124941927 / (12 * nside ** 2) > 100) throw new RangeError("Region exceeds 100 deg²; select a smaller region");
+  if (body.cursor !== undefined && (typeof body.cursor !== "string" || body.cursor.length > 8192)) throw new RangeError("Invalid public lookup cursor");
+  if (body.querySnapshotId !== undefined && (typeof body.querySnapshotId !== "string" || !/^[a-f0-9]{64}$/.test(body.querySnapshotId))) throw new RangeError("Invalid public query snapshot");
+  if (body.pageSize !== undefined && (!Number.isSafeInteger(body.pageSize) || Number(body.pageSize) < 1 || Number(body.pageSize) > 100)) throw new RangeError("pageSize must be 1-100");
+  return { order, cells, ...(typeof body.cursor === "string" ? { cursor: body.cursor } : {}),
+    ...(typeof body.querySnapshotId === "string" ? { querySnapshotId: body.querySnapshotId } : {}),
+    ...(typeof body.pageSize === "number" ? { pageSize: body.pageSize } : {}) };
 }
 
 app.post("/api/sky/overlap", async (request: Request, response: Response) => {
@@ -1593,7 +1604,7 @@ app.post("/api/sky/overlap", async (request: Request, response: Response) => {
 
 app.post("/api/sky/overlap/details", async (request: Request, response: Response) => {
   try {
-    const body = (request.body ?? {}) as SkyOverlapRequest & { componentId?: unknown; pixels?: unknown };
+    const body = (request.body ?? {}) as SkyOverlapRequest & { componentId?: unknown; pixels?: unknown; cursor?: unknown; querySnapshotId?: unknown; pageSize?: unknown };
     const context = overlapContext(body);
     const sources = await overlapSources(context);
     const overlap = calculateSkyOverlap(sources, context.nside);
@@ -1602,7 +1613,8 @@ app.post("/api/sky/overlap/details", async (request: Request, response: Response
     if (componentId && !component) throw new Error(`Overlap component not found: ${componentId}`);
     const pixels = component?.cells ?? (body.pixels === undefined ? overlap.pixels : overlapPixelsInput(body.pixels));
     const selectedSources = sources.filter((source) => pixels.some((pixel) => source.pixels.includes(pixel)));
-    response.json({ component: component ?? null, pixels, sources: selectedSources, ...(await reverseLookupFiles(selectedSources, { order: Math.log2(context.nside), cells: pixels })) });
+    response.setHeader("Cache-Control", "no-store");
+    response.json({ component: component ?? null, pixels, sources: selectedSources, ...(await reverseLookupFiles(selectedSources, reverseRegionInput(context.nside, pixels, body))) });
   } catch (error) {
     sendApiError(response, error);
   }
@@ -1610,7 +1622,7 @@ app.post("/api/sky/overlap/details", async (request: Request, response: Response
 
 app.post("/api/sky/reverse-lookup", async (request: Request, response: Response) => {
   try {
-    const body = (request.body ?? {}) as SkyOverlapRequest & { componentId?: unknown; pixels?: unknown };
+    const body = (request.body ?? {}) as SkyOverlapRequest & { componentId?: unknown; pixels?: unknown; cursor?: unknown; querySnapshotId?: unknown; pageSize?: unknown };
     const context = overlapContext(body);
     const sources = await overlapSources(context);
     let pixels = body.pixels === undefined ? undefined : overlapPixelsInput(body.pixels);
@@ -1622,7 +1634,8 @@ app.post("/api/sky/reverse-lookup", async (request: Request, response: Response)
     }
     if (!pixels?.length) throw new RangeError("pixels or componentId is required");
     const selectedSources = sources.filter((source) => pixels!.some((pixel) => source.pixels.includes(pixel)));
-    response.json({ pixels, sources: selectedSources, ...(await reverseLookupFiles(selectedSources, { order: Math.log2(context.nside), cells: pixels })) });
+    response.setHeader("Cache-Control", "no-store");
+    response.json({ pixels, sources: selectedSources, ...(await reverseLookupFiles(selectedSources, reverseRegionInput(context.nside, pixels, body))) });
   } catch (error) {
     sendApiError(response, error);
   }
@@ -1643,7 +1656,7 @@ function coverageDownloadInput(value: unknown): CoverageDownloadRequest {
     if (typeof entry !== "string" || !entry.trim() || entry.trim().length > 180) throw new RangeError(`${name} is invalid`);
     return entry.trim();
   };
-  const sourceIds = stringArrayInput(body.sourceIds, "sourceIds");
+  const sourceIds = stringArrayInput(body.sourceIds, "sourceIds", 256, 8192);
   if (sourceIds) assertExecutablePublicSourceIds(sourceIds);
   assertPublicSourceIdsInFiles(body.files);
   if (body.targetConnectorId !== undefined) {
