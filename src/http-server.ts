@@ -20,9 +20,9 @@ import { deriveDataAssetOperationalStatus, type DataAssetCoverageEvidence, type 
 import { ConnectorScanCapabilityError, ConnectorScanPreconditionError, DataWarehouseDisabledError, dataWarehouseEnabled, validateConnectorSelfScanBody } from "./warehouse-scan.js";
 import { createAstroMcpServer } from "./mcp.js";
 import { ResourceCatalogSyncError, ResourceCatalogUnavailableError, ResourcePackageManager, resourcePackageSurveyRecords, type ResourcePackageLoad } from "./resource-packages.js";
-import type { SurveyFootprintManifest } from "./survey-footprints.js";
+import { normalizeSurveyFootprintManifest, type SurveyFootprintManifest } from "./survey-footprints.js";
 import { surveyCardFor, SurveyRegistry, type SurveyRecord, type SurveyRegistrationInput, type SurveyReleaseRegistrationInput } from "./survey-registry.js";
-import { isConcretePublicSourceId, publicGeometrySourceIdForFootprint, publicSourceIdForFootprint, publicSourceIdentityForFootprint } from "./public-source-identity.js";
+import { isConcretePublicSourceId, parsePublicSourceId, publicGeometrySourceIdForFootprint, publicSourceIdForFootprint, publicSourceIdentityForFootprint } from "./public-source-identity.js";
 import { WorkflowEngine } from "./workflow-engine.js";
 import { WorkflowStore } from "./workflow-store.js";
 import { listTags } from "./tags.js";
@@ -43,8 +43,8 @@ import { buildProvenance } from "./build-metadata.js";
 import { InstallationService } from "./installation.js";
 import { SystemConfigStore } from "./system-config.js";
 import { WorkspaceAgentService } from "./workspace-agent.js";
-import { AssetsRegionClient, assetsLayerIdForIdentity, type AssetsRegionCoverageEvidence, type AssetsRegionFileEvidence, type AssetsRegionLookupSummary, type AssetsRegionScanScope, type AssetsRegionLookupResponse } from "./assets-region-client.js";
-import { directoryLocations, regionContainsCell, type WorkspaceDirectory, type WorkspaceFileLocation } from "./workspace-directories.js";
+import { AssetsCoverageOverviewClient, AssetsRegionClient, AssetsRegionRateLimitError, assetsLayerIdForIdentity, type AssetsRegionCoverageEvidence, type AssetsRegionFileEvidence, type AssetsRegionLookupSummary, type AssetsRegionScanScope, type AssetsRegionLookupResponse } from "./assets-region-client.js";
+import { regionContainsCell, WorkspaceDirectoryCollector, type WorkspaceDirectory, type WorkspaceFileLocation } from "./workspace-directories.js";
 
 const projectRoot = fileURLToPath(new URL("../", import.meta.url));
 const port = Number(process.env.PORT ?? "3000");
@@ -261,6 +261,10 @@ const assetsRegionClient = new AssetsRegionClient({
   catalogUrl: resourceCatalogUrl,
   getApiKey: () => systemConfig.getAssetsApiKey(),
 });
+const assetsCoverageOverviewClient = new AssetsCoverageOverviewClient({
+  catalogUrl: resourceCatalogUrl,
+  getApiKey: () => systemConfig.getAssetsApiKey(),
+});
 const workspaceAgent = new WorkspaceAgentService({ root: path.join(stateRoot, "agent"), config: systemConfig, dataCatalog, connectors, production: productionService });
 const workflowEngine = new WorkflowEngine(workflowStore, new McpCatalogQueryClient(catalogMcpUrl, catalogMcpTimeoutMs, 1));
 const agentService = new AgentService(workflowStore, workflowEngine);
@@ -410,6 +414,12 @@ async function validateConnectorIds(input: DataAssetRegistrationInput): Promise<
 
 function sendApiError(response: Response, error: unknown): void {
   const message = error instanceof Error ? error.message : String(error);
+  if (response.writableEnded || response.destroyed) return;
+  if (response.headersSent) {
+    if (String(response.getHeader("Content-Type")).includes("text/event-stream")) response.end(`event: error\ndata: ${JSON.stringify({ error: message })}\n\n`);
+    else response.destroy();
+    return;
+  }
   const notFound = message.startsWith("Dataset not found:") || message.startsWith("Data asset not found:") || message.startsWith("Connector not found:") || message.startsWith("Connector ingest run not found:") || message.startsWith("Coverage job not found:") || message.startsWith("Coverage download job not found:") || message.startsWith("Overlap component not found:") || message.startsWith("Survey not found:") || message.startsWith("Public survey not found:") || message.startsWith("Resource package not found:") || message.startsWith("Resource package is not installed:") || message.startsWith("Resource package job not found:") || message.startsWith("Resource package MOC layer not found:") || message.startsWith("Resource package MOC artifact is not available:")
     || message.startsWith("User MOC artifact file not found:")
     || message.startsWith("Workflow not found:")
@@ -452,7 +462,21 @@ function sanitizeEndpointForDisplay(value: string): string {
 
 async function effectiveFootprints(): Promise<SurveyFootprintManifest> {
   // Public coverage is sourced only from the trusted Assets snapshot.
-  return resourcePackages.activeFootprints();
+  const active = await resourcePackages.activeFootprints();
+  if (!active.footprints.some((footprint) => footprint.surveyId === "legacy-surveys")) return active;
+  try {
+    const supplements = await assetsCoverageOverviewClient.legacyDr9Footprints();
+    const identities = new Set(active.footprints.map((footprint) => `${footprint.surveyId}:${footprint.releaseId}:${footprint.product}`));
+    const added = supplements.filter((footprint) => !identities.has(`${footprint.surveyId}:${footprint.releaseId}:${footprint.product}`));
+    if (!added.length) return active;
+    return normalizeSurveyFootprintManifest({
+      ...active,
+      footprints: [...active.footprints, ...added],
+    });
+  } catch (error) {
+    console.warn("Assets Legacy DR9 overview is unavailable", error instanceof Error ? error.message : String(error));
+    return active;
+  }
 }
 
 function publicSurveyRecords(): SurveyRecord[] {
@@ -1364,6 +1388,7 @@ async function overlapSources(context: OverlapSourceContext): Promise<SkyOverlap
     ...(assets.length ? { assetIds: assets.map((asset) => asset.id) } : {}),
     layerIds: warehouseLayerIds,
   });
+  if (warehouseLayerIds.length && warehouse.status === "error") throw new Error("Workspace coverage is temporarily unavailable; retry this query.");
   const artifactSelections = selectUserMocArtifacts(artifacts);
   await Promise.all(assets.map(async (asset) => {
     const [legacy, local] = await Promise.all([
@@ -1436,6 +1461,39 @@ async function overlapSources(context: OverlapSourceContext): Promise<SkyOverlap
   return [...result.values()].sort((left, right) => left.id.localeCompare(right.id));
 }
 
+/** A region already selected in the globe needs identities, not a second full-sky projection. */
+async function reverseSourcesFromIds(context: OverlapSourceContext): Promise<SkyOverlapSource[] | undefined> {
+  if (!context.sourceIds?.size || context.surveyIds?.size || context.releaseIds?.size || context.assetIds?.size) return undefined;
+  if ([...context.sourceIds].some(id => !isConcretePublicSourceId(id) && !/^workspace:(?:asset|moc|warehouse):.+$/.test(id))) return undefined;
+  const needsPrivate = context.includeWorkspace && [...context.sourceIds].some(id => id.startsWith("workspace:"));
+  const [assets, artifacts, runs] = needsPrivate ? await Promise.all([dataCatalog.list(), userMocs.list(), connectorRuns.list()]) : [[], [], []];
+  const owned = new Set(workspaceWarehouseLayerIds(assets, artifacts, runs));
+  const sources: SkyOverlapSource[] = [];
+  for (const id of context.sourceIds) {
+    if (isConcretePublicSourceId(id)) {
+      if (!context.includePublic) continue;
+      const identity = parsePublicSourceId(id)!;
+      sources.push({ id, kind: "public", label: identity.product, nside: context.nside, pixels: [], surveyId: identity.surveyId,
+        releaseId: identity.releaseId, product: identity.product, sourceIdentity: identity });
+    } else if (context.includeWorkspace && id.startsWith("workspace:asset:")) {
+      const asset = assets.find(asset => overlapSourceIdForAsset(asset.id) === id);
+      if (!asset) throw new RangeError("Selected Workspace asset is unavailable");
+      sources.push({ id, kind: "workspace", label: asset.name, nside: context.nside, pixels: [], assetId: asset.id, surveyId: asset.surveyId,
+        releaseId: asset.releaseId, product: asset.product, modality: asset.modalities[0],
+        layerIds: [...owned].filter(layerId => [asset.id, workspaceLayerIdForAsset(asset.id), `user-${asset.id}`].includes(layerId)) });
+    } else if (context.includeWorkspace && id.startsWith("workspace:moc:")) {
+      const artifact = artifacts.find(artifact => `workspace:moc:${artifact.id}` === id);
+      if (!artifact || !owned.has(artifact.layerId)) throw new RangeError("Selected Workspace MOC lineage is unavailable");
+      sources.push({ id, kind: "workspace", label: artifact.layerId, product: artifact.layerId, nside: context.nside, pixels: [], layerIds: [artifact.layerId] });
+    } else if (context.includeWorkspace && id.startsWith("workspace:warehouse:")) {
+      const layerId = id.slice("workspace:warehouse:".length);
+      if (!owned.has(layerId)) throw new RangeError("Selected Workspace Warehouse lineage is unavailable");
+      sources.push({ id, kind: "workspace", label: layerId, product: layerId, nside: context.nside, pixels: [], layerIds: [layerId] });
+    }
+  }
+  return sources;
+}
+
 function overlapContext(body: SkyOverlapRequest): OverlapSourceContext {
   const nside = Number(body.nside ?? ASTRO_OVERVIEW_NSIDE);
   nsideOrderForCoverage(nside);
@@ -1478,6 +1536,7 @@ interface ReverseLookupResult {
   assetsResult?: AssetsRegionLookupResponse;
   workspaceDirectories?: WorkspaceDirectory[];
   directoriesTruncated?: boolean;
+  publicRetryAfterSeconds?: number;
 }
 
 interface ReverseLookupRegion {
@@ -1493,28 +1552,39 @@ function mergeUnavailable(unavailable: Map<string, ReverseLookupUnavailable>, so
   unavailable.set(sourceId, current ? { ...current, reason: `${current.reason}；${reason}` } : { sourceId, reason });
 }
 
-async function reverseLookupFiles(sources: readonly SkyOverlapSource[], region: ReverseLookupRegion): Promise<ReverseLookupResult> {
+async function reverseLookupFiles(sources: readonly SkyOverlapSource[], region: ReverseLookupRegion, update?: (event: "progress" | "batch", value: Record<string, unknown>) => void): Promise<ReverseLookupResult> {
   const unavailable: ReverseLookupUnavailable[] = [];
   const warnings: string[] = [];
   const locations: WorkspaceFileLocation[] = [];
   let assetsResult: AssetsRegionLookupResponse | undefined;
   let directoriesTruncated = false;
+  let publicRetryAfterSeconds: number | undefined;
   const publicSources = sources.filter((source) => source.kind === "public");
   const layerIds = [...new Set(publicSources.flatMap((source) => {
     const id = assetsLayerIdForIdentity(source.sourceIdentity); return id ? [id] : [];
   }))];
   const privateSources = sources.filter((source) => source.kind === "workspace");
+  const sourceForLayer = (id: string): string | undefined => privateSources.find((source) => source.layerIds?.includes(id)
+    || (source.assetId && [source.assetId, workspaceLayerIdForAsset(source.assetId), `user-${source.assetId}`].includes(id)))?.id;
+  const directoryCollector = new WorkspaceDirectoryCollector(sourceForLayer);
+  update?.("progress", { stage: "assets", state: layerIds.length ? "running" : "not-selected" });
+  update?.("progress", { stage: "workspace", state: privateSources.length ? "running" : "not-selected" });
   await Promise.all([
     (async () => {
       if (!layerIds.length) return;
       try {
         assetsResult = await assetsRegionClient.lookup({ layerIds, order: region.order, cells: region.cells,
-          cursor: region.cursor, querySnapshotId: region.querySnapshotId, pageSize: region.pageSize ?? 100 });
+          cursor: region.cursor, querySnapshotId: region.querySnapshotId, pageSize: region.pageSize ?? 100 }, update ? event => {
+            update(event.event, event.event === "batch" ? { kind: "public-native", ...event.value } : { ...event.value, stage: `assets-${event.value.stage}` });
+          } : undefined);
         if (!assetsResult) publicSources.forEach((source) => unavailable.push({ sourceId: source.id, reason: "公开分块反查需要 Workspace 配置有效的 Assets API Key；几何重合仍可用。" }));
-        else warnings.push(...assetsResult.notes);
+        else { warnings.push(...assetsResult.notes); update?.("batch", { kind: "public-result", result: assetsResult, provisional: true }); }
+        update?.("progress", { stage: "assets", state: assetsResult ? "completed" : "unavailable", total: assetsResult?.spatialUnits?.length ?? 0 });
       } catch (error) {
+        if (error instanceof AssetsRegionRateLimitError) publicRetryAfterSeconds = error.retryAfterSeconds;
         const reason = error instanceof Error ? error.message : String(error);
         publicSources.forEach((source) => unavailable.push({ sourceId: source.id, reason }));
+        update?.("progress", { stage: "assets", state: "unavailable" });
       }
     })(),
     (async () => {
@@ -1527,8 +1597,9 @@ async function reverseLookupFiles(sources: readonly SkyOverlapSource[], region: 
       await Promise.all([
         (async () => {
           try {
-            const result = await warehouseIndex.reverseFiles({ layerIds: selectedLayerIds, order: region.order, cells: region.cells });
-            locations.push(...result.files); directoriesTruncated ||= result.truncated; warnings.push(...result.notes);
+            const result = await warehouseIndex.reverseDirectories({ layerIds: selectedLayerIds, order: region.order, cells: region.cells, sourceForLayer });
+            result.directories.forEach(directory => directoryCollector.addDirectory(directory));
+            directoriesTruncated ||= result.truncated; warnings.push(...result.notes);
           } catch (error) { directoriesTruncated = true; warnings.push(`私有 Warehouse 目录反查：${error instanceof Error ? error.message : String(error)}`); }
         })(),
         (async () => {
@@ -1557,14 +1628,19 @@ async function reverseLookupFiles(sources: readonly SkyOverlapSource[], region: 
           }
         })(),
       ]);
+      locations.forEach(file => directoryCollector.addFile(file));
+      if (update) {
+        const directories = directoryCollector.result();
+        for (let offset = 0; offset < directories.length; offset += 100) update("batch", { kind: "workspace-directories", directories: directories.slice(offset, offset + 100), provisional: true });
+        update("progress", { stage: "workspace", state: "completed", total: directories.length, truncated: directoriesTruncated });
+      }
     })(),
   ]);
-  const sourceForLayer = (id: string): string | undefined => privateSources.find((source) => source.layerIds?.includes(id)
-    || (source.assetId && [source.assetId, workspaceLayerIdForAsset(source.assetId), `user-${source.assetId}`].includes(id)))?.id;
-  const workspaceDirectories = directoryLocations(locations, sourceForLayer);
+  const workspaceDirectories = directoryCollector.result();
   privateSources.filter((source) => !workspaceDirectories.some((directory) => directory.sourceId === source.id))
     .forEach((source) => unavailable.push({ sourceId: source.id, reason: "该区域没有已确认的本地文件父目录映射；覆盖几何仍保留。" }));
   return { files: [], unavailable, warnings: [...new Set(warnings)], workspaceDirectories, directoriesTruncated,
+    ...(publicRetryAfterSeconds ? { publicRetryAfterSeconds } : {}),
     ...(assetsResult ? { assetsResult, fileEvidence: assetsResult.files, coverageEvidence: assetsResult.coverageEvidence,
       scanScopes: assetsResult.scanScopes, assetsLookup: { available: assetsResult.available, precision: assetsResult.precision,
         truncated: assetsResult.truncated, expiresAt: assetsResult.expiresAt } } : {}) };
@@ -1602,10 +1678,26 @@ app.post("/api/sky/overlap", async (request: Request, response: Response) => {
   }
 });
 
+class WorkspaceLookupStream {
+  readonly enabled: boolean;
+  constructor(request: Request, readonly response: Response) { this.enabled = String(request.headers.accept ?? "").includes("text/event-stream"); }
+  emit(event: "progress" | "batch" | "complete", value: unknown): void {
+    if (!this.enabled || this.response.destroyed || this.response.writableEnded) return;
+    if (!this.response.headersSent) { this.response.setHeader("Content-Type", "text/event-stream; charset=utf-8"); this.response.setHeader("Cache-Control", "no-store"); this.response.setHeader("X-Accel-Buffering", "no"); this.response.flushHeaders(); }
+    this.response.write(`event: ${event}\ndata: ${JSON.stringify(value)}\n\n`);
+    if (event === "complete") this.response.end();
+  }
+  readonly update = (event: "progress" | "batch", value: Record<string, unknown>): void => { this.emit(event, value); };
+  complete(value: unknown): void { if (this.enabled) this.emit("complete", value); else this.response.json(value); }
+}
+
 app.post("/api/sky/overlap/details", async (request: Request, response: Response) => {
+  const stream = new WorkspaceLookupStream(request, response);
   try {
     const body = (request.body ?? {}) as SkyOverlapRequest & { componentId?: unknown; pixels?: unknown; cursor?: unknown; querySnapshotId?: unknown; pageSize?: unknown };
     const context = overlapContext(body);
+    response.setHeader("Cache-Control", "no-store");
+    stream.emit("progress", { stage: "geometry", state: "running" });
     const sources = await overlapSources(context);
     const overlap = calculateSkyOverlap(sources, context.nside);
     const componentId = typeof body.componentId === "string" ? body.componentId : undefined;
@@ -1613,17 +1705,28 @@ app.post("/api/sky/overlap/details", async (request: Request, response: Response
     if (componentId && !component) throw new Error(`Overlap component not found: ${componentId}`);
     const pixels = component?.cells ?? (body.pixels === undefined ? overlap.pixels : overlapPixelsInput(body.pixels));
     const selectedSources = sources.filter((source) => pixels.some((pixel) => source.pixels.includes(pixel)));
-    response.setHeader("Cache-Control", "no-store");
-    response.json({ component: component ?? null, pixels, sources: selectedSources, ...(await reverseLookupFiles(selectedSources, reverseRegionInput(context.nside, pixels, body))) });
+    stream.complete({ component: component ?? null, pixels, sources: selectedSources, ...(await reverseLookupFiles(selectedSources, reverseRegionInput(context.nside, pixels, body), stream.enabled ? stream.update : undefined)) });
   } catch (error) {
     sendApiError(response, error);
   }
 });
 
 app.post("/api/sky/reverse-lookup", async (request: Request, response: Response) => {
+  const stream = new WorkspaceLookupStream(request, response);
   try {
     const body = (request.body ?? {}) as SkyOverlapRequest & { componentId?: unknown; pixels?: unknown; cursor?: unknown; querySnapshotId?: unknown; pageSize?: unknown };
     const context = overlapContext(body);
+    response.setHeader("Cache-Control", "no-store");
+    stream.emit("progress", { stage: "geometry", state: "running" });
+    if (body.pixels !== undefined && body.componentId === undefined) {
+      const sources = await reverseSourcesFromIds(context);
+      if (sources) {
+        const pixels = overlapPixelsInput(body.pixels);
+        const region = reverseRegionInput(context.nside, pixels, body);
+        stream.complete({ pixels, sources, ...(await reverseLookupFiles(sources, region, stream.enabled ? stream.update : undefined)) });
+        return;
+      }
+    }
     const sources = await overlapSources(context);
     let pixels = body.pixels === undefined ? undefined : overlapPixelsInput(body.pixels);
     if (typeof body.componentId === "string") {
@@ -1634,8 +1737,7 @@ app.post("/api/sky/reverse-lookup", async (request: Request, response: Response)
     }
     if (!pixels?.length) throw new RangeError("pixels or componentId is required");
     const selectedSources = sources.filter((source) => pixels!.some((pixel) => source.pixels.includes(pixel)));
-    response.setHeader("Cache-Control", "no-store");
-    response.json({ pixels, sources: selectedSources, ...(await reverseLookupFiles(selectedSources, reverseRegionInput(context.nside, pixels, body))) });
+    stream.complete({ pixels, sources: selectedSources, ...(await reverseLookupFiles(selectedSources, reverseRegionInput(context.nside, pixels, body), stream.enabled ? stream.update : undefined)) });
   } catch (error) {
     sendApiError(response, error);
   }

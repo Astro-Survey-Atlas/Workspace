@@ -1,3 +1,4 @@
+import { readJsonResponse, type JsonResponseEvent } from "../../src/json-response-stream";
 import type { AgentSession, ToolDescriptor, WorkflowDefinition, WorkflowRun } from "../../src/workflow";
 import type { DataAssetRecord as CoreDataAssetRecord, DataAssetRegistrationInput as CoreDataAssetRegistrationInput } from "../../src/data-catalog";
 import type { ConnectorCheck, ConnectorCheckInput, ConnectorPublicRecord, ConnectorRegistrationInput } from "../../src/connectors";
@@ -21,6 +22,7 @@ export interface SkyReverseLookupResponse {
   files: CoverageDownloadFile[]; fileEvidence?: AssetsRegionFileEvidence[]; coverageEvidence?: AssetsRegionCoverageEvidence[];
   assetsLookup?: AssetsRegionLookupSummary; scanScopes?: AssetsRegionScanScope[];
   assetsResult?: AssetsRegionLookupResponse; workspaceDirectories?: WorkspaceDirectory[]; directoriesTruncated?: boolean;
+  publicRetryAfterSeconds?: number;
   unavailable: Array<{ sourceId: string; url?: string; reason: string }>; warnings?: string[]; sources: SkyOverlapSource[];
 }
 import type { ProductionPipelineDefinition, ProductionRun, ProductionRunInput } from "../../src/production";
@@ -492,8 +494,11 @@ export const workspaceApi = {
   async skyOverlapDetails(input: { componentId: string; sourceIds: string[]; nside: number }): Promise<Record<string, unknown>> {
     return postJson<Record<string, unknown>>("/api/sky/overlap/details", input);
   },
-  async skyReverseLookup(input: { componentId?: string; sourceIds?: string[]; assetIds?: string[]; pixels?: number[]; nside?: number; cursor?: string; querySnapshotId?: string; pageSize?: number }): Promise<SkyReverseLookupResponse> {
-    return postJson<SkyReverseLookupResponse>("/api/sky/reverse-lookup", input);
+  async skyReverseLookup(input: { componentId?: string; sourceIds?: string[]; assetIds?: string[]; pixels?: number[]; nside?: number; cursor?: string; querySnapshotId?: string; pageSize?: number }, update?: (event: JsonResponseEvent) => void): Promise<SkyReverseLookupResponse> {
+    if (!update) return postJson<SkyReverseLookupResponse>("/api/sky/reverse-lookup", input);
+    const response = await fetch("/api/sky/reverse-lookup", { method: "POST", headers: { "Content-Type": "application/json", Accept: "text/event-stream" }, body: JSON.stringify(input) });
+    if (!response.ok) throw new Error(`Reverse lookup HTTP ${response.status}`);
+    return readJsonResponse<SkyReverseLookupResponse>(response, update);
   },
   async submitCoverageDownload(input: { files: CoverageDownloadFile[]; componentId?: string; sourceIds?: string[] }): Promise<CoverageDownloadJob> {
     return (await postJson<{ job: CoverageDownloadJob }>("/api/coverage-downloads", input)).job;

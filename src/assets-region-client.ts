@@ -1,4 +1,9 @@
 import type { PublicSourceIdentity } from "./public-source-identity.js";
+import type { SurveyFootprint } from "./survey-footprints.js";
+import { readJsonResponse } from "./json-response-stream.js";
+
+export type AssetsRegionEvent = { event: "progress"; value: { stage: string; state: string; layerId?: string; total?: number } }
+  | { event: "batch"; value: { result: AssetsRegionLookupResponse; provisional: true } };
 
 export interface AssetsRegionLookupRequest {
   layerIds: string[];
@@ -125,6 +130,7 @@ export interface AssetsRegionFileEvidence {
 
 export interface AssetsRegionLookupResponse {
   available: boolean;
+  nativeUnitIndexRevision?: string;
   precision: "exact" | "estimated" | "entrypoint-only" | "truncated";
   truncated: boolean;
   requested: { layerIds: string[]; order: number; cells: number[] };
@@ -144,6 +150,13 @@ export interface AssetsRegionLookupResponse {
 }
 
 interface AssetsRegionClientOptions {
+  catalogUrl: string;
+  getApiKey: () => Promise<string | undefined>;
+  fetchImpl?: typeof fetch;
+  timeoutMs?: number;
+}
+
+interface AssetsCoverageOverviewClientOptions {
   catalogUrl: string;
   getApiKey: () => Promise<string | undefined>;
   fetchImpl?: typeof fetch;
@@ -415,6 +428,7 @@ function parseResponse(value: unknown): AssetsRegionLookupResponse {
   const warnings = Array.isArray(plan.warnings) ? plan.warnings.filter((item): item is string => typeof item === "string") : [];
   return {
     available: root.available === true,
+    ...(text(root.nativeUnitIndexRevision) ? { nativeUnitIndexRevision: text(root.nativeUnitIndexRevision) } : {}),
     precision: precision(root.precision),
     truncated: root.truncated === true,
     requested: { layerIds, order, cells },
@@ -431,6 +445,10 @@ function parseResponse(value: unknown): AssetsRegionLookupResponse {
 }
 
 /** Server-side, bounded bridge to the Assets file/Tile reverse-lookup API. */
+export class AssetsRegionRateLimitError extends Error {
+  constructor(readonly retryAfterSeconds: number) { super("Assets region query reached its API Key rate limit; retry after the reported delay"); }
+}
+
 export class AssetsRegionClient {
   readonly #endpoint?: URL;
   readonly #getApiKey: () => Promise<string | undefined>;
@@ -444,26 +462,121 @@ export class AssetsRegionClient {
     this.#timeoutMs = options.timeoutMs ?? 60_000;
   }
 
-  async lookup(input: AssetsRegionLookupRequest): Promise<AssetsRegionLookupResponse | undefined> {
+  async lookup(input: AssetsRegionLookupRequest, update?: (event: AssetsRegionEvent) => void): Promise<AssetsRegionLookupResponse | undefined> {
     const key = await this.#getApiKey();
     if (!key) return undefined;
     if (!this.#endpoint) throw new Error("Assets region query endpoint is not configured");
     const response = await this.#fetch(this.#endpoint, {
       method: "POST",
-      headers: { Accept: "application/json", "Content-Type": "application/json", "X-Assets-API-Key": key },
+      headers: { Accept: update ? "text/event-stream" : "application/json", "Content-Type": "application/json", "X-Assets-API-Key": key },
       // Deliberately construct the public request: no private IDs, paths or scan metadata cross this boundary.
       body: JSON.stringify({ layerIds: input.layerIds, order: input.order, cells: input.cells,
         ...(input.limit === undefined ? {} : { limit: input.limit }), pageSize: input.pageSize ?? 100,
         ...(input.cursor ? { cursor: input.cursor } : {}), ...(input.querySnapshotId ? { querySnapshotId: input.querySnapshotId } : {}) }),
       signal: AbortSignal.timeout(this.#timeoutMs),
     });
-    const bytes = Buffer.from(await response.arrayBuffer());
-    if (bytes.length > MAX_RESPONSE_BYTES) throw new Error("Assets region query response is too large");
     if (!response.ok) {
+      await response.body?.cancel();
+      if (response.status === 429) throw new AssetsRegionRateLimitError(Math.min(60, Math.max(1, Number(response.headers.get("Retry-After")) || 60)));
       if (response.status === 401 || response.status === 403) throw new Error("Assets region query authorization failed; update the Workspace API Key");
       throw new Error(`Assets region query failed: HTTP ${response.status}`);
     }
-    return parseResponse(JSON.parse(bytes.toString("utf8")) as unknown);
+    const value = await readJsonResponse<unknown>(response, event => {
+      if (event.event === "progress") {
+        const layerId = text(event.value.layerId);
+        if (layerId && !input.layerIds.includes(layerId)) return;
+        const stage = text(event.value.stage), state = text(event.value.state);
+        if (!stage || !state) return;
+        update?.({ event: "progress", value: { stage, state, ...(layerId ? { layerId } : {}), ...(integer(event.value.total) === undefined ? {} : { total: integer(event.value.total) }) } });
+      } else if (event.event === "batch" && Array.isArray(event.value.units)) {
+        const result = parseResponse({ available: true, precision: "estimated", truncated: true, requested: { layerIds: input.layerIds, order: input.order, cells: input.cells }, downloadPlan: { spatialUnits: event.value.units, truncated: true } });
+        update?.({ event: "batch", value: { result, provisional: true } });
+      }
+    }, MAX_RESPONSE_BYTES);
+    return parseResponse(value);
+  }
+}
+
+/** Reads public order-4 overview cells for the DR9 native-unit products. */
+export class AssetsCoverageOverviewClient {
+  readonly #endpoint?: URL;
+  readonly #getApiKey: () => Promise<string | undefined>;
+  readonly #fetch: typeof fetch;
+  readonly #timeoutMs: number;
+
+  constructor(options: AssetsCoverageOverviewClientOptions) {
+    try {
+      const catalog = new URL(options.catalogUrl);
+      if (catalog.protocol === "http:" || catalog.protocol === "https:") {
+        this.#endpoint = new URL("/api/v1/access/coverage-block", catalog.origin);
+      }
+    } catch {
+      this.#endpoint = undefined;
+    }
+    this.#getApiKey = options.getApiKey;
+    this.#fetch = options.fetchImpl ?? fetch;
+    this.#timeoutMs = options.timeoutMs ?? 15_000;
+  }
+
+  async legacyDr9Footprints(): Promise<SurveyFootprint[]> {
+    if (!this.#endpoint) return [];
+    const key = await this.#getApiKey();
+    if (!key) return [];
+
+    const expected = new Map([
+      ["source-units-legacy-surveys-legacy-dr9-coadded-imaging", "Coadded imaging"],
+      ["source-units-legacy-surveys-legacy-dr9-tractor-catalog", "Tractor catalog"],
+    ]);
+    const footprints = await Promise.all([...expected.entries()].map(async ([layerId, product]): Promise<SurveyFootprint> => {
+      const response = await this.#fetch(this.#endpoint!, {
+        method: "POST",
+        headers: { Accept: "application/json", "Content-Type": "application/json", "X-Assets-API-Key": key },
+        body: JSON.stringify({ layerId, order: 4, tile: 0 }),
+        cache: "no-store",
+        signal: AbortSignal.timeout(this.#timeoutMs),
+      });
+      if (!response.ok) {
+        if (response.status === 401 || response.status === 403) throw new Error("Assets DR9 overview authorization failed; update the Workspace API Key");
+        throw new Error(`Assets DR9 coverage block failed: HTTP ${response.status}`);
+      }
+      const bytes = Buffer.from(await response.arrayBuffer());
+      if (bytes.length > MAX_RESPONSE_BYTES) throw new Error("Assets DR9 coverage block is too large");
+      const block = JSON.parse(bytes.toString("utf8")) as Record<string, unknown>;
+      const cells = Array.isArray(block.cells) ? block.cells : [];
+      const normalizedCells = cells.map(integer);
+      const sourceUnitIndex = block.sourceUnitIndex;
+      const note = sourceUnitIndex && typeof sourceUnitIndex === "object" && !Array.isArray(sourceUnitIndex)
+        ? text((sourceUnitIndex as Record<string, unknown>).notes) : undefined;
+      const generatedAt = text(block.generatedAt);
+      const cellCount = integer(block.cellCount);
+      const invalid: string[] = [];
+      if (block.layerId !== layerId || block.surveyId !== "legacy-surveys" || block.releaseId !== "legacy-dr9" || block.product !== product) invalid.push("identity");
+      if (block.order !== 4 || block.tileId !== 0 || block.maxOrder !== 4 || block.overviewOrder !== 4
+        || !Array.isArray(block.availableOrders) || block.availableOrders.length !== 1 || block.availableOrders[0] !== 4) invalid.push("order");
+      if (!sourceUnitIndex || typeof sourceUnitIndex !== "object" || Array.isArray(sourceUnitIndex)
+        || (sourceUnitIndex as Record<string, unknown>).status !== "estimated" || !note) invalid.push("precision");
+      if (!generatedAt || !Number.isFinite(Date.parse(generatedAt)) || !text(block.revision)) invalid.push("revision metadata");
+      if (cellCount === undefined || cellCount < 1 || cellCount > 3072
+        || normalizedCells.some((cell) => cell === undefined || cell >= 3072)
+        || normalizedCells.length !== cellCount || new Set(normalizedCells).size !== normalizedCells.length) invalid.push("cells");
+      if (invalid.length) throw new Error(`Assets returned an invalid DR9 overview block (${invalid.join(", ")}) for ${layerId}`);
+      return {
+        surveyId: "legacy-surveys",
+        releaseId: "legacy-dr9",
+        product,
+        modality: text(block.modality) ?? (product === "Coadded imaging" ? "imaging" : "catalog"),
+        label: `Legacy Surveys DR9 ${product} overview`,
+        nside: 16,
+        pixels: normalizedCells as number[],
+        quality: "official_overview",
+        sourceUrl: "https://www.legacysurvey.org/dr9/",
+        sourceId: layerId,
+        layerId,
+        retrievedAt: generatedAt!,
+        notes: note!,
+      };
+    }));
+    return footprints;
   }
 }
 

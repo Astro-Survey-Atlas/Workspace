@@ -1,6 +1,6 @@
 import type { ScanPrecision } from "./connector-history.js";
 import { parseElasticsearchEndpoint } from "./es-endpoint.js";
-import { regionContainsCell, regionPixelFilter, type WorkspaceFileLocation } from "./workspace-directories.js";
+import { regionContainsCell, regionPixelFilter, WorkspaceDirectoryCollector, type WorkspaceDirectory, type WorkspaceFileLocation } from "./workspace-directories.js";
 
 export const WAREHOUSE_LAYER_INDEX = "ast_layer_index_v1";
 export const WAREHOUSE_FILE_INDEX = "ast_file_index_v1";
@@ -95,7 +95,22 @@ export interface WarehouseIndexOptions {
 }
 
 interface SearchHit { _id?: string; _source?: Record<string, unknown>; sort?: unknown[] }
-interface SearchResponse { hits?: { hits?: SearchHit[]; total?: number | { value?: number } } }
+interface DirectoryBucket {
+  key: { fileId?: string | null; layerId?: string; order?: number };
+  doc_count?: number;
+  matching_cell?: { value?: number };
+  precisions?: { buckets?: { key?: string }[] };
+  legacy_precisions?: { buckets?: { key?: string }[] };
+}
+interface SearchResponse {
+  hits?: { hits?: SearchHit[]; total?: number | { value?: number } };
+  aggregations?: { files?: { buckets?: DirectoryBucket[]; after_key?: Record<string, unknown> };
+    geometry?: { buckets?: Array<{ key: { order?: number; pixel?: number }; precisions?: { buckets?: Array<{ key: string }> }; legacy_precisions?: { buckets?: Array<{ key: string }> }; source_orders?: { buckets?: Array<{ key: number }> } }>; after_key?: Record<string, unknown> } };
+  timed_out?: boolean;
+  _shards?: { failed?: number };
+}
+interface ScanBinding { scanRunId?: string; observation: boolean }
+interface ProjectedGeometry { pixels: Set<number>; nativeOrders: Set<number>; availableOrders: Set<number>; precisions: Set<ScanPrecision> }
 
 const text = (value: unknown): string | undefined => typeof value === "string" && value.trim() ? value.trim() : undefined;
 const number = (value: unknown): number | undefined => typeof value === "number" && Number.isFinite(value) ? value : typeof value === "string" && value.trim() && Number.isFinite(Number(value)) ? Number(value) : undefined;
@@ -186,6 +201,7 @@ export class WarehouseIndexService {
   readonly #maxDocuments: number;
   readonly #fetch: typeof fetch;
   readonly #authorization?: string;
+  readonly #geometryCache = new Map<string, { promise: Promise<ProjectedGeometry>; expiresAt: number; cells: number }>();
 
   constructor(options: WarehouseIndexOptions = {}) {
     const endpoint = parseElasticsearchEndpoint(options.url ?? process.env.ASTRO_WAREHOUSE_ES_URL ?? "");
@@ -267,8 +283,9 @@ export class WarehouseIndexService {
     const targetOrder = nsideOrder(input.nside);
     if (!this.url) return { status: "unavailable", index: this.coverageIndex, nside: input.nside, pixels: [], layers: [], inactiveLayers: [], message: "ASTRO_WAREHOUSE_ES_URL is not configured" };
     try {
-      const catalog = await this.loadCatalog(input.layerIds);
-      if (!catalog) throw new WarehouseIndexError("Warehouse Elasticsearch is not configured");
+      const metadata = await this.#pages(this.layerIndex, input.layerIds === undefined ? { match_all: {} } : { terms: { layer_id: input.layerIds } }, [{ layer_id: "asc" }]);
+      if (metadata.truncated) throw new WarehouseIndexError("Warehouse layer selection is incomplete");
+      const catalog = { layers: metadata.hits.map(layerFromHit).filter((layer): layer is WarehouseLayerSnapshot => Boolean(layer) && layer!.layerMode !== "CANDIDATE") };
       const selected = catalog.layers.filter((layer) => {
         const assetMatch = !input.assetIds?.length || input.assetIds.some((assetId) => layer.layerId === assetId || layer.layerId === `workspace-${assetId}` || layer.layerId === `user-${assetId}`);
         // An explicit empty layerIds list means "no owned layers". This is
@@ -277,31 +294,15 @@ export class WarehouseIndexService {
         const layerIdMatch = input.layerIds === undefined || input.layerIds.includes(layer.layerId);
         return assetMatch && (!input.survey || layer.surveyId === input.survey) && (!input.release || layer.releaseId === input.release) && layerIdMatch;
       });
-      const activeIds = new Set(selected.filter((layer) => layer.state === "ACTIVE").map((layer) => layer.layerId));
       const byLayer = new Map<string, Set<number>>();
       const orders = new Map<string, Set<number>>();
       const available = new Map<string, Set<number>>();
       const precisions = new Map<string, Set<ScanPrecision>>();
-      for (const edge of catalog.coverages) {
-        if (!activeIds.has(edge.layerId)) continue;
-        // These describe the real source documents and must survive even when
-        // the requested overview order is finer than the source order.
-        const layerOrders = orders.get(edge.layerId) ?? new Set<number>();
-        layerOrders.add(edge.order);
-        orders.set(edge.layerId, layerOrders);
-        const layerAvailable = available.get(edge.layerId) ?? new Set<number>();
-        layerAvailable.add(edge.order);
-        if (edge.sourceOrder !== undefined) layerAvailable.add(edge.sourceOrder);
-        available.set(edge.layerId, layerAvailable);
-        const layerPrecision = precisions.get(edge.layerId) ?? new Set<ScanPrecision>();
-        layerPrecision.add(edge.precision ?? "exact");
-        precisions.set(edge.layerId, layerPrecision);
-
-        const projected = projectPixel(edge.ipix, edge.order, targetOrder);
-        if (!projected.length) continue;
-        const pixels = byLayer.get(edge.layerId) ?? new Set<number>();
-        projected.forEach((pixel) => pixels.add(pixel)); byLayer.set(edge.layerId, pixels);
-      }
+      await Promise.all(selected.filter(layer => layer.state === "ACTIVE").map(async layer => {
+        const geometry = await this.#projectedGeometry(layer, targetOrder);
+        byLayer.set(layer.layerId, geometry.pixels); orders.set(layer.layerId, geometry.nativeOrders);
+        available.set(layer.layerId, geometry.availableOrders); precisions.set(layer.layerId, geometry.precisions);
+      }));
       const layers = selected.map((layer): WarehouseCoverageLayer => {
         const state = layer.state;
         const status = state === "ACTIVE" ? "ready" : state === "FAILED" ? "error" : state === "UNKNOWN" ? "unavailable" : "pending";
@@ -324,6 +325,82 @@ export class WarehouseIndexService {
     }
   }
 
+  /** Aggregate unique projected cells in ES; repeated file edges never cap an overview. */
+  #projectedGeometry(layer: WarehouseLayerSnapshot, targetOrder: number): Promise<ProjectedGeometry> {
+    const key = JSON.stringify([layer, targetOrder]);
+    const existing = this.#geometryCache.get(key);
+    if (existing && existing.expiresAt > Date.now()) return existing.promise;
+    this.#geometryCache.delete(key);
+    for (const [cachedKey, value] of this.#geometryCache) if (value.expiresAt <= Date.now()) this.#geometryCache.delete(cachedKey);
+    while (this.#geometryCache.size >= 16) this.#geometryCache.delete(this.#geometryCache.keys().next().value!);
+    const entry = { promise: this.#loadProjectedGeometry(layer, targetOrder), expiresAt: Number.POSITIVE_INFINITY, cells: 0 };
+    entry.promise = entry.promise.then(geometry => {
+      entry.cells = geometry.pixels.size; entry.expiresAt = Date.now() + 60_000;
+      while ([...this.#geometryCache.values()].reduce((sum, value) => sum + value.cells, 0) > 200_000) this.#geometryCache.delete(this.#geometryCache.keys().next().value!);
+      return geometry;
+    }).catch(error => { if (this.#geometryCache.get(key) === entry) this.#geometryCache.delete(key); throw error; });
+    this.#geometryCache.set(key, entry);
+    return entry.promise;
+  }
+
+  async #loadProjectedGeometry(layer: WarehouseLayerSnapshot, targetOrder: number): Promise<ProjectedGeometry> {
+    const pixels = new Set<number>(), nativeOrders = new Set<number>(), availableOrders = new Set<number>(), precisions = new Set<ScanPrecision>();
+    const committed = await this.#committedBindings(layer);
+    if (committed.truncated) throw new WarehouseIndexError("Warehouse committed coverage scope is incomplete");
+    if (!committed.bindings.size) return { pixels, nativeOrders, availableOrders, precisions };
+    const validFrame = (field: string, values: string[]) => ({ bool: { should: [{ terms: { [field]: values } }, { bool: { must_not: { exists: { field } } } }], minimum_should_match: 1 } });
+    const query = { bool: { filter: [{ terms: { layer_id: [...committed.bindings.keys()] } },
+      validFrame("coordinate_frame", ["ICRS", "icrs"]), validFrame("coordinateFrame", ["ICRS", "icrs"]),
+      validFrame("nesting", ["NESTED", "nested"]), validFrame("ordering", ["NESTED", "nested"]) ] } };
+    let after: Record<string, unknown> | undefined;
+    let legacyAfter: unknown[] | undefined, legacy = false, loaded = 0;
+    const add = (nativeOrder: number, pixel: number, values: Array<{ key: string }> = [], sourceOrders: Array<{ key: number }> = []) => {
+      nativeOrders.add(nativeOrder); availableOrders.add(nativeOrder);
+      sourceOrders.forEach(value => { const native = order(value.key); if (native !== undefined) availableOrders.add(native); });
+      for (const value of values) { const p = precision(value.key); if (p) precisions.add(p); }
+      if (nativeOrder >= targetOrder && validPixel(pixel, targetOrder)) pixels.add(pixel);
+      if (pixels.size > this.#maxDocuments) throw new WarehouseIndexError("Warehouse overview exceeded its unique-cell budget");
+    };
+    while (true) {
+      const response = await this.#search(this.coverageIndex, legacy ? { size: Math.min(10_000, this.#maxDocuments - loaded), track_total_hits: true, query,
+        sort: [{ layer_id: "asc" }, { source_file_id: "asc" }, { healpix_order: "asc" }, { healpix_cell: "asc" }, { coverage_role: "asc" }], ...(legacyAfter ? { search_after: legacyAfter } : {}) }
+        : { size: 0, query, aggs: { geometry: { composite: { size: 5000, sources: [
+          { order: { terms: { field: "healpix_order" } } },
+          { pixel: { terms: { script: { lang: "painless", source: "long o=doc['healpix_order'].value; long p=doc['healpix_cell'].value; return o>params.order ? (long)(p/Math.pow(4,o-params.order)) : p;", params: { order: targetOrder } } } } },
+        ], ...(after ? { after } : {}) }, aggs: { precisions: { terms: { field: "precision", size: 4 } }, legacy_precisions: { terms: { field: "coverage_precision", size: 4 } }, source_orders: { terms: { field: "source_order", size: 30 } } } } } }, Math.max(this.#timeoutMs, 15_000));
+      if (response.timed_out || response._shards?.failed) throw new WarehouseIndexError("Warehouse overview aggregation is incomplete");
+      const buckets = response.aggregations?.geometry?.buckets;
+      if (buckets) {
+        for (const bucket of buckets) {
+          const nativeOrder = order(bucket.key.order), pixel = number(bucket.key.pixel);
+          if (nativeOrder === undefined || pixel === undefined) throw new WarehouseIndexError("Warehouse overview has an invalid native-cell identity");
+          add(nativeOrder, pixel, [...(bucket.precisions?.buckets ?? []), ...(bucket.legacy_precisions?.buckets ?? [])], bucket.source_orders?.buckets);
+        }
+        const next = response.aggregations?.geometry?.after_key;
+        if (!buckets.length || !next) break;
+        if (JSON.stringify(next) === JSON.stringify(after)) throw new WarehouseIndexError("Warehouse overview cursor did not advance");
+        after = next;
+      } else {
+        // Compatibility with small ES-compatible fixtures; real ES supplies the aggregation.
+        const hits = response.hits?.hits;
+        if (!hits) throw new WarehouseIndexError("Warehouse overview has no geometry aggregation");
+        legacy = true; loaded += hits.length;
+        for (const hit of hits) {
+          const edge = coverageFromHit(hit);
+          if (!edge || !committed.bindings.has(edge.layerId)) continue;
+          const projected = edge.order >= targetOrder ? projectPixel(edge.ipix, edge.order, targetOrder)[0]! : edge.ipix;
+          add(edge.order, projected, [{ key: edge.precision ?? "exact" }], edge.sourceOrder === undefined ? [] : [{ key: edge.sourceOrder }]);
+        }
+        if (!hits.length || loaded >= (total(response) ?? loaded + 1)) break;
+        if (loaded >= this.#maxDocuments) throw new WarehouseIndexError("Legacy Warehouse overview is incomplete at its evidence-row budget");
+        const next = hits.at(-1)?.sort;
+        if (!next || JSON.stringify(next) === JSON.stringify(legacyAfter)) throw new WarehouseIndexError("Legacy Warehouse overview cursor did not advance");
+        legacyAfter = next;
+      }
+    }
+    return { pixels, nativeOrders, availableOrders, precisions };
+  }
+
   async reverseFiles(input: { layerIds: readonly string[]; order: number; cells: readonly number[] }): Promise<{ files: WorkspaceFileLocation[]; truncated: boolean; notes: string[] }> {
     const files: WorkspaceFileLocation[] = [];
     const notes: string[] = [];
@@ -334,44 +411,64 @@ export class WarehouseIndexService {
     const layers = (layerHits.hits?.hits ?? []).map(layerFromHit).filter((layer): layer is WarehouseLayerSnapshot => Boolean(layer)
       && allowed.has(layer!.layerId) && layer!.state === "ACTIVE" && layer!.layerMode !== "CANDIDATE");
     const selected = new Set(input.cells);
+    const maximumFiles = Math.min(this.#maxDocuments, 50_000);
+    const maximumCellMatches = 2_000_000;
+    let retainedFiles = 0;
+    let retainedCellMatches = 0;
     for (const layer of layers) {
-      const bindings = new Map<string, { scanRunId?: string; observation: boolean }>();
-      if (layer.layerMode === "PARTITIONED") {
-        if (!layer.activeScopeId || !layer.scopeSnapshotSha256) { notes.push(`${layer.layerId}: missing committed scan scope`); truncated = true; continue; }
-        const members = await this.#pages(process.env.ASTRO_WAREHOUSE_PARTITION_INDEX ?? "ast_partition_index_v1", {
-          bool: { filter: [{ term: { layer_id: layer.layerId } }, { term: { scope_id: layer.activeScopeId } }, { term: { state: "ACTIVE" } }] },
-        }, [{ partition_id: "asc" }]);
-        truncated ||= members.truncated;
-        for (const hit of members.hits) {
-          const member = hit._source ?? {};
-          const candidate = text(member.active_layer_id);
-          if (member.layer_id !== layer.layerId || member.scope_id !== layer.activeScopeId || member.state !== "ACTIVE"
-            || member.scope_snapshot_sha256 !== layer.scopeSnapshotSha256 || !candidate) { truncated = true; continue; }
-          bindings.set(candidate, { scanRunId: text(member.active_scan_run_id), observation: true });
-        }
-        if (bindings.size) {
-          const pointed = await this.#search(this.layerIndex, { size: bindings.size, query: { terms: { layer_id: [...bindings.keys()] } } });
-          const active = new Set((pointed.hits?.hits ?? []).flatMap((hit) => hit._source?.state === "ACTIVE" ? [text(hit._source.layer_id) ?? hit._id!] : []));
-          for (const id of bindings.keys()) if (!active.has(id)) { bindings.delete(id); truncated = true; }
-        }
-      } else bindings.set(layer.layerId, { scanRunId: layer.scanRunId, observation: false });
+      const committed = await this.#committedBindings(layer);
+      const bindings = committed.bindings;
+      truncated ||= committed.truncated;
+      notes.push(...committed.notes);
       if (!bindings.size) continue;
       const actualOrders = layer.availableOrders.length ? layer.availableOrders : [input.order];
-      const coverage = await this.#pages(this.coverageIndex, { bool: { filter: [
+      const coverageQuery = { bool: { filter: [
         { terms: { layer_id: [...bindings.keys()] } },
         { bool: { should: actualOrders.map((actualOrder) => ({ bool: { filter: [
           { term: { healpix_order: actualOrder } }, regionPixelFilter("healpix_cell", actualOrder, input.order, input.cells),
         ] } })), minimum_should_match: 1 } },
-      ] } }, [{ source_file_id: "asc" }, { layer_id: "asc" }, { healpix_order: "asc" }, { healpix_cell: "asc" }, { coverage_role: "asc" }]);
-      truncated ||= coverage.truncated;
-      const edges = coverage.hits.flatMap((hit) => {
-        const edge = coverageFromHit(hit);
-        return edge && bindings.has(edge.layerId) && edge.sourceFileId && regionContainsCell(edge.order, edge.ipix, input.order, selected)
-          && (!edge.coordinateFrame || edge.coordinateFrame.toUpperCase() === "ICRS") && (!edge.nesting || edge.nesting.toUpperCase() === "NESTED") ? [edge] : [];
-      });
+      ] } };
+      const coverageSort = [{ source_file_id: "asc" }, { layer_id: "asc" }, { healpix_order: "asc" }, { healpix_cell: "asc" }, { coverage_role: "asc" }];
+      const matches = new Map<string, Map<string, Map<number, { cells: Set<number>; precision: WorkspaceFileLocation["precision"]; sourceUri?: string }>>>();
+      let after: unknown[] | undefined;
+      let scanned = 0;
+      // A fine-order footprint can have many edges for one file. Bound the
+      // retained mapping rather than stopping after a fixed number of edges.
+      coveragePages: while (true) {
+        const response = await this.#search(this.coverageIndex, { size: 1000, track_total_hits: true, query: coverageQuery,
+          sort: coverageSort, ...(after ? { search_after: after } : {}) });
+        const page = response.hits?.hits ?? [];
+        scanned += page.length;
+        for (const hit of page) {
+          const edge = coverageFromHit(hit);
+          if (!edge || !bindings.has(edge.layerId) || !edge.sourceFileId || !regionContainsCell(edge.order, edge.ipix, input.order, selected)
+            || (edge.coordinateFrame && edge.coordinateFrame.toUpperCase() !== "ICRS") || (edge.nesting && edge.nesting.toUpperCase() !== "NESTED")) continue;
+          const candidate = matches.get(edge.layerId) ?? new Map();
+          let file = candidate.get(edge.sourceFileId);
+          if (!file) {
+            if (retainedFiles >= maximumFiles) { truncated = true; break coveragePages; }
+            file = new Map(); candidate.set(edge.sourceFileId, file); matches.set(edge.layerId, candidate); retainedFiles += 1;
+          }
+          const match = file.get(edge.order) ?? { cells: new Set<number>(), precision: "exact" as const };
+          if (!match.cells.has(edge.ipix)) {
+            if (retainedCellMatches >= maximumCellMatches) { truncated = true; break coveragePages; }
+            match.cells.add(edge.ipix); retainedCellMatches += 1;
+          }
+          match.precision = match.precision === "estimated" || edge.precision === "estimated" ? "estimated"
+            : match.precision === "entrypoint-only" || edge.precision === "entrypoint-only" ? "entrypoint-only" : "exact";
+          match.sourceUri ??= edge.sourceUri;
+          file.set(edge.order, match);
+        }
+        const count = total(response);
+        if (!page.length) { truncated ||= count !== undefined && scanned < count; break; }
+        if (count === undefined ? page.length < 1000 : scanned >= count) break;
+        const next = page.at(-1)?.sort;
+        if (!next?.length || JSON.stringify(next) === JSON.stringify(after)) { truncated = true; break; }
+        after = next;
+      }
       for (const [candidateId, binding] of bindings) {
-        const candidateEdges = edges.filter((edge) => edge.layerId === candidateId);
-        const ids = [...new Set(candidateEdges.flatMap((edge) => edge.sourceFileId ? [edge.sourceFileId] : []))];
+        const candidateMatches = matches.get(candidateId);
+        const ids = [...candidateMatches?.keys() ?? []];
         const metadata = new Map<string, Record<string, unknown>>();
         for (let start = 0; start < ids.length; start += 500) {
           const batch = ids.slice(start, start + 500);
@@ -388,15 +485,14 @@ export class WarehouseIndexService {
           }
         }
         for (const id of ids) {
-          const matching = candidateEdges.filter((edge) => edge.sourceFileId === id);
+          const matching = candidateMatches!.get(id)!;
           const file = metadata.get(id);
-          const uri = text(file?.canonical_source_uri) ?? text(file?.source_uri) ?? text(file?.sourceUri) ?? matching.find((edge) => edge.sourceUri)?.sourceUri;
+          const uri = text(file?.canonical_source_uri) ?? text(file?.source_uri) ?? text(file?.sourceUri) ?? [...matching.values()].find((match) => match.sourceUri)?.sourceUri;
           if (!uri) { notes.push(`${layer.layerId}: indexed file has no source locator`); continue; }
-          for (const actualOrder of new Set(matching.map((edge) => edge.order))) {
-            const matches = matching.filter((edge) => edge.order === actualOrder);
+          for (const [actualOrder, match] of matching) {
             files.push({ layerId: layer.layerId, surveyId: layer.surveyId, releaseId: layer.releaseId, product: layer.productId,
-              modality: layer.modality, sourceUri: uri, order: actualOrder, matchingCells: matches.map((edge) => edge.ipix),
-              precision: matches.some((edge) => edge.precision === "estimated") ? "estimated" : matches.some((edge) => edge.precision === "entrypoint-only") ? "entrypoint-only" : "exact",
+              modality: layer.modality, sourceUri: uri, order: actualOrder, matchingCells: [...match.cells].sort((a, b) => a - b),
+              precision: match.precision,
               scanRunId: binding.scanRunId });
           }
         }
@@ -404,6 +500,138 @@ export class WarehouseIndexService {
     }
     if (truncated) notes.push("Private directory lookup is incomplete at the configured metadata query limit or scan scope.");
     return { files, truncated, notes };
+  }
+
+  /** Query file identities once per native order; keep only their immediate parents. */
+  async reverseDirectories(input: { layerIds: readonly string[]; order: number; cells: readonly number[];
+    sourceForLayer: (layerId: string) => string | undefined }): Promise<{ directories: WorkspaceDirectory[]; truncated: boolean; notes: string[] }> {
+    const collector = new WorkspaceDirectoryCollector(input.sourceForLayer, this.#maxDocuments);
+    const notes = new Set<string>();
+    let truncated = false;
+    if (!this.configured || !input.layerIds.length) return { directories: [], truncated, notes: [] };
+    const allowed = new Set(input.layerIds);
+    const layerHits = await this.#search(this.layerIndex, { size: 1000, query: { terms: { layer_id: [...allowed] } } });
+    const layers = (layerHits.hits?.hits ?? []).map(layerFromHit).filter((layer): layer is WarehouseLayerSnapshot => Boolean(layer)
+      && allowed.has(layer!.layerId) && layer!.state === "ACTIVE" && layer!.layerMode !== "CANDIDATE");
+    const selected = new Set(input.cells);
+    for (const layer of layers) {
+      const committed = await this.#committedBindings(layer);
+      truncated ||= committed.truncated;
+      committed.notes.forEach(note => notes.add(note));
+      const bindings = committed.bindings;
+      if (!bindings.size) continue;
+      const actualOrders = layer.availableOrders.length ? layer.availableOrders : [input.order];
+      const validFrame = (field: string, values: string[]) => ({ bool: { should: [
+        { terms: { [field]: values } }, { bool: { must_not: { exists: { field } } } },
+      ], minimum_should_match: 1 } });
+      const query = { bool: { filter: [
+        { terms: { layer_id: [...bindings.keys()] } },
+        { bool: { should: actualOrders.map(actualOrder => ({ bool: { filter: [
+          { term: { healpix_order: actualOrder } }, regionPixelFilter("healpix_cell", actualOrder, input.order, input.cells),
+        ] } })), minimum_should_match: 1 } },
+        validFrame("coordinate_frame", ["ICRS", "icrs"]), validFrame("coordinateFrame", ["ICRS", "icrs"]),
+        validFrame("nesting", ["NESTED", "nested"]), validFrame("ordering", ["NESTED", "nested"]),
+      ] } };
+      let after: Record<string, unknown> | undefined;
+      while (true) {
+        const response = await this.#search(this.coverageIndex, { size: 0, query, aggs: { files: {
+          composite: { size: 5000, sources: [
+            { fileId: { terms: { field: "source_file_id", missing_bucket: true } } }, { layerId: { terms: { field: "layer_id" } } },
+            { order: { terms: { field: "healpix_order" } } },
+          ], ...(after ? { after } : {}) },
+          aggs: {
+            matching_cell: { min: { field: "healpix_cell" } },
+            precisions: { terms: { field: "precision", size: 4 } }, legacy_precisions: { terms: { field: "coverage_precision", size: 4 } },
+          },
+        } } });
+        if (response.timed_out || response._shards?.failed) truncated = true;
+        const buckets = response.aggregations?.files?.buckets;
+        if (!buckets) throw new WarehouseIndexError("Warehouse directory aggregation is missing file groups");
+        if (!buckets.length) break;
+        const byCandidate = new Map<string, DirectoryBucket[]>();
+        for (const bucket of buckets) {
+          const candidateId = bucket.key.layerId;
+          if (!candidateId || !bindings.has(candidateId)) continue;
+          const group = byCandidate.get(candidateId) ?? [];
+          group.push(bucket); byCandidate.set(candidateId, group);
+        }
+        for (const [candidateId, groups] of byCandidate) {
+          const binding = bindings.get(candidateId)!;
+          const ids = [...new Set(groups.flatMap(group => group.key.fileId ? [group.key.fileId] : []))];
+          const locators = new Map<string, string>();
+          for (let start = 0; start < ids.length; start += 500) {
+            const batch = ids.slice(start, start + 500);
+            const joined = await this.#search(binding.observation ? process.env.ASTRO_WAREHOUSE_FILE_OBSERVATION_INDEX ?? "ast_file_observation_index_v1" : this.fileIndex, {
+              size: 500, _source: ["file_id", "layer_id", "scan_run_id", "canonical_source_uri", "source_uri", "sourceUri"],
+              query: binding.observation ? { bool: { filter: [{ term: { layer_id: candidateId } }, { terms: { file_id: batch } },
+                ...(binding.scanRunId ? [{ term: { scan_run_id: binding.scanRunId } }] : [])] } }
+                : { bool: { should: [{ ids: { values: batch } }, { terms: { file_id: batch } }], minimum_should_match: 1 } },
+            });
+            if (joined.timed_out || joined._shards?.failed) truncated = true;
+            for (const hit of joined.hits?.hits ?? []) {
+              const file = hit._source ?? {};
+              const id = text(file.file_id) ?? hit._id;
+              if (!id || !batch.includes(id) || (binding.observation && (file.layer_id !== candidateId
+                || (binding.scanRunId && file.scan_run_id !== binding.scanRunId)))) continue;
+              const uri = text(file.canonical_source_uri) ?? text(file.source_uri) ?? text(file.sourceUri);
+              if (uri) locators.set(id, uri);
+            }
+          }
+          for (const group of groups) {
+            const fileId = group.key.fileId;
+            const actualOrder = order(group.key.order);
+            const pixel = number(group.matching_cell?.value);
+            if (!fileId || actualOrder === undefined || pixel === undefined || !validPixel(pixel, actualOrder)
+              || !regionContainsCell(actualOrder, pixel, input.order, selected)) {
+              truncated = true; continue;
+            }
+            const uri = locators.get(fileId);
+            if (!uri) { truncated = true; notes.add("A matched private file has no committed source locator; its parent is unavailable."); continue; }
+            const values = [...(group.precisions?.buckets ?? []).map(value => value.key), ...(group.legacy_precisions?.buckets ?? []).map(value => value.key)];
+            const matchPrecision = values.includes("entrypoint-only") ? "entrypoint-only" : values.includes("estimated") ? "estimated" : "exact";
+            if (!collector.addFile({ layerId: layer.layerId, surveyId: layer.surveyId, releaseId: layer.releaseId, product: layer.productId,
+              modality: layer.modality, sourceUri: uri, order: actualOrder, matchingCells: [pixel], precision: matchPrecision,
+              matchingCellsTruncated: (group.doc_count ?? 1) > 1 })) truncated = true;
+          }
+        }
+        if (collector.truncated) break;
+        const next = response.aggregations?.files?.after_key;
+        if (!next) break;
+        if (JSON.stringify(next) === JSON.stringify(after)) { truncated = true; break; }
+        after = next;
+      }
+      if (collector.truncated) break;
+    }
+    const directories = collector.result();
+    if (directories.some(directory => directory.matchingCellsTruncated)) notes.add("Private parent directories retain representative native cells, not each file's full footprint.");
+    if (truncated) notes.add("Private directory lookup is incomplete at the configured directory limit or committed scan scope.");
+    return { directories, truncated, notes: [...notes] };
+  }
+
+  async #committedBindings(layer: WarehouseLayerSnapshot): Promise<{ bindings: Map<string, ScanBinding>; truncated: boolean; notes: string[] }> {
+    const bindings = new Map<string, ScanBinding>();
+    if (layer.layerMode !== "PARTITIONED") {
+      bindings.set(layer.layerId, { scanRunId: layer.scanRunId, observation: false });
+      return { bindings, truncated: false, notes: [] };
+    }
+    if (!layer.activeScopeId || !layer.scopeSnapshotSha256) return { bindings, truncated: true, notes: [`${layer.layerId}: missing committed scan scope`] };
+    const members = await this.#pages(process.env.ASTRO_WAREHOUSE_PARTITION_INDEX ?? "ast_partition_index_v1", {
+      bool: { filter: [{ term: { layer_id: layer.layerId } }, { term: { scope_id: layer.activeScopeId } }, { term: { state: "ACTIVE" } }] },
+    }, [{ partition_id: "asc" }]);
+    let truncated = members.truncated;
+    for (const hit of members.hits) {
+      const member = hit._source ?? {};
+      const candidate = text(member.active_layer_id);
+      if (member.layer_id !== layer.layerId || member.scope_id !== layer.activeScopeId || member.state !== "ACTIVE"
+        || member.scope_snapshot_sha256 !== layer.scopeSnapshotSha256 || !candidate) { truncated = true; continue; }
+      bindings.set(candidate, { scanRunId: text(member.active_scan_run_id), observation: true });
+    }
+    if (bindings.size) {
+      const pointed = await this.#search(this.layerIndex, { size: bindings.size, query: { terms: { layer_id: [...bindings.keys()] } } });
+      const active = new Set((pointed.hits?.hits ?? []).flatMap(hit => hit._source?.state === "ACTIVE" ? [text(hit._source.layer_id) ?? hit._id!] : []));
+      for (const id of bindings.keys()) if (!active.has(id)) { bindings.delete(id); truncated = true; }
+    }
+    return { bindings, truncated, notes: [] };
   }
 
   async #pages(index: string, query: unknown, sort: unknown[]): Promise<{ hits: SearchHit[]; truncated: boolean }> {
@@ -423,11 +651,11 @@ export class WarehouseIndexService {
     return { hits, truncated: true };
   }
 
-  async #search(index: string, body: unknown): Promise<SearchResponse> {
+  async #search(index: string, body: unknown, timeoutMs = this.#timeoutMs): Promise<SearchResponse> {
     if (!this.url) throw new WarehouseIndexError("Warehouse Elasticsearch is not configured");
     let response: Response;
     try {
-      response = await this.#fetch(`${this.url}/${encodeURIComponent(index)}/_search`, { method: "POST", headers: { Accept: "application/json", "Content-Type": "application/json", ...(this.#authorization ? { Authorization: this.#authorization } : {}) }, body: JSON.stringify(body), signal: AbortSignal.timeout(this.#timeoutMs) });
+      response = await this.#fetch(`${this.url}/${encodeURIComponent(index)}/_search`, { method: "POST", headers: { Accept: "application/json", "Content-Type": "application/json", ...(this.#authorization ? { Authorization: this.#authorization } : {}) }, body: JSON.stringify(body), signal: AbortSignal.timeout(timeoutMs) });
     } catch (error) { throw new WarehouseIndexError(`Warehouse Elasticsearch request failed: ${error instanceof Error ? error.message : String(error)}`); }
     if (!response.ok) throw new WarehouseIndexError(`Warehouse Elasticsearch returned HTTP ${response.status}`);
     return await response.json() as SearchResponse;

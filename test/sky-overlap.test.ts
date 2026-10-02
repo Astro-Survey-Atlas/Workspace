@@ -91,12 +91,25 @@ test("an O10 private scan supplies an O8 query projection without refining a coa
   assert.deepEqual(privateOverlapOrders([]), []);
 });
 
-test("common order unions product capabilities within each survey before intersecting surveys", () => {
+test("a selected coarse product limits the common order for its survey", () => {
   const sources = [
     { ...surveySource("desi-spectra", "desi", [1], 16), availableOrders: [4, 8] },
     { ...surveySource("desi-redrock", "desi", [1], 16), availableOrders: [4] },
     { ...surveySource("euclid", "euclid", [1], 16), availableOrders: [4, 8] },
   ];
-  assert.equal(commonOverlapNside(sources), 256);
+  assert.equal(commonOverlapNside(sources), 16);
   assert.equal(commonOverlapNside([...sources, { ...surveySource("csst", "csst", [1], 16), availableOrders: [4] }]), 16);
+});
+
+test("Legacy DR9 North constrains a selected DR10-plus-DR9 survey to O4", () => {
+  const sources = [
+    { ...surveySource("legacy-dr10", "legacy-surveys", [1], 16), availableOrders: [4, 8] },
+    { ...surveySource("legacy-dr9-north", "legacy-surveys", [1], 16), availableOrders: [4] },
+    { ...surveySource("euclid", "euclid", [1], 16), availableOrders: [4, 8] },
+    { ...surveySource("desi", "desi", [1], 16), availableOrders: [4, 8] },
+    { ...surveySource("hst", "hst", [1], 16), availableOrders: [4, 8] },
+    { ...surveySource("csst", "csst", [1], 16), availableOrders: privateOverlapOrders([10]) },
+  ];
+  assert.equal(commonOverlapNside(sources), 16);
+  assert.deepEqual(calculateSkyOverlap(sources, commonOverlapNside(sources)).pixels, [1]);
 });

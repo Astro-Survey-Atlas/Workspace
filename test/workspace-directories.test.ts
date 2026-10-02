@@ -20,7 +20,7 @@ test("directories are immediate file parents, deduplicated with actual order and
 });
 
 test("CSV retains private directories and unavailable public lookup status", () => {
-  const directory = directoryLocations([{ layerId: "csst", sourceUri: "/local/visit/image.fits", order: 8, matchingCells: [202250], precision: "exact" }], () => "workspace:csst");
+  const directory = directoryLocations([{ layerId: "csst", sourceUri: "/local/visit/image.fits", order: 8, matchingCells: [202250], precision: "exact", matchingCellsTruncated: true }], () => "workspace:csst");
   const csv = workspaceManifestCsv(undefined, directory, true, { componentId: "C04", order: 8, cells: [202250],
     unavailable: [{ sourceId: "public:hst", reason: "API Key required" }], warnings: ["Private scan is incomplete"] });
   assert.match(csv, /workspace-directory/);
@@ -29,6 +29,7 @@ test("CSV retains private directories and unavailable public lookup status", () 
   assert.match(csv, /API Key required/);
   assert.match(csv, /Private scan is incomplete/);
   assert.match(csv, /C04/);
+  assert.match(csv, /matchingCellsTruncated/);
 });
 
 test("Workspace sends only public region selectors and keeps all native-unit links for temporary display/export", async () => {

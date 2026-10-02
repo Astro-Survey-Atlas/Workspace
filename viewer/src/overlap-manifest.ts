@@ -24,7 +24,7 @@ export function workspaceManifestCsv(publicResult: AssetsRegionLookupResponse | 
     for (const item of items ?? []) rows.push([kind, "", "", "", "", "", "", "", "", "", "", "", "", "", publicResult?.querySnapshot?.id, JSON.stringify(item)]);
   }
   rows.push(["manifest-state", "", "", "", "", "", "", "", "", "", "", "", "", "", publicResult?.querySnapshot?.id,
-    JSON.stringify({ publicAvailable: Boolean(publicResult), querySnapshot: publicResult?.querySnapshot, page: publicResult?.page,
+    JSON.stringify({ publicAvailable: Boolean(publicResult), querySnapshot: publicResult?.querySnapshot, nativeUnitIndexRevision: publicResult?.nativeUnitIndexRevision, page: publicResult?.page,
       truncated: publicResult?.truncated, warnings: publicResult?.downloadPlan?.warnings, notes: publicResult?.notes,
       scanScopes: publicResult?.scanScopes, directoriesTruncated, ...context })]);
   const cell = (value: unknown): string => {

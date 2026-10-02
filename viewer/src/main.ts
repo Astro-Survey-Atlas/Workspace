@@ -1,6 +1,8 @@
 import { ChevronLeft, ChevronRight, createIcons, Download, Globe2, GripVertical, Info, Layers3, Maximize2, MessageSquare, Minimize2, Moon, Play, Plus, RefreshCw, RotateCcw, Send, Settings2, SlidersHorizontal, Sun, Undo2, X, Image, Telescope, ScanLine, Database, CircleHelp, ListChecks, Box, Radio, FileJson2 } from "lucide";
 import { mergePublicPages, workspaceManifestCsv } from "./overlap-manifest.js";
 import type { SkyReverseLookupResponse } from "./api.js";
+import type { AssetsRegionLookupResponse, AssetsRegionSpatialUnit } from "../../src/assets-region-client";
+import type { WorkspaceDirectory } from "../../src/workspace-directories";
 
 import "./styles.css";
 import {
@@ -1431,8 +1433,39 @@ function renderOverlapComponent(component: SurveyLayerOverlapComponent): void {
     inspectorRows(`重合区块 ${selected.id}`, [...baseRows, ["反查", "区域超过 4096 cells / 100 deg²，请选择更小天区。"]]);
     return;
   }
-  let lookup: SkyReverseLookupResponse;
-  const request = (cursor?: string) => workspaceApi.skyReverseLookup({ sourceIds, nside, pixels: selected.cells, pageSize: 100, ...(cursor ? { cursor } : {}) });
+  let lookup: SkyReverseLookupResponse = { files: [], unavailable: [], warnings: [], sources: (overlapResponse?.sources ?? []).filter(source => sourceIds.includes(source.id)), workspaceDirectories: [] };
+  let lookupPending = true, progressText = "正在读取公开分块与本地目录";
+  const provisionalUnits = new Map<string, AssetsRegionSpatialUnit>();
+  const provisionalDirectories = new Map<string, WorkspaceDirectory>();
+  let progressRender: ReturnType<typeof setTimeout> | undefined;
+  const request = async (cursor?: string) => {
+    const input = { sourceIds: cursor ? lookup.sources.filter((source) => source.kind === "public").map((source) => source.id) : sourceIds,
+      nside, pixels: selected.cells, pageSize: 100, ...(cursor ? { cursor } : {}) };
+    let result = await workspaceApi.skyReverseLookup(input, cursor ? undefined : event => {
+      if (!current() || !lookupPending) return;
+      if (event.event === "progress") {
+        const stage = String(event.value.stage);
+        const label = stage.startsWith("assets") ? "公开分块" : stage === "workspace" ? "本地目录" : "来源";
+        progressText = `${label}：${event.value.state === "completed" ? "已返回" : event.value.state === "unavailable" ? "不可用" : "查询中"}${event.value.total === undefined ? "" : ` ${event.value.total} 项`}；完整清单仍在准备`;
+      } else if (event.event === "batch") {
+        if (event.value.kind === "public-result") lookup.assetsResult = event.value.result as unknown as AssetsRegionLookupResponse;
+        else if (event.value.kind === "public-native") {
+          const result = event.value.result as unknown as AssetsRegionLookupResponse;
+          for (const unit of result.spatialUnits ?? []) if (provisionalUnits.size < 200) provisionalUnits.set(JSON.stringify([unit.layerId, unit.unitKind, unit.unitId]), unit);
+          lookup.assetsResult = { ...result, spatialUnits: [...provisionalUnits.values()] };
+        } else if (event.value.kind === "workspace-directories" && Array.isArray(event.value.directories)) {
+          for (const directory of event.value.directories as WorkspaceDirectory[]) provisionalDirectories.set(JSON.stringify([directory.sourceId, directory.layerId, directory.directoryUri, directory.order]), directory);
+          lookup.workspaceDirectories = [...provisionalDirectories.values()];
+        }
+      }
+      if (!progressRender) progressRender = setTimeout(() => { progressRender = undefined; if (current() && lookupPending) render(); }, 100);
+    });
+    if (cursor && result.publicRetryAfterSeconds) {
+      await new Promise<void>((resolve) => setTimeout(resolve, result.publicRetryAfterSeconds! * 1000));
+      if (current()) result = await workspaceApi.skyReverseLookup(input);
+    }
+    return result;
+  };
   const precisionLabels: Record<string, string> = { exact: "精确", estimated: "估算", "entrypoint-only": "仅入口", truncated: "截断" };
   const render = () => {
     if (!current()) return;
@@ -1466,9 +1499,9 @@ function renderOverlapComponent(component: SurveyLayerOverlapComponent): void {
     for (const format of ["json", "csv"] as const) {
       const button = actionButton(`导出 ${format.toUpperCase()}`, () => { void exportPlan(format, button); });
       const icon = document.createElement("i"); icon.dataset.lucide = format === "json" ? "file-json-2" : "download"; button.prepend(icon);
-      button.title = `导出 ${format.toUpperCase()} 来源清单`; actions.push(button);
+      button.title = lookupPending ? "等待完整查询和冻结快照完成后导出" : `导出 ${format.toUpperCase()} 来源清单`; button.disabled = lookupPending; actions.push(button);
     }
-    if (lookup.assetsResult?.page?.hasMore) {
+    if (!lookupPending && lookup.assetsResult?.page?.hasMore) {
       const nextButton = actionButton("继续浏览", () => {
         nextButton.disabled = true;
         void request(lookup.assetsResult?.page?.nextCursor).then((next) => {
@@ -1480,12 +1513,13 @@ function renderOverlapComponent(component: SurveyLayerOverlapComponent): void {
       });
       const icon = document.createElement("i"); icon.dataset.lucide = "chevron-right"; nextButton.prepend(icon); actions.push(nextButton);
     }
-    const missingNativeSurveys = lookup.assetsResult && !lookup.assetsResult.page?.hasMore
+    const missingNativeSurveys = !lookupPending && lookup.assetsResult && !lookup.assetsResult.page?.hasMore
       ? [...new Set(lookup.sources.filter((source) => source.kind === "public" && source.surveyId
         && !lookup.assetsResult!.spatialUnits?.some((unit) => unit.surveyId === source.surveyId)).map((source) => source.surveyId!))]
       : [];
     inspectorRows(`重合区块 ${selected.id}`, [...baseRows,
       ["公开分块", String(lookup.assetsResult?.spatialUnits?.length ?? 0)], ["本地目录", String(lookup.workspaceDirectories?.length ?? 0)],
+      ...(lookupPending ? [["查询进度", progressText] as [string, string]] : []),
       ...(missingNativeSurveys.length ? [["未返回原生分块", missingNativeSurveys.join(" / ")] as [string, string]] : []),
       ...(lookup.directoriesTruncated ? [["本地状态", "目录结果不完整"] as [string, string]] : []),
       ...(lookup.assetsResult?.querySnapshot ? [["公开查询", lookup.assetsResult.querySnapshot.queryExhausted ? "查询已穷尽，巡天完整性未知" : "结果受来源范围或查询限制"] as [string, string]] : []),
@@ -1521,10 +1555,11 @@ function renderOverlapComponent(component: SurveyLayerOverlapComponent): void {
     if (lookup.workspaceDirectories?.length) {
       host.append(Object.assign(document.createElement("h3"), { textContent: "CSST / 本地目录" }));
       const list = document.createElement("ul"); list.className = "native-unit-results";
-      for (const directory of lookup.workspaceDirectories) {
+      for (const directory of lookupPending ? lookup.workspaceDirectories.slice(0, 100) : lookup.workspaceDirectories) {
         const row = document.createElement("li"); row.className = "native-unit-result";
         row.append(Object.assign(document.createElement("small"), { textContent: `${directory.surveyId ?? "local"} · ${directory.releaseId ?? "--"} · ${directory.modality ?? "--"} · O${directory.order} · ${precisionLabels[directory.precision]}` }),
           Object.assign(document.createElement("code"), { textContent: directory.directoryUri }));
+        if (directory.matchingCellsTruncated) row.append(Object.assign(document.createElement("small"), { textContent: "匹配像元为代表性样本；目录清单完整性单独标明。" }));
         list.append(row);
       }
       host.append(list);
@@ -1547,7 +1582,7 @@ function renderOverlapComponent(component: SurveyLayerOverlapComponent): void {
     host.append(supporting);
     createIcons({ icons: { Image, Telescope, ScanLine, Database, RotateCcw, Layers3, Sun, CircleHelp, ListChecks, Box, Radio, Info, Download, FileJson2, ChevronRight }, attrs: { "aria-hidden": "true" } });
   };
-  void request().then((result) => { if (!current()) return; lookup = result; render(); })
+  void request().then((result) => { if (progressRender) clearTimeout(progressRender); if (!current()) return; lookupPending = false; lookup = result; render(); })
     .catch((error) => { if (current()) inspectorRows(`重合区块 ${selected.id}`, [...baseRows, ["反查失败", error instanceof Error ? error.message : String(error)]]); });
 }
 

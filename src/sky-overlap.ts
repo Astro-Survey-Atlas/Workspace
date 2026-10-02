@@ -159,9 +159,11 @@ export function commonOverlapNside(sources: readonly SkyOverlapSource[], fallbac
   const groups = new Map<string, Set<number>>();
   for (const source of sources) {
     const key = source.surveyId?.trim() ? `survey:${source.surveyId.trim()}` : `source:${source.id}`;
-    const orders = groups.get(key) ?? new Set<number>();
-    (source.availableOrders ?? [Math.log2(source.nside)]).forEach(order => orders.add(order));
-    groups.set(key, orders);
+    const sourceOrders = new Set(source.availableOrders ?? [Math.log2(source.nside)]);
+    const selectedOrders = groups.get(key);
+    groups.set(key, selectedOrders
+      ? new Set([...selectedOrders].filter((order) => sourceOrders.has(order)))
+      : sourceOrders);
   }
   const orders = [...groups.values()].map(values => [...values]);
   const common = orders[0]!.filter(order => orders.every(values => values.includes(order)));

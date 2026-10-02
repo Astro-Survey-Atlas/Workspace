@@ -1,7 +1,19 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { AssetsRegionClient } from "../src/assets-region-client.js";
+import { AssetsCoverageOverviewClient, AssetsRegionClient, AssetsRegionRateLimitError } from "../src/assets-region-client.js";
+
+test("Assets rate limits retain their retry delay without retrying or falling back", async () => {
+  let requests = 0;
+  const client = new AssetsRegionClient({ catalogUrl: "http://assets.test/api/v1/resource-packages/catalog.json",
+    getApiKey: async () => "asa_live_test", fetchImpl: (async () => {
+      requests++;
+      return new Response('{"error":"limited"}', { status: 429, headers: { "Retry-After": "17" } });
+    }) as typeof fetch });
+  await assert.rejects(client.lookup({ layerIds: ["public-layer"], order: 4, cells: [637], cursor: "fixture" }),
+    (error: unknown) => error instanceof AssetsRegionRateLimitError && error.retryAfterSeconds === 17);
+  assert.equal(requests, 1);
+});
 
 test("AssetsRegionClient sends the scoped key and preserves file evidence", async () => {
   let request: { url: string; init: RequestInit } | undefined;
@@ -272,4 +284,110 @@ test("AssetsRegionClient preserves observation-footprint evidence without files 
     sourceLabel: "MAST observation 26442812",
     summary: "Estimated observation footprint; no science files were scanned.",
   }]);
+});
+
+test("AssetsCoverageOverviewClient reads only the two estimated DR9 order-4 public layers", async () => {
+  const requests: Array<{ url: string; init: RequestInit }> = [];
+  const layerRows = [
+    { layerId: "source-units-legacy-surveys-legacy-dr9-coadded-imaging", product: "Coadded imaging", cells: [11, 12] },
+    { layerId: "source-units-legacy-surveys-legacy-dr9-tractor-catalog", product: "Tractor catalog", cells: [12] },
+  ];
+  const client = new AssetsCoverageOverviewClient({
+    catalogUrl: "http://assets.test/api/v1/resource-packages/catalog.json",
+    getApiKey: async () => "asa_live_test",
+    fetchImpl: (async (url, init) => {
+      const requestUrl = new URL(String(url));
+      requests.push({ url: requestUrl.href, init: init ?? {} });
+      const body = JSON.parse(String(init?.body)) as { layerId: string; order: number; tile: number };
+      const index = layerRows.findIndex(({ layerId }) => layerId === body.layerId);
+      if (requestUrl.pathname !== "/api/v1/access/coverage-block" || index < 0) return new Response("not found", { status: 404 });
+      const layerId = layerRows[index]!.layerId;
+      const product = layerRows[index]!.product;
+      return new Response(JSON.stringify({
+        generatedAt: "2026-10-01T00:00:00.000Z",
+        layerId,
+        surveyId: "legacy-surveys",
+        releaseId: "legacy-dr9",
+        product,
+        modality: product === "Coadded imaging" ? "imaging" : "catalog",
+        availableOrders: [4],
+        overviewOrder: 4,
+        maxOrder: 4,
+        cellCount: layerRows[index]!.cells.length,
+        revision: `${layerId}-revision`,
+        sourceUnitIndex: { status: "estimated", notes: "Native DR9 brick candidates; order-4 overview." },
+        order: 4,
+        tileId: 0,
+        cells: layerRows[index]!.cells,
+        sha256: "a".repeat(64),
+      }), { status: 200 });
+    }) as typeof fetch,
+  });
+
+  const footprints = await client.legacyDr9Footprints();
+  assert.equal(footprints.length, 2);
+  assert.deepEqual(footprints.map(({ product, pixels, layerId, quality, nside }) => ({ product, pixels, layerId, quality, nside })), [
+    {
+      product: "Coadded imaging",
+      pixels: [11, 12],
+      layerId: "source-units-legacy-surveys-legacy-dr9-coadded-imaging",
+      quality: "official_overview",
+      nside: 16,
+    },
+    {
+      product: "Tractor catalog",
+      pixels: [12],
+      layerId: "source-units-legacy-surveys-legacy-dr9-tractor-catalog",
+      quality: "official_overview",
+      nside: 16,
+    },
+  ]);
+  assert.equal(requests.length, 2);
+  assert.ok(requests.every(({ init }) => new Headers(init.headers).get("X-Assets-API-Key") === "asa_live_test"));
+  assert.ok(requests.every(({ init }) => JSON.parse(String(init.body)).order === 4));
+  assert.ok(requests.every(({ url }) => new URL(url).pathname === "/api/v1/access/coverage-block"));
+  assert.ok(footprints.every(({ notes }) => notes.includes("overview")));
+});
+
+test("AssetsCoverageOverviewClient rejects non-O4 precision returned by Assets", async () => {
+  const client = new AssetsCoverageOverviewClient({
+    catalogUrl: "http://assets.test/api/v1/resource-packages/catalog.json",
+    getApiKey: async () => "asa_live_test",
+    fetchImpl: (async () => new Response(JSON.stringify({
+      generatedAt: "2026-10-01T00:00:00.000Z",
+      layerId: "source-units-legacy-surveys-legacy-dr9-coadded-imaging",
+      surveyId: "legacy-surveys",
+      releaseId: "legacy-dr9",
+      product: "Coadded imaging",
+      availableOrders: [4, 8],
+      overviewOrder: 4,
+      maxOrder: 8,
+      cellCount: 1,
+      revision: "revision",
+      sourceUnitIndex: { status: "estimated", notes: "DR9" },
+      order: 4,
+      tileId: 0,
+      cells: [1],
+      sha256: "a".repeat(64),
+    }), { status: 200 })) as typeof fetch,
+  });
+  await assert.rejects(() => client.legacyDr9Footprints(), /invalid DR9 overview block/);
+});
+
+test("streamed public batches stay request-scoped and cannot carry private selectors upstream", async () => {
+  const unit = { layerId: "euclid-layer", productId: "euclid-product", surveyId: "euclid", releaseId: "euclid-q1", product: "VIS", unitKind: "tile", unitId: "42", order: 4, nside: 16, matchingCells: [637], precision: "estimated", accessUri: "https://eas.esac.esa.int/source/42" };
+  const complete = { available: true, precision: "estimated", truncated: false, requested: { layerIds: ["euclid-layer"], order: 4, cells: [637] }, downloadPlan: { spatialUnits: [unit] } };
+  let events = 0;
+  const client = new AssetsRegionClient({ catalogUrl: "http://assets.test/api/v1/resource-packages/catalog.json", getApiKey: async () => "asa_live_test", fetchImpl: (async (_url, init) => {
+    assert.equal(new Headers(init?.headers).get("Accept"), "text/event-stream");
+    const body = JSON.parse(String(init?.body));
+    assert.deepEqual(Object.keys(body).sort(), ["cells", "layerIds", "order", "pageSize"]);
+    const frames = [{ event: "progress", value: { stage: "native", layerId: "euclid-layer", state: "completed", total: 1 } },
+      { event: "batch", value: { units: [unit, { ...unit, layerId: "unrequested-layer" }] } }, { event: "complete", value: complete }];
+    return new Response(frames.map(frame => `event: ${frame.event}\ndata: ${JSON.stringify(frame.value)}\n\n`).join(""), { headers: { "Content-Type": "text/event-stream" } });
+  }) as typeof fetch });
+  const input = { layerIds: ["euclid-layer"], order: 4, cells: [637], privatePath: "/synthetic/private", privateScan: "synthetic" };
+  const result = await client.lookup(input, event => { events++; if (event.event === "batch") { assert.equal(event.value.result.spatialUnits!.length, 1); assert.equal(event.value.provisional, true); } });
+  assert.equal(events, 2); assert.deepEqual(result?.spatialUnits, [unit]);
+  assert.equal(result?.truncated, false);
 });
