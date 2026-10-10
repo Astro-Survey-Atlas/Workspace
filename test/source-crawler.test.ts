@@ -176,6 +176,84 @@ test("unknown resolver kinds surface as unavailable units instead of throwing", 
 
 test("duplicate relative paths in the inventory are rejected instead of renamed", async () => {
   await assert.rejects(() => resolveSourceInventory([directFileUnit, { ...directFileUnit }], {
-    fetchImpl: async () => new Response(null, { status: 500 }),
+    fetchImpl: async () => new Response(null, { status: 200, headers: { "content-type": "application/fits" } }),
   }), /清单相对路径冲突/);
+});
+
+test("mast-observation resolves only public SCIENCE FITS products from the official product API", async () => {
+  const requests: Array<{ url: string; method: string; body?: string }> = [];
+  const inventory = await resolveSourceInventory([{
+    sourceId: "public:hst:mast-2026:acs:layerId=hst-acs",
+    unitId: "hst-observation-26442812",
+    resolver: "mast-observation@1",
+    observationId: "26442812",
+  }], {
+    fetchImpl: async (input, init) => {
+      const method = init?.method ?? "GET";
+      requests.push({ url: String(input), method, body: init?.body ? String(init.body) : undefined });
+      if (method !== "POST") throw new Error("preview must not fetch a science product");
+      return new Response(JSON.stringify({ status: "COMPLETE", Tables: [{
+        Columns: ["obsid", "parent_obsid", "dataproduct_type", "productType", "dataRights", "productFilename", "dataURI", "dataSize"].map((dataIndex) => ({ dataIndex })),
+        Rows: [
+          [26442812, 26442812, "image", "SCIENCE", "PUBLIC", "j12345678_drz.fits", "mast:HST/product/j12345678_drz.fits", 100],
+          [26442812, 26442812, "image", "CALIBRATION", "PUBLIC", "j12345678_dark.fits", "mast:HST/product/j12345678_dark.fits", 200],
+          [26442812, 26442812, "image", "SCIENCE", "PUBLIC", "metadata.json", "mast:HST/product/metadata.json", 50],
+          [26442812, 26442812, "image", "SCIENCE", "PROPRIETARY", "private.fits", "mast:HST/product/private.fits", 75],
+          [26442812, 999, "image", "SCIENCE", "PUBLIC", "wrong-parent.fits", "mast:HST/product/wrong-parent.fits", 80],
+          [999, 999, "image", "SCIENCE", "PUBLIC", "other-observation.fits", "mast:HST/product/other-observation.fits", 90],
+        ],
+      }] }), { status: 200, headers: { "content-type": "application/json" } });
+    },
+  });
+
+  assert.equal(requests.length, 1);
+  assert.equal(requests[0]?.url, "https://mast.stsci.edu/api/v0/invoke");
+  assert.equal(requests[0]?.method, "POST");
+  const form = new URLSearchParams(requests[0]?.body);
+  const envelope = JSON.parse(form.get("request") ?? "{}") as { service: string; params: { obsid: number }; format: string; pagesize: number; page: number };
+  assert.equal(envelope.service, "Mast.Caom.Products");
+  assert.equal(envelope.params.obsid, 26442812);
+  assert.equal(envelope.format, "json");
+  assert.equal(envelope.pagesize, 513);
+  assert.equal(envelope.page, 1);
+  assert.equal(inventory.files.length, 1);
+  assert.equal(inventory.files[0]?.relativePath.endsWith("/j12345678_drz.fits"), true);
+  assert.equal(inventory.files[0]?.sizeBytes, 100);
+  const download = new URL(inventory.files[0]!.url);
+  assert.equal(download.origin, "https://mast.stsci.edu");
+  assert.equal(download.pathname, "/api/v0.1/Download/file");
+  assert.equal(download.searchParams.get("uri"), "mast:HST/product/j12345678_drz.fits");
+  assert.equal(inventory.units[0]?.resolver, "mast-observation@1");
+  assert.equal(inventory.units[0]?.status, "resolved");
+});
+
+test("direct-file metadata rejects missing and listing responses but records unsupported HEAD as unverified", async () => {
+  for (const response of [
+    new Response(null, { status: 403 }),
+    new Response(null, { status: 404 }),
+    new Response(null, { status: 200, headers: { "content-type": "text/html" } }),
+    new Response(null, { status: 200, headers: { "content-type": "application/json" } }),
+  ]) {
+    const inventory = await resolveSourceInventory([directFileUnit], { fetchImpl: async () => response });
+    assert.equal(inventory.files.length, 0);
+    assert.equal(inventory.units[0]?.status, "unavailable");
+  }
+
+  const unsupported = await resolveSourceInventory([directFileUnit], {
+    fetchImpl: async () => new Response(null, { status: 405 }),
+  });
+  assert.equal(unsupported.files.length, 1);
+  assert.equal(unsupported.files[0]?.metadataState, "unverified");
+  assert.match(unsupported.units[0]?.note ?? "", /could not be verified/);
+
+  const failedTransport = await resolveSourceInventory([directFileUnit], {
+    fetchImpl: async () => { throw new Error("connection interrupted"); },
+  });
+  assert.equal(failedTransport.files[0]?.metadataState, "unverified");
+  assert.match(failedTransport.units[0]?.note ?? "", /could not be verified/);
+
+  const missingLength = await resolveSourceInventory([directFileUnit], {
+    fetchImpl: async () => new Response(null, { status: 200, headers: { "content-type": "application/fits" } }),
+  });
+  assert.equal(missingLength.files[0]?.sizeBytes, undefined);
 });

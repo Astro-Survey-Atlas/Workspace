@@ -76,20 +76,40 @@ Workspace should preserve these distinctions in the UI and plan review:
 Workspace must not copy or maintain any Assets native-unit index, public cell
 mapping, reverse-response cache or snapshot. Resource packages contain public
 MOCs, previews and layer metadata only; geometry sidecars are not native-unit
-indexes.
-When a user asks for public data units, Workspace's server may call an
-authenticated Assets endpoint for the requested region and explicit
-public layer identity. Only public layer IDs, order/cells and page/snapshot
-selectors cross this boundary. CSST paths, IDs, hashes, scan records and private
-MOCs never enter Assets requests.
+indexes. Assets may show a small anonymous lookup preview; a valid API Key
+authorizes the full scoped, paginated lookup. Workspace public lookup always
+uses its server-side Key and never falls back to the anonymous preview.
 
-Public responses exist only in the server request and browser memory. They
-cannot be written to Workspace storage, persistent caches, artifacts, production
-recipes or log bodies. A browser may export its temporary JSON/CSV manifest.
-Assets owns the immutable query snapshot, revision, expiry and pagination.
-Without a valid Workspace Assets API Key, public native lookup is unavailable;
-there is no anonymous retry, directory crawl or download-production fallback.
-Public geometry and private directory lookup still work.
+An Assets lookup without a snapshot selector reads the current state and
+freezes its result. Continuation cursors stay on that snapshot; preview
+revalidation names the same snapshot. `page.hasMore=false` means no further
+page remains in that cursor chain. `querySnapshot.queryExhausted` tracks whether
+the underlying bounded query/search completed and can remain false under query
+limits or gaps. `truncated` reports source/query limits or omitted evidence and
+can remain true after page exhaustion. `inventoryComplete` independently
+describes completeness of the declared source inventory. A fully drained export
+may therefore have `page.hasMore=false`, `querySnapshot.queryExhausted=false`,
+`inventoryComplete=false` and `truncated=true`. Workspace sends only public
+layer IDs, HEALPix order/cells, public unit IDs and cursor/snapshot selectors.
+CSST paths, IDs, hashes, scan records, private MOCs and parent directories
+never enter Assets requests.
+
+Raw public lookup, footprint, native-index and snapshot responses exist only in
+the serving request and browser memory. They are not written to Workspace
+storage, persistent caches, artifacts, production recipes or log bodies. A
+browser may export its temporary JSON/CSV source manifest. Of Assets response
+metadata, the only persistence exception is a user-confirmed download task's
+minimal selected-file inventory (source identity, URI, size, checksum and
+relative destination) and progress. That inventory freezes the confirmed file
+set if a later Assets query finds more files; it contains no raw response or
+shared index. The full source files fetched by Workspace are task outputs at
+the chosen Workspace destination. Assets owns the public snapshot and never
+downloads scientific data. Workspace requires its valid API Key for native
+lookup; without it, public geometry and private directory lookup remain
+available while public native lookup is unavailable.
+
+The phase-two stateless preview and confirmed-task request contract is defined
+in [Download Plan Workflow](download-plan-workflow.md).
 
 The first MVP uses Euclid, DESI, Legacy Surveys and HST. Selected products are
 unioned within each survey only at an order supported by every selected product

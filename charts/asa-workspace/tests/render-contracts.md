@@ -74,7 +74,8 @@ mount it writable at `productionData.mountPath`, and emit
 mount plus `ASTRO_LOCAL_CONNECTOR_ROOTS` containing it; disabled output must
 omit the PVC, mount, and variables. With `dataWarehouse.enabled=true` it must
 also emit `ASTRO_WAREHOUSE_LOCAL_CLAIM` and
-`ASTRO_WAREHOUSE_LOCAL_SCANNER_MOUNT`; a `mountPath` that is not a strict
-subpath of `scannerMountPath`, access modes without `ReadWriteMany`, or
+`ASTRO_WAREHOUSE_LOCAL_SCANNER_MOUNT`. Equal mount paths and a production mount
+under the scanner mount must both render. Unrelated mounts, path-prefix lookalikes
+(for example `/data-other` under `/data`), access modes without `ReadWriteMany`, or
 combining `existingClaim` with `storageClass` must fail the guards. The state
 PVC must never carry the scanner-source label.

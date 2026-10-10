@@ -128,8 +128,9 @@
 {{- if regexMatch `(^|/)\.\.?(/|$)` $scannerMount }}{{ fail "productionData.scannerMountPath must not contain dot segments" }}{{- end }}
 {{- if .Values.productionData.enabled }}
 {{- if not (has "ReadWriteMany" .Values.productionData.accessModes) }}{{ fail "productionData.accessModes must include ReadWriteMany" }}{{- end }}
-{{- $mountRelative := trimPrefix (printf "%s/" $scannerMount) $productionMount -}}
-{{- if and .Values.dataWarehouse.enabled (or (eq $mountRelative $productionMount) (eq $mountRelative "") (hasPrefix $mountRelative "/")) }}{{ fail "productionData.mountPath must be a strict subpath of scannerMountPath so the Warehouse scanner can remount the claim" }}{{- end }}
+{{- $sameMount := eq (trimSuffix "/" $productionMount) (trimSuffix "/" $scannerMount) -}}
+{{- $nestedMount := hasPrefix (printf "%s/" (trimSuffix "/" $scannerMount)) (trimSuffix "/" $productionMount) -}}
+{{- if and .Values.dataWarehouse.enabled (not (or $sameMount $nestedMount)) }}{{ fail "productionData.mountPath must equal or be a subpath of scannerMountPath" }}{{- end }}
 {{- if and .Values.productionData.existingClaim .Values.productionData.storageClass }}{{ fail "productionData.existingClaim cannot be combined with storageClass" }}{{- end }}
 {{- else }}
 {{- if or .Values.productionData.existingClaim .Values.productionData.storageClass }}{{ fail "productionData source fields require productionData.enabled=true" }}{{- end }}

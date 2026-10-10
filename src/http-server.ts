@@ -10,6 +10,7 @@ import type { Request, Response } from "express";
 
 import { AgentService } from "./agent.js";
 import { AstroIndexService, ASTRO_FILE_INDEX, ASTRO_OVERVIEW_NSIDE, type AstroCoverageLayer, type AstroSkyQueryInput } from "./astro-index.js";
+import { DerivedRepairService, SKY_DATA_POINT_INDEX } from "./derived-repairs.js";
 import { AstroObjectIndexService, type AstroCellsQueryInput, type ObjectRegionQueryInput } from "./astro-object-index.js";
 import { McpCatalogQueryClient } from "./catalog-mcp-client.js";
 import { createConnectorCredentialStore, type StoredConnectorCredentials } from "./connector-credentials.js";
@@ -36,7 +37,8 @@ import { WarehouseIndexService, type WarehouseCoverageLayer } from "./warehouse-
 import { WarehouseScanService } from "./warehouse-scan.js";
 import { commonOverlapNside, calculateSkyOverlap, privateOverlapOrders, type SkyOverlapSource } from "./sky-overlap.js";
 import { CoverageDownloadService, type CoverageDownloadFile } from "./coverage-downloads.js";
-import { discoverSourceFiles, type SourceUnit } from "./source-crawler.js";
+import { RegionDownloadPlanService } from "./region-download-plan.js";
+import { createRegionDownloadPreviewHandler } from "./region-download-http.js";
 import { ProductionService, ProductionStateError, type ProductionSourceResolver, type ProductionWarehouseHandoff } from "./production.js";
 import { listProductionCapabilities } from "./production-capabilities.js";
 import { buildProvenance } from "./build-metadata.js";
@@ -101,6 +103,7 @@ const connectorCredentials = createConnectorCredentialStore();
 const connectorRuns = new ConnectorIngestRunCatalog(metadataStore);
 const userMocs = new UserMocArtifactStore({ root: userMocRoot });
 const astroObjectIndex = new AstroObjectIndexService({ baseUrl: astroEsUrl });
+const skyDataPoints = new AstroObjectIndexService({ baseUrl: astroEsUrl, objectIndex: SKY_DATA_POINT_INDEX });
 const localCsvScans = new LocalCsvScanExecutor({
   enabled: localCsvScanEnabled,
   connectors,
@@ -141,12 +144,9 @@ const coverageDownloads = new CoverageDownloadService({
   statePath: coverageDownloadStatePath,
   registerConnector: (input) => connectors.register(input),
 });
-/* Builtin source-unit resolver: maps an immutable region snapshot onto typed
- * executable source units using Workspace's own coverage metadata. This seam
- * is where a future authorized Assets source-unit API plugs in. */
-const DESI_TILE_URL_PATTERN = /^https:\/\/data\.desi\.lbl\.gov\/public\/(dr1|edr)\/spectro\/redux\/(iron|fuji)\/tiles\/cumulative\/(\d{1,6})\/(\d{8})\/$/;
-const DIRECT_FILE_URL_PATTERN = /\.(?:fits?|fits?\.gz|fz|csv|tsv|ecsv|jsonl?|parquet|zip|tgz|tar|gz|hdf5?|nc|xml|reg|txt|sha256sum)(?:$|[?#])/i;
-
+const derivedRepairs = new DerivedRepairService({ root: path.join(stateRoot, "derived-repairs"), evidenceRoot: process.env.ASTRO_WAREHOUSE_EVIDENCE_MOUNT_PATH ?? "/var/lib/atlas-evidence",
+  runs: connectorRuns, assets: dataCatalog, artifacts: userMocs, warehouse: warehouseScans, points: skyDataPoints, downloads: () => coverageDownloads.list() });
+warehouseScans.onCoverageCompleted((assetId, scanRunId) => derivedRepairs.submit(assetId, { mode: "positions", scanRunId }));
 function assertExecutablePublicSourceId(sourceId: string): void {
   if (sourceId.startsWith("public:") && !isConcretePublicSourceId(sourceId)) {
     throw new RangeError("public sourceId must include survey, release/DR, product, and sourceId or layerId");
@@ -186,61 +186,21 @@ function assertPublicSourceIdsInProductionInput(value: unknown): void {
 const productionSourceResolver: ProductionSourceResolver = {
   async resolve(region) {
     assertExecutablePublicSourceIds(region.sourceIds);
-    const sources = await overlapSources({
-      nside: region.nside,
-      ...(region.sourceIds.length ? { sourceIds: new Set(region.sourceIds) } : {}),
-      includePublic: true,
-      includeWorkspace: true,
-    });
-    const regionPixels = new Set(region.pixels);
-    const units: SourceUnit[] = [];
-    const blocked: Array<{ sourceId: string; reason: string }> = [];
-    const present = new Set(sources.map((source) => source.id));
-    region.sourceIds
-      .filter((id) => !present.has(id))
-      .forEach((id) => blocked.push({ sourceId: id, reason: "来源不存在、不可用或没有该区域的覆盖" }));
-    for (const source of sources) {
-      if (!source.pixels.some((pixel) => regionPixels.has(pixel))) {
-        blocked.push({ sourceId: source.id, reason: "来源覆盖与所选区域没有交集" });
-        continue;
-      }
-      if (source.kind === "public" && source.executable === false) {
-        blocked.push({ sourceId: source.id, reason: "公开覆盖只有几何证据，没有具体 sourceId/layerId 可供下载" });
-        continue;
-      }
-      const url = source.sourceUrl;
-      if (!url) {
-        blocked.push({ sourceId: source.id, reason: "来源没有可反查的文件 URL" });
-        continue;
-      }
-      if (!/^https?:\/\//i.test(url)) {
-        blocked.push({
-          sourceId: source.id,
-          reason: /^s3:\/\//i.test(url) ? "S3 URL 需要配置凭据后才能下载" : "仅支持公开 HTTP(S) 来源 URL",
-        });
-        continue;
-      }
-      const desi = url.match(DESI_TILE_URL_PATTERN);
-      if (desi) {
-        units.push({
-          sourceId: source.id,
-          unitId: `desi:${desi[1]}:${desi[2]}:${desi[3]}:${desi[4]}`,
-          resolver: "desi-tile@1",
-          directoryUrl: url,
-          release: desi[1]!,
-          redux: desi[2]!,
-          tileId: Number(desi[3]),
-          lastNight: desi[4]!,
-        });
-        continue;
-      }
-      if (DIRECT_FILE_URL_PATTERN.test(url)) {
-        units.push({ sourceId: source.id, unitId: `file:${source.id}`, resolver: "direct-file@1", url });
-        continue;
-      }
-      units.push({ sourceId: source.id, unitId: `dir:${source.id}`, resolver: "http-directory@1", directoryUrl: url.replace(/\/?$/, "/") });
-    }
-    return { units, blocked };
+    const layerIds = [...new Set(region.sourceIds.flatMap(sourceId => {
+      const identity = parsePublicSourceId(sourceId);
+      const layerId = identity ? assetsLayerIdForIdentity(identity) : undefined;
+      return layerId ? [layerId] : [];
+    }))];
+    if (!layerIds.length) throw new RangeError("下载需要具体公共产品图层；本地目录仅作为空间依据");
+    const preview = await regionDownloadPlans.preview({ layerIds, order: Math.log2(region.nside), cells: region.pixels });
+    return {
+      units: [],
+      inventory: preview.inventory,
+      blocked: preview.unavailable.map(item => ({
+        sourceId: region.sourceIds.find(sourceId => assetsLayerIdForIdentity(parsePublicSourceId(sourceId)) === item.layerId) ?? item.layerId,
+        reason: item.reason,
+      })),
+    };
   },
 };
 const warehouseProductionHandoff: ProductionWarehouseHandoff = {
@@ -254,6 +214,7 @@ const productionService = new ProductionService({
   objectIndex: astroObjectIndex,
   localRoots: localConnectorRoots,
   sourceResolver: productionSourceResolver,
+  confirmPublicDownload: confirmation => regionDownloadPlans.confirm(confirmation),
   ...(warehouseScans.enabled ? { warehouseHandoff: warehouseProductionHandoff } : {}),
 });
 const systemConfig = new SystemConfigStore(systemConfigRoot);
@@ -261,6 +222,7 @@ const assetsRegionClient = new AssetsRegionClient({
   catalogUrl: resourceCatalogUrl,
   getApiKey: () => systemConfig.getAssetsApiKey(),
 });
+const regionDownloadPlans = new RegionDownloadPlanService({ client: assetsRegionClient });
 const assetsCoverageOverviewClient = new AssetsCoverageOverviewClient({
   catalogUrl: resourceCatalogUrl,
   getApiKey: () => systemConfig.getAssetsApiKey(),
@@ -433,6 +395,7 @@ function sendApiError(response: Response, error: unknown): void {
     : error instanceof LocalSourceInspectionCapabilityError ? error.statusCode
     : error instanceof LocalSourceInspectionError ? error.statusCode
   : error instanceof ProductionStateError ? error.statusCode
+  : error instanceof Error && "statusCode" in error && typeof error.statusCode === "number" && error.statusCode >= 400 && error.statusCode <= 599 ? error.statusCode
   : error instanceof DataWarehouseDisabledError ? 503
     : error instanceof ResourceCatalogUnavailableError ? 503
     : error instanceof ResourceCatalogSyncError ? 502
@@ -441,6 +404,9 @@ function sendApiError(response: Response, error: unknown): void {
     : error instanceof RangeError ? 400
     : notFound ? 404 : 500;
   if (status === 500) console.error("API request failed", error);
+  if (status === 429 && error instanceof Error && "retryAfterSeconds" in error && typeof error.retryAfterSeconds === "number") {
+    response.set("Retry-After", String(Math.max(1, Math.ceil(error.retryAfterSeconds))));
+  }
   response.status(status).json({ error: message });
 }
 
@@ -533,6 +499,7 @@ app.get("/api/data-assets/status", async (_request: Request, response: Response)
     const assets = await dataCatalog.list();
     const [connectorRecords, runs] = await Promise.all([connectors.list(), connectorRuns.list()]);
     const artifacts = await userMocs.list();
+    const repairs = await derivedRepairs.list();
     const artifactSelections = selectUserMocArtifacts(artifacts);
     const warehouse = await warehouseIndex.coverage({
       nside: ASTRO_OVERVIEW_NSIDE,
@@ -576,6 +543,7 @@ app.get("/api/data-assets/status", async (_request: Request, response: Response)
             ...(mocLayer ? [coverageStatus(mocLayer.status)] : []),
           ]),
           objectStatus: local.status,
+          activeCoverage: warehouseLayer?.state === "ACTIVE" || mocLayer?.mocStatus === "ready",
           latestMocStatus: mocLayer?.latestMocStatus,
           pixels: [...new Set([...legacy.pixels, ...local.pixels, ...(warehouseLayer?.pixels ?? []), ...(mocLayer?.pixels ?? [])])],
           objectCount: local.facts.reduce((sum, fact) => sum + fact.objectCount, 0),
@@ -593,7 +561,11 @@ app.get("/api/data-assets/status", async (_request: Request, response: Response)
         localScanConfigured: localCsvScanEnabled && astroObjectIndex.configured,
         warehouseConfigured: warehouseEnabled && warehouseIndex.configured,
       });
-      return { ...derived, assetName: asset.name };
+      const pointQuery = await skyDataPoints.queryObjects({ bbox: { raMin: 0, raMax: 360, decMin: -90, decMax: 90 }, layerScopes: [{ assetId: asset.id }], limit: 1, includeAttributes: false });
+      const repair = repairs.find((task) => task.assetId === asset.id && task.mode !== "moc" && !task.maxFiles);
+      return { ...derived, assetName: asset.name, dataPointCount: pointQuery.status === "ready" ? pointQuery.total : 0,
+        dataPointStatus: repair?.status ?? (pointQuery.total > 0 ? "succeeded" : "not_indexed"),
+        ...(repair ? { dataPointProgress: { processedFiles: repair.processedFiles, fileCount: repair.fileCount, errors: repair.headerErrors + repair.coordinateErrors } } : {}) };
     }));
     response.json({ statuses });
   } catch (error) {
@@ -1245,6 +1217,33 @@ app.post("/api/sky/cells/query", async (request: Request, response: Response) =>
   } catch (error) {
     sendApiError(response, error);
   }
+});
+
+app.get("/api/derived-repairs", async (_request: Request, response: Response) => {
+  try { response.json({ tasks: await derivedRepairs.list() }); } catch (error) { sendApiError(response, error); }
+});
+app.post("/api/data-assets/:id/derived-repairs", async (request: Request, response: Response) => {
+  try { response.status(202).json({ task: await derivedRepairs.submit(datasetIdFrom(request), request.body) }); } catch (error) { sendApiError(response, error); }
+});
+app.post("/api/sky/points/scopes", async (request: Request, response: Response) => {
+  try {
+    const input = request.body as { sourceIds?: unknown };
+    if (!Array.isArray(input.sourceIds) || input.sourceIds.length > 512 || input.sourceIds.some((id) => typeof id !== "string")) throw new RangeError("Concrete sourceIds are required");
+    response.json({ scopes: await derivedRepairs.scopesForSources(input.sourceIds) });
+  } catch (error) { sendApiError(response, error); }
+});
+app.post("/api/sky/points/query", async (request: Request, response: Response) => {
+  try {
+    const input = request.body as ObjectRegionQueryInput;
+    if (!input.region || !Array.isArray(input.layerScopes)) throw new RangeError("Data point queries require an entry region and explicit layer scopes");
+    const result = await astroObjectIndex.queryObjects(input, [astroObjectIndex.objectIndex, SKY_DATA_POINT_INDEX]);
+    response.json({ ...result, indexing: await derivedRepairs.isIndexing(input.layerScopes) });
+  } catch (error) { sendApiError(response, error); }
+});
+app.get("/api/sky/points/:id", async (request: Request, response: Response) => {
+  try { const point = await astroObjectIndex.getPoint(datasetIdFrom(request), [astroObjectIndex.objectIndex, SKY_DATA_POINT_INDEX]);
+    if (!point) { response.status(404).json({ error: "Data point not found" }); return; } response.json({ point });
+  } catch (error) { sendApiError(response, error); }
 });
 
 app.post("/api/sky/objects/query", async (request: Request, response: Response) => {
@@ -2086,7 +2085,7 @@ app.get("/api/sky/coverage", async (request: Request, response: Response) => {
         const breakdown = {
           key: asset.id,
           label: asset.name,
-          files: legacy.byAsset.find((entry) => entry.key === asset.id)?.files ?? 0,
+          files: warehouseLayer?.fileCount ?? legacy.byAsset.find((entry) => entry.key === asset.id)?.files ?? 0,
           bytes: legacy.byAsset.find((entry) => entry.key === asset.id)?.bytes ?? 0,
           objects: objectCount,
           objectCount,
@@ -2250,6 +2249,8 @@ app.get("/api/production-runs", async (_request: Request, response: Response) =>
     response.json({ runs: await productionService.listRuns() });
   } catch (error) { sendApiError(response, error); }
 });
+
+app.post("/api/sky/download-plan/preview", createRegionDownloadPreviewHandler(regionDownloadPlans, sendApiError));
 
 app.post("/api/production-runs", async (request: Request, response: Response) => {
   try {
@@ -2509,6 +2510,7 @@ async function start(): Promise<void> {
   if (recoveredLocalScans) console.warn(`Marked ${recoveredLocalScans} interrupted local CSV scan(s) as failed`);
   await resourcePackages.initialize();
   warehouseScans.start();
+  if (warehouseEnabled) derivedRepairs.start();
 
   httpServer = app.listen(port, host, () => {
     console.log(`asa-workspace listening on http://${host}:${port}`);
@@ -2523,6 +2525,7 @@ void start().catch(async (error) => {
 
 async function shutdown(): Promise<void> {
   warehouseScans.stop();
+  derivedRepairs.stop();
   if (httpServer) await new Promise<void>((resolve) => httpServer!.close(() => resolve()));
   await metadataStore.close();
   process.exit(0);

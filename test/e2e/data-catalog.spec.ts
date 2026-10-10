@@ -612,15 +612,18 @@ test("data production exposes template-driven DAG runs and requires sky context"
   await expect(page.locator("#inspector-content")).toContainText("流水线参数");
   await expect(page.locator("#inspector-content")).toContainText("未附加天区");
   await expect(page.locator("#production-execute")).toBeDisabled();
-  await expect(page.locator("#production-log-detail")).toBeHidden();
+  await expect(page.locator("#production-log-detail")).toHaveCount(0);
+  await expect(page.locator('.production-dag-node[data-status="idle"]')).toHaveCount(3);
   await page.locator("#production-dag-list .production-dag-node").nth(1).click();
-  await expect(page.locator("#production-log-detail")).toContainText("最近邻球面匹配 · 节点日志");
+  await expect(page.locator("#inspector-content")).toContainText("最近邻球面匹配");
+  await expect(page.locator("#inspector-content")).toContainText("选择一条历史执行记录");
+  await expect(page.locator("#production-log-detail")).toHaveCount(0);
   await expect(page.locator("#production-pipeline-detail")).toHaveCount(0);
   await expect(page.locator("#production-dag-list")).toContainText("对象");
   const workbenchBounds = await page.evaluate(() => {
     const stage = document.querySelector("#production-stage")?.getBoundingClientRect();
     const dag = document.querySelector("#production-dag-list")?.getBoundingClientRect();
-    const logs = document.querySelector("#production-log-detail")?.getBoundingClientRect();
+    const logs = document.querySelector(".production-log-section")?.getBoundingClientRect();
     if (!stage || !dag || !logs) throw new Error("Missing production workbench bounds");
     return {
       stageTop: stage.top,
@@ -638,8 +641,13 @@ test("data production exposes template-driven DAG runs and requires sky context"
   if (await runChips.count()) {
     await runChips.first().click();
     await expect(runChips.first()).toHaveClass(/active/);
+    await expect(page.locator("#inspector-kicker")).toHaveText("EXECUTION OVERVIEW");
+    await page.locator("#production-dag-list .production-dag-node").nth(1).click();
+    await expect(page.locator("#inspector-panel #production-log-detail")).toBeVisible();
+    await expect(page.locator("#production-stage #production-log-detail")).toHaveCount(0);
     await page.locator("#production-template-list .production-template-card").nth(1).click();
     await expect(page.locator("#production-stage .production-run-chip").first()).not.toHaveClass(/active/);
+    await expect(page.locator('.production-dag-node[data-status="idle"]')).toHaveCount(3);
   }
 });
 

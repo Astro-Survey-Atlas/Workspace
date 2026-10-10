@@ -66,6 +66,9 @@ export interface WarehouseCoverageLayer {
   message?: string;
   source: "warehouse";
   assetIds: string[];
+  fileCount: number;
+  coverageCount: number;
+  errorCount: number;
 }
 
 export interface WarehouseCoverageResponse {
@@ -314,6 +317,7 @@ export class WarehouseIndexService {
         return {
           key: `warehouse:${layer.layerId}`, layerId: layer.layerId, surveyId: layer.surveyId, releaseId: layer.releaseId, productId: layer.productId,
           modality: layer.modality, coverageRole: layer.coverageRole, state, status, nside: input.nside, pixels: layerPixels,
+          fileCount: layer.fileCount, coverageCount: layer.coverageCount, errorCount: layer.errorCount,
           nativeOrders: [...edgeOrders].sort((a, b) => a - b), availableOrders,
           ...(layer.maxOrder === undefined ? {} : { maxOrder: layer.maxOrder }),
           precision: precisionValue, ...(layer.errorSummary ? { message: layer.errorSummary } : {}), source: "warehouse", assetIds: [],

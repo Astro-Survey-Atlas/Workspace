@@ -34,3 +34,7 @@ _Avoid_: mutable canvas selection
 _Avoid_: survey-level public ID
 
 The browser, CLI, and Agent use the same server-side command interfaces. The CLI is an HTTP client and never reads the metadata store or filesystem directly.
+
+**Sky data point**: A real ICRS position associated with a catalog row, spectrum target, image center, or pointing. It retains its survey, release, product and file identity. An image center does not assert a detected celestial object.
+
+**Derived repair**: A recoverable operation that rebuilds Workspace artifacts or coordinate associations from an existing successful scan, preserving the original scan and its coverage.

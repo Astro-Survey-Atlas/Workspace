@@ -1,9 +1,11 @@
 import { lookup } from "node:dns/promises";
 import net from "node:net";
+import { abortable } from "./abortable.js";
 
 export type RemoteHostnameResolver = (hostname: string) => Promise<readonly string[]>;
 
 export interface RemoteUrlPolicyOptions {
+  signal?: AbortSignal;
   /** Test and controlled integrations may provide a deterministic resolver. */
   resolveHostname?: RemoteHostnameResolver;
   /** Custom fetch implementations used by isolated tests do not need DNS I/O. */
@@ -107,6 +109,7 @@ async function defaultResolveHostname(hostname: string): Promise<readonly string
 
 /** Validate an HTTP(S) URL before the server makes an outbound request. */
 export async function assertPublicHttpUrl(value: string | URL, options: RemoteUrlPolicyOptions = {}): Promise<URL> {
+  options.signal?.throwIfAborted();
   let url: URL;
   try {
     url = value instanceof URL ? new URL(value.href) : new URL(value);
@@ -121,16 +124,18 @@ export async function assertPublicHttpUrl(value: string | URL, options: RemoteUr
   if (!options.skipDnsLookup) {
     const resolveHostname = options.resolveHostname ?? defaultResolveHostname;
     try {
-      const addresses = await resolveHostname(hostname);
+      const addresses = await abortable(resolveHostname(hostname), options.signal);
       if (addresses.some((address) => isNonPublicAddress(address))) {
         throw new RangeError("Remote URL resolves to a local or private network address");
       }
     } catch (error) {
+      options.signal?.throwIfAborted();
       if (error instanceof RangeError && /private|local/i.test(error.message)) throw error;
       // A DNS failure will be reported by fetch. Keeping it as a valid URL
       // avoids turning a transient resolver outage into a permanent catalog
       // rejection, while successful private resolutions remain blocked.
     }
   }
+  options.signal?.throwIfAborted();
   return url;
 }

@@ -1,6 +1,7 @@
 import type { PublicSourceIdentity } from "./public-source-identity.js";
 import type { SurveyFootprint } from "./survey-footprints.js";
 import { readJsonResponse } from "./json-response-stream.js";
+import { abortable } from "./abortable.js";
 
 export type AssetsRegionEvent = { event: "progress"; value: { stage: string; state: string; layerId?: string; total?: number } }
   | { event: "batch"; value: { result: AssetsRegionLookupResponse; provisional: true } };
@@ -462,19 +463,22 @@ export class AssetsRegionClient {
     this.#timeoutMs = options.timeoutMs ?? 60_000;
   }
 
-  async lookup(input: AssetsRegionLookupRequest, update?: (event: AssetsRegionEvent) => void): Promise<AssetsRegionLookupResponse | undefined> {
-    const key = await this.#getApiKey();
+  async lookup(input: AssetsRegionLookupRequest, update?: (event: AssetsRegionEvent) => void, options: { signal?: AbortSignal } = {}): Promise<AssetsRegionLookupResponse | undefined> {
+    options.signal?.throwIfAborted();
+    const key = await abortable(this.#getApiKey(), options.signal);
     if (!key) return undefined;
     if (!this.#endpoint) throw new Error("Assets region query endpoint is not configured");
-    const response = await this.#fetch(this.#endpoint, {
+    const timeout = AbortSignal.timeout(this.#timeoutMs);
+    const signal = options.signal ? AbortSignal.any([options.signal, timeout]) : timeout;
+    const response = await abortable(this.#fetch(this.#endpoint, {
       method: "POST",
       headers: { Accept: update ? "text/event-stream" : "application/json", "Content-Type": "application/json", "X-Assets-API-Key": key },
       // Deliberately construct the public request: no private IDs, paths or scan metadata cross this boundary.
       body: JSON.stringify({ layerIds: input.layerIds, order: input.order, cells: input.cells,
         ...(input.limit === undefined ? {} : { limit: input.limit }), pageSize: input.pageSize ?? 100,
         ...(input.cursor ? { cursor: input.cursor } : {}), ...(input.querySnapshotId ? { querySnapshotId: input.querySnapshotId } : {}) }),
-      signal: AbortSignal.timeout(this.#timeoutMs),
-    });
+      signal,
+    }), signal);
     if (!response.ok) {
       await response.body?.cancel();
       if (response.status === 429) throw new AssetsRegionRateLimitError(Math.min(60, Math.max(1, Number(response.headers.get("Retry-After")) || 60)));
@@ -492,7 +496,7 @@ export class AssetsRegionClient {
         const result = parseResponse({ available: true, precision: "estimated", truncated: true, requested: { layerIds: input.layerIds, order: input.order, cells: input.cells }, downloadPlan: { spatialUnits: event.value.units, truncated: true } });
         update?.({ event: "batch", value: { result, provisional: true } });
       }
-    }, MAX_RESPONSE_BYTES);
+    }, MAX_RESPONSE_BYTES, signal);
     return parseResponse(value);
   }
 }

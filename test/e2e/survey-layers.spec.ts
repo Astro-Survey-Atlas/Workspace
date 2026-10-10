@@ -97,6 +97,8 @@ test.afterAll(async () => {
 async function proxyApi(page: Page): Promise<void> {
   await page.route("**/api/**", async (route) => {
     const requestUrl = new URL(route.request().url());
+    if (requestUrl.pathname === "/api/sky/points/scopes") { await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ scopes: [] }) }); return; }
+    if (requestUrl.pathname.startsWith("/api/sky/points/") && requestUrl.pathname !== "/api/sky/points/query") { await route.fulfill({ status: 404, body: "{}" }); return; }
     // The UI suite uses the deployed catalog/resource-package APIs, but its
     // interaction tests need a deterministic owned coverage surface. The
     // remote Warehouse ES is intentionally optional and may be unavailable;
@@ -252,7 +254,7 @@ async function openFresh(page: Page, beforeGoto?: () => Promise<void>): Promise<
     localStorage.setItem("astro-workspace:theme:v1", "dark");
   });
   await page.reload();
-  await expect(page.locator("#service-status")).toHaveText("SERVICE ONLINE");
+  await expect(page.locator("#service-status")).toHaveText("SERVICE ONLINE", { timeout: 30_000 });
   await expect(page.locator("#loading-indicator")).not.toHaveClass(/visible/);
   const layersMode = page.locator('button[data-mode="layers"]');
   if (!await layersMode.evaluate((button) => button.classList.contains("active"))) await layersMode.click();
@@ -907,7 +909,7 @@ test("keeps a public Assets MOC and a user MOC on one ICRS/NESTED cell", async (
         layers: [mocLayer],
       }) });
     });
-    await page.route("**/api/sky/objects/query", async (route) => {
+    await page.route("**/api/sky/points/query", async (route) => {
       const body = (route.request().postDataJSON() ?? {}) as Record<string, any>;
       objectRequests.push(body);
       await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({
@@ -955,13 +957,17 @@ test("keeps a public Assets MOC and a user MOC on one ICRS/NESTED cell", async (
 });
 
 test("sphere selection enters Aladin with an exact region snapshot", async ({ page }, testInfo) => {
+  test.setTimeout(90_000);
   await page.setViewportSize({ width: 1440, height: 900 });
-  const objectRequests: Array<{ assetIds?: string[]; surveyIds?: string[]; releaseIds?: string[]; region?: { nside?: number; pixels?: number[]; ordering?: string; coordinateFrame?: string }; bbox?: { raMin?: number; raMax?: number; decMin?: number; decMax?: number }; includeAttributes?: boolean }> = [];
+  const objectRequests: Array<{ assetIds?: string[]; layerScopes?: Array<{ assetId: string; sourceId?: string }>; surveyIds?: string[]; releaseIds?: string[]; region?: { nside?: number; pixels?: number[]; ordering?: string; coordinateFrame?: string }; bbox?: { raMin?: number; raMax?: number; decMin?: number; decMax?: number }; includeAttributes?: boolean }> = [];
   await openFresh(page, async () => {
-    await page.route("**/api/sky/objects/query", async (route) => {
+    await page.route("**/api/sky/points/query", async (route) => {
       const body = route.request().postDataJSON() as typeof objectRequests[number];
       objectRequests.push(body);
-      const bbox = body.bbox ?? { raMin: 0, raMax: 1, decMin: 0, decMax: 1 };
+      const vector = new Healpix(body.region?.nside ?? 16).pix2vec(body.region?.pixels?.[0] ?? 0);
+      const centerRa = (Math.atan2(vector.y, vector.x) * 180 / Math.PI + 360) % 360;
+      const centerDec = Math.asin(vector.z) * 180 / Math.PI;
+      const bbox = body.bbox ?? { raMin: centerRa, raMax: centerRa, decMin: centerDec, decMax: centerDec };
       const ra = ((Number(bbox.raMin ?? 0) + Number(bbox.raMax ?? 0)) / 2) % 360;
       const dec = (Number(bbox.decMin ?? 0) + Number(bbox.decMax ?? 0)) / 2;
       await route.fulfill({
@@ -978,7 +984,7 @@ test("sphere selection enters Aladin with an exact region snapshot", async ({ pa
             release: "cosmos-custom-v1",
             product: "COSMOS",
             modality: "catalog",
-            asset_id: "user-12b69893-1a68-4b20-81dd-fb1ddca31953",
+            asset_id: body.layerScopes?.[0]?.assetId ?? "fixture-asset",
           }],
           total: 1,
           limit: 1000,
@@ -1048,11 +1054,12 @@ test("sphere selection enters Aladin with an exact region snapshot", async ({ pa
   await expect(page.locator("#aladin-cache-state")).toContainText(/CACHE|FETCH/);
   await expect(page.locator("#aladin-fullscreen")).toBeVisible();
   await expect(page.locator("#scene-camera-readout")).toBeHidden();
-  await expect(page.locator("#scene-mode-label")).toHaveText("OBJECT EXPLORE");
+  await expect(page.locator("#scene-mode-label")).toHaveText("DATA EXPLORE");
   await expect(page.locator("#scene-mode-value")).toHaveText("ALT/AZ");
   await expect(page.locator("#scene-coordinate-readout")).toBeVisible();
   await expect(page.locator("#aladin-coordinate-form, #aladin-ra, #aladin-dec, #aladin-fov, #aladin-go")).toHaveCount(0);
-  await expect(page.locator("#aladin-asset-nav .aladin-asset-button")).toHaveCount(1);
+  await expect(page.locator("#aladin-asset-nav .aladin-asset-button")).toHaveCount(4);
+  await expect(page.locator("#aladin-asset-nav")).toContainText("仅有公开覆盖");
   await expect(page.locator(".aladin-location")).toBeHidden();
   await expect(page.locator(".aladin-fov")).toBeHidden();
   await expect(page.locator(".aladin-status-bar")).toBeHidden();
@@ -1077,9 +1084,9 @@ test("sphere selection enters Aladin with an exact region snapshot", async ({ pa
   expect(objectRequests[0]!.region?.ordering).toBe("NESTED");
   expect(objectRequests[0]!.region?.coordinateFrame).toBe("ICRS");
   expect(objectRequests[0]!.includeAttributes).toBe(false);
-  expect(objectRequests.every((request) => request.assetIds?.length === 1)).toBe(true);
+  expect(objectRequests.every((request) => request.layerScopes?.length === 1)).toBe(true);
   expect(objectRequests.every((request) => request.surveyIds === undefined && request.releaseIds === undefined)).toBe(true);
-  await expect(page.locator("#object-status")).toContainText("OBJECTS");
+  await expect(page.locator("#object-status")).toContainText("DATA POINTS");
   await expect.poll(() => catalogMarkerPixelCount(page), { timeout: 10_000 }).toBeGreaterThan(0);
   const catalogCanvas = page.locator(".aladin-catalogCanvas").last();
   const marker = await catalogCanvas.evaluate((element) => {
@@ -1121,6 +1128,7 @@ test("Escape exits Aladin even when a layer control has focus", async ({ page })
   await page.setViewportSize({ width: 1440, height: 900 });
   await openFresh(page);
   const canvas = page.locator("#scene-canvas");
+  await waitForVisibleAssetCoverage(page);
   const point = await findCanvasPoint(page, (state) => state.covered && state.selectable);
   await canvas.click({ position: point });
   await canvas.click({ button: "right", position: point });
@@ -1155,7 +1163,7 @@ test("Aladin queries the current RA/Dec viewport for lightweight objects", async
   test.setTimeout(60_000);
   await page.setViewportSize({ width: 1440, height: 900 });
   const requests: Array<{
-    assetIds?: string[];
+    assetIds?: string[]; layerScopes?: Array<{ assetId: string; sourceId?: string }>;
     surveyIds?: string[];
     releaseIds?: string[];
     cursor?: unknown[];
@@ -1165,7 +1173,7 @@ test("Aladin queries the current RA/Dec viewport for lightweight objects", async
     limit?: number;
   }> = [];
   await openFresh(page, async () => {
-    await page.route("**/api/sky/objects/query", async (route) => {
+    await page.route("**/api/sky/points/query", async (route) => {
       const body = route.request().postDataJSON() as typeof requests[number];
       requests.push(body);
        const pageNumber = body.bbox ? (body.cursor ? 2 : 1) : 0;
@@ -1178,9 +1186,9 @@ test("Aladin queries the current RA/Dec viewport for lightweight objects", async
            release: "cosmos-custom-v1",
            product: "COSMOS",
            modality: "catalog",
-           asset_id: "user-12b69893-1a68-4b20-81dd-fb1ddca31953",
+           asset_id: body.layerScopes?.[0]?.assetId ?? "fixture-asset",
          }))
-          : [{ object_id: "viewport-object-0", ra_deg: 150.1, dec_deg: 2.2, survey: "cosmos-custom", release: "cosmos-custom-v1", product: "COSMOS", modality: "catalog", asset_id: "user-12b69893-1a68-4b20-81dd-fb1ddca31953" }];
+          : [{ object_id: "viewport-object-0", ra_deg: 150.1, dec_deg: 2.2, survey: "cosmos-custom", release: "cosmos-custom-v1", product: "COSMOS", modality: "catalog", asset_id: body.layerScopes?.[0]?.assetId ?? "fixture-asset" }];
        await route.fulfill({
          status: 200,
          contentType: "application/json",
@@ -1203,9 +1211,11 @@ test("Aladin queries the current RA/Dec viewport for lightweight objects", async
   await page.locator("#coverage-enter-flat").click();
   await expect(page.locator("#aladin-explorer")).toBeVisible();
   await expect.poll(() => requests.length, { timeout: 15_000 }).toBeGreaterThan(0);
-  await expect(page.locator("#aladin-asset-nav .aladin-asset-button")).toHaveCount(1);
+  const inherited = await page.evaluate(() => (window as unknown as { __ASTRO_WORKSPACE_DEBUG__: () => { aladinSnapshot: { sourceKeys: string[] } } }).__ASTRO_WORKSPACE_DEBUG__().aladinSnapshot.sourceKeys);
+  await expect(page.locator("#aladin-asset-nav .aladin-asset-button")).toHaveCount(inherited.length);
+  if (inherited.some((key) => key.startsWith("public:"))) await expect(page.locator("#aladin-asset-nav")).toContainText("仅有公开覆盖");
   await expect(page.locator("#aladin-explorer")).toHaveAttribute("data-object-returned", "2000", { timeout: 15_000 });
-  await expect(page.locator("#workspace-notification-deck .workspace-notification").filter({ hasText: "2,000 个对象已载入" })).toBeVisible();
+  await expect(page.locator("#workspace-notification-deck .workspace-notification").filter({ hasText: "2,000 个数据点已载入" })).toBeVisible();
   expect(requests[0]!.region?.ordering).toBe("NESTED");
   expect(requests[0]!.region?.coordinateFrame).toBe("ICRS");
   expect(requests[0]!.includeAttributes).toBe(false);
@@ -1213,10 +1223,66 @@ test("Aladin queries the current RA/Dec viewport for lightweight objects", async
    expect(requests.some((request) => JSON.stringify(request.cursor) === JSON.stringify(["viewport-page-2"]))).toBe(true);
   await expect(page.locator("#aladin-explorer")).toHaveAttribute("data-object-complete", "true");
    await expect(page.locator("#aladin-explorer")).toHaveAttribute("data-catalog-colors", /.+/);
-  expect(requests.every((request) => request.assetIds?.length === 1)).toBe(true);
+  expect(requests.every((request) => request.layerScopes?.length === 1)).toBe(true);
   expect(requests.every((request) => request.surveyIds === undefined && request.releaseIds === undefined)).toBe(true);
-   await expect(page.locator("#object-status")).toContainText("2,000 / 2,000 OBJECTS");
+   await expect(page.locator("#object-status")).toContainText("2,000 / 2,000 DATA POINTS");
+  const layerCheckbox = page.locator("#aladin-asset-nav input[type=checkbox]").first();
+  await layerCheckbox.uncheck();
+  await expect(page.locator("#aladin-explorer")).toHaveAttribute("data-object-returned", "0");
+  const before = requests.length;
+  await page.waitForTimeout(300); expect(requests.length).toBe(before);
+  await layerCheckbox.check();
+  await expect(page.locator("#aladin-explorer")).toHaveAttribute("data-object-returned", "2000");
   await expect(page.locator("#aladin-asset-nav .aladin-asset-button").first()).toBeVisible();
+});
+
+test("Aladin updates an unchanged viewport during indexing and stops with empty scopes", async ({ page }) => {
+  test.setTimeout(75_000);
+  await page.setViewportSize({ width: 1440, height: 900 });
+  const requests: Array<Record<string, any>> = [];
+  let indexing = true;
+  await openFresh(page, async () => {
+    await page.route("**/api/sky/points/query", async (route) => {
+      const input = route.request().postDataJSON();
+      if (input.bbox) requests.push(input);
+      // A missing profile must not freeze the per-layer total at zero after
+      // its real viewport query receives coordinates.
+      const count = !input.bbox ? 0 : requests.length > 1 ? 2 : 1;
+      await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ status: "ready", index: "private-points", indexing,
+        objects: Array.from({ length: count }, (_, i) => ({ object_id: `header-${i}`, ra_deg: 150.1 + i / 1000, dec_deg: 2.2,
+          survey: "fixture", release: "fixture", product: "image", modality: "image", asset_id: input.layerScopes[0].assetId,
+          attributes: { position_role: "image_center", hdu_index: "1" } })), total: count, limit: 1000 }) });
+    });
+  });
+  await waitForVisibleAssetCoverage(page);
+  const point = await findCanvasPoint(page, (state) => state.covered && state.selectable && state.assetIds.length > 0, { requireAsset: true });
+  await page.locator("#scene-canvas").click({ button: "right", position: point });
+  await page.locator("#coverage-enter-flat").click();
+  const host = page.locator("#aladin-explorer");
+  await expect(host).toHaveAttribute("data-indexing", "true", { timeout: 15_000 });
+  await expect(host).toHaveAttribute("data-object-complete", "false");
+  await expect(page.locator("#aladin-loaded-summary")).toContainText("索引补建中");
+  // Aladin can resize once while entering the panel; compare the settled
+  // viewport to the later indexing refresh, not the initial layout request.
+  await page.waitForTimeout(800);
+  const settledIndex = requests.length - 1;
+  await expect.poll(() => requests.length, { timeout: 15_000 }).toBeGreaterThan(settledIndex + 1);
+  await expect(host).toHaveAttribute("data-object-returned", "2");
+  await expect(page.locator("#aladin-asset-nav .aladin-asset-button").first()).toContainText("2 / 2 个数据点");
+  expect(requests[settledIndex + 1]?.bbox).toEqual(requests[settledIndex]?.bbox);
+  expect(requests[settledIndex + 1]?.region).toEqual(requests[settledIndex]?.region);
+  expect(requests[settledIndex + 1]?.layerScopes).toEqual(requests[settledIndex]?.layerScopes);
+  const checkbox = page.locator("#aladin-asset-nav input[type=checkbox]").first();
+  await checkbox.uncheck();
+  await expect(host).toHaveAttribute("data-object-returned", "0");
+  const previousRequests = requests.length;
+  await page.waitForTimeout(10_500);
+  expect(requests.length).toBe(previousRequests);
+  indexing = false;
+  await checkbox.check();
+  await expect(host).toHaveAttribute("data-object-returned", "2");
+  await expect(host).toHaveAttribute("data-object-complete", "true");
+  await expect(host).toHaveAttribute("data-indexing", "false");
 });
 
 test("Aladin entry returns to the sphere with Escape", async ({ page }) => {

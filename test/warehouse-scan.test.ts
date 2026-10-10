@@ -863,8 +863,10 @@ test("builds local ScanRequests on the production data PVC without source secret
   const plan = spec.plan as Record<string, any>;
   assert.equal(plan.source.connector.type, "local");
   assert.deepEqual(plan.extraction, { mode: "fits-wcs", outputOrder: 10 });
-  assert.deepEqual(plan.source.location, { rootPath: "/data/prd-test-run", subPath: "prd-test-run" });
-  assert.deepEqual(spec.scanner.sourceVolume, { claimName: "asa-workspace-production-data", mountPath: "/data", subPath: "prd-test-run" });
+  // ScanPlan SourceLocation accepts rootPath only for local sources. The PVC
+  // subPath is mounted at that same root, so the scanner sees the run files.
+  assert.deepEqual(plan.source.location, { rootPath: "/data/prd-test-run" });
+  assert.deepEqual(spec.scanner.sourceVolume, { claimName: "asa-workspace-production-data", mountPath: "/data/prd-test-run", subPath: "prd-test-run" });
   assert.equal(spec.scanner.backoffLimit, 0);
   assert.deepEqual(spec.credentials.source, {});
   assert.doesNotMatch(JSON.stringify(spec.credentials), /secretName/);
@@ -969,4 +971,23 @@ test("production handoff submits exactly one local ScanRequest and stays idempot
   } finally {
     await rm(fixture.directory, { recursive: true, force: true });
   }
+});
+
+test("metadata replay uses the frozen inventory scope without a second pattern expansion or coverage submission", async () => {
+  const fixture = await warehouseFixture(["SUCCEEDED"], {}, "http://warehouse-es:9200", "user", [], { kind: "image" });
+  try {
+    const coverage: CoverageJobSnapshot = { surveyId: "my-survey", releaseId: "my-release", product: "my-product", mode: "fits-wcs", coordinateFrame: "ICRS",
+      coverageRole: "image_extent", dataOrigin: "observed", sourceTier: "user_file_derived", maxOrder: 10, queryOrder: 8, previewOrder: 4, fileNamePattern: "image_*.fits" };
+    const { run } = await fixture.runs.create(fixture.connector.locationKey, { connectorId: fixture.connector.id, connectorName: fixture.connector.name, connectorKind: "s3", backend: "warehouse",
+      taskKind: "user_coverage", assetId: fixture.asset.id, assetIds: [fixture.asset.id], assetName: fixture.asset.name, status: "succeeded", fileCount: 1,
+      batchId: "original-scan", warehouseLayerId: "workspace-user-asset-1", sourcePath: "s3://user-data/catalogs/images/image_", coverage, sourceSnapshotSha256: "a".repeat(64) });
+    const replay = await fixture.service.startPositionReplay(run, "derived-test", { layerId: run.warehouseLayerId!, scanRunId: run.batchId!, sourceSnapshotSha256: "a".repeat(64),
+      path: path.join(fixture.directory, "inventory.ndjson"), sha256: "b".repeat(64), fileCount: 1 });
+    const { readFile } = await import("node:fs/promises");
+    const spec = JSON.parse(await readFile(path.join(replay.outputPath, "replay-spec.json"), "utf8"));
+    assert.equal(spec.source.location.prefix, "catalogs/images/image_");
+    assert.equal(spec.inventorySha256, "b".repeat(64)); assert.equal(spec.concurrency, 8);
+    assert.equal(spec.sink, undefined);
+    assert.ok(!fixture.requests.some((request) => request.path.endsWith("/scanrequests")));
+  } finally { await rm(fixture.directory, { recursive: true, force: true }); }
 });

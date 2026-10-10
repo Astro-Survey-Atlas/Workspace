@@ -89,10 +89,15 @@ carry the scanner-source label and `ReadWriteMany` access.
 
 When `dataWarehouse.enabled=true` at the same time, the chart also injects
 `ASTRO_WAREHOUSE_LOCAL_CLAIM` and `ASTRO_WAREHOUSE_LOCAL_SCANNER_MOUNT`. The
-Warehouse scanner Job then mounts the same claim read-only at
-`scannerMountPath` (`/data`), so `mountPath` must stay a strict subpath of
-`scannerMountPath`. This lets a completed run hand its local Connector to a
-Warehouse scan without copying bytes to object storage.
+Warehouse scanner Job mounts the selected run's PVC subpath read-only beneath
+`scannerMountPath` (default `/data/production`). `mountPath` may equal or be a
+subpath of `scannerMountPath`. Equal paths preserve file URIs and returned
+parent directories across Workspace and scanner containers. In the ScanRequest,
+the selected directory is both `plan.source.location.rootPath` and
+`scanner.sourceVolume.mountPath`; only the volume carries `subPath`. A completed
+run's Connector can be scanned after linking a registered user asset and recipe.
+Pin `dataWarehouse.scannerImage` to a version compatible with the deployed
+Warehouse Operator; older scanners can reject fields added by its plan renderer.
 
 ```yaml
 productionData:
@@ -102,7 +107,7 @@ productionData:
   accessModes: [ReadWriteMany]
   size: 500Gi
   mountPath: /data/production
-  scannerMountPath: /data
+  scannerMountPath: /data/production
 ```
 
 ## Workspace search (always on)

@@ -58,6 +58,7 @@ export interface MocCoreAdapter {
   buildCatalog(input: MocCoreCatalogInput): Promise<MocCoreCatalogResult>;
   /** Build an authoritative MOC from already validated NESTED cells. */
   buildNestedHealpix?(input: MocCoreNestedHealpixInput): Promise<MocCoreCatalogResult>;
+  buildNestedHealpixFile?(input: Omit<MocCoreNestedHealpixInput, "cells"> & { inputPath: string }): Promise<MocCoreCatalogResult>;
 }
 
 export class MocCoreUnavailableError extends Error {
@@ -208,16 +209,27 @@ export class MocCoreCliAdapter implements MocCoreAdapter {
     if (!Array.isArray(input.cells) || input.cells.some((cell) => !cell || !Number.isSafeInteger(cell.order) || !Number.isSafeInteger(cell.ipix) || cell.order < 0 || cell.order > maxOrder || cell.ipix < 0 || cell.ipix >= 12 * 4 ** cell.order)) {
       throw new RangeError("nested HEALPix cells are invalid");
     }
-    const work = await mkdtemp(path.join(os.tmpdir(), "astro-atlas-moc-core-nested-"));
+    const work = await mkdtemp(path.join(os.tmpdir(), "astro-atlas-moc-cells-"));
     const inputPath = path.join(work, "cells.json");
+    try {
+      await writeFile(inputPath, JSON.stringify({ cells: input.cells.map((cell) => ({ order: cell.order, ipix: cell.ipix })) }), "utf8");
+      return await this.buildNestedHealpixFile({ ...input, inputPath });
+    } finally { await rm(work, { recursive: true, force: true }); }
+  }
+
+  async buildNestedHealpixFile(input: Omit<MocCoreNestedHealpixInput, "cells"> & { inputPath: string }): Promise<MocCoreCatalogResult> {
+    const maxOrder = positiveOrder(input.maxOrder, MOC_CORE_DEFAULT_MAX_ORDER, "maxOrder");
+    const queryOrder = positiveOrder(input.queryOrder, MOC_CORE_QUERY_ORDER, "queryOrder");
+    const previewOrder = positiveOrder(input.previewOrder, MOC_CORE_PREVIEW_ORDER, "previewOrder");
+    if (queryOrder !== 8 || previewOrder !== 4) throw new RangeError("MOC Core projections are fixed at orders 8 and 4");
+    const work = await mkdtemp(path.join(os.tmpdir(), "astro-atlas-moc-core-nested-"));
     const specPath = path.join(work, "spec.json");
     const outputPath = path.join(work, "build");
     const layerId = stableLayerId(input.layerId);
-    await writeFile(inputPath, JSON.stringify({ cells: input.cells.map((cell) => ({ order: cell.order, ipix: cell.ipix })) }), "utf8");
     await writeFile(specPath, JSON.stringify({
       layerId,
       mode: "nested-healpix",
-      input: inputPath,
+      input: path.resolve(input.inputPath),
       coverageRole: input.coverageRole,
       dataOrigin: input.dataOrigin,
       sourceTier: input.sourceTier,

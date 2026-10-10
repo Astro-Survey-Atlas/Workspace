@@ -7,6 +7,9 @@ metadata:
   labels:
     {{- include "asa-workspace.labels" . | nindent 4 }}
 rules:
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["get", "list", "create"]
   - apiGroups: [""]
     resources: ["secrets"]
     verbs: ["get", "create", "update", "patch", "delete"]

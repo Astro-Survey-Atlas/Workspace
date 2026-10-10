@@ -7,12 +7,13 @@ import type { DataCatalogRegistry, DataAssetRecord } from "./data-catalog.js";
 import type { AstroObjectIndexService, AstroObjectRecord } from "./astro-object-index.js";
 import type { LocalConnectorRootsPolicy } from "./local-connector-roots.js";
 import type { CoverageDownloadFile, CoverageDownloadJob, CoverageDownloadService } from "./coverage-downloads.js";
+import type { RegionDownloadConfirmation } from "./region-download-plan.js";
 import {
   resolveSourceInventory, computeInventoryDigest, validateRelativePath,
   type ResolveSourceInventoryOptions, type SourceFileInventory, type SourceInventoryFile, type SourceUnit, type SourceUnitResolution,
 } from "./source-crawler.js";
 
-export type ProductionRunStatus = "queued" | "resolving" | "awaiting-approval" | "running" | "succeeded" | "failed" | "cancelled" | "rejected";
+export type ProductionRunStatus = "queued" | "resolving" | "awaiting-approval" | "running" | "succeeded" | "partial" | "failed" | "cancelled" | "rejected";
 export type ProductionPipelineAvailability = "available" | "planned";
 
 export interface RegionSnapshot {
@@ -37,7 +38,7 @@ export interface ProductionArtifact {
 export interface ProductionStep {
   id: string;
   title: string;
-  status: "pending" | "running" | "succeeded" | "failed" | "cancelled" | "skipped";
+  status: "pending" | "running" | "succeeded" | "partial" | "failed" | "cancelled" | "skipped";
   detail?: string;
   startedAt?: string;
   completedAt?: string;
@@ -118,6 +119,8 @@ export interface ProductionRunInput {
   region?: unknown;
   /** @deprecated Pre-expanded file list; bypasses in-run resolution and approval. */
   files?: readonly CoverageDownloadFile[];
+  /** A user-confirmed subset of an authenticated, transient region preview. */
+  publicDownload?: RegionDownloadConfirmation;
   exportFormat?: "json" | "csv";
   crawlerId?: string;
   concurrency?: number;
@@ -136,6 +139,8 @@ export interface ProductionSourceResolver {
 
 export interface ProductionSourceResolution {
   units: SourceUnit[];
+  /** Already resolved metadata from the authenticated region adapter. */
+  inventory?: SourceFileInventory;
   /** Sources that could not be mapped to any executable unit. */
   blocked: Array<{ sourceId: string; reason: string }>;
 }
@@ -257,7 +262,7 @@ function normalizeStep(step: ProductionStep): ProductionStep {
     : [];
   if (!logs.length && step.status !== "pending") {
     const timestamp = step.completedAt ?? step.startedAt ?? now();
-    const level = step.status === "failed" ? "error" : step.status === "cancelled" ? "warning" : "info";
+    const level = step.status === "failed" ? "error" : step.status === "cancelled" || step.status === "partial" ? "warning" : "info";
     logs.push(stepLog(timestamp, level, step.detail ?? `节点状态：${step.status}`));
   }
   return { ...step, logs };
@@ -386,6 +391,7 @@ interface ProductionServiceOptions {
   localRoots: LocalConnectorRootsPolicy;
   sourceResolver?: ProductionSourceResolver;
   sourceResolveOptions?: ResolveSourceInventoryOptions;
+  confirmPublicDownload?: (confirmation: RegionDownloadConfirmation) => Promise<SourceFileInventory>;
   warehouseHandoff?: ProductionWarehouseHandoff;
 }
 
@@ -404,6 +410,7 @@ export class ProductionService {
   readonly #localRoots: LocalConnectorRootsPolicy;
   readonly #sourceResolver?: ProductionSourceResolver;
   readonly #sourceResolveOptions?: ResolveSourceInventoryOptions;
+  readonly #confirmPublicDownload?: ProductionServiceOptions["confirmPublicDownload"];
   readonly #warehouseHandoff?: ProductionWarehouseHandoff;
   readonly #runs = new Map<string, ProductionRun>();
   readonly #writes = new Map<string, Promise<void>>();
@@ -423,6 +430,7 @@ export class ProductionService {
     this.#localRoots = options.localRoots;
     this.#sourceResolver = options.sourceResolver;
     this.#sourceResolveOptions = options.sourceResolveOptions;
+    this.#confirmPublicDownload = options.confirmPublicDownload;
     this.#warehouseHandoff = options.warehouseHandoff;
   }
 
@@ -521,9 +529,35 @@ export class ProductionService {
     const normalized: Record<string, unknown> = { pipelineKey, region };
     const steps: ProductionStep[] = pipeline.dag.map((node) => ({ id: node.id, title: node.title, status: "pending", logs: [] }));
     let initialStatus: ProductionRunStatus = "queued";
+    let confirmedInventory: SourceFileInventory | undefined;
     if (pipeline.id === "overlap-download") {
       const hasLegacyFiles = Array.isArray(input.files) && input.files.length > 0;
       if (input.files !== undefined && !hasLegacyFiles) throw new RangeError("overlap-download files must be a non-empty array when provided");
+      if (input.publicDownload !== undefined) {
+        if (hasLegacyFiles) throw new RangeError("publicDownload cannot be combined with legacy files");
+        if (reuse) {
+          normalized.publicDownload = clone(input.publicDownload);
+        } else {
+          const confirmation = input.publicDownload;
+          if (!confirmation || typeof confirmation !== "object" || !confirmation.selection) throw new RangeError("publicDownload.selection is required");
+          const selection = confirmation.selection;
+          if (selection.order !== Math.log2(region.nside) || !Array.isArray(selection.cells)
+            || JSON.stringify([...new Set(selection.cells)].sort((a, b) => a - b)) !== JSON.stringify(region.pixels)) {
+            throw new ProductionStateError("下载选区与区域快照不一致；请重新预览");
+          }
+          if (!this.#confirmPublicDownload) throw new ProductionStateError("当前部署未配置认证区域下载");
+          confirmedInventory = await this.#confirmPublicDownload(confirmation);
+          if (!confirmedInventory.files.length) throw new RangeError("请至少选择一个可下载文件");
+          // Store only the confirmed file inventory and a provenance reference.
+          // The raw lookup and the unselected native units remain transient.
+          normalized.publicDownload = {
+            querySnapshotId: selection.querySnapshotId,
+            nativeUnitIndexRevision: selection.nativeUnitIndexRevision,
+            previewSha256: confirmation.previewSha256,
+          };
+          region.sourceIds = [...new Set(confirmedInventory.files.map(file => file.sourceId))];
+        }
+      }
       const exportFormat = input.exportFormat ?? "json";
       if (exportFormat !== "json" && exportFormat !== "csv") throw new RangeError("exportFormat must be json or csv");
       const crawlerId = input.crawlerId === undefined ? "builtin-http" : text(input.crawlerId, "crawlerId");
@@ -539,7 +573,7 @@ export class ProductionService {
       normalized.warehouseHandoff = warehouseHandoff;
       // Runs without pre-expanded files resolve their source units inside the
       // run and pause at a human approval gate before any transfer.
-      if (!hasLegacyFiles) initialStatus = "resolving";
+      if (!hasLegacyFiles && !confirmedInventory && !reuse) initialStatus = "resolving";
     } else {
       if (!input.leftAssetId || !input.rightAssetId) throw new RangeError("object-crossmatch requires two assets");
       const leftAssetId = text(input.leftAssetId, "leftAssetId");
@@ -567,7 +601,21 @@ export class ProductionService {
       artifacts: [],
       summary: {},
       ...(reuse ? { inventory: clone(reuse.inventory), approval: { ...clone(reuse.approval), reused: true }, retryOfRunId: reuse.originId } : {}),
+      ...(confirmedInventory ? {
+        inventory: clone(confirmedInventory),
+        approval: { state: "approved" as const, planSha256: confirmedInventory.inventorySha256, decidedAt: createdAt, decidedBy: "user" as const },
+      } : {}),
     };
+    if (confirmedInventory) {
+      run.summary = {
+        inventorySha256: confirmedInventory.inventorySha256,
+        inventoryFiles: confirmedInventory.files.length,
+        inventoryBytes: confirmedInventory.files.reduce((sum, file) => sum + (file.sizeBytes ?? 0), 0),
+        inventoryUnits: confirmedInventory.units.length,
+        ...(confirmedInventory.truncated ? { inventoryTruncated: true } : {}),
+      };
+      this.appendStepLog(run, "resolve", "info", "已重新校验认证区域预览及所选文件");
+    }
     if (reuse) {
       run.summary = {
         ...run.summary,
@@ -702,7 +750,7 @@ export class ProductionService {
         if (statusAfter === "awaiting-approval" || statusAfter === "rejected" || statusAfter === "cancelled") {
           return;
         }
-        run.status = "succeeded";
+        run.status = statusAfter === "partial" || Number(run.summary.failedFiles ?? 0) > 0 ? "partial" : "succeeded";
         run.completedAt = now();
         await this.#save(run);
       } catch (error) {
@@ -754,7 +802,7 @@ export class ProductionService {
         const resolution = await this.#sourceResolver.resolve(region);
         // A cancelled run must not continue past its in-flight resolution.
         if (run.status !== "resolving" && run.status !== "running") return;
-        inventory = await resolveSourceInventory(resolution.units, this.#sourceResolveOptions);
+        inventory = resolution.inventory ?? await resolveSourceInventory(resolution.units, this.#sourceResolveOptions);
         inventory.units = [...inventory.units, ...resolution.blocked.map((entry) => ({
           sourceId: entry.sourceId,
           unitId: `blocked:${entry.sourceId}`,
@@ -793,6 +841,12 @@ export class ProductionService {
     }
     if (!run.inventory) throw new Error("缺少下载清单");
     const inventory = run.inventory;
+    if (run.steps.find(step => step.id === "resolve")?.status !== "succeeded") {
+      await this.setStep(run, "resolve", "succeeded", `${inventory.units.length} 个来源单元 · ${inventory.files.length} 个已确认文件`);
+    }
+    if (!run.artifacts.some(artifact => artifact.name === "download-plan.json")) {
+      await this.writeArtifact(run, "download-plan.json", "application/json", `${JSON.stringify({ inventory, summary: run.summary }, null, 2)}\n`);
+    }
 
     // --- approval ---
     if (run.approval?.state === "approved") {
@@ -848,6 +902,11 @@ export class ProductionService {
         url: file.url,
         name: file.relativePath.split("/").pop() ?? file.relativePath,
         relativePath: file.relativePath,
+        sourceId: file.sourceId,
+        unitId: file.unitId,
+        nativeUnitId: file.nativeUnitId,
+        nativeUnitKind: file.nativeUnitKind,
+        layerId: file.layerId,
         ...(file.sizeBytes !== undefined ? { sizeBytes: file.sizeBytes } : {}),
         ...(file.sha256 ? { sha256: file.sha256 } : {}),
         ...(file.etag ? { etag: file.etag } : {}),
@@ -867,7 +926,7 @@ export class ProductionService {
     let current: CoverageDownloadJob = download;
     let loggedFiles = current.downloadedFiles;
     for (let attempt = 0; attempt < DOWNLOAD_POLL_ATTEMPTS; attempt += 1) {
-      if (current.status === "completed" || current.status === "failed" || current.status === "cancelled") break;
+      if (current.status === "completed" || current.status === "partial" || current.status === "failed" || current.status === "cancelled") break;
       await new Promise((resolve) => setTimeout(resolve, DOWNLOAD_POLL_INTERVAL_MS));
       current = await this.#downloads.get(download.id);
       run.summary = { ...run.summary, downloadedFiles: current.downloadedFiles, downloadedBytes: current.downloadedBytes };
@@ -877,15 +936,35 @@ export class ProductionService {
       }
       await this.#save(run);
     }
-    if (current.status !== "completed" && current.status !== "failed" && current.status !== "cancelled") {
+    if (current.status !== "completed" && current.status !== "partial" && current.status !== "failed" && current.status !== "cancelled") {
       await this.#downloads.cancel(download.id).catch(() => undefined);
       throw new Error("下载任务超时（1 小时），已请求取消；可重试复用已下载内容");
     }
+    const failedTransfers = current.transfer?.filter((entry) => entry.status === "failed") ?? [];
+    const failedFiles = Math.max(failedTransfers.length, current.totalFiles - current.downloadedFiles);
+    run.summary = {
+      ...run.summary,
+      downloadedFiles: current.downloadedFiles,
+      downloadedBytes: current.downloadedBytes,
+      failedFiles,
+    };
+    if (current.status === "failed" && failedTransfers.length) {
+      failedTransfers.forEach((entry) => this.appendStepLog(run, "download", "warning", `${entry.relativePath} 已跳过：${entry.error ?? "下载或校验失败"}`));
+      await this.#save(run);
+    }
     if (current.status === "cancelled") { run.status = "cancelled"; throw new Error(current.error ?? "下载已取消"); }
-    if (current.status !== "completed") throw new Error(current.error ?? "下载失败");
+    if (current.status !== "completed" && current.status !== "partial") throw new Error(current.error ?? "下载失败");
+    if (current.downloadedFiles === 0) throw new Error(current.error ?? "没有文件通过下载与校验");
     run.outputConnectorId = current.outputConnectorId;
     run.outputPath = current.outputPath;
-    await this.setStep(run, "download", "succeeded", `${current.downloadedFiles} 个文件下载完成`);
+    const partiallySucceeded = current.status === "partial" || failedFiles > 0;
+    if (partiallySucceeded) {
+      failedTransfers.forEach((entry) => this.appendStepLog(run, "download", "warning", `${entry.relativePath} 已跳过：${entry.error ?? "下载或校验失败"}`));
+    }
+    const downloadDetail = partiallySucceeded
+      ? `已保留 ${current.downloadedFiles}/${current.totalFiles} 个验证成功文件；${failedFiles} 个失败文件已跳过`
+      : `${current.downloadedFiles} 个文件下载完成`;
+    await this.setStep(run, "download", partiallySucceeded ? "partial" : "succeeded", downloadDetail);
 
     // --- connector ---
     await this.setStep(run, "connector", "running", "正在登记下载结果");
@@ -964,10 +1043,10 @@ export class ProductionService {
   private updateStep(step: ProductionStep, status: ProductionStep["status"], detail?: string, level?: ProductionStepLogEntry["level"]): void {
     const timestamp = now();
     if (status === "running" && !step.startedAt) step.startedAt = timestamp;
-    if (["succeeded", "failed", "cancelled", "skipped"].includes(status)) step.completedAt = timestamp;
+    if (["succeeded", "partial", "failed", "cancelled", "skipped"].includes(status)) step.completedAt = timestamp;
     step.status = status;
     if (detail) step.detail = detail;
-    const resolvedLevel = level ?? (status === "failed" ? "error" : status === "cancelled" ? "warning" : "info");
+    const resolvedLevel = level ?? (status === "failed" ? "error" : status === "cancelled" || status === "partial" ? "warning" : "info");
     const message = detail ?? (status === "running" ? `${step.title}开始执行` : `${step.title}：${status}`);
     step.logs = [...step.logs, stepLog(timestamp, resolvedLevel, message)].slice(-MAX_STEP_LOGS);
   }

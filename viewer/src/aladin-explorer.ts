@@ -1,6 +1,6 @@
 import A from "aladin-lite";
 
-import type { AstroObjectRecord, ObjectRegionQueryInput } from "../../src/astro-object-index";
+import type { AstroObjectRecord, ObjectRegionQueryInput, SkyDataPointScope } from "../../src/astro-object-index";
 import { workspaceApi } from "./api";
 import { clampDec, normalizeRa } from "./coordinates";
 import type { SurveyObjectPoint } from "./survey-layer-viewer";
@@ -17,10 +17,13 @@ export interface AladinExplorerSnapshot {
   imageSurveyUrl: string;
   assetTargets: AladinAssetTarget[];
   initialAssetId?: string;
+  layerScopes?: SkyDataPointScope[];
 }
 
 export interface AladinAssetTarget {
   assetId: string;
+  scopes?: SkyDataPointScope[];
+  coverageOnly?: boolean;
   label: string;
   color: string;
   centerRaDeg: number;
@@ -45,6 +48,7 @@ export interface AladinExplorerStatus {
   message?: string;
   assets?: AladinAssetProgress[];
   overlapCount?: number;
+  indexing?: boolean;
 }
 
 export interface AladinAssetProgress {
@@ -88,6 +92,7 @@ interface ViewportSession {
   total: number;
   truncated: boolean;
   seeded: boolean;
+  indexing: boolean;
   lastUsed: number;
 }
 
@@ -102,6 +107,7 @@ type PointShape = "circle" | "square" | "diamond" | "triangle" | "plus";
 
 const QUERY_LIMIT = 1000;
 const QUERY_DEBOUNCE_MS = 200;
+const INDEX_REFRESH_MS = 10_000;
 const MIN_FOV_DEG = 0.05;
 const MAX_FOV_DEG = 180;
 const MAX_VIEWPORT_SESSIONS = 3;
@@ -269,12 +275,14 @@ export class AladinExplorer {
 
   private readonly host: HTMLElement;
   private readonly callbacks: AladinExplorerCallbacks;
+  private readonly selectedLayerIds = new Set<string>();
   private readonly assetTargets = new Map<string, AladinAssetTarget>();
   private readonly sessions = new Map<string, ViewportSession>();
   private aladin: any = null;
   private activeSession: ViewportSession | null = null;
   private activeRequest: ActiveRequest | null = null;
   private queryTimer: ReturnType<typeof setTimeout> | null = null;
+  private indexRefreshTimer: ReturnType<typeof setTimeout> | null = null;
   private resizeObserver: ResizeObserver | null = null;
   private generation = 0;
   private disposed = false;
@@ -300,7 +308,8 @@ export class AladinExplorer {
     this.snapshot.assetTargets.forEach((target) => this.assetTargets.set(target.assetId, target));
     this.activeAssetId = snapshot.initialAssetId && this.assetTargets.has(snapshot.initialAssetId)
       ? snapshot.initialAssetId
-      : this.snapshot.assetTargets[0]?.assetId ?? null;
+      : null;
+    this.snapshot.assetTargets.forEach((target) => this.selectedLayerIds.add(target.assetId));
     this.ready = this.initialize();
   }
 
@@ -377,6 +386,7 @@ export class AladinExplorer {
       const record = source?.data?.record as AstroObjectRecord | undefined;
       if (record) {
         this.lastObjectClickAt = Date.now();
+        void workspaceApi.skyPointDetail(record.object_id).then(({ point }) => { if (!this.disposed && this.host.dataset.objectSelected === point.object_id) this.callbacks.onObject(this.toObjectPoint(point)); }).catch(() => undefined);
         this.host.dataset.objectSelected = record.object_id;
         this.callbacks.onObject(this.toObjectPoint(record, source?.data?.overlap ? {
           overlapCount: Number(source.data.overlapCount) || undefined,
@@ -423,15 +433,26 @@ export class AladinExplorer {
     return this.activeAssetId;
   }
 
+  getSelectedLayerIds(): string[] { return [...this.selectedLayerIds]; }
+
+  setLayerSelected(layerId: string, selected: boolean): void {
+    if (!this.assetTargets.has(layerId)) return;
+    if (selected) this.selectedLayerIds.add(layerId); else this.selectedLayerIds.delete(layerId);
+    this.activeAssetId = this.selectedLayerIds.size === 1 ? [...this.selectedLayerIds][0]! : null;
+    this.activateSession([...this.selectedLayerIds]);
+    this.callbacks.onAssetChange?.(this.activeAssetId);
+    this.renderSeedRecords(); this.scheduleQuery(0);
+  }
+
   focusAsset(assetId: string | null): void {
-    if (assetId !== null && !this.assetTargets.has(assetId)) return;
-    this.activateSession(assetId ? [assetId] : [...(this.snapshot.filters.assetIds ?? [])]);
-    this.activeAssetId = assetId;
-    this.callbacks.onAssetChange?.(assetId);
-    const target = assetId ? this.assetTargets.get(assetId) : undefined;
-    this.gotoRaDec(target?.centerRaDeg ?? this.snapshot.centerRaDeg, target?.centerDecDeg ?? this.snapshot.centerDecDeg);
-    this.setFov(target?.defaultFovDeg ?? this.snapshot.initialFovDeg);
-    this.renderSeedRecords();
+    this.selectedLayerIds.clear();
+    (assetId ? [assetId] : [...this.assetTargets.keys()]).forEach((id) => this.selectedLayerIds.add(id));
+    this.activeAssetId = assetId; this.activateSession([...this.selectedLayerIds]);
+    this.callbacks.onAssetChange?.(assetId); this.renderSeedRecords(); this.scheduleQuery(0);
+  }
+
+  private scopesForLayers(layerIds: readonly string[]): SkyDataPointScope[] {
+    return layerIds.flatMap((id) => this.assetTargets.get(id)?.scopes ?? [{ assetId: id }]);
   }
 
   gotoRaDec(raDeg: number, decDeg: number): void {
@@ -463,11 +484,15 @@ export class AladinExplorer {
   }
 
   reset(): void {
-    this.focusAsset(this.snapshot.initialAssetId ?? this.snapshot.assetTargets[0]?.assetId ?? null);
+    this.focusAsset(null);
+    this.gotoRaDec(this.snapshot.centerRaDeg, this.snapshot.centerDecDeg);
+    this.setFov(this.snapshot.initialFovDeg);
   }
 
   private scheduleQuery(delayMs: number): void {
     if (this.disposed || !this.aladin) return;
+    if (this.indexRefreshTimer) clearTimeout(this.indexRefreshTimer);
+    this.indexRefreshTimer = null;
     this.generation += 1;
     this.activeRequest?.controller.abort();
     this.activeRequest = null;
@@ -483,14 +508,15 @@ export class AladinExplorer {
     if (this.disposed || generation !== this.generation || !this.aladin) return;
     const view = this.getCurrentView();
     const boxes = viewportBoxes(view, this.host);
-    const assetIds = this.activeAssetId ? [this.activeAssetId] : [...(this.snapshot.filters.assetIds ?? [])];
-    if (!assetIds.length) {
-      this.emitStatus({ phase: "empty", returned: 0, total: 0, truncated: false, message: "当前选区没有可探索的用户资产对象" });
+    const assetIds = [...this.selectedLayerIds];
+    if (!assetIds.length || !this.scopesForLayers(assetIds).length) {
+      this.activateSession(assetIds);
+      this.emitStatus({ phase: "empty", returned: 0, total: 0, truncated: false, message: assetIds.length ? "所选图层仅有覆盖；下载并扫描后可显示数据点" : "当前未选中数据图层" });
       return;
     }
     const session = this.activateSession(assetIds);
     session.lastUsed = Date.now();
-    const jobs = subtractRects(boxes, [...session.coveredRects, ...session.pendingRects]);
+    const jobs = subtractRects(boxes, [...(session.indexing ? [] : session.coveredRects), ...session.pendingRects]);
     if (!jobs.length) {
       this.emitSessionStatus(session, true);
       return;
@@ -498,8 +524,9 @@ export class AladinExplorer {
     const controller = new AbortController();
     const request: ActiveRequest = { controller, generation, session, jobs };
     this.activeRequest = request;
+    session.indexing = false;
     jobs.forEach((job) => session.pendingRects.push(job));
-      this.emitStatus({ phase: "loading", returned: session.renderedObjectIds.size, total: session.total, truncated: session.truncated, complete: false, assets: this.assetProgress(session, "loading"), overlapCount: session.overlapSources.size });
+      this.emitStatus({ phase: "loading", returned: session.renderedObjectIds.size, total: session.total, truncated: session.truncated, complete: false, assets: this.assetProgress(session, "loading"), overlapCount: session.overlapSources.size, indexing: session.indexing });
     try {
       for (const bbox of jobs) {
         let cursor: unknown[] | undefined;
@@ -517,14 +544,16 @@ export class AladinExplorer {
             },
             coordinateFrame: "ICRS",
             ordering: "NESTED",
-            assetIds,
+            layerScopes: this.scopesForLayers(assetIds),
             limit: QUERY_LIMIT,
             includeAttributes: false,
             cursor,
           };
-          const result = await workspaceApi.skyObjectsQuery(input, controller.signal);
+          const result = await workspaceApi.skyPointsQuery(input, controller.signal);
           if (this.disposed || generation !== this.generation || controller.signal.aborted) return;
           if (result.status === "error") throw new Error(result.message ?? "对象查询失败");
+          session.indexing ||= Boolean(result.indexing);
+          if (session.indexing) session.coveredRects = [];
           if (firstPage) firstPage = false;
           this.appendRecords(session, result.objects);
           session.total = Math.max(session.total, result.total);
@@ -541,6 +570,7 @@ export class AladinExplorer {
             complete: false,
             assets: this.assetProgress(session, "loading"),
             overlapCount: session.overlapSources.size,
+            indexing: session.indexing,
           });
           if (!hasMore || budgetReached) {
             session.truncated ||= hasMore || budgetReached;
@@ -551,7 +581,7 @@ export class AladinExplorer {
           await yieldToBrowser();
           if (this.disposed || generation !== this.generation || controller.signal.aborted) return;
         }
-        if (jobComplete) {
+        if (jobComplete && !session.indexing) {
           session.coveredRects.push(bbox);
           session.coveredRects = compactRects(session.coveredRects);
         }
@@ -566,11 +596,14 @@ export class AladinExplorer {
         if (index >= 0) session.pendingRects.splice(index, 1);
       });
       if (this.activeRequest === request) this.activeRequest = null;
+      if (!this.disposed && generation === this.generation && session.indexing && this.activeSession === session) {
+        this.indexRefreshTimer = setTimeout(() => { this.indexRefreshTimer = null; this.scheduleQuery(0); }, INDEX_REFRESH_MS);
+      }
     }
   }
 
   private sessionKey(assetIds: readonly string[]): string {
-    return `${this.snapshot.nside}:${this.snapshot.pixels.join(",")}:${assetIds.join(",")}`;
+    return `${this.snapshot.nside}:${this.snapshot.pixels.join(",")}:${this.snapshot.sourceKeys.join(",")}:${JSON.stringify(this.scopesForLayers(assetIds))}`;
   }
 
   private activateSession(assetIds: readonly string[]): ViewportSession {
@@ -594,6 +627,7 @@ export class AladinExplorer {
         total: 0,
         truncated: false,
         seeded: false,
+        indexing: false,
         lastUsed: Date.now(),
       };
       this.sessions.set(key, session);
@@ -634,8 +668,9 @@ export class AladinExplorer {
       returned,
       total: session.total,
       truncated: session.truncated,
-      complete,
-      message: returned ? undefined : "当前资产在此视野没有对象；可点击资产导航聚焦",
+      complete: complete && !session.indexing,
+      indexing: session.indexing,
+      message: session.indexing ? "坐标索引补建中，已完成的数据点会自动更新" : returned ? undefined : "所选图层在当前天区和视野内没有数据点",
       assets: this.assetProgress(session, returned ? "ready" : "idle"),
       overlapCount: session.overlapSources.size,
     });
@@ -649,7 +684,7 @@ export class AladinExplorer {
         label: target.label,
         color: target.color,
         returned: session.returnedByAsset.get(target.assetId) ?? 0,
-        total: target.objectCount ?? (session.assetIds.length === 1 ? session.total : 0),
+        total: Math.max(target.objectCount ?? 0, session.returnedByAsset.get(target.assetId) ?? 0, session.assetIds.length === 1 ? session.total : 0),
         truncated: session.truncated,
         cacheState: phase === "loading"
           ? "loading"
@@ -663,13 +698,11 @@ export class AladinExplorer {
 
   private renderSeedRecords(): void {
     if (!this.callbacks.initialRecords) return;
-    const entries = this.activeAssetId
-      ? [[this.activeAssetId, this.callbacks.initialRecords.get(this.activeAssetId)] as const]
-      : [...this.callbacks.initialRecords.entries()];
+    const entries = [...this.selectedLayerIds].map((id) => [id, this.callbacks.initialRecords!.get(id)] as const);
     const records = entries.flatMap(([, entry]) => entry?.records ?? []);
     const total = entries.reduce((sum, [, entry]) => sum + (entry?.total ?? 0), 0);
     const truncated = entries.some(([, entry]) => Boolean(entry?.truncated));
-    const session = this.activateSession(this.activeAssetId ? [this.activeAssetId] : [...(this.snapshot.filters.assetIds ?? [])]);
+    const session = this.activateSession([...this.selectedLayerIds]);
     if (records.length && !session.seeded) {
       session.seeded = true;
       session.total = Math.max(session.total, total);
@@ -687,7 +720,7 @@ export class AladinExplorer {
       if (session.renderedObjectIds.has(record.object_id) || session.renderedObjectIds.size >= MAX_SESSION_RECORDS) return;
       session.renderedObjectIds.add(record.object_id);
       addedRecords.push(record);
-      if (record.asset_id) session.returnedByAsset.set(record.asset_id, (session.returnedByAsset.get(record.asset_id) ?? 0) + 1);
+      for (const key of session.assetIds) if (this.scopesForLayers([key]).some((scope) => scope.assetId === record.asset_id && (!scope.sourceId || scope.sourceId === record.attributes?.source_id))) session.returnedByAsset.set(key, (session.returnedByAsset.get(key) ?? 0) + 1);
       const layer = this.callbacks.resolveLayer(record);
       const group = groups.get(layer.key) ?? { layer, records: [] };
       group.records.push(record);
@@ -724,6 +757,7 @@ export class AladinExplorer {
       catalog.addSources(sources);
     });
     addedRecords.forEach((record) => {
+      if (record.attributes?.position_role === "image_center" || record.attributes?.position_role === "pointing") return;
       const key = overlapBucketKey(record);
       const bucket = session.overlapBuckets.get(key) ?? [];
       bucket.push(record);
@@ -805,6 +839,8 @@ export class AladinExplorer {
     this.activeRequest = null;
     if (this.queryTimer) clearTimeout(this.queryTimer);
     this.queryTimer = null;
+    if (this.indexRefreshTimer) clearTimeout(this.indexRefreshTimer);
+    this.indexRefreshTimer = null;
     this.resizeObserver?.disconnect();
     this.resizeObserver = null;
     this.pendingView = null;

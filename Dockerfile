@@ -1,4 +1,5 @@
 FROM python:3.11-slim-bookworm AS moc-core
+ARG ASTRO_PYTHON_PACKAGE_INDEX=https://pypi.org/simple
 
 # Assets publishes the scientific implementation. Workspace vendors only the
 # pinned wheel and dependency lock so production can generate user MOCs without
@@ -6,6 +7,7 @@ FROM python:3.11-slim-bookworm AS moc-core
 COPY vendor/moc-core/requirements.lock /tmp/moc-core/requirements.lock
 COPY vendor/moc-core/astro_survey_moc_core-1.0.0-py3-none-any.whl /tmp/moc-core/
 RUN python -m pip install --no-cache-dir --ignore-installed --prefix=/opt/moc-core \
+    --index-url ${ASTRO_PYTHON_PACKAGE_INDEX} \
     --requirement /tmp/moc-core/requirements.lock \
     /tmp/moc-core/astro_survey_moc_core-1.0.0-py3-none-any.whl
 
@@ -65,6 +67,7 @@ RUN apt-get update \
 COPY --from=moc-core /opt/moc-core /usr/local
 COPY --from=build --chown=astro:astro /app/node_modules ./node_modules
 COPY --from=build --chown=astro:astro /app/dist/src ./dist
+COPY --chown=astro:astro src/sky-point-coordinates.py ./dist/sky-point-coordinates.py
 COPY --from=build --chown=astro:astro /app/packages/cli/dist ./packages/cli/dist
 COPY --from=build --chown=astro:astro /app/dist/viewer ./viewer
 

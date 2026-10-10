@@ -555,3 +555,19 @@ test("object index extracts URL credentials for queries and index initialization
   assert.ok(authorizations.length >= 3);
   assert.ok(authorizations.every((value) => value === `Basic ${Buffer.from("atlas-user:p@ss", "utf8").toString("base64")}`));
 });
+
+test("data point scopes use asset AND concrete source, while empty selection stays empty", async () => {
+  const bodies: unknown[] = [];
+  await withServer(async (request, response) => {
+    assert.match(request.url ?? "", /ignore_unavailable=true/);
+    bodies.push(JSON.parse(await requestBody(request)));
+    response.setHeader("Content-Type", "application/json"); response.end(JSON.stringify({ hits: { total: 0, hits: [] } }));
+  }, async (baseUrl) => {
+    const service = new AstroObjectIndexService({ baseUrl });
+    const region = { nside: 16, pixels: [3], coordinateFrame: "ICRS", ordering: "NESTED" };
+    await service.queryObjects(validQuery({ region, layerScopes: [{ assetId: "asset", sourceId: "public:one" }, { assetId: "local" }] }), [ASTRO_OBJECT_INDEX, "astro_data_point_index_v1"]);
+    await service.queryObjects(validQuery({ region, layerScopes: [] }), [ASTRO_OBJECT_INDEX, "astro_data_point_index_v1"]);
+    assert.match(JSON.stringify(bodies[0]), /attributes.source_id/); assert.match(JSON.stringify(bodies[0]), /healpix_pixel/);
+    assert.match(JSON.stringify(bodies[1]), /match_none/); assert.match(JSON.stringify(bodies[1]), /ra_deg/);
+  });
+});

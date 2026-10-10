@@ -1,3 +1,4 @@
+import { publicSourceIdForFootprint } from "../../src/public-source-identity";
 import * as THREE from "three";
 import { Healpix } from "healpixjs";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
@@ -81,6 +82,7 @@ export interface SurveyLayerContextMenu {
   releaseIds?: string[];
   assetIds: string[];
   componentId?: string;
+  sourceIds?: string[];
 }
 
 export interface SurveyLayerOverlapComponent {
@@ -214,6 +216,7 @@ interface LayerMesh extends THREE.Mesh<THREE.BufferGeometry, THREE.MeshBasicMate
     layerKey?: string;
     assetId?: string;
     surveyId?: string;
+    nside: number;
     records: CellRecord[];
     drill?: boolean;
   };
@@ -231,11 +234,15 @@ interface FragmentTransition {
 }
 
 interface ExplodedFragment {
+  key: string;
+  nside: number;
+  pixel: number;
+  sourceRadius: number;
+  targetRadius: number;
   root: THREE.Group;
   material: THREE.MeshBasicMaterial;
   lineMaterial: THREE.LineBasicMaterial;
-  fromScale: number;
-  offset: THREE.Vector3;
+  startScale: number;
 }
 
 interface ExplosionLayerEntry {
@@ -284,7 +291,7 @@ const DIMMED_OPACITY = 0.075;
 const DIMMED_EDGE_OPACITY = 0.12;
 const EXPLODED_OPACITY = 0.82;
 const EXPLODED_LAYER_STEP = 0.26;
-const EXPLODED_TANGENT_STEP = 0.065;
+const MINIMUM_EXPLODED_RADIUS = 0.05;
 const REGION_INNER_PADDING = 0.045;
 const REGION_OUTER_PADDING = 0.065;
 const DRILL_RENDER_ORDER = 10_000;
@@ -481,6 +488,8 @@ export class SurveyLayerViewer {
   #selectionCoreMaterial: THREE.LineBasicMaterial | null = null;
   #selectionEdgeMaterial: THREE.LineDashedMaterial | null = null;
   #selectionGlowMaterial: THREE.LineBasicMaterial | null = null;
+  #selectionOutlines: THREE.LineSegments[] = [];
+  #selectionBounds: { innerRadius: number; outerRadius: number } | null = null;
   #explosionTransition: ExplosionTransition | null = null;
   #explodedFragments: ExplodedFragment[] = [];
   #explodedPixel: number | null = null;
@@ -662,7 +671,7 @@ export class SurveyLayerViewer {
       depthWrite: false,
       toneMapped: false,
     })) as LayerMesh;
-    mesh.userData = { layerKey: "__drill__", records: visible.map((cell) => ({ pixel: cell.pixel })), drill: true };
+    mesh.userData = { layerKey: "__drill__", nside, records: visible.map((cell) => ({ pixel: cell.pixel })), drill: true };
     mesh.renderOrder = DRILL_RENDER_ORDER;
     const edges = new THREE.LineSegments(buildSphericalCellEdges(cellsInput), new THREE.LineBasicMaterial({
       vertexColors: true,
@@ -803,10 +812,8 @@ export class SurveyLayerViewer {
 
   get #outerRadius(): number {
     const radii = this.#displayDepths().map((entry) => entry.radius);
-    const explodedOuter = this.#explodedPixel == null
-      ? 1
-      : 1 + Math.max(0, this.#explodedFragments.length - 1) * EXPLODED_LAYER_STEP / 2;
-    return Math.max(1, explodedOuter, ...radii);
+    const explodedRadii = this.#explodedFragments.map((fragment) => fragment.targetRadius * fragment.root.scale.x);
+    return Math.max(1, this.#selectionBounds?.outerRadius ?? 1, ...explodedRadii, ...radii);
   }
 
   #effectiveSkyFovDeg(): number {
@@ -941,6 +948,7 @@ export class SurveyLayerViewer {
   }
 
   setRegionSelection(pixels: Iterable<number>): void {
+    this.#clearExplosion(false);
     const maximum = 12 * this.#manifest.nside ** 2;
     const next = [...new Set(pixels)].filter((pixel) => Number.isInteger(pixel) && pixel >= 0 && pixel < maximum);
     this.#selectedPixels.clear();
@@ -1006,6 +1014,8 @@ export class SurveyLayerViewer {
     this.#selectionCoreMaterial = null;
     this.#selectionEdgeMaterial = null;
     this.#selectionGlowMaterial = null;
+    this.#selectionOutlines = [];
+    this.#selectionBounds = null;
     clearGroup(this.#drillGroup);
     clearGroup(this.#objectPointGroup);
     this.#onHover(null);
@@ -1125,7 +1135,7 @@ export class SurveyLayerViewer {
     }));
     const material = new THREE.MeshBasicMaterial({ side: THREE.DoubleSide, colorWrite: false, depthWrite: false, toneMapped: false });
     const mesh = new THREE.Mesh(buildSphericalCellSheetGeometry(cells), material) as LayerMesh;
-    mesh.userData = { surveyId: "__interaction__", records: pixels.map((pixel) => ({ pixel })) };
+    mesh.userData = { surveyId: "__interaction__", nside: this.#manifest.nside, records: pixels.map((pixel) => ({ pixel })) };
     mesh.renderOrder = -1;
     this.#interactionMesh = mesh;
     this.#scene.add(mesh);
@@ -1140,6 +1150,7 @@ export class SurveyLayerViewer {
       mesh.userData = {
         layerKey: layer.key,
         assetId: this.#workspaceLayerAssetIds(layer)[0],
+        nside: this.#manifest.nside,
         records: layer.pixels.map((pixel) => ({ pixel })),
       };
       mesh.renderOrder = renderOrder;
@@ -1328,7 +1339,7 @@ export class SurveyLayerViewer {
     const material = fragmentMaterial();
     material.opacity = animated ? 0 : meshOpacity;
     const mesh = new THREE.Mesh(buildSphericalCellSheetGeometry(cells), material) as LayerMesh;
-    mesh.userData = { surveyId, records: pixels.map((pixel) => ({ pixel })) };
+    mesh.userData = { surveyId, layerKey: `public-survey:${surveyId}`, nside: cells[0]?.nside ?? this.#manifest.nside, records: pixels.map((pixel) => ({ pixel })) };
     mesh.renderOrder = renderOrder;
     const lineMaterials: THREE.LineBasicMaterial[] = [];
     if (isOverlap) {
@@ -1429,28 +1440,46 @@ export class SurveyLayerViewer {
     // after Reset). Refresh the world matrix before ray construction so an
     // immediate pointer event uses the current pose.
     this.#camera.updateMatrixWorld();
+    this.#scene.updateMatrixWorld(true);
     this.#raycaster.setFromCamera(this.#pointer, this.#camera);
-    const renderedHit = this.#raycaster.intersectObjects([this.#drillGroup, this.#workspaceCoverageGroup], true).find((hit) => {
-      const object = hit.object as Partial<LayerMesh>;
-      return Boolean(object.userData?.records?.length);
+    const groups = [this.#drillGroup, this.#workspaceCoverageGroup, this.#coverageGroup, this.#explosionGroup];
+    const pickable = (object: THREE.Object3D): object is LayerMesh => object.visible && object instanceof THREE.Mesh
+      && Boolean(object.userData.records?.length) && object.material.opacity > 0.001;
+    const renderedHit = this.#raycaster.intersectObjects(groups, true).find((hit) => {
+      return pickable(hit.object) && hit.faceIndex != null;
     });
-    let renderedPixel: number | undefined;
-    let renderedNside = this.#drillNside;
+    let cell: { pixel: number; nside: number; point: THREE.Vector3 } | null = null;
     if (renderedHit) {
       const object = renderedHit.object as LayerMesh;
-      const records = object.userData.records;
-      const record = records[Math.max(0, Math.floor((renderedHit.faceIndex ?? 0) / 2))] ?? records[0];
-      renderedPixel = record?.pixel;
-      if (object.userData.drill) renderedNside = this.#drillNside;
-      else renderedNside = [...this.#workspaceLayers.values()].find((layer) => layer.key === object.userData.layerKey)?.nside ?? this.#manifest.nside;
+      const record = object.userData.records[Math.floor(renderedHit.faceIndex! / 2)];
+      if (record) cell = { pixel: record.pixel, nside: object.userData.nside, point: renderedHit.point.clone().normalize() };
     }
-    // Angular picking keeps inset gaps selectable, while a rendered shell hit preserves
-    // the actual asset or drill cell beneath the pointer.
-    const unitPoint = this.#intersectUnitSphere(this.#raycaster.ray);
-    if (!unitPoint && !renderedHit) return null;
-    const point = unitPoint ?? renderedHit!.point.clone().normalize();
-    const nside = renderedPixel == null ? this.#manifest.nside : renderedNside;
-    const pixel = renderedPixel ?? healpixPixelFromSceneDirection(nside, point);
+    // Preserve selectable inset gaps at each visible shell's actual radius.
+    // A unit-sphere ray can land in a different cell when a layer is nearer.
+    if (!cell) {
+      let nearestDistance = Infinity;
+      groups.forEach((group) => group.traverse((object) => {
+        if (!pickable(object) || !object.visible) return;
+        const position = object.geometry.getAttribute("position");
+        if (!position?.count) return;
+        const radius = new THREE.Vector3().fromBufferAttribute(position, 0).applyMatrix4(object.matrixWorld).length();
+        const point = this.#intersectSphere(this.#raycaster.ray, radius);
+        if (!point) return;
+        const distance = point.distanceTo(this.#raycaster.ray.origin);
+        if (distance >= nearestDistance) return;
+        const nside = object.userData.nside;
+        const pixel = healpixPixelFromSceneDirection(nside, point);
+        if (!object.userData.records.some((record) => record.pixel === pixel)) return;
+        cell = { pixel, nside, point: point.normalize() };
+        nearestDistance = distance;
+      }));
+    }
+    if (!cell && this.#interactionMode === "region") {
+      const point = this.#intersectSphere(this.#raycaster.ray, 1);
+      if (point) cell = { pixel: healpixPixelFromSceneDirection(this.#manifest.nside, point), nside: this.#manifest.nside, point };
+    }
+    if (!cell) return null;
+    const { pixel, nside, point } = cell;
     const membership = nside === this.#manifest.nside ? visibleCoverageAtPixel(this.#model, pixel, this.#visibleSurveyIds) : null;
     const workspaceAvailable = nside === this.#manifest.nside && this.#workspaceAvailableAt(pixel);
     const workspaceInteractive = nside === this.#manifest.nside && this.#workspaceInteractiveAt(pixel);
@@ -1485,13 +1514,13 @@ export class SurveyLayerViewer {
     return pixel === undefined ? null : this.#overlapComponents.find((component) => component.cells.includes(pixel)) ?? null;
   }
 
-  #intersectUnitSphere(ray: THREE.Ray): THREE.Vector3 | null {
+  #intersectSphere(ray: THREE.Ray, radius: number): THREE.Vector3 | null {
     const origin = ray.origin;
     const direction = ray.direction;
     const a = direction.lengthSq();
     if (a === 0) return null;
     const b = 2 * origin.dot(direction);
-    const c = origin.lengthSq() - 1;
+    const c = origin.lengthSq() - radius * radius;
     const discriminant = b * b - 4 * a * c;
     if (discriminant < 0) return null;
     const sqrt = Math.sqrt(discriminant);
@@ -1547,6 +1576,7 @@ export class SurveyLayerViewer {
     const hit = this.#pickCell(event);
     if (!hit) return;
     this.#onHover(null);
+    if (additive) this.#clearExplosion(false);
     if (!additive) {
       this.#selectedPixels.clear();
       this.#selectedPixels.add(hit.pixel);
@@ -1561,6 +1591,8 @@ export class SurveyLayerViewer {
     this.#selectionCoreMaterial = null;
     this.#selectionEdgeMaterial = null;
     this.#selectionGlowMaterial = null;
+    this.#selectionOutlines = [];
+    this.#selectionBounds = null;
     delete this.#canvas.dataset.selectionVolume;
     delete this.#canvas.dataset.selectionDepthKeys;
     delete this.#canvas.dataset.selectionDepthRadii;
@@ -1568,28 +1600,19 @@ export class SurveyLayerViewer {
     this.#applyFocus();
     if (!this.#selectedPixels.size) return;
     const selected = [...this.#selectedPixels];
-    const displayDepths = this.#displayDepths();
-    const coveredKeys = new Set<string>();
-    selected.forEach((pixel) => {
-      const membership = visibleCoverageAtPixel(this.#model, pixel, this.#visibleSurveyIds);
-      membership?.surveyIds.forEach((surveyId) => coveredKeys.add(`public-survey:${surveyId}`));
-      this.#workspaceLayers.forEach((layer) => {
-        if (this.#workspaceLayerVisible(layer) && layer.pixels.includes(pixel)) coveredKeys.add(this.#workspaceLayerKey(layer));
-      });
-    });
-    const selectionDepths = displayDepths.filter((depth) => coveredKeys.has(depth.key));
-    const depths = selectionDepths.length ? selectionDepths : displayDepths;
+    const { selectionDepths, depths, innerRadius, outerRadius } = this.#selectionVolume();
     if (!depths.length) return;
-    const radii = depths.map((depth) => depth.radius);
-    const minimumRadius = Math.max(0.05, Math.min(...radii) - REGION_INNER_PADDING);
-    const maximumRadius = Math.max(...radii) + REGION_OUTER_PADDING;
+    this.#selectionBounds = { innerRadius, outerRadius };
     // Only paint source sheets when the selected cell is actually covered by
     // that source. The fallback depth list is still useful for sizing the
     // white selection volume, but must not fabricate coverage in empty cells.
     const sheetDepths = [...selectionDepths].sort((left, right) => left.radius - right.radius);
     sheetDepths.forEach((depth, index) => {
       const color = this.#highlightExplosionColor(this.#colorForLayerKey(depth.key));
-      const cells = selected.map((pixel) => ({
+      const pixels = selected.filter((pixel) => this.#layerCoversPixel(depth.key, pixel)
+        && !this.#explodedFragments.some((fragment) => fragment.nside === this.#manifest.nside && fragment.pixel === pixel && fragment.key === depth.key));
+      if (!pixels.length) return;
+      const cells = pixels.map((pixel) => ({
         nside: this.#manifest.nside,
         pixel,
         radius: depth.radius + 0.003 + index * 0.0015,
@@ -1604,8 +1627,9 @@ export class SurveyLayerViewer {
         depthTest: false,
         depthWrite: false,
         toneMapped: false,
-      }));
-      sheet.renderOrder = SELECTION_RENDER_ORDER - 10 + index * 2;
+      })) as LayerMesh;
+      sheet.userData = { layerKey: depth.key, nside: this.#manifest.nside, records: pixels.map((pixel) => ({ pixel })) };
+      sheet.renderOrder = SELECTION_RENDER_ORDER - (sheetDepths.length - index) * 2 - 2;
       const sheetEdges = new THREE.LineSegments(buildSphericalCellEdges(cells), new THREE.LineBasicMaterial({
         vertexColors: true,
         transparent: true,
@@ -1614,14 +1638,14 @@ export class SurveyLayerViewer {
         depthWrite: false,
         toneMapped: false,
       }));
-      sheetEdges.renderOrder = SELECTION_RENDER_ORDER - 9 + index * 2;
+      sheetEdges.renderOrder = sheet.renderOrder + 1;
       this.#selectionGroup.add(sheet, sheetEdges);
     });
     const edgeCells = selected.map((pixel) => ({
       nside: this.#manifest.nside,
       pixel,
-      innerRadius: minimumRadius,
-      outerRadius: maximumRadius,
+      innerRadius,
+      outerRadius,
       color: SELECTION_EDGE_COLOR,
       inset: 0.012,
     }));
@@ -1663,6 +1687,7 @@ export class SurveyLayerViewer {
     this.#selectionCoreMaterial = coreMaterial;
     this.#selectionEdgeMaterial = volumeEdgeMaterial;
     this.#selectionGlowMaterial = glowMaterial;
+    this.#selectionOutlines = [glowEdges, volumeEdges, coreEdges];
     this.#selectionGroup.add(glowEdges, volumeEdges, coreEdges);
     this.#canvas.dataset.selectionVolume = "outline";
     this.#canvas.dataset.selectionDepthKeys = depths.map((depth) => depth.key).join(",");
@@ -1672,16 +1697,55 @@ export class SurveyLayerViewer {
     this.#requestRender();
   }
 
+  #layerCoversPixel(key: string, pixel: number): boolean {
+    return key.startsWith("public-survey:")
+      ? Boolean(this.#model.pixelsBySurvey.get(key.slice("public-survey:".length))?.includes(pixel))
+      : Boolean(this.#workspaceLayers.get(key)?.pixels.includes(pixel));
+  }
+
+  #selectionVolume(): { selectionDepths: LayerDepth[]; depths: LayerDepth[]; innerRadius: number; outerRadius: number } {
+    const currentRadii = new Map(this.#explodedFragments
+      .filter((fragment) => fragment.nside === this.#manifest.nside && this.#selectedPixels.has(fragment.pixel))
+      .map((fragment) => [fragment.key, fragment.targetRadius * fragment.root.scale.x]));
+    const displayDepths = this.#displayDepths().map((depth) => ({ ...depth, radius: currentRadii.get(depth.key) ?? depth.radius }));
+    const selectionDepths = displayDepths.filter((depth) => [...this.#selectedPixels].some((pixel) => this.#layerCoversPixel(depth.key, pixel)));
+    const depths = selectionDepths.length ? selectionDepths : displayDepths;
+    const radii = depths.map((depth) => depth.radius);
+    return { selectionDepths, depths,
+      innerRadius: Math.max(0.001, Math.min(...radii) - REGION_INNER_PADDING),
+      outerRadius: Math.max(...radii) + REGION_OUTER_PADDING };
+  }
+
+  #updateSelectionVolume(): void {
+    if (!this.#selectionOutlines.length) return;
+    const { depths, innerRadius, outerRadius } = this.#selectionVolume();
+    this.#selectionBounds = { innerRadius, outerRadius };
+    const geometry = buildSphericalCellVolumeEdges([...this.#selectedPixels].map((pixel) => ({
+      nside: this.#manifest.nside, pixel, innerRadius, outerRadius, color: SELECTION_EDGE_COLOR, inset: 0.012,
+    })));
+    for (const outline of this.#selectionOutlines) {
+      const positions = outline.geometry.getAttribute("position");
+      const next = geometry.getAttribute("position");
+      for (let index = 0; index < positions.count; index++) positions.setXYZ(index, next.getX(index), next.getY(index), next.getZ(index));
+      positions.needsUpdate = true;
+      outline.geometry.computeBoundingSphere();
+      outline.computeLineDistances();
+    }
+    geometry.dispose();
+    this.#canvas.dataset.selectionDepthKeys = depths.map((depth) => depth.key).join(",");
+    this.#canvas.dataset.selectionDepthRadii = depths.map((depth) => depth.radius.toFixed(4)).join(",");
+  }
+
   #selectionAnchor(): SurveyLayerState["selectionAnchor"] {
     if (!this.#selectedPixels.size) return null;
-    const radius = this.#outerRadius + 0.045;
+    const radius = this.#selectionBounds?.outerRadius ?? this.#outerRadius + 0.045;
     const world = this.#pixelDirection(this.#selectedPixels).multiplyScalar(radius);
     const projected = world.clone().project(this.#camera);
     const forward = new THREE.Vector3();
     this.#camera.getWorldDirection(forward);
     const boundaryDirections = [...this.#selectedPixels]
       .flatMap((pixel) => sphericalCellBoundary(this.#manifest.nside, pixel, 1));
-    const projectedBounds = [Math.max(0.05, this.#outerRadius - 0.18), radius]
+    const projectedBounds = [this.#selectionBounds?.innerRadius ?? Math.max(0.05, this.#outerRadius - 0.18), radius]
       .flatMap((sampleRadius) => boundaryDirections.map((point) => point.clone().multiplyScalar(sampleRadius).project(this.#camera)));
     const leftRatio = projectedBounds.length ? Math.min(...projectedBounds.map((point) => (point.x + 1) / 2)) : (projected.x + 1) / 2;
     const rightRatio = projectedBounds.length ? Math.max(...projectedBounds.map((point) => (point.x + 1) / 2)) : (projected.x + 1) / 2;
@@ -1767,6 +1831,8 @@ export class SurveyLayerViewer {
     this.#selectionCoreMaterial = null;
     this.#selectionEdgeMaterial = null;
     this.#selectionGlowMaterial = null;
+    this.#selectionOutlines = [];
+    this.#selectionBounds = null;
     this.#applyFocus();
     this.#onSelection(null);
     this.#emitState();
@@ -1780,11 +1846,11 @@ export class SurveyLayerViewer {
     for (const surveyId of membership.surveyIds) {
       if (!this.#visibleSurveyIds.has(surveyId)) continue;
       entries.push({
-        key: `survey:${surveyId}`,
+        key: `public-survey:${surveyId}`,
         nside,
         pixel,
         color: this.#colorBySurvey.get(surveyId) ?? BASE_COLOR,
-          sourceRadius: depths.get(`public-survey:${surveyId}`)?.radius ?? 1,
+        sourceRadius: depths.get(`public-survey:${surveyId}`)?.radius ?? 1,
       });
     }
     if (nside === this.#manifest.nside) {
@@ -1819,18 +1885,19 @@ export class SurveyLayerViewer {
     }
     this.#explodedPixel = pixel;
     this.#explodedNside = nside;
+    const order = this.#normalizedLayerOrder();
+    entries.sort((left, right) => {
+      const leftIndex = order.indexOf(left.key), rightIndex = order.indexOf(right.key);
+      return (leftIndex < 0 ? order.length : leftIndex) - (rightIndex < 0 ? order.length : rightIndex);
+    });
     const midpoint = (entries.length - 1) / 2;
-    const normal = this.#pixelDirectionAt(nside, [pixel]);
-    const reference = Math.abs(normal.y) < 0.82
-      ? new THREE.Vector3(0, 1, 0)
-      : new THREE.Vector3(1, 0, 0);
-    const tangent = new THREE.Vector3().crossVectors(reference, normal).normalize();
+    const step = Math.min(EXPLODED_LAYER_STEP, (1 - MINIMUM_EXPLODED_RADIUS) / Math.max(1, midpoint));
+    // Expand only along the celestial radius. The selection outline uses
+    // these same interpolated radii rather than a second set of source sheets.
     this.#explodedFragments = entries.map((entry, index) => {
-      const targetRadius = 1 + (index - midpoint) * EXPLODED_LAYER_STEP;
+      const targetRadius = 1 + (midpoint - index) * step;
       const root = new THREE.Group();
       root.scale.setScalar(entry.sourceRadius / targetRadius);
-      const offset = tangent.clone().multiplyScalar((index - midpoint) * EXPLODED_TANGENT_STEP);
-      root.position.copy(offset).multiplyScalar(entry.sourceRadius / targetRadius);
       const cell: SphericalCellSheetGeometryInput = {
         nside: entry.nside,
         pixel: entry.pixel,
@@ -1840,8 +1907,9 @@ export class SurveyLayerViewer {
       };
       const material = fragmentMaterial(0);
       material.depthTest = false;
-      const mesh = new THREE.Mesh(buildSphericalCellSheetGeometry([cell]), material);
-      mesh.renderOrder = EXPLOSION_RENDER_ORDER + index * 2;
+      const mesh = new THREE.Mesh(buildSphericalCellSheetGeometry([cell]), material) as LayerMesh;
+      mesh.userData = { layerKey: entry.key, nside: entry.nside, records: [{ pixel: entry.pixel }] };
+      mesh.renderOrder = EXPLOSION_RENDER_ORDER + (entries.length - 1 - index) * 2;
       const lineMaterial = new THREE.LineBasicMaterial({
         vertexColors: true,
         transparent: true,
@@ -1851,10 +1919,11 @@ export class SurveyLayerViewer {
         toneMapped: false,
       });
       const edges = new THREE.LineSegments(buildSphericalCellEdges([cell]), lineMaterial);
-      edges.renderOrder = EXPLOSION_RENDER_ORDER + index * 2 + 1;
+      edges.renderOrder = mesh.renderOrder + 1;
       root.add(mesh, edges);
       this.#explosionGroup.add(root);
-      return { root, material, lineMaterial, fromScale: entry.sourceRadius / targetRadius, offset };
+      return { key: entry.key, nside: entry.nside, pixel: entry.pixel, sourceRadius: entry.sourceRadius, targetRadius,
+        root, material, lineMaterial, startScale: root.scale.x };
     });
     this.#setCoverageOpacity(true);
     this.#explosionTransition = {
@@ -1863,6 +1932,7 @@ export class SurveyLayerViewer {
       direction: "in",
       fragments: this.#explodedFragments,
     };
+    this.#renderSelectionRegion();
     const direction = this.#pixelDirectionAt(nside, [pixel]);
     const outer = this.#outerRadius;
     const distance = Math.max(this.#camera.position.length(), outer + 0.18);
@@ -1880,6 +1950,7 @@ export class SurveyLayerViewer {
     this.#explodedNside = null;
     this.#setCoverageOpacity(false);
     if (animated && this.#explodedFragments.length) {
+      this.#explodedFragments.forEach((fragment) => { fragment.startScale = fragment.root.scale.x; });
       this.#explosionTransition = {
         startedAt: performance.now(),
         durationMs: 360,
@@ -1891,7 +1962,7 @@ export class SurveyLayerViewer {
       this.#explodedFragments = [];
       clearGroup(this.#explosionGroup);
     }
-    this.#applyFocus();
+    this.#renderSelectionRegion();
     this.#requestRender();
   }
 
@@ -1979,20 +2050,22 @@ export class SurveyLayerViewer {
     const progress = Math.min(1, (now - transition.startedAt) / transition.durationMs);
     const eased = easeInOut(progress);
     transition.fragments.forEach((fragment) => {
-      const scale = transition.direction === "in"
-        ? THREE.MathUtils.lerp(fragment.fromScale, 1, eased)
-        : THREE.MathUtils.lerp(1, fragment.fromScale, eased);
+      const targetScale = transition.direction === "in" ? 1 : fragment.sourceRadius / fragment.targetRadius;
+      const scale = THREE.MathUtils.lerp(fragment.startScale, targetScale, eased);
       fragment.root.scale.setScalar(scale);
-      fragment.root.position.copy(fragment.offset).multiplyScalar(scale);
       fragment.material.opacity = (transition.direction === "in" ? eased : 1 - eased) * EXPLODED_OPACITY;
       fragment.lineMaterial.opacity = (transition.direction === "in" ? eased : 1 - eased) * 0.96;
     });
-    if (progress < 1) return;
-    this.#explosionTransition = null;
-    if (transition.direction === "out") {
-      this.#explodedFragments = [];
-      clearGroup(this.#explosionGroup);
+    if (progress >= 1) {
+      this.#explosionTransition = null;
+      if (transition.direction === "out") {
+        this.#explodedFragments = [];
+        clearGroup(this.#explosionGroup);
+        this.#renderSelectionRegion();
+      }
     }
+    this.#updateSelectionVolume();
+    this.#emitState();
   }
 
   #advanceSelectionAnimation(now: number): void {
@@ -2129,24 +2202,27 @@ export class SurveyLayerViewer {
       this.#renderSelectionRegion();
       this.#emitSelection();
     }
+    const overlapComponent = this.#overlapMode ? this.#pickOverlapComponent(event) : null;
     const surveyIds = new Set<string>();
     const releaseIds = new Set<string>();
     const assetIds = new Set<string>();
-    for (const pixel of this.#selectedPixels) {
+    const sourceIds = new Set<string>();
+    for (const pixel of overlapComponent?.cells ?? this.#selectedPixels) {
       const membership = visibleCoverageAtPixel(this.#model, pixel, this.#visibleSurveyIds);
       const workspace = this.#workspaceMembershipAt(pixel);
+      membership?.artifacts.forEach((artifact) => { const id = publicSourceIdForFootprint(artifact); if (id) sourceIds.add(id); });
       membership?.surveyIds.forEach((surveyId) => surveyIds.add(surveyId));
       membership?.releaseIds.forEach((releaseId) => releaseIds.add(releaseId));
       workspace.surveyIds.forEach((surveyId) => surveyIds.add(surveyId));
       workspace.releaseIds.forEach((releaseId) => releaseIds.add(releaseId));
       workspace.assetIds.forEach((assetId) => assetIds.add(assetId));
     }
-    const overlapComponent = this.#overlapMode ? this.#pickOverlapComponent(event) : null;
     this.#onContextMenu({
       clientX: event.clientX,
       clientY: event.clientY,
-      nside: this.#manifest.nside,
-      pixels: [...this.#selectedPixels].sort((left, right) => left - right),
+      nside: overlapComponent ? 2 ** overlapComponent.order : this.#manifest.nside,
+      pixels: overlapComponent ? [...overlapComponent.cells] : [...this.#selectedPixels].sort((left, right) => left - right),
+      sourceIds: overlapComponent?.sourceIds?.filter((id) => id.startsWith("public:")) ?? [...sourceIds].sort(),
       surveyIds: [...surveyIds].sort(),
       releaseIds: [...releaseIds].sort(),
       assetIds: [...assetIds].sort(),

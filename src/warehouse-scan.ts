@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { open, readFile } from "node:fs/promises";
+import { mkdir, open, readFile, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 import { connectorConfigurationHash, connectorLocationKey, hasCurrentSuccessfulConnectorCheck, type ConnectorRecord, type ConnectorRegistry } from "./connectors.js";
@@ -12,6 +12,7 @@ import { DataWarehouseDisabledError, ConnectorScanCapabilityError, ConnectorScan
 import type { UserMocArtifact, UserMocArtifactContext, UserMocArtifactStore, UserMocPrecision } from "./user-moc-artifacts.js";
 import { defaultMocCoreAdapter, type MocCoreAdapter } from "./moc-core-adapter.js";
 import { WAREHOUSE_FILE_INDEX } from "./warehouse-index.js";
+import type { WarehouseInventory } from "./warehouse-inventory.js";
 import { assetsCoreContext } from "./assets-core.js";
 
 export const WAREHOUSE_SCAN_API = "/apis/atlas.zhejianglab.org/v1alpha1";
@@ -640,7 +641,8 @@ export function buildWorkspaceScanRequest(value: ScanRequestBuildInput): Record<
   const sourceUri = selection.sourceUri;
   if (isLocal && !localSource) throw new RangeError("未配置 Warehouse 本地扫描数据卷（localSource）");
   const localLocation = isLocal ? localSourceLocation(sourceUri, localSource!) : undefined;
-  const location: { bucket: string; prefix: string } | { rootPath: string; subPath?: string } = localLocation ?? objectStoreLocation(sourceUri);
+  // subPath belongs to the PVC mount, never to ScanPlan SourceLocation.
+  const location = localLocation ? { rootPath: localLocation.rootPath } : objectStoreLocation(sourceUri);
   const surveyId = normalizedCoverage.surveyId;
   const releaseId = normalizedCoverage.releaseId;
   const product = normalizedCoverage.product;
@@ -688,7 +690,7 @@ export function buildWorkspaceScanRequest(value: ScanRequestBuildInput): Record<
     ...(Object.keys(sourceProperties).length ? { annotations: { "atlas.zhejianglab.org/scan-properties": JSON.stringify(sourceProperties) } } : {}),
   };
   const localVolume = localLocation
-    ? { claimName: localSource!.claimName, mountPath: localSource!.scannerMountPath.replace(/\/+$/, ""), ...(localLocation.subPath ? { subPath: localLocation.subPath } : {}) }
+    ? { claimName: localSource!.claimName, mountPath: localLocation.rootPath, ...(localLocation.subPath ? { subPath: localLocation.subPath } : {}) }
     : undefined;
   return {
     apiVersion: "atlas.zhejianglab.org/v1alpha1", kind: "ScanRequest",
@@ -761,6 +763,8 @@ export class WarehouseScanService {
   readonly #localSource?: WarehouseLocalSourceVolume;
   #timer: ReturnType<typeof setInterval> | undefined;
   #polling = false;
+  #coverageCompleted?: (assetId: string, runId: string) => Promise<unknown>;
+  onCoverageCompleted(handler: (assetId: string, runId: string) => Promise<unknown>): void { this.#coverageCompleted = handler; }
   readonly #checkedFailureEvidence = new Set<string>();
   readonly #coveragePreview: CoveragePreviewCache;
 
@@ -799,6 +803,65 @@ export class WarehouseScanService {
 
   start(): void { if (!this.#enabled || !this.#client) return; void this.poll(); this.#timer = setInterval(() => { void this.poll(); }, this.#pollMs); }
   stop(): void { if (this.#timer) clearInterval(this.#timer); this.#timer = undefined; }
+
+  /** Metadata-only Job from a successful finite inventory. Never submits a coverage refresh. */
+  async startPositionReplay(run: ConnectorIngestRunRecord, taskId: string, inventory: WarehouseInventory, maxFiles?: number): Promise<{ jobName: string; outputPath: string }> {
+    if (!this.#enabled || !this.#client) throw new DataWarehouseDisabledError();
+    if (run.backend !== "warehouse" || run.status !== "succeeded" || !run.connectorId || !run.assetId
+      || !run.sourcePath || !run.coverage || !run.sourceSnapshotSha256 || !/^[a-z0-9-]{1,63}$/.test(taskId)) throw new RangeError("Position replay requires a successful Workspace coverage scan");
+    const connector = await this.#connectors.get(run.connectorId);
+    const asset = await this.#dataCatalog.get(run.assetId);
+    if (asset.origin !== "user" || connector.locationKey !== run.locationKey) throw new RangeError("Replay source identity changed");
+    const secretName = `${taskId}-source`.slice(0, 63);
+    const isLocal = connector.kind === "local";
+    if (!isLocal && connector.kind !== "s3") throw new ConnectorScanCapabilityError(connector.kind);
+    if (isLocal && !this.#localSource) throw new ConnectorScanPreconditionError("Local source volume is not configured");
+    const localLocation = isLocal ? localSourceLocation(run.sourcePath, this.#localSource!) : undefined;
+    const source = localLocation ? { connector: { type: "local" }, location: { rootPath: localLocation.rootPath } }
+      : { connector: sourceConnectorPlan(connector), location: objectStoreLocation(run.sourcePath) };
+    const localVolume = localLocation ? { claimName: this.#localSource!.claimName, mountPath: localLocation.rootPath, subPath: localLocation.subPath } : undefined;
+    const outputPath = path.join(this.#evidenceMountPath, "derived", taskId);
+    if (!evidenceDirectory(inventory.path, this.#evidenceMountPath)) throw new RangeError("Replay inventory is outside the private evidence volume");
+    await mkdir(outputPath, { recursive: true });
+    const specPath = path.join(outputPath, "replay-spec.json");
+    await writeFile(`${specPath}.tmp`, JSON.stringify({ source, inventoryPath: inventory.path, inventorySha256: inventory.sha256,
+      sourceSnapshotSha256: run.sourceSnapshotSha256, layerId: run.warehouseLayerId, scanRunId: run.batchId,
+      outputPath, concurrency: 8, ...(maxFiles ? { maxFiles } : {}) }));
+    await rename(`${specPath}.tmp`, specPath);
+    const jobName = taskId;
+    const jobPath = `/apis/batch/v1/namespaces/${encodeURIComponent(this.#namespace)}/jobs`;
+    const existing = await this.#client.request("GET", `${jobPath}/${jobName}`);
+    if (existing.ok) return { jobName, outputPath };
+    if (existing.status !== 404) throw new Error(`Unable to inspect metadata Job (HTTP ${existing.status})`);
+    const env: unknown[] = [];
+    if (connector.kind === "s3") {
+      const credentials = connector.credentialRef ? await this.#credentials.get(connector.credentialRef) : undefined;
+      if (!credentials?.accessKeyId || !credentials.secretAccessKey) throw new ConnectorScanPreconditionError("Connector has no saved S3 credentials");
+      await this.#createSecret(secretName, credentials, sourceConnectorEndpoint(connector), taskId);
+      env.push(...[["ATLAS_SOURCE_ACCESS_KEY", "access-key"], ["ATLAS_SOURCE_SECRET_KEY", "secret-key"]].map(([name, key]) => ({ name, valueFrom: { secretKeyRef: { name: secretName, key } } })));
+    }
+    const local = localVolume;
+    const labels = { "app.kubernetes.io/managed-by": "asa-workspace", [WORKSPACE_TRACK_LABELS.caller]: "workspace", [WORKSPACE_TRACK_LABELS.taskKind]: "position-replay", [WORKSPACE_TRACK_LABELS.asset]: asset.id };
+    const body = { apiVersion: "batch/v1", kind: "Job", metadata: { name: jobName, labels }, spec: { backoffLimit: 2, activeDeadlineSeconds: 86400,
+      ttlSecondsAfterFinished: 86400, template: { metadata: { labels }, spec: { restartPolicy: "Never", containers: [{ name: "headers", image: this.#scannerImage,
+        args: ["--extract-positions", specPath], env, resources: { requests: { cpu: "250m", memory: "256Mi" }, limits: { cpu: "2", memory: "1Gi" } },
+        volumeMounts: [{ name: "evidence", mountPath: this.#evidenceMountPath }, ...(local ? [{ name: "source", mountPath: local.mountPath, readOnly: true, ...(local.subPath ? { subPath: local.subPath } : {}) }] : [])] }],
+        volumes: [{ name: "evidence", persistentVolumeClaim: { claimName: this.#evidenceClaimName } }, ...(local ? [{ name: "source", persistentVolumeClaim: { claimName: local.claimName } }] : [])] } } } };
+    const result = await this.#client.request("POST", jobPath, body);
+    if (!result.ok && result.status !== 409) { await this.#cleanupSecret(secretName); throw new Error(`Unable to create metadata Job (HTTP ${result.status})`); }
+    return { jobName, outputPath };
+  }
+
+  async positionReplayState(jobName: string): Promise<"running" | "succeeded" | "failed" | "missing"> {
+    if (!this.#client || !/^[a-z0-9-]{1,63}$/.test(jobName)) throw new RangeError("Invalid metadata Job");
+    const result = await this.#client.request<{ status?: { succeeded?: number; failed?: number; conditions?: Array<{ type?: string; status?: string }> } }>("GET", `/apis/batch/v1/namespaces/${encodeURIComponent(this.#namespace)}/jobs/${jobName}`);
+    if (result.status === 404) return "missing";
+    if (!result.ok) throw new Error(`Unable to inspect metadata Job (HTTP ${result.status})`);
+    const status = result.value?.status;
+    const terminal = status?.succeeded ? "succeeded" : status?.conditions?.some((condition) => condition.type === "Failed" && condition.status === "True") ? "failed" : "running";
+    if (terminal !== "running") await this.#cleanupSecret(`${jobName}-source`.slice(0, 63));
+    return terminal;
+  }
 
   async submitScan(connectorId: string, input: GenericScanInput, idempotency?: string): Promise<ConnectorIngestRunRecord> {
     if (!this.#enabled) throw new DataWarehouseDisabledError();
@@ -1086,7 +1149,10 @@ export class WarehouseScanService {
         ...(artifactError ? { error: artifactError } : {}),
       });
     }
-    if (phase === "SUCCEEDED") await this.#cleanupSecret(current.secretName);
+    if (phase === "SUCCEEDED") {
+      await this.#cleanupSecret(current.secretName);
+      if (current.assetId && current.coverage?.mode === "fits-wcs") await this.#coverageCompleted?.(current.assetId, current.id);
+    }
   }
 
   async #enrichFailedRunEvidence(run: ConnectorIngestRunRecord): Promise<void> {

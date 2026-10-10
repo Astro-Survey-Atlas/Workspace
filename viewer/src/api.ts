@@ -34,6 +34,7 @@ import type {
   ObjectRegionQueryInput,
   AstroObjectQueryResult,
 } from "../../src/astro-object-index";
+import type { RegionDownloadPreview, RegionDownloadPreviewEvent, RegionDownloadSelection } from "../../src/region-download-plan";
 
 export interface WorkspaceCapabilities {
   dataWarehouse: { enabled: boolean; configured?: boolean; namespace?: string; layerIndex?: string; coverageIndex?: string };
@@ -162,8 +163,8 @@ export interface CoverageDownloadFile {
 
 export interface CoverageDownloadJob {
   id: string;
-  status: "queued" | "running" | "completed" | "failed" | "cancelled";
-  phase: "queued" | "downloading" | "verifying" | "registering" | "completed" | "failed" | "cancelled";
+  status: "queued" | "running" | "completed" | "partial" | "failed" | "cancelled";
+  phase: "queued" | "downloading" | "verifying" | "registering" | "completed" | "partial" | "failed" | "cancelled";
   files: CoverageDownloadFile[];
   downloadedFiles: number;
   totalFiles: number;
@@ -478,6 +479,18 @@ export const workspaceApi = {
   async skyCellsQuery(input: AstroCellsQueryInput, signal?: AbortSignal): Promise<AstroCellsQueryResult> {
     return postJson<AstroCellsQueryResult>("/api/sky/cells/query", input, signal);
   },
+  async skyPointScopes(sourceIds: string[], signal?: AbortSignal): Promise<{ scopes: import("../../src/astro-object-index").SkyDataPointScope[] }> {
+    return postJson("/api/sky/points/scopes", { sourceIds }, signal);
+  },
+  async skyPointsQuery(input: ObjectRegionQueryInput, signal?: AbortSignal): Promise<AstroObjectQueryResult> {
+    return postJson<AstroObjectQueryResult>("/api/sky/points/query", input, signal);
+  },
+  async skyPointDetail(id: string): Promise<{ point: import("../../src/astro-object-index").AstroObjectRecord }> {
+    return getJson(`/api/sky/points/${encodeURIComponent(id)}`);
+  },
+  async derivedRepair(assetId: string, mode: "moc" | "positions" | "both"): Promise<unknown> {
+    return postJson(`/api/data-assets/${encodeURIComponent(assetId)}/derived-repairs`, { mode });
+  },
   async skyObjectsQuery(input: ObjectRegionQueryInput, signal?: AbortSignal): Promise<AstroObjectQueryResult> {
     return postJson<AstroObjectQueryResult>("/api/sky/objects/query", input, signal);
   },
@@ -499,6 +512,17 @@ export const workspaceApi = {
     const response = await fetch("/api/sky/reverse-lookup", { method: "POST", headers: { "Content-Type": "application/json", Accept: "text/event-stream" }, body: JSON.stringify(input) });
     if (!response.ok) throw new Error(`Reverse lookup HTTP ${response.status}`);
     return readJsonResponse<SkyReverseLookupResponse>(response, update);
+  },
+  async previewRegionDownload(selection: RegionDownloadSelection, options: { signal?: AbortSignal; onUpdate?: (event: RegionDownloadPreviewEvent) => void } = {}): Promise<RegionDownloadPreview> {
+    if (!options.onUpdate) return (await postJson<{ preview: RegionDownloadPreview }>("/api/sky/download-plan/preview", selection, options.signal)).preview;
+    const response = await fetch("/api/sky/download-plan/preview", { method: "POST", headers: { "Content-Type": "application/json", Accept: "text/event-stream" }, body: JSON.stringify(selection), signal: options.signal });
+    if (!response.ok) {
+      const payload = await response.json().catch(() => ({})) as { error?: string };
+      throw new Error(payload.error ?? `文件预览请求失败（HTTP ${response.status}）`);
+    }
+    return (await readJsonResponse<{ preview: RegionDownloadPreview }>(response, (event) => {
+      if (event.event === "progress" || event.event === "batch") options.onUpdate?.(event as RegionDownloadPreviewEvent);
+    }, undefined, options.signal)).preview;
   },
   async submitCoverageDownload(input: { files: CoverageDownloadFile[]; componentId?: string; sourceIds?: string[] }): Promise<CoverageDownloadJob> {
     return (await postJson<{ job: CoverageDownloadJob }>("/api/coverage-downloads", input)).job;

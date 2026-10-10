@@ -25,7 +25,10 @@ export interface ObjectRegionSelectionInput {
   ordering?: string;
 }
 
+export interface SkyDataPointScope { assetId: string; sourceId?: string }
+
 export interface ObjectRegionQueryInput {
+  layerScopes?: SkyDataPointScope[];
   bbox?: {
     raMin: number;
     raMax: number;
@@ -85,6 +88,8 @@ export interface AstroObjectQueryResult {
   searchAfter?: unknown[];
   nextCursor?: unknown[];
   message?: string;
+  /** More coordinates for the selected assets are still being indexed. */
+  indexing?: boolean;
 }
 
 export interface AstroCoverageFact {
@@ -217,7 +222,7 @@ const OBJECT_SOURCE_FIELDS = [
   "attributes",
 ] as const;
 
-const OBJECT_POINT_SOURCE_FIELDS = OBJECT_SOURCE_FIELDS.filter((field) => field !== "attributes");
+const OBJECT_POINT_SOURCE_FIELDS: readonly string[] = [...OBJECT_SOURCE_FIELDS.filter((field) => field !== "attributes"), "attributes.position_role", "attributes.position_method", "attributes.file_name", "attributes.hdu_index", "attributes.source_id"];
 
 const COVERAGE_SOURCE_FIELDS = [
   "healpix_order",
@@ -486,6 +491,7 @@ function mergedFilterValues(primary: unknown, alias: unknown, name: string): str
 }
 
 interface NormalizedObjectRegionQuery {
+  layerScopes?: SkyDataPointScope[];
   bbox?: {
     raMin: number;
     raMax: number;
@@ -571,6 +577,7 @@ function validateQueryInput(input: ObjectRegionQueryInput): NormalizedObjectRegi
   return {
     ...(bbox ? { bbox } : {}),
     ...(region ? { region } : {}),
+    ...(input.layerScopes === undefined ? {} : { layerScopes: validateLayerScopes(input.layerScopes) }),
     surveys: mergedFilterValues(input.surveys, input.surveyIds, "surveys"),
     releases: mergedFilterValues(input.releases, input.releaseIds, "releases"),
     products: validateFilterValues(input.products, "products"),
@@ -717,6 +724,22 @@ function objectSort(input: NormalizedObjectRegionQuery): readonly Record<string,
   return !input.region && input.searchAfter?.length === LEGACY_OBJECT_SORT.length ? LEGACY_OBJECT_SORT : OBJECT_SORT;
 }
 
+function validateLayerScopes(value: unknown): SkyDataPointScope[] {
+  if (!Array.isArray(value) || value.length > 512) throw new RangeError("layerScopes must be an array of at most 512 scopes");
+  return value.map((entry) => {
+    if (!isRecord(entry) || typeof entry.assetId !== "string" || !entry.assetId.trim()) throw new RangeError("each layer scope requires an assetId");
+    if (entry.sourceId !== undefined && (typeof entry.sourceId !== "string" || !entry.sourceId.trim())) throw new RangeError("sourceId must be non-empty");
+    return { assetId: entry.assetId, ...(entry.sourceId ? { sourceId: entry.sourceId as string } : {}) };
+  });
+}
+
+function scopedLayerFilter(scopes: readonly SkyDataPointScope[]): Record<string, unknown> {
+  if (!scopes.length) return { match_none: {} };
+  return { bool: { should: scopes.map((scope) => ({ bool: { filter: [
+    { term: { asset_id: scope.assetId } }, ...(scope.sourceId ? [{ term: { "attributes.source_id": scope.sourceId } }] : []),
+  ] } })), minimum_should_match: 1 } };
+}
+
 function queryBody(input: NormalizedObjectRegionQuery): Record<string, unknown> {
   const filters: unknown[] = [];
   if (input.region) {
@@ -734,7 +757,7 @@ function queryBody(input: NormalizedObjectRegionQuery): Record<string, unknown> 
   ] as const) {
     if (values?.length) filters.push({ terms: { [field]: values } });
   }
-  const visibility = layerVisibilityFilter(input.surveys, input.assetIds);
+  const visibility = input.layerScopes === undefined ? layerVisibilityFilter(input.surveys, input.assetIds) : scopedLayerFilter(input.layerScopes);
   if (visibility) filters.push(visibility);
 
   return {
@@ -1112,6 +1135,13 @@ export class AstroObjectIndexService {
     return this.#coverageIndex;
   }
 
+  async getPoint(id: string, readIndices: readonly string[]): Promise<AstroObjectRecord | undefined> {
+    if (!id || id.length > 512) throw new RangeError("Invalid point identity");
+    const indices = readIndices.map((index) => normalizeIndex(index, "readIndex", this.#objectIndex));
+    const result = await this.#requestJson(`/${indices.map(encodeURIComponent).join(",")}/_search?ignore_unavailable=true`, JSON.stringify({ size: 1, query: { term: { object_id: id } } }), "application/json") as ElasticsearchSearchResponse;
+    return hitsFromResponse(result).map((hit) => objectFromHit(hit)).find((value) => value !== undefined);
+  }
+
   async ensureIndices(): Promise<void> {
     if (!this.configured) throw new Error("ASTRO_ES_URL is not configured; cannot initialize local scan indices");
     await this.#ensureIndex(this.#objectIndex, {
@@ -1130,7 +1160,7 @@ export class AstroObjectIndexService {
         asset_id: { type: "keyword" },
         source_file_id: { type: "keyword" },
         scan_run_id: { type: "keyword" },
-        attributes: { type: "flattened" },
+        attributes: { type: "flattened", ignore_above: 8192 },
       },
     });
     await this.#ensureIndex(this.#coverageIndex, {
@@ -1309,7 +1339,7 @@ export class AstroObjectIndexService {
     }
   }
 
-  async queryObjects(input: ObjectRegionQueryInput): Promise<AstroObjectQueryResult> {
+  async queryObjects(input: ObjectRegionQueryInput, readIndices?: readonly string[]): Promise<AstroObjectQueryResult> {
     const normalized = validateQueryInput(input);
     if (!this.configured) {
       return queryResult(this.#objectIndex, normalized, "unavailable", {
@@ -1319,7 +1349,7 @@ export class AstroObjectIndexService {
 
     try {
       const response = await this.#requestJson(
-        `/${encodeURIComponent(this.#objectIndex)}/_search`,
+        `/${encodeURIComponent(readIndices?.map((index) => normalizeIndex(index, "readIndex", this.#objectIndex)).join(",") ?? this.#objectIndex)}/_search${readIndices ? "?ignore_unavailable=true" : ""}`,
         JSON.stringify(queryBody(normalized)),
         "application/json",
       ) as ElasticsearchSearchResponse;

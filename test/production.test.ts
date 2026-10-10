@@ -69,9 +69,9 @@ function createService(root: string, options: {
     localRoots: { assertConfiguredPath: () => undefined } as never,
     ...(options.sourceResolver ? {
       sourceResolver: options.sourceResolver,
-      // Keep the in-run resolve step hermetic: HEAD enrichment is best-effort,
-      // so an offline stub fetch still yields a resolved inventory.
-      sourceResolveOptions: { fetchImpl: async () => new Response("", { status: 404 }) },
+      // Keep the in-run resolve step hermetic. Unsupported HEAD retains an
+      // unverified candidate; a real 404 would make the source unavailable.
+      sourceResolveOptions: { fetchImpl: async () => new Response(null, { status: 405 }) },
     } : {}),
   });
 }
@@ -79,7 +79,7 @@ function createService(root: string, options: {
 async function waitForTerminal(service: ProductionService, id: string): Promise<ProductionRun> {
   for (let attempt = 0; attempt < 600; attempt += 1) {
     const run = await service.getRun(id);
-    if (["succeeded", "failed", "cancelled"].includes(run.status)) return run;
+    if (["succeeded", "partial", "failed", "cancelled"].includes(run.status)) return run;
     await new Promise((resolve) => setTimeout(resolve, 10));
   }
   throw new Error(`Timed out waiting for production run ${id}`);

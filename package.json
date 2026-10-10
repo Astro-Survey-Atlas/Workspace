@@ -3,7 +3,9 @@
   "version": "0.10.38",
   "private": true,
   "type": "module",
-  "workspaces": ["packages/cli"],
+  "workspaces": [
+    "packages/cli"
+  ],
   "description": "Atlas user-asset workspace and MCP service",
   "scripts": {
     "build": "npm run build:server && npm run build:viewer && npm run build:cli",
@@ -14,7 +16,7 @@
     "dev:viewer": "vite --host 0.0.0.0 --port 5173",
     "preview:viewer": "vite preview --host 0.0.0.0 --port 4173",
     "start": "node dist/src/http-server.js",
-    "test": "tsx --test test/*.test.ts",
+    "test": "tsx --test --test-concurrency=4 test/*.test.ts",
     "test:e2e": "playwright test",
     "verify": "npm run verify:types && npm run build && npm test && npm run verify:chart",
     "verify:types": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.viewer.json --noEmit",
@@ -27,6 +29,7 @@
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1095.0",
     "@modelcontextprotocol/sdk": "1.29.0",
+    "@streamparser/json": "^0.0.22",
     "aladin-lite": "^3.9.0-beta",
     "ali-oss": "^6.23.0",
     "csv-parse": "7.0.1",

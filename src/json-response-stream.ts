@@ -1,14 +1,16 @@
+import { abortable } from "./abortable.js";
+
 export interface JsonResponseEvent { event: string; value: Record<string, unknown> }
 
 /** A request-scoped reader; events and results are never cached or persisted. */
-export async function readJsonResponse<T>(response: Response, update?: (event: JsonResponseEvent) => void, maximumEventBytes = 32 * 1024 * 1024): Promise<T> {
+export async function readJsonResponse<T>(response: Response, update?: (event: JsonResponseEvent) => void, maximumEventBytes = 32 * 1024 * 1024, signal?: AbortSignal): Promise<T> {
   const streamed = response.headers.get("Content-Type")?.includes("text/event-stream");
   if (!response.body) throw new Error("Query response is unavailable");
   const reader = response.body.getReader(), decoder = new TextDecoder();
   let buffer = "", received = 0;
   try {
     while (true) {
-      const chunk = await reader.read();
+      const chunk = await abortable(reader.read(), signal);
       received += chunk.value?.byteLength ?? 0;
       if (received > maximumEventBytes * (streamed ? 8 : 1)) throw new Error("Query response exceeded its transfer budget");
       buffer += decoder.decode(chunk.value, { stream: !chunk.done }).replace(/\r\n/g, "\n");
@@ -27,5 +29,5 @@ export async function readJsonResponse<T>(response: Response, update?: (event: J
       }
       if (chunk.done) throw new Error("Query stream ended before completion");
     }
-  } finally { await reader.cancel().catch(() => undefined); }
+  } finally { void reader.cancel().catch(() => undefined); }
 }

@@ -9,6 +9,7 @@ export type DataAssetNextAction = "scan_local" | "scan_remote" | "retry" | "conf
 
 export interface DataAssetCoverageEvidence {
   status?: string;
+  activeCoverage?: boolean;
   /** Status reported by the object/coverage index independently of footprint evidence. */
   objectStatus?: string;
   pixels?: readonly number[];
@@ -30,6 +31,9 @@ export interface DataAssetOperationalStatus {
   coverage: DataAssetCoverageState;
   objects: DataAssetObjectState;
   nextAction: DataAssetNextAction;
+  dataPointCount?: number;
+  dataPointStatus?: string;
+  dataPointProgress?: { processedFiles: number; fileCount: number; errors: number };
   message?: string;
 }
 
@@ -74,10 +78,10 @@ export function deriveDataAssetOperationalStatus(input: DataAssetStatusInput): D
   // terminal run as evidence; otherwise require at least one indexed object.
   const indexed = input.objectIndexConfigured
     && coverage?.objectStatus === "ready"
-    && ((coverage.objectCount === undefined && latestRunIs(input, "succeeded"))
-      || (coverage.objectCount !== undefined && (coverage.objectCount > 0 || latestRunIs(input, "succeeded"))));
+    && ((coverage.objectCount ?? 0) > 0 || (latestRunIs(input, "succeeded") && run?.taskKind !== "user_coverage"));
   let state: DataAssetCoverageState;
-  if (failed) state = "failed";
+  if (coverage?.activeCoverage) state = hasPixelEvidence(coverage) ? "ready" : "empty";
+  else if (failed) state = "failed";
   else if (pending) state = "pending";
   else if (hasPixelEvidence(coverage)) state = "ready";
   else if (coverageStatus === "unavailable") state = "unavailable";
@@ -112,7 +116,9 @@ export function deriveDataAssetOperationalStatus(input: DataAssetStatusInput): D
     else nextAction = "configure_connector";
   }
 
-  const message = coverage?.message ?? run?.error;
+  // Ready evidence supersedes historical import errors; those remain on the
+  // original run. Current index/coverage diagnostics still take precedence.
+  const message = coverage?.message ?? (state === "ready" || state === "empty" ? undefined : run?.error);
   return {
     assetId: input.asset.id,
     coverage: state,

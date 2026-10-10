@@ -4,7 +4,7 @@
 > [`atlas-boundary-plan.md`](atlas-boundary-plan.md) 为准。这里的接口只描述
 > Workspace 自有 API，不是 Assets 或 Warehouse API。Workspace 服务端可能在
 > 明确的重合/下载操作中调用受保护的 Assets scoped query；该调用不是浏览器
-> API，也不会把 Assets 的私有反查索引暴露给客户端。
+> API，也不会把 Assets 的原生索引文件复制到 Workspace。
 
 这是 Astro Data Workspace API 的维护入口。接口实现、请求示例和状态语义发生变化时，必须在同一变更中更新本文和对应测试；`README.md` 只保留入口链接，不再复制完整请求体。
 
@@ -42,7 +42,16 @@ Content-Type: application/json
 {}
 ```
 
-请求体必须为空对象或省略。该接口扫描 Connector 注册的完整 S3/OSS Prefix，创建 namespaced `atlas.zhejianglab.org/v1alpha1/ScanRequest`（`ScanPlan.version=2`），并返回 Workspace 扫描记录。它不能表达子目录、basename 过滤器或产品级 coverage 证据。
+请求体必须为空对象或省略。该接口扫描 Connector 注册的完整 S3/OSS Prefix，
+或受管生产数据卷内的本地目录，创建 namespaced
+`atlas.zhejianglab.org/v1alpha1/ScanRequest`（`ScanPlan.version=2`），并返回
+Workspace 扫描记录。Connector 必须关联一个已登记的用户资产，扫描参数使用该资产的
+FITS 图像或 CSV 坐标配方。空请求不能额外指定子目录或 basename 过滤器。
+
+本地扫描的 `plan.source.location` 仅包含 scanner 容器内的 `rootPath`；
+PVC 的相对子路径放在 `scanner.sourceVolume.subPath`，并挂载到同一个
+`scanner.sourceVolume.mountPath`。本地来源不创建 source 凭据。新下载生成的
+Connector 需要先在「用户资产」登记并关联，才能提交扫描。
 
 一个 Connector 如果关联多个 `origin=user` 资产，Workspace 会以
 `ConnectorScanPreconditionError` 拒绝这次无 `assetId` 的自扫描，不会静默选择
@@ -55,6 +64,7 @@ Content-Type: application/json
 
 ```http
 GET /api/connectors/{connectorId}/runs
+GET /api/connectors/{connectorId}/ingest-runs
 GET /api/connector-ingest-runs?connectorId={connectorId}
 ```
 
@@ -240,11 +250,79 @@ POST /api/sky/reverse-lookup
 例如 `public:desi:dr1:spectro:sourceId=tile-123`，不能使用 `public:desi` 或
 任何仅含 survey 的 ID。返回结果必须保留实际 order、revision、expiry 和状态。
 
-当前 Workspace 内置 HTTP 爬虫只是受限 fallback：它识别直链，并从小型
-HTML/XML 目录提取数据文件链接；结果过多时只返回前 128 个并在 `warnings`
-中说明。MOC JSON、普通说明页、S3 入口和无法确认文件类型的服务 URL 会保持
-`entrypoint-only` 或 `unavailable`，不会伪装成可下载文件。受保护 Assets API
-未配置时，公开几何和 overlap 仍可用，但公开下载可能只能显示不可执行状态。
+公开反查通过服务端 API Key 临时读取 Assets 的原生分块分页，返回原生身份、
+来源 URI 和实际精度；本地部分返回命中文件的直接父目录。
+源站文件元数据只在用户操作下面的下载预览时获取，按具体原生单元解析，
+不爬取整个巡天根目录。MOC JSON、说明页、S3 入口或没有可验证文件映射的
+来源保持 `entrypoint-only` 或 `unavailable`。缺少 API Key 时，公开几何和
+本地目录查询仍可用，公开原生反查和下载预览不可用。
+
+### 区域下载预览与确认
+
+```http
+POST /api/sky/download-plan/preview
+Content-Type: application/json
+
+{
+  "layerIds": ["desi-dr1-spectra-footprint"],
+  "order": 4,
+  "cells": [637,639,725,958,959,1002,1003],
+  "querySnapshotId": "<Assets 反查返回的 querySnapshot.id>",
+  "nativeUnitIndexRevision": "<Assets 反查返回的 nativeUnitIndexRevision>",
+  "units": [{"layerId":"desi-dr1-spectra-footprint","unitKind":"tile","unitId":"406"}]
+}
+```
+
+示例中的单元身份必须确实出现在所选区域的冻结快照中；不能仅复制示例身份。
+请求体直接是公开选择器，成功返回 `200`、`Cache-Control: no-store` 和
+`{"preview":{...}}`。预览不会创建任务或传输科学文件，字段含义如下：
+
+| 字段 | 含义 |
+| --- | --- |
+| `selection` | 规范化后的公开图层、ICRS/NESTED order/cells、快照和明确原生单元；用于后续确认 |
+| `querySnapshotId`、`nativeUnitIndexRevision`、`expiresAt` | Assets 冻结查询及有效期限；确认时重新核对 |
+| `inventory.files` | 当前候选文件：真实 URL、相对目标路径、大小/校验信息、来源和原生单元身份；相同物理 URL 去重 |
+| `unavailable`、`notes` | 文件或来源不可用的原因、访问与范围限制；不能据此创造文件 |
+| `selectionTruncated`、`inventory.truncated` | 原生选择或文件解析受到限制；分页耗尽不代表库存完整 |
+| `limits` | 确认上限：最多 128 个文件；文件大小与任务总量没有字节配额 |
+| `planSha256` | 绑定本次选择、版本和候选清单的摘要；确认字段名为 `previewSha256` |
+
+同一端点支持 `Accept: text/event-stream`。响应保留 `Cache-Control: no-store`，
+设置 `X-Accel-Buffering: no`，等待期间每 10 秒发送心跳注释。事件如下：
+
+| 事件 | `data` 内容 |
+| --- | --- |
+| `progress` | `stage: lookup / metadata`、`completed`、可选 `total`、`files`、`unavailable` 计数 |
+| `batch` | `files` 和 `unavailable` 增量；相同 URL 可更新归属，客户端按 URL 合并 |
+| `complete` | `{"preview":{...}}`，最终校验后的完整预览及摘要 |
+| `error` | `error` 消息；已分类错误附带 `statusCode` 和可选 `retryAfterSeconds`，随后结束连接 |
+
+流开始前的参数错误仍返回普通 HTTP 错误。收到 `complete` 前，文件仅供查看，
+不能勾选或确认。停止后保留已发现文件，但必须重新预览才能确认。关闭预览、
+切换天区/模板或离开数据生产会中止当前源站请求并停止后续排队请求。
+未声明流式响应的客户端继续接收原有 JSON。预览不创建持久化 session。
+
+桌面默认从已载入结果中每巡天选择一个原生分块，用户可以展开增加（最多 128 个），
+再请求文件预览；区域的完整 `order/cells` 和图层选择仍保留。改变分块选择会清空
+旧预览及文件勾选，必须重新预览。预览完成后，最多 128 个候选默认勾选，文件大小
+不影响选择；创建下载任务仍需用户确认。执行器按流分块写入 `.part` 文件，并在源站
+提供强校验器时用 HTTP Range 续传。这个选择只控制源站元数据
+解析范围，不限制区块反查分页或 JSON/CSV 来源清单导出。
+
+确认使用现有 `POST /api/production-runs`、`pipelineKey=overlap-download@1`：
+传入相同天区 `region`，`publicDownload.selection=preview.selection`、
+`publicDownload.previewSha256=preview.planSha256`，以及用户勾选的
+`publicDownload.selectedFileUrls`。服务器在创建任务前重新校验同一快照和候选清单；
+默认并发 4，允许 1–16。桌面流程使用 `warehouseHandoff=none`，下载后登记资产并
+单独扫描。完整请求示例见 [下载流程](download-plan-workflow.md)。
+
+成功创建返回 `202` 和 `{run}`。任务仅持久化选中文件的最小清单、审批引用和进度；
+不保存原始公开反查或未选候选。重试复用已经批准的文件集合，后续发现新文件不会追加。
+下载写入 Workspace 运行端，完成后注册 Connector；Assets 不下载科学文件。
+
+参数错误返回 `400`；Key 缺失或鉴权失败返回 `401`；快照过期、版本或清单变化
+返回 `409`；Assets 配额限制返回 `429` 并携带 `Retry-After`。源站单项不可用通过
+预览的 `unavailable` 表达。
 
 ### 重合来源下载闭环
 
@@ -264,10 +342,13 @@ Content-Type: application/json
 }
 ```
 
-提交返回 `202` 和任务 ID。Workspace 会限制文件名、单文件/总大小和 URL 协议，
-在服务器上下载并校验大小和 SHA-256；成功后把文件放到受管本地目录并自动登记
-一个新的 `local` Connector，任务的 `outputConnectorId`/`outputPath` 指向该闭环
-结果。可用下面的接口轮询或取消任务：
+提交返回 `202` 和任务 ID。Workspace 会校验文件名、目标路径和 URL 协议；
+单文件与任务总字节数不设上限。服务器逐个下载文件并校验大小和 SHA-256，
+失败文件重试耗尽后会跳过，继续下载其余文件。至少一个文件通过校验时，
+成功文件会放到受管本地目录并自动登记一个新的 `local` Connector；全成功为
+`completed`，部分成功为 `partial`，任务的 `outputConnectorId`/`outputPath`
+指向结果。全文件失败时状态为 `failed`，不会登记空 Connector。可用下面的
+接口轮询或取消任务：
 
 下载计划的 public item 只能来自 concrete public source identity 对应的受控
 结果；`public:<survey>`、缺少 release/DR/product/sourceId/layerId 或身份与
@@ -281,8 +362,9 @@ GET  /api/coverage-downloads/{jobId}
 POST /api/coverage-downloads/{jobId}/cancel
 ```
 
-任务状态为 `queued`、`running`、`completed`、`failed` 或 `cancelled`，并带有
-`downloading`、`verifying`、`registering` 等阶段。下载任务始终创建新的 Connector；
+任务状态为 `queued`、`running`、`completed`、`partial`、`failed` 或 `cancelled`，并带有
+`downloading`、`verifying`、`registering`、`partial` 等阶段。`downloadedFiles`
+只统计通过完整下载与校验的文件；逐文件错误保存在 `transfer[].error`。下载任务始终创建新的 Connector；
 旧版的 `targetConnectorId` 参数会被明确拒绝，不会静默写入已有位置。
 
 ### Assets 原生 MOC
@@ -356,3 +438,43 @@ GET /api/public-surveys/{surveyId}
 - Warehouse `ast_*` 读取：`src/warehouse-index.ts`
 - 扫描运行记录：`src/connector-history.ts`
 - scanner/operator 细节：`/home/aaron/Repo/Astro-Survey-Atlas-Warehouse/docs/scan-plan.md`
+
+## 私有制品修复与天空数据点
+
+`POST /api/data-assets/{assetId}/derived-repairs` 接受
+`{"mode":"moc"|"positions"|"both","scanRunId":"可选的成功扫描 ID","maxFiles":100}`。
+`maxFiles` 可选，1–1000，只用于 header 样本验证；样本不会写入正式数据点索引。
+任务返回 202，状态由 `GET /api/derived-repairs` 查询。任务独立保存，关联原扫描
+和输入快照哈希，不覆盖原始扫描、MOC 失败历史或 Warehouse 当前覆盖。
+MOC 从既有 normalized evidence 流式导入并在磁盘排序去重。坐标补建消费同一份
+有限文件清单，默认 8 路读取未压缩 FITS 的 2880-byte header Range，跳过像素数组；
+每 100 文件提交可恢复 checkpoint。新覆盖扫描同时保留 header 证据，成功后直接
+补建坐标，不再次读取科学文件。失败文件与坐标错误保留为私有证据，成功批次可查询。
+
+天空数据点在独立的 `astro_data_point_index_v1`；科学目录对象仍在既有对象索引。
+影像中心使用科学 HDU 的 Astropy celestial WCS 转到 ICRS，保留 HDU、原始 WCS
+header、方法和源文件；无影像 WCS 时可使用明确的目标指向。影像中心、指向和
+目录行是不同的位置类型，影像中心不代表检测出的恒星，不能作为科学对象匹配输入。
+缺少真实坐标不产生 HEALPix 中心替代点。辅助 DQ/ERR 等 HDU 不产生影像中心。
+
+`POST /api/sky/points/query` 必须提供 ICRS/NESTED `region` 和显式
+`layerScopes: [{"assetId":"...","sourceId":"可选的具体公开来源"}]`；`bbox` 与区域
+取交集。作用域是 asset AND source，多个作用域之间 OR，空数组严格返回空结果。
+`includeAttributes:false` 只返回位置和少量位置类型/来源标记，完整文件与 header
+由 `GET /api/sky/points/{id}` 按需读取。分页延续原有 cursor/search_after 契约。
+响应的 `indexing` 表示所选私有资产仍有正式坐标补建任务；样本和 MOC-only
+任务不计入。Aladin 在此期间保留已显示点，每 10 秒按冻结入口天区和当前视野
+重新查询，完成后恢复视野缓存。取消所有可查询图层或退出 Aladin 会停止刷新。
+
+索引写入遇到超时、连接失败或 HTTP 429/502/503/504 时，任务保持 `running`，
+保留最后提交偏移，以 10–120 秒退避重试。`retryAttempts` / `nextRetryAt`
+说明当前等待；成功后清除。超时可能已经写入部分文档，稳定点 ID 保证重试幂等，
+统计只在整批成功后前移。为同一扫描、源快照和样本范围创建新的坐标补建时，
+复用已有 header Job/证据，从已提交的 header 重建索引，保留之前的失败任务。
+`POST /api/sky/points/scopes` 接受具体 `sourceIds`，只通过已校验下载文件的来源
+以及输出 Connector 与私有资产的真实关联解析 scope，不按巡天名称猜测。
+
+Aladin 冻结外部选择的具体图层与进入区域，默认启用所有继承图层；内部 checkbox
+只能缩小此集合。公开 coverage-only 图层明确提示下载扫描后才有数据点。缓存包含
+进入区域、具体来源与内部选择，取消所有图层不退回全局查询。资产状态独立报告
+`dataPointCount`、`dataPointStatus` 与补建文件进度，覆盖成功不等于目录对象已索引。

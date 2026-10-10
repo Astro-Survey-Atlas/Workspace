@@ -21,6 +21,25 @@ function status(overrides: Partial<DataAssetStatusInput> = {}) {
   });
 }
 
+test("an ACTIVE Warehouse layer stays usable when its derived MOC import failed", () => {
+  const result = status({ coverage: { status: "ready", activeCoverage: true, pixels: [123], latestMocStatus: "failed", objectStatus: "ready", objectCount: 0 }, latestRun: { status: "succeeded", taskKind: "user_coverage" } });
+  assert.equal(result.coverage, "ready");
+  assert.equal(result.objects, "not_indexed");
+  assert.equal(result.nextAction, "none");
+});
+
+test("repaired coverage does not present a historical scan import error as its current explanation", () => {
+  const historicalRun = { status: "succeeded", taskKind: "user_coverage", error: "File size (4287359816) is greater than 2 GiB" };
+  const coverage = { status: "ready", activeCoverage: true, pixels: [123], latestMocStatus: "ready", objectStatus: "ready", objectCount: 0 };
+  const result = status({ coverage, latestRun: historicalRun });
+  assert.equal(result.coverage, "ready");
+  assert.equal(result.nextAction, "none");
+  assert.equal(result.message, undefined);
+  assert.equal(historicalRun.error, "File size (4287359816) is greater than 2 GiB");
+  assert.equal(status({ coverage: { ...coverage, message: "Object index is temporarily unavailable" }, latestRun: historicalRun }).message,
+    "Object index is temporarily unavailable");
+});
+
 test("unlinked assets ask the user to configure a Connector", () => {
   assert.deepEqual(status({ coverage: { status: "ready", pixels: [] } }), {
     assetId: "asset-cosmos",
