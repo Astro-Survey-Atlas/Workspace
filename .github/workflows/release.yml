@@ -65,6 +65,7 @@ jobs:
           context: .
           push: true
           platforms: linux/amd64
+          provenance: false
           tags: |
             ${{ env.GHCR_IMAGE }}:${{ needs.validate.outputs.version }}
             ${{ env.GHCR_IMAGE }}:${{ needs.validate.outputs.image_tag }}
