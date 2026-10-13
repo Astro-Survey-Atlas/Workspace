@@ -329,7 +329,7 @@ identifiable directly in the list. The earlier r4 name
 Connector-name code and regression details are in
 `docs/workspace-download-ui-verification-20261012.md`.
 
-## Current Dev deployment and error-history cleanup (October 13, r6)
+## Previous Dev deployment and error-history cleanup (October 13, r6)
 
 Helm revision **90** deploys Workspace image
 `0.0.1-dev-20261013-cleanup-r1`; the Pod is Ready with zero restarts. The
@@ -353,4 +353,30 @@ Live CSST status was verified through Workspace during this deployment:
 errors. `npm run verify:types`, `npm run build`, `npm run verify:chart` and
 `git diff --check` passed. The Dockerfile source build hit an npm internal error
 in `npm ci`; this Dev image overlays the validated local build outputs on the
-currently deployed runtime image. Release `v0.0.1` is being prepared separately.
+currently deployed runtime image. The v0.0.1 release was still pending here;
+see the current deployment section below.
+
+## Current Dev deployment and v0.0.1 release (October 13, r7)
+
+Git tag `v0.0.1` and `main` point to commit
+`99033ca8e0fa1a20c43ce44cf163116b2d7202c7`. Release workflow run
+`38343022050` completed successfully. It published the Workspace image to
+GHCR and Aliyun as `0.0.1` and `0.0.1-20261013-034311`; the GHCR OCI Helm
+Chart is version `0.0.1`. The public GitHub Release has six assets, including
+the Windows setup executable, its blockmap, and `latest.yml`:
+`https://github.com/Astro-Survey-Atlas/Workspace/releases/tag/v0.0.1`.
+
+Helm revision **93** deploys the official Aliyun image
+`0.0.1-20261013-034311` with digest
+`sha256:a979f934f80776761028ae49646498af16da0752a0030876e9c0ba6a7b7d04f8`.
+The Workspace Pod and existing downloader Pod are Ready with zero restarts.
+The downloader remains on its prior r4 image. The upgrade reused the existing
+Helm values, preserving shared storage, proxy, Warehouse and resource settings.
+Workspace `/healthz` reports version `0.0.1`.
+
+The first official-image pull hit a transient connection reset at the Aliyun
+token endpoint. Workspace was restored on the verified r6 image; after checking
+the registry endpoint from the host and a Pod, deployment of the official image
+succeeded. Current API checks still show zero failed/unavailable records:
+4 successful Production runs, 4 completed downloads, 3 successful Connector
+scans, 7 successful derived repairs and 3 ready MOC artifacts.
