@@ -102,7 +102,12 @@ jobs:
           helm package charts/asa-workspace -d dist-chart
       - name: Push chart to GHCR OCI
         run: |
+          VERSION="${{ needs.validate.outputs.version }}"
           helm registry login ghcr.io -u ${{ github.actor }} -p ${{ secrets.GITHUB_TOKEN }}
+          if helm pull "${CHART_OCI}/asa-workspace" --version "${VERSION}" --destination "${RUNNER_TEMP}" > /dev/null 2>&1; then
+            echo "Chart ${VERSION} is already published; keeping its existing package."
+            exit 0
+          fi
           helm push dist-chart/*.tgz ${{ env.CHART_OCI }}
 
   desktop:
@@ -138,3 +143,24 @@ jobs:
         env:
           CSC_IDENTITY_AUTO_DISCOVERY: "false"
         run: npx electron-builder --win --publish always
+
+  publish:
+    name: Publish GitHub Release
+    runs-on: ubuntu-latest
+    needs: [validate, docker, chart, desktop]
+    steps:
+      - uses: actions/github-script@v7
+        with:
+          script: |
+            const { data: release } = await github.rest.repos.getReleaseByTag({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              tag: context.ref_name,
+            });
+            const { data: published } = await github.rest.repos.updateRelease({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              release_id: release.id,
+              draft: false,
+            });
+            core.info(`Published ${published.html_url}`);

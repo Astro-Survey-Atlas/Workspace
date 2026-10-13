@@ -34,3 +34,4 @@ publish:
   provider: github
   owner: Astro-Survey-Atlas
   repo: Workspace
+  releaseType: release
