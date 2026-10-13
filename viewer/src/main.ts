@@ -2,6 +2,7 @@ import { ChevronLeft, ChevronRight, createIcons, Download, Globe2, GripVertical,
 import { mergePublicPages, workspaceManifestCsv } from "./overlap-manifest.js";
 import { coverageLocator, coverageSourceGroups, setupCoverageLocatorTooltip } from "./coverage-inspector.js";
 import type { SkyOverlapSource } from "../../src/sky-overlap.js";
+import type { SkyPointInspectionResult } from "../../src/astro-object-index.js";
 import type { SkyReverseLookupResponse } from "./api.js";
 import type { AssetsRegionLookupResponse, AssetsRegionSpatialUnit } from "../../src/assets-region-client";
 import type { WorkspaceDirectory } from "../../src/workspace-directories";
@@ -408,6 +409,8 @@ let aladinFullscreen = false;
 let aladinAssetDrawerOpen = false;
 let aladinEntryGeneration = 0;
 let aladinEntryAbort: AbortController | null = null;
+let aladinPointInspectionGeneration = 0;
+let aladinPointInspectionAbort: AbortController | null = null;
 let mode: ViewMode = "layers";
 let astroOverview: AstroOverviewResponse | null = null;
 const workspaceCellSummaries = new Map<string, AstroSpatialSummary>();
@@ -423,6 +426,10 @@ const productionPanel = new ProductionPanel(
   (error) => console.error("Production UI request failed", error),
   renderProductionSummary,
   renderProductionInspector,
+  (connectorId) => {
+    connectorSelectionRequest = connectorId;
+    void activateMode("connectors").catch(showFatal);
+  },
 );
 const systemPanel = new SystemPanel((error) => console.error("System settings UI request failed", error), renderSystemSummary);
 const agentDock = new AgentDock((error) => console.error("Agent UI request failed", error));
@@ -803,9 +810,11 @@ function cancelAladinEntry(): void {
 
 function renderAladinAssetDrawerState(): void {
   const controls = byId("aladin-controls");
+  const deck = byId("aladin-deck");
   const rail = byId("aladin-cockpit-rail");
   const toggle = byId<HTMLButtonElement>("aladin-asset-drawer-toggle");
   controls.dataset.assetDrawer = aladinAssetDrawerOpen ? "open" : "closed";
+  deck.classList.toggle("is-open", aladinAssetDrawerOpen);
   rail.classList.toggle("is-open", aladinAssetDrawerOpen);
   toggle.setAttribute("aria-expanded", String(aladinAssetDrawerOpen));
   toggle.setAttribute("aria-label", aladinAssetDrawerOpen ? "收起图层抽屉" : "展开图层抽屉");
@@ -813,9 +822,7 @@ function renderAladinAssetDrawerState(): void {
   toggle.replaceChildren();
   const toggleIcon = document.createElement("i");
   toggleIcon.dataset.lucide = aladinAssetDrawerOpen ? "chevron-left" : "chevron-right";
-  const toggleLabel = document.createElement("span");
-  toggleLabel.textContent = "资产";
-  toggle.append(toggleIcon, toggleLabel);
+  toggle.append(toggleIcon);
   createIcons({ icons: { ChevronLeft, ChevronRight }, attrs: { "aria-hidden": "true" } });
 }
 
@@ -831,6 +838,7 @@ function pushAladinToast(message: string, tone: "info" | "success" | "error" = "
 function destroyViewer(): void {
   layerViewer?.dispose();
   aladinExplorer?.dispose();
+  clearAladinPointInspection();
   cancelAladinEntry();
   layerViewer = null;
   aladinExplorer = null;
@@ -871,10 +879,11 @@ function explorationSurveyIds(ids: Iterable<string> = visibleSurveyIds, assetIds
 }
 
 function selectionSurveyIds(selection: SurveyLayerSelection): string[] {
-  const localOnlyIds = localOnlySurveyIds(selection.assetIds);
-  return [...new Set(selection.surveyIds)]
-    .filter((surveyId) => !localOnlyIds.has(surveyId) && footprintsForSurvey(surveyId).length > 0)
-    .sort();
+  return [...new Set(selection.artifacts.map((artifact) => artifact.surveyId))].sort();
+}
+
+function selectionPublicReleaseIds(selection: SurveyLayerSelection): string[] {
+  return [...new Set(selection.artifacts.map((artifact) => artifact.releaseId))].sort();
 }
 
 type SkyRegionMenu = { clientX: number; clientY: number; nside: number; pixels: number[]; surveyIds: string[]; releaseIds?: string[]; assetIds: string[]; componentId?: string; sourceIds?: string[] };
@@ -964,23 +973,10 @@ async function toggleAladinFullscreen(): Promise<void> {
 }
 
 function renderAladinStatus(status: AladinExplorerStatus): void {
-  const previousAladinIndexing = latestAladinStatus?.indexing;
   latestAladinStatus = status;
   const host = byId("aladin-explorer");
-  const phaseLabel: Record<typeof status.phase, string> = {
-    initializing: "初始化 Aladin",
-    loading: status.total > 0
-      ? `已加载 ${formatInteger(status.returned)} / ${formatInteger(status.total)} 个数据点`
-      : `已加载 ${formatInteger(status.returned)} 个数据点`,
-    ready: `${formatInteger(status.returned)} 个数据点`,
-    empty: "当前视野没有数据点",
-    error: `数据点查询失败：${status.message ?? "未知错误"}`,
-  };
   const selectionEmpty = status.phase === "empty" && status.message?.includes("当前选区没有可探索的用户资产");
-  if (status.phase === "initializing") notifyWorkspace("Aladin 正在初始化", "数据点探索视图正在准备", { tone: "info" });
-  else if (status.phase === "loading" && !status.indexing && !previousAladinIndexing) notifyWorkspace("Aladin 正在加载数据点", phaseLabel.loading, { tone: "info" });
-  else if (status.phase === "error") pushAladinToast(status.message ?? "数据点查询失败", "error");
-  else if (status.phase === "ready" && status.complete) pushAladinToast(`${formatInteger(status.returned)} 个数据点已载入`, "success");
+  if (status.phase === "error") pushAladinToast(status.message ?? "数据点查询失败", "error");
   else if (status.phase === "empty" && !selectionEmpty && !status.indexing) pushAladinToast(status.message ?? "当前视野暂无数据点", "info");
   else if (status.message && !selectionEmpty && !status.indexing) pushAladinToast(status.message, "info");
   host.dataset.queryPhase = status.phase;
@@ -1112,9 +1108,10 @@ async function enterAladinExplorer(menu: SkyRegionMenu): Promise<void> {
       return { key: layer.id, label: layer.label, color: layer.color };
     },
     onObject: (point) => {
-      if (point) renderSurveyObjectPoint(point);
+      if (point) renderAladinPointInspector(point);
       else {
-        byId("inspector-panel").classList.remove("aladin-object-selected");
+        clearAladinPointInspection();
+        byId("inspector-panel").classList.remove("aladin-object-selected", "mobile-open");
         delete byId("inspector-panel").dataset.objectId;
         inspectorRows("", []);
       }
@@ -1134,6 +1131,7 @@ async function enterAladinExplorer(menu: SkyRegionMenu): Promise<void> {
 
 async function leaveAladinExplorer(): Promise<void> {
   if (!aladinExplorer && !aladinSnapshot && !aladinEntryAbort) return;
+  clearAladinPointInspection();
   cancelAladinEntry();
   const stage = byId("scene-stage");
   if (document.fullscreenElement === stage) await document.exitFullscreen().catch(() => undefined);
@@ -1278,7 +1276,8 @@ function coverageSourceDisplay(source: Pick<SkyOverlapSource, "kind" | "surveyId
   const survey = surveyId ? records.get(surveyId) : undefined;
   const card = cards.find(candidate => candidate.id === surveyId);
   return {
-    surveyName: survey?.name ?? card?.name ?? surveyId ?? "未标注巡天",
+    surveyName: (source.kind === "workspace" && source.assetId ? dataAssets.find(asset => asset.id === source.assetId)?.name : undefined)
+      ?? survey?.name ?? card?.name ?? surveyId ?? "未标注巡天",
     releaseLabel: survey?.releases.find(release => release.id === releaseId)?.label ?? releaseId,
     color: survey ? surveyDisplayColor(survey.id, survey.color)
       : card ? surveyDisplayColor(card.id, card.color)
@@ -1654,6 +1653,18 @@ async function enterSkyOverlapMode(): Promise<void> {
   canvas.dataset.overlapMode = "true";
   byId("scene-mode-value").textContent = "G · OVERLAP";
   byId("scene-badge").textContent = "天区重合";
+  overlapInspector("G · 天区重合", [], [["状态", "正在计算重合区域…"]]);
+  const progress = byId("inspector-content").querySelector("dd");
+  if (progress) {
+    progress.className = "coverage-lookup-progress";
+    progress.setAttribute("role", "status");
+    progress.setAttribute("aria-live", "polite");
+    progress.setAttribute("aria-busy", "true");
+    const spinner = document.createElement("span");
+    spinner.className = "coverage-lookup-spinner";
+    spinner.setAttribute("aria-hidden", "true");
+    progress.prepend(spinner);
+  }
   try {
     const state = layerViewer.state;
     const sourceIds = overlapSourceIdsForState(state);
@@ -1673,13 +1684,21 @@ async function enterSkyOverlapMode(): Promise<void> {
     overlapResponse = result;
     layerViewer.setOverlapCells(result.nside, result.pixels);
     layerViewer.setOverlapComponents(result.components);
-    renderOverlapSummary(result);
+    const initialComponent = result.components.find(component => component.id === "C01") ?? result.components[0];
+    if (initialComponent) renderOverlapComponent(initialComponent);
+    else renderOverlapSummary(result);
     if (result.status === "empty") notifyWorkspace("当前可见来源没有共同覆盖", "请选择至少两个已建立覆盖的来源后重试。", { tone: "info" });
   } catch (error) {
     if (requestGeneration !== overlapRequestGeneration) return;
     overlapModeActive = false;
     layerViewer.setOverlapMode(false);
     canvas.dataset.overlapMode = "false";
+    const retry = document.createElement("button");
+    retry.type = "button";
+    retry.className = "command-button secondary";
+    retry.textContent = "重新计算";
+    retry.addEventListener("click", () => void enterSkyOverlapMode());
+    overlapInspector("天区重合计算失败", [], [["原因", error instanceof Error ? error.message : String(error)]], [retry]);
     notifyWorkspace("天区重合计算失败", error instanceof Error ? error.message : String(error), { tone: "error" });
   }
 }
@@ -1715,6 +1734,7 @@ function renderRegionSceneLegend(state: SurveyLayerState): void {
   surveyIds.forEach((surveyId) => {
     const displayLayer = displayLayerFor({ surveyId });
     const item = document.createElement("span");
+    item.className = "region-scene-survey";
     const swatch = document.createElement("i");
     swatch.style.background = displayLayer.color;
     item.append(swatch, displayLayer.label);
@@ -1723,6 +1743,7 @@ function renderRegionSceneLegend(state: SurveyLayerState): void {
   selectedLayerRegion.assetIds.forEach((assetId) => {
     const displayLayer = displayLayerFor({ assetId });
     const item = document.createElement("span");
+    item.className = "region-scene-asset";
     const swatch = document.createElement("i");
     swatch.style.background = displayLayer.color;
     item.append(swatch, displayLayer.label);
@@ -1809,7 +1830,7 @@ function renderSurveySelection(selection: SurveyLayerSelection | null): void {
     layerViewer?.clearRegionSelection();
   });
   clearAction.classList.add("secondary");
-   const publicSourceIds = publicExecutableSourceIdsForRegion(selection.nside, selection.pixels, selectedSurveyIds, selection.releaseIds);
+   const publicSourceIds = publicExecutableSourceIdsForRegion(selection.nside, selection.pixels, selectedSurveyIds, selectionPublicReleaseIds(selection));
    const buildAction = actionButton("交给数据生产", () => {
      productionPanel.setContext({ nside: selection.nside, pixels: selection.pixels, sourceIds: publicSourceIds, assetIds: selection.assetIds }, "overlap-download@1", { showDownloadGuide: true });
      void activateMode("workflow").catch(showFatal);
@@ -1872,6 +1893,208 @@ function renderSurveyObjectPoint(point: SurveyObjectPoint): void {
   panel.classList.add("aladin-object-selected");
   panel.dataset.objectId = point.objectId ?? "unknown";
   panel.classList.add("mobile-open");
+}
+
+function clearAladinPointInspection(): void {
+  aladinPointInspectionGeneration += 1;
+  aladinPointInspectionAbort?.abort();
+  aladinPointInspectionAbort = null;
+}
+
+function inspectionLayerDescriptor(point: import("../../src/astro-object-index.js").AstroObjectRecord) {
+  return displayLayerFor({
+    assetId: point.asset_id,
+    surveyId: point.survey,
+    releaseId: point.release,
+    product: point.product,
+    modality: point.modality,
+    key: point.object_id,
+  });
+}
+
+function appendAladinInspectionResults(result: SkyPointInspectionResult, host: HTMLElement): void {
+  host.replaceChildren();
+  const objectGroups = new Map<string, { label: DisplayLayerDescriptor; matches: SkyPointInspectionResult["matches"] }>();
+  result.matches.forEach((match) => {
+    const descriptor = inspectionLayerDescriptor(match.point);
+    const key = JSON.stringify([match.point.asset_id, match.point.survey, match.point.release, match.point.product, match.point.modality]);
+    const group = objectGroups.get(key) ?? { label: descriptor, matches: [] };
+    group.matches.push(match);
+    objectGroups.set(key, group);
+  });
+
+  const objects = document.createElement("section");
+  objects.className = "aladin-inspector-section";
+  const objectsHeading = document.createElement("header");
+  objectsHeading.className = "aladin-inspector-section-heading";
+  const objectsTitle = document.createElement("strong");
+  objectsTitle.textContent = "附近星表对象";
+  const objectsCount = document.createElement("output");
+  objectsCount.textContent = String(result.matches.length);
+  objectsHeading.append(objectsTitle, objectsCount);
+  objects.append(objectsHeading);
+  if (!result.matches.length) {
+    const empty = document.createElement("p");
+    empty.className = "aladin-inspector-empty";
+    empty.textContent = "该位置附近没有匹配的已索引星表对象。";
+    objects.append(empty);
+  } else {
+    objectGroups.forEach(({ label, matches }) => {
+      const group = document.createElement("section");
+      group.className = "aladin-inspector-group";
+      const groupHeading = document.createElement("header");
+      const swatch = document.createElement("i");
+      swatch.style.background = label.color;
+      const name = document.createElement("strong");
+      name.textContent = label.label;
+      const count = document.createElement("span");
+      count.textContent = String(matches.length);
+      groupHeading.append(swatch, name, count);
+      const list = document.createElement("ul");
+      matches.forEach(({ point, separationArcsec }) => {
+        const row = document.createElement("li");
+        row.className = "aladin-inspector-record";
+        const recordHeading = document.createElement("div");
+        recordHeading.className = "aladin-inspector-record-heading";
+        const id = document.createElement("strong");
+        id.textContent = point.object_id;
+        const separation = document.createElement("small");
+        separation.textContent = `${separationArcsec.toFixed(2)}″`;
+        recordHeading.append(id, separation);
+        const product = document.createElement("small");
+        product.className = "aladin-inspector-record-meta";
+        product.textContent = [point.release, point.product, point.modality].filter(Boolean).join(" · ");
+        const facts = Object.entries(point.attributes ?? {})
+          .filter(([key]) => !["header", "primary_header", "file_name", "position_role"].includes(key))
+          .slice(0, 3)
+          .map(([key, value]) => `${key}: ${inspectorValue(value)}`)
+          .join(" · ");
+        row.append(recordHeading, product);
+        if (facts) {
+          const detail = document.createElement("p");
+          detail.textContent = facts;
+          row.append(detail);
+        }
+        list.append(row);
+      });
+      group.append(groupHeading, list);
+      objects.append(group);
+    });
+  }
+
+  const images = document.createElement("section");
+  images.className = "aladin-inspector-section";
+  const imagesHeading = document.createElement("header");
+  imagesHeading.className = "aladin-inspector-section-heading";
+  const imagesTitle = document.createElement("strong");
+  imagesTitle.textContent = "覆盖此坐标的影像";
+  const imagesCount = document.createElement("output");
+  imagesCount.textContent = String(result.images.length);
+  imagesHeading.append(imagesTitle, imagesCount);
+  images.append(imagesHeading);
+  if (!result.images.length) {
+    const empty = document.createElement("p");
+    empty.className = "aladin-inspector-empty";
+    empty.textContent = "已索引图层中没有覆盖此坐标的影像。";
+    images.append(empty);
+  } else {
+    const list = document.createElement("ul");
+    list.className = "aladin-inspector-image-list";
+    result.images.forEach((point) => {
+      const descriptor = inspectionLayerDescriptor(point);
+      const row = document.createElement("li");
+      const file = document.createElement("strong");
+      file.textContent = point.attributes?.file_name ?? point.object_id;
+      const meta = document.createElement("small");
+      meta.textContent = [descriptor.label, point.release, point.product,
+        point.attributes?.hdu_index ? `HDU ${point.attributes.hdu_index}` : undefined]
+        .filter(Boolean).join(" · ");
+      row.append(file, meta);
+      list.append(row);
+    });
+    images.append(list);
+  }
+  host.append(objects, images);
+}
+
+function queryAladinPoint(point: SurveyObjectPoint, radiusArcsec: number, status: HTMLElement, results: HTMLElement): void {
+  aladinPointInspectionAbort?.abort();
+  const controller = new AbortController();
+  aladinPointInspectionAbort = controller;
+  const generation = ++aladinPointInspectionGeneration;
+  const layerScopes = aladinExplorer?.getSelectedLayerScopes() ?? [];
+  if (!aladinSnapshot || !layerScopes.length) {
+    status.textContent = "没有已选中且已建立索引的 Workspace 图层。";
+    results.replaceChildren();
+    return;
+  }
+  status.textContent = "正在查询所选图层的已索引数据…";
+  workspaceApi.skyPointInspect({
+    raDeg: point.raDeg,
+    decDeg: point.decDeg,
+    radiusArcsec,
+    layerScopes,
+    region: {
+      nside: aladinSnapshot.nside,
+      pixels: aladinSnapshot.pixels,
+      coordinateFrame: "ICRS",
+      ordering: "NESTED",
+    },
+  }, controller.signal).then((result) => {
+    if (controller.signal.aborted || generation !== aladinPointInspectionGeneration) return;
+    const indexing = result.indexing ? " · 坐标索引补建中" : "";
+    const truncated = result.truncated ? " · 结果已截断" : "";
+    status.textContent = `${formatInteger(result.matches.length)} 个附近对象 · ${formatInteger(result.images.length)} 张覆盖影像${indexing}${truncated}`;
+    appendAladinInspectionResults(result, results);
+  }).catch((error: unknown) => {
+    if (controller.signal.aborted || generation !== aladinPointInspectionGeneration) return;
+    status.textContent = `查询失败：${error instanceof Error ? error.message : String(error)}`;
+    results.replaceChildren();
+  });
+}
+
+function renderAladinPointInspector(point: SurveyObjectPoint): void {
+  clearAladinPointInspection();
+  const panel = byId("inspector-panel");
+  const empty = byId("inspector-empty");
+  const content = byId("inspector-content");
+  panel.classList.add("aladin-object-selected", "mobile-open");
+  panel.dataset.objectId = point.objectId ?? "unknown";
+  byId("inspector-kicker").textContent = "COORDINATE INSPECTOR";
+  empty.hidden = true;
+  content.hidden = false;
+  content.className = "inspector-content aladin-inspector-content";
+
+  const heading = document.createElement("h2");
+  heading.textContent = `RA ${point.raDeg.toFixed(6)}° · Dec ${point.decDeg >= 0 ? "+" : ""}${point.decDeg.toFixed(6)}°`;
+  const selected = document.createElement("p");
+  selected.className = "aladin-inspector-selected";
+  selected.textContent = `已选对象 ${point.objectId ?? "未命名"}`;
+  const controls = document.createElement("label");
+  controls.className = "aladin-inspector-radius";
+  const label = document.createElement("span");
+  label.textContent = "星表匹配半径";
+  const input = document.createElement("input");
+  input.type = "number";
+  input.min = "0.1";
+  input.max = "60";
+  input.step = "0.1";
+  input.value = "1";
+  input.setAttribute("aria-label", "星表匹配半径（角秒）");
+  const unit = document.createElement("small");
+  unit.textContent = "arcsec";
+  controls.append(label, input, unit);
+  const status = document.createElement("p");
+  status.className = "aladin-inspector-status";
+  status.setAttribute("role", "status");
+  const results = document.createElement("div");
+  results.className = "aladin-inspector-results";
+  input.addEventListener("change", () => {
+    if (!input.reportValidity()) return;
+    queryAladinPoint(point, Number(input.value), status, results);
+  });
+  content.replaceChildren(heading, selected, controls, status, results);
+  queryAladinPoint(point, Number(input.value), status, results);
 }
 
 function renderSurveyInspection(inspection: SurveyLayerInspection | null): void {
@@ -3944,7 +4167,10 @@ document.addEventListener("pointerdown", (event) => {
   if (!menu.hidden && !menu.contains(event.target as Node)) closeSkyContextMenu();
 });
 byId<HTMLButtonElement>("controls-toggle").addEventListener("click", () => controlsPanel.classList.toggle("mobile-open"));
-byId<HTMLButtonElement>("inspector-close").addEventListener("click", () => byId("inspector-panel").classList.remove("mobile-open"));
+byId<HTMLButtonElement>("inspector-close").addEventListener("click", () => {
+  if (byId("inspector-panel").classList.contains("aladin-object-selected")) clearAladinPointInspection();
+  byId("inspector-panel").classList.remove("mobile-open");
+});
 window.addEventListener("astro:navigate", (event) => {
   const detail = (event as CustomEvent<{ mode?: ViewMode; productionContext?: ProductionContext; productionPipeline?: string; showDownloadGuide?: boolean }>).detail;
   const nextMode = detail?.mode;

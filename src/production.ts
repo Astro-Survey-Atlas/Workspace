@@ -145,7 +145,7 @@ export interface ProductionSourceResolution {
   blocked: Array<{ sourceId: string; reason: string }>;
 }
 
-/** Adapter that hands a verified production output Connector to Warehouse. */
+/** Adapter that registers source-scoped image assets and submits verified files to Warehouse. */
 export interface ProductionWarehouseHandoff {
   submit(input: ProductionWarehouseHandoffInput): Promise<ProductionWarehouseHandoffReceipt>;
 }
@@ -154,11 +154,14 @@ export interface ProductionWarehouseHandoffInput {
   runId: string;
   connectorId: string;
   inventorySha256: string;
+  inventory?: SourceFileInventory;
+  verifiedRelativePaths?: string[];
 }
 
 export interface ProductionWarehouseHandoffReceipt {
   accepted: boolean;
   scanRunIds: string[];
+  message?: string;
 }
 
 /** Conflict-style state errors surfaced as HTTP 409. */
@@ -176,22 +179,22 @@ export const PRODUCTION_PIPELINES: readonly ProductionPipelineDefinition[] = [
     version: 1,
     key: "overlap-download@1",
     title: "重合区域数据下载",
-    description: "解析重合区域的来源单元，审批清单后流式下载并登记新的 Connector，可移交 Warehouse 扫描。",
+    description: "解析重合区域的来源单元，审批清单后流式下载；Warehouse 可用时自动登记并扫描 FITS 图像。",
     availability: "available",
     inputRequirements: ["RegionSnapshot", "来源解析", "清单审批", "并发", "存储位置", "Warehouse 提交"],
-    outputs: ["区域 JSON/CSV", "下载清单 download-plan.json", "下载账本 download-manifest.json", "新的本地 Connector"],
+    outputs: ["区域 JSON/CSV", "下载清单 download-plan.json", "下载账本 download-manifest.json", "来源资产", "Warehouse FITS 覆盖", "新的本地 Connector"],
     dag: [
       { id: "region", title: "固定区域快照", description: "保存重合区域的 ICRS / NESTED HEALPix 快照。" },
       { id: "resolve", title: "来源单元解析", description: "把区域来源解析为 typed source units 并展开规范文件清单。", dependsOn: ["region"] },
       { id: "approval", title: "清单审批", description: "人工确认清单内容与目标；审批绑定清单 SHA-256。", dependsOn: ["resolve"] },
       { id: "download", title: "流式下载与校验", description: "按并发配置流式下载清单文件，支持断点续传与校验。", dependsOn: ["approval"] },
       { id: "connector", title: "登记结果 Connector", description: "把下载目录登记为新的 Workspace Connector。", dependsOn: ["download"] },
-      { id: "warehouse", title: "Warehouse 扫描提交", description: "可选：把输出 Connector 移交 Warehouse 扫描。", dependsOn: ["connector"] },
+      { id: "warehouse", title: "Warehouse 扫描提交", description: "按已验证文件的巡天来源登记图像资产并提交覆盖扫描。", dependsOn: ["connector"] },
     ],
     parameters: [
       { key: "exportFormat", label: "区域导出格式", type: "select", defaultValue: "json", options: ["json", "csv"] },
       { key: "crawlerId", label: "爬虫执行器", type: "select", defaultValue: "builtin-http", options: ["builtin-http"] },
-      { key: "concurrency", label: "并发数", type: "number", defaultValue: 4 },
+      { key: "concurrency", label: "并发数", type: "number", defaultValue: 2 },
     ],
   },
   {
@@ -239,7 +242,6 @@ const MAX_STATE_RUNS = 200;
 const MAX_STEP_LOGS = 200;
 const MAX_PIXELS = 4096;
 const MAX_MATCH_ROWS = 10_000;
-const DOWNLOAD_POLL_ATTEMPTS = 7_200;
 const DOWNLOAD_POLL_INTERVAL_MS = 500;
 
 function now(): string {
@@ -465,7 +467,8 @@ export class ProductionService {
           ...legacyRun,
           steps: Array.isArray(legacyRun.steps) ? legacyRun.steps.map(normalizeStep) : [],
         };
-        if (run.status === "queued" || run.status === "running" || run.status === "resolving") {
+        if ((run.status === "queued" || run.status === "running" || run.status === "resolving")
+          && !(this.#downloads.externalDownloads && run.pipelineKey === "overlap-download@1" && run.summary?.downloadJobId)) {
           run.status = "failed";
           run.error = "服务重启前生产任务尚未完成；请手动重试（已验证/部分文件会被复用）";
           run.completedAt = now();
@@ -489,9 +492,16 @@ export class ProductionService {
           const order = new Map(pipeline.dag.map((node, index) => [node.id, index]));
           run.steps.sort((left, right) => (order.get(left.id) ?? 999) - (order.get(right.id) ?? 999));
         }
+        if (this.#downloads.externalDownloads && run.summary.downloadJobId
+          && (run.status === "running" || run.status === "resolving")) run.status = "queued";
         this.#runs.set(run.id, clone(run));
       }
       await this.#persist();
+      if (this.#downloads.externalDownloads) setImmediate(() => {
+        for (const run of this.#runs.values()) {
+          if ((run.status === "running" || run.status === "queued") && run.summary.downloadJobId) void this.#execute(run.id);
+        }
+      });
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") console.warn("Ignoring invalid production state", error);
     }
@@ -504,6 +514,19 @@ export class ProductionService {
   async listRuns(): Promise<ProductionRun[]> {
     await this.initialize();
     return [...this.#runs.values()].map(clone).sort((left, right) => right.createdAt.localeCompare(left.createdAt));
+  }
+
+  async clearFailedHistory(): Promise<number> {
+    await this.initialize();
+    if (this.#writes.size) await Promise.all([...this.#writes.values()]);
+    let removed = 0;
+    for (const [id, run] of this.#runs) {
+      if (run.status !== "failed" || this.#executing.has(id)) continue;
+      this.#runs.delete(id);
+      removed += 1;
+    }
+    if (removed) await this.#persist();
+    return removed;
   }
 
   async getRun(id: string): Promise<ProductionRun> {
@@ -561,14 +584,14 @@ export class ProductionService {
       const exportFormat = input.exportFormat ?? "json";
       if (exportFormat !== "json" && exportFormat !== "csv") throw new RangeError("exportFormat must be json or csv");
       const crawlerId = input.crawlerId === undefined ? "builtin-http" : text(input.crawlerId, "crawlerId");
-      const concurrency = input.concurrency === undefined ? 4 : input.concurrency;
+      const concurrency = input.concurrency === undefined ? 2 : input.concurrency;
       if (!Number.isSafeInteger(concurrency) || concurrency < 1 || concurrency > 16) throw new RangeError("concurrency must be an integer between 1 and 16");
       if (hasLegacyFiles) normalized.files = clone(input.files);
       normalized.exportFormat = exportFormat;
       normalized.crawlerId = crawlerId;
       normalized.concurrency = concurrency;
       if (input.storageConnectorId !== undefined) normalized.storageConnectorId = text(input.storageConnectorId, "storageConnectorId");
-      const warehouseHandoff = input.warehouseHandoff ?? "none";
+      const warehouseHandoff = input.warehouseHandoff ?? (this.#warehouseHandoff ? "submit" : "none");
       if (warehouseHandoff !== "none" && warehouseHandoff !== "submit") throw new RangeError("warehouseHandoff must be none or submit");
       normalized.warehouseHandoff = warehouseHandoff;
       // Runs without pre-expanded files resolve their source units inside the
@@ -886,7 +909,7 @@ export class ProductionService {
     }
 
     // --- download ---
-    await this.setStep(run, "download", "running", `流式下载 ${inventory.files.length} 个文件，并发数 ${Number(run.input.concurrency ?? 4)}`);
+    await this.setStep(run, "download", "running", `流式下载 ${inventory.files.length} 个文件，并发数 ${Number(run.input.concurrency ?? 2)}`);
     const storageConnectorId = typeof run.input.storageConnectorId === "string" ? run.input.storageConnectorId : undefined;
     let outputRoot: string | undefined;
     if (storageConnectorId) {
@@ -914,7 +937,7 @@ export class ProductionService {
       })),
       componentId: region.componentId,
       sourceIds: region.sourceIds,
-      concurrency: Number(run.input.concurrency ?? 4),
+      concurrency: Number(run.input.concurrency ?? 2),
       requestKey: `production:${originId}`,
       inventorySha256: inventory.inventorySha256,
       ...(outputRoot ? { outputRoot } : {}),
@@ -925,8 +948,7 @@ export class ProductionService {
     await this.#save(run);
     let current: CoverageDownloadJob = download;
     let loggedFiles = current.downloadedFiles;
-    for (let attempt = 0; attempt < DOWNLOAD_POLL_ATTEMPTS; attempt += 1) {
-      if (current.status === "completed" || current.status === "partial" || current.status === "failed" || current.status === "cancelled") break;
+    while (current.status !== "completed" && current.status !== "partial" && current.status !== "failed" && current.status !== "cancelled") {
       await new Promise((resolve) => setTimeout(resolve, DOWNLOAD_POLL_INTERVAL_MS));
       current = await this.#downloads.get(download.id);
       run.summary = { ...run.summary, downloadedFiles: current.downloadedFiles, downloadedBytes: current.downloadedBytes };
@@ -935,10 +957,6 @@ export class ProductionService {
         this.appendStepLog(run, "download", "info", `已完成 ${current.downloadedFiles}/${current.totalFiles} 个文件，${current.downloadedBytes} bytes`);
       }
       await this.#save(run);
-    }
-    if (current.status !== "completed" && current.status !== "partial" && current.status !== "failed" && current.status !== "cancelled") {
-      await this.#downloads.cancel(download.id).catch(() => undefined);
-      throw new Error("下载任务超时（1 小时），已请求取消；可重试复用已下载内容");
     }
     const failedTransfers = current.transfer?.filter((entry) => entry.status === "failed") ?? [];
     const failedFiles = Math.max(failedTransfers.length, current.totalFiles - current.downloadedFiles);
@@ -972,7 +990,7 @@ export class ProductionService {
     await this.setStep(run, "connector", "succeeded", current.outputConnectorId ?? "已登记");
 
     // --- warehouse ---
-    const handoffMode = run.input.warehouseHandoff === "submit" ? "submit" : "none";
+    const handoffMode = run.input.warehouseHandoff === "none" ? "none" : "submit";
     if (handoffMode === "none") {
       await this.setStep(run, "warehouse", "skipped", "未请求 Warehouse 扫描");
       return;
@@ -987,8 +1005,14 @@ export class ProductionService {
       runId: originId,
       connectorId: run.outputConnectorId,
       inventorySha256: inventory.inventorySha256,
+      inventory,
+      verifiedRelativePaths: current.transfer.filter((entry) => entry.status === "verified").map((entry) => entry.relativePath),
     });
-    run.summary = { ...run.summary, warehouseScanRuns: receipt.scanRunIds };
+    run.summary = { ...run.summary, warehouseScanRuns: receipt.scanRunIds, ...(receipt.message ? { warehouseHandoffMessage: receipt.message } : {}) };
+    if (!receipt.accepted) {
+      await this.setStep(run, "warehouse", "skipped", receipt.message ?? "下载内容没有可自动扫描的 FITS 图像资产");
+      return;
+    }
     await this.setStep(run, "warehouse", "succeeded", `Warehouse 已受理 ${receipt.scanRunIds.length} 个扫描请求`);
   }
 

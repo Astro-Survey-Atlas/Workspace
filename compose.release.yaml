@@ -8,7 +8,7 @@
 # The workspace image defaults to the public GitHub Container Registry tag.
 # Pin a specific released version instead of `latest` for reproducibility:
 #
-#   ASTRO_WORKSPACE_IMAGE=ghcr.io/astro-survey-atlas/asa-workspace:0.10.38 \
+#   ASTRO_WORKSPACE_IMAGE=ghcr.io/astro-survey-atlas/asa-workspace:0.0.1 \
 #     docker compose -f compose.release.yaml up -d
 #
 # Data lives in the named volumes `asa-workspace-state` (sqlite and

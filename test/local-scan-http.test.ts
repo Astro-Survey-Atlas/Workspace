@@ -9,6 +9,7 @@ import test from "node:test";
 import { pathToFileURL } from "node:url";
 
 import { ASTRO_FILE_INDEX } from "../src/astro-index.js";
+import { ASTRO_IMAGE_FOOTPRINT_INDEX } from "../src/astro-object-index.js";
 import { UserMocArtifactStore } from "../src/user-moc-artifacts.js";
 
 const FITS_BLOCK_BYTES = 2_880;
@@ -163,7 +164,8 @@ test("HTTP local CSV scan writes object and coverage documents and serves a mult
       response.end(JSON.stringify({ error: "workspace Elasticsearch unavailable" }));
       return;
     }
-    if (request.method === "HEAD" && (pathname === "/astro_object_index_v1" || pathname === "/astro_coverage_index_v1")) {
+    if (request.method === "HEAD" && (pathname === "/astro_object_index_v1" || pathname === "/astro_coverage_index_v1"
+      || pathname === `/${ASTRO_IMAGE_FOOTPRINT_INDEX}`)) {
       response.statusCode = 200;
       response.end();
       return;
@@ -317,6 +319,15 @@ test("HTTP local CSV scan writes object and coverage documents and serves a mult
     });
     assert.equal(invalidCoverageDownload.status, 400);
     assert.match(await invalidCoverageDownload.text(), /geometry-only/);
+
+    const invalidDownloadIdentity = await fetch(`${baseUrl}/api/coverage-downloads`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ files: [{}], requestKey: 42 }),
+    });
+    assert.equal(invalidDownloadIdentity.status, 400);
+    assert.match(await invalidDownloadIdentity.text(), /requestKey is invalid/);
+
     const runsAfterInvalidPublicInput = await apiJson<{ runs: Array<{ id: string }> }>(baseUrl, "/api/production-runs");
     assert.deepEqual(runsAfterInvalidPublicInput.runs.map((run) => run.id), runsBeforeInvalidPublicInput.runs.map((run) => run.id));
 

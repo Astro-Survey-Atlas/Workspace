@@ -284,6 +284,7 @@ export class AladinExplorer {
   private queryTimer: ReturnType<typeof setTimeout> | null = null;
   private indexRefreshTimer: ReturnType<typeof setTimeout> | null = null;
   private resizeObserver: ResizeObserver | null = null;
+  private themeObserver: MutationObserver | null = null;
   private generation = 0;
   private disposed = false;
   private pendingView: AladinExplorerView | null = null;
@@ -326,7 +327,7 @@ export class AladinExplorer {
       projection: "AIT",
       showCooGrid: true,
       gridOptions: {
-         color: "rgb(131, 210, 212)",
+        color: this.themeGridColor(),
         opacity: 0.45,
         thickness: 1,
         showLabels: true,
@@ -340,23 +341,26 @@ export class AladinExplorer {
       showFrame: false,
       showZoomControl: false,
       showProjectionControl: false,
-       showCatalog: true,
-       showContextMenu: false,
-       showCooLocation: false,
-       showFov: false,
-       showStatusBar: false,
-       showCooGridControl: false,
-       showColorPickerControl: false,
-       showSelectionModeControl: false,
-       showSettingsControl: false,
-       showSimbadPointerControl: false,
-       showReticle: false,
+      showCatalog: true,
+      showContextMenu: false,
+      showCooLocation: false,
+      showFov: false,
+      showStatusBar: false,
+      showCooGridControl: false,
+      showColorPickerControl: false,
+      showSelectionModeControl: false,
+      showSettingsControl: false,
+      showSimbadPointerControl: false,
+      showReticle: false,
     });
-     if (this.disposed) {
-       this.disposeAladin();
-       return;
-     }
-     this.aladin.showCatalog?.(true);
+    if (this.disposed) {
+      this.disposeAladin();
+      return;
+    }
+    this.applyThemeGridColor();
+    this.themeObserver = new MutationObserver(() => this.applyThemeGridColor());
+    this.themeObserver.observe(document.documentElement, { attributes: true, attributeFilter: ["data-theme"] });
+    this.aladin.showCatalog?.(true);
 
      const initialTarget = this.activeAssetId ? this.assetTargets.get(this.activeAssetId) : undefined;
     this.aladin.gotoRaDec(initialTarget?.centerRaDeg ?? this.snapshot.centerRaDeg, initialTarget?.centerDecDeg ?? this.snapshot.centerDecDeg);
@@ -404,6 +408,16 @@ export class AladinExplorer {
     });
   }
 
+  private themeGridColor(): string {
+    return getComputedStyle(document.documentElement).getPropertyValue("--asa-magenta").trim() || "#f01951";
+  }
+
+  private applyThemeGridColor(): void {
+    const color = this.themeGridColor();
+    this.host.dataset.gridColor = color;
+    this.aladin?.setGridOptions?.({ color });
+  }
+
   private emitStatus(status: AladinExplorerStatus): void {
     this.callbacks.onStatus(status);
   }
@@ -434,6 +448,10 @@ export class AladinExplorer {
   }
 
   getSelectedLayerIds(): string[] { return [...this.selectedLayerIds]; }
+
+  getSelectedLayerScopes(): SkyDataPointScope[] {
+    return this.scopesForLayers([...this.selectedLayerIds]);
+  }
 
   setLayerSelected(layerId: string, selected: boolean): void {
     if (!this.assetTargets.has(layerId)) return;
@@ -843,6 +861,8 @@ export class AladinExplorer {
     this.indexRefreshTimer = null;
     this.resizeObserver?.disconnect();
     this.resizeObserver = null;
+    this.themeObserver?.disconnect();
+    this.themeObserver = null;
     this.pendingView = null;
     this.pendingViewExpiresAt = 0;
     [...this.sessions.values()].forEach((session) => this.removeSession(session));

@@ -2,6 +2,7 @@ import { workspaceApi } from "./api";
 import type { RuntimeDataServices, WarehouseInstallationView } from "./api";
 import type { AiProviderRecord, McpServerRecord } from "../../src/system-config";
 import { notifyWorkspace } from "./notifications";
+import type { DownloadSettingsView } from "./api";
 
 function byId<T extends HTMLElement>(id: string): T {
   const element = document.getElementById(id);
@@ -19,10 +20,10 @@ export interface SystemSummary {
   connected: number;
 }
 
-type SystemSection = "ai" | "mcp" | "warehouse" | "runtime" | "capabilities";
+type SystemSection = "ai" | "mcp" | "warehouse" | "runtime" | "capabilities" | "downloads";
 
 function settingsSection(value: string | undefined): SystemSection {
-  return value === "mcp" || value === "warehouse" || value === "runtime" || value === "capabilities" ? value : "ai";
+  return value === "mcp" || value === "warehouse" || value === "runtime" || value === "capabilities" || value === "downloads" ? value : "ai";
 }
 
 export class SystemPanel {
@@ -33,6 +34,9 @@ export class SystemPanel {
   private initialized = false;
   private editingProvider: AiProviderRecord | null = null;
   private editingServer: McpServerRecord | null = null;
+  private downloads: DownloadSettingsView | null = null;
+  private downloadTimer?: ReturnType<typeof setInterval>;
+  private downloadsRefreshing = false;
 
   constructor(private readonly onError: (error: unknown) => void, private readonly onSummary: (summary: SystemSummary) => void) {
     byId<HTMLButtonElement>("ai-provider-new").addEventListener("click", () => this.openProvider());
@@ -47,6 +51,9 @@ export class SystemPanel {
     byId<HTMLButtonElement>("mcp-server-test").addEventListener("click", () => void this.testServer().catch((error) => this.fail(error)));
     document.querySelectorAll<HTMLButtonElement>("[data-settings-tab]").forEach((button) => button.addEventListener("click", () => this.selectSection(settingsSection(button.dataset.settingsTab))));
     document.querySelectorAll<HTMLButtonElement>("[data-settings-section]").forEach((button) => button.addEventListener("click", () => this.selectSection(settingsSection(button.dataset.settingsSection))));
+    byId<HTMLFormElement>("download-settings-form").addEventListener("submit", event => { event.preventDefault(); void this.saveDownloads().catch(error => this.fail(error)); });
+    byId("download-proxy-test").addEventListener("click", () => void this.saveDownloads("test").catch(error => this.fail(error)));
+    byId("download-proxy-clear").addEventListener("click", () => void this.saveDownloads("clear").catch(error => this.fail(error)));
   }
 
   async activate(): Promise<void> {
@@ -55,9 +62,12 @@ export class SystemPanel {
       this.initialized = true;
     } else await this.refresh();
     this.renderProviders(); this.renderServers(); this.renderWarehouse(); this.renderInstallation(); this.renderRuntime(); this.renderCapabilities(); this.emitSummary();
+    await this.refreshDownloads(true);
+    if (this.downloadTimer) clearInterval(this.downloadTimer);
+    this.downloadTimer = setInterval(() => void this.refreshDownloads(false).catch(() => undefined), 30_000);
   }
 
-  deactivate(): void {}
+  deactivate(): void { if (this.downloadTimer) clearInterval(this.downloadTimer); this.downloadTimer = undefined; }
   debugState(): Record<string, unknown> { return { aiProviders: this.providers.length, mcpServers: this.servers.length, runtime: this.runtime ? "loaded" : "unavailable", installation: this.installation ? this.installation.observed.state : "unavailable" }; }
 
   private async refresh(): Promise<void> {
@@ -89,6 +99,104 @@ export class SystemPanel {
     byId("settings-warehouse-view").hidden = section !== "warehouse";
     byId("settings-runtime-view").hidden = section !== "runtime";
     byId("settings-capabilities-view").hidden = section !== "capabilities";
+    byId("settings-downloads-view").hidden = section !== "downloads";
+  }
+
+  private async refreshDownloads(form: boolean): Promise<void> {
+    if (this.downloadsRefreshing) return;
+    this.downloadsRefreshing = true;
+    try {
+      const view = await workspaceApi.downloadSettings().catch(() => null);
+      if (view?.settings) this.downloads = view;
+      else this.downloads = null;
+      if (form && this.downloads) this.fillDownloads();
+      this.renderDownloads();
+    } finally { this.downloadsRefreshing = false; }
+  }
+
+  private fillDownloads(): void {
+    const settings = this.downloads?.settings;
+    if (!settings) return;
+    byId<HTMLInputElement>("download-proxy-enabled").checked = settings.proxyEnabled;
+    byId<HTMLInputElement>("download-proxy-url").value = settings.proxyUrl;
+    byId<HTMLInputElement>("download-proxy-username").value = settings.proxyUsername;
+    byId<HTMLInputElement>("download-proxy-password").value = "";
+    byId<HTMLInputElement>("download-proxy-password").placeholder = settings.passwordConfigured ? "已保存，输入新值可替换" : "无需认证可留空";
+  }
+
+  private async saveDownloads(action?: "test" | "clear"): Promise<void> {
+    const form = byId<HTMLFormElement>("download-settings-form"), feedback = byId("download-proxy-feedback");
+    const buttons = [...form.querySelectorAll<HTMLButtonElement>("button")]; buttons.forEach(button => { button.disabled = true; });
+    feedback.textContent = action === "test" ? "正在保存并检测…" : "正在保存…";
+    try {
+      const password = byId<HTMLInputElement>("download-proxy-password").value;
+      this.downloads = await workspaceApi.saveDownloadSettings({ proxyEnabled: byId<HTMLInputElement>("download-proxy-enabled").checked,
+        proxyUrl: byId<HTMLInputElement>("download-proxy-url").value,
+        proxyUsername: action === "clear" ? "" : byId<HTMLInputElement>("download-proxy-username").value,
+        ...(action === "clear" ? { proxyPassword: null } : password ? { proxyPassword: password } : {}) });
+      this.fillDownloads();
+      if (action === "test") this.downloads = await workspaceApi.testDownloadRoute();
+      feedback.textContent = action === "test" ? this.downloads.health.detail : "下载设置已保存";
+      this.renderDownloads();
+    } catch (error) { feedback.textContent = error instanceof Error ? error.message : "下载设置操作失败"; throw error; }
+    finally { buttons.forEach(button => { button.disabled = false; }); }
+  }
+
+  private renderDownloads(): void {
+    const view = this.downloads, host = byId("download-route-health");
+    const heading = document.createElement("header"), title = document.createElement("strong"); title.textContent = "代理链路";
+    const badge = document.createElement("span"); badge.textContent = !view?.health.engineAvailable ? "服务不可用"
+      : view.health.status === "ok" ? "可用" : view.health.status === "failed" ? "不可用" : "检测中";
+    heading.append(title, badge); host.replaceChildren(heading);
+    if (view) {
+      const health = view.health, details = document.createElement("p"); details.textContent = health.detail; host.append(details);
+      const timing = document.createElement("p"); timing.textContent = `${view.settings.proxyEnabled ? `代理连接：${health.proxyConnectMs === undefined ? "--" : `${health.proxyConnectMs} ms`} · ` : "直连 · "}链路响应：${health.sourceResponseMs === undefined ? "--" : `${health.sourceResponseMs} ms`}`;
+      host.append(timing);
+      const checked = document.createElement("small"); checked.textContent = `最近检测：${health.checkedAt ? new Date(health.checkedAt).toLocaleString() : "尚未检测"}`; host.append(checked);
+    }
+    host.append(this.renderProxyLatency(view?.healthHistory ?? []));
+  }
+
+  private renderProxyLatency(history: NonNullable<DownloadSettingsView["healthHistory"]>): HTMLElement {
+    const section = document.createElement("section"); section.className = "proxy-latency";
+    const title = document.createElement("strong"); title.textContent = `${this.downloads?.settings.proxyEnabled ? "代理" : "直连"}链路延时 · 最近 24 次检测`;
+    section.append(title);
+    const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    svg.setAttribute("viewBox", "0 0 360 104"); svg.setAttribute("role", "img");
+    svg.setAttribute("aria-label", "最近 24 次代理链路延时波形图");
+    const samples = history.filter(sample => sample.checkedAt && (sample.status === "ok" || sample.status === "failed")).slice(-24);
+    const max = Math.max(100, ...samples.map(sample => sample.sourceResponseMs ?? 0));
+    const scale = Math.ceil(max / 100) * 100;
+    const left = 40, right = 352, top = 10, bottom = 70;
+    for (let index = 0; index < 3; index++) {
+      const y = top + index * ((bottom - top) / 2), grid = document.createElementNS(svg.namespaceURI, "line");
+      grid.setAttribute("x1", String(left)); grid.setAttribute("x2", String(right)); grid.setAttribute("y1", String(y)); grid.setAttribute("y2", String(y));
+      grid.setAttribute("class", "proxy-latency-grid"); svg.append(grid);
+      const label = document.createElementNS(svg.namespaceURI, "text"); label.setAttribute("x", "2"); label.setAttribute("y", String(y + 3));
+      label.textContent = `${Math.round(scale * (2 - index) / 2)} ms`; svg.append(label);
+    }
+    const paths: string[] = [];
+    let current: string[] = [];
+    samples.forEach((sample, index) => {
+      const x = left + (samples.length <= 1 ? right - left : index / (samples.length - 1) * (right - left));
+      if (sample.status !== "ok") { if (current.length) paths.push(current.join(" ")); current = []; return; }
+      const y = bottom - Math.min(1, (sample.sourceResponseMs ?? 0) / scale) * (bottom - top);
+      current.push(`${current.length ? "L" : "M"}${x.toFixed(1)} ${y.toFixed(1)}`);
+    });
+    if (current.length) paths.push(current.join(" "));
+    for (const data of paths) { const line = document.createElementNS(svg.namespaceURI, "path"); line.setAttribute("d", data); line.setAttribute("class", "proxy-latency-line"); svg.append(line); }
+    samples.forEach((sample, index) => {
+      const x = left + (samples.length <= 1 ? right - left : index / (samples.length - 1) * (right - left));
+      const point = document.createElementNS(svg.namespaceURI, "circle"); point.setAttribute("cx", x.toFixed(1));
+      point.setAttribute("cy", sample.status === "ok" ? String(bottom - Math.min(1, (sample.sourceResponseMs ?? 0) / scale) * (bottom - top)) : "82");
+      point.setAttribute("r", "3.5"); point.setAttribute("class", sample.status === "ok" ? "proxy-latency-point" : "proxy-latency-failure");
+      point.setAttribute("tabindex", "0"); point.setAttribute("aria-label", `${new Date(sample.checkedAt).toLocaleString()} ${sample.status === "ok" ? `${sample.sourceResponseMs} ms` : "连接失败"}`);
+      const tooltip = document.createElementNS(svg.namespaceURI, "title"); tooltip.textContent = `${new Date(sample.checkedAt).toLocaleString()} · ${sample.status === "ok" ? `${sample.sourceResponseMs} ms` : "连接失败"}`;
+      point.append(tooltip); svg.append(point);
+    });
+    if (!samples.length) { const empty = document.createElementNS(svg.namespaceURI, "text"); empty.setAttribute("x", "196"); empty.setAttribute("y", "48"); empty.setAttribute("text-anchor", "middle"); empty.textContent = "等待首次检测"; svg.append(empty); }
+    section.append(svg);
+    return section;
   }
 
   private renderRuntime(): void {

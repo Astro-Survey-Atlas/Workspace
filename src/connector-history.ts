@@ -352,6 +352,15 @@ export class ConnectorIngestRunCatalog {
       throw new Error(`Connector ingest run not found: ${id}`);
     }
   }
+
+  async clearFailedHistory(): Promise<ConnectorIngestRunRecord[]> {
+    const failed = await this.list({ status: "failed" });
+    if (!failed.length) return [];
+    await this.#store.transaction(async (transaction) => {
+      for (const run of failed) await transaction.deleteConnectorIngestRun(run.id);
+    });
+    return failed;
+  }
 }
 
 export function publicConnectorIngestRun(record: ConnectorIngestRunRecord): ConnectorIngestRun {

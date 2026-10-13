@@ -3,12 +3,14 @@ import {
   LOCAL_OBJECT_INDEX,
   type LocalScanDocument,
 } from "./local-scan.js";
+import { Healpix, Hploc } from "healpixjs";
 import { COVERAGE_ROLES, DATA_ORIGINS, SOURCE_TIERS, type CoverageDataOrigin, type CoverageRole, type CoverageSourceTier } from "./assets-core.js";
 import { parseElasticsearchEndpoint } from "./es-endpoint.js";
 import { regionPixelFilter } from "./workspace-directories.js";
 
 export const ASTRO_OBJECT_INDEX = LOCAL_OBJECT_INDEX;
 export const ASTRO_COVERAGE_INDEX = LOCAL_COVERAGE_INDEX;
+export const ASTRO_IMAGE_FOOTPRINT_INDEX = "astro_data_image_footprint_index_v1";
 export const ASTRO_OBJECT_NATIVE_ORDER = 8;
 export const ASTRO_OBJECT_NATIVE_NSIDE = 2 ** ASTRO_OBJECT_NATIVE_ORDER;
 export const ASTRO_HEALPIX_COORDINATE_FRAME = "ICRS" as const;
@@ -79,6 +81,31 @@ export interface AstroObjectRecord {
   id?: string;
 }
 
+export interface AstroImageFootprintDocument {
+  _id: string;
+  _index: typeof ASTRO_IMAGE_FOOTPRINT_INDEX;
+  point_id: string;
+  asset_id: string;
+  source_id?: string;
+  ra_min: number;
+  ra_max: number;
+  dec_min: number;
+  dec_max: number;
+}
+
+export interface AstroImageFootprintQuery {
+  raDeg: number;
+  decDeg: number;
+  layerScopes: readonly SkyDataPointScope[];
+  limit?: number;
+}
+
+export interface AstroImageFootprintQueryResult {
+  pointIds: string[];
+  total: number;
+  truncated: boolean;
+}
+
 export interface AstroObjectQueryResult {
   status: AstroObjectQueryStatus;
   index: string;
@@ -90,6 +117,36 @@ export interface AstroObjectQueryResult {
   message?: string;
   /** More coordinates for the selected assets are still being indexed. */
   indexing?: boolean;
+}
+
+export interface SkyPointInspectionInput {
+  raDeg: number;
+  decDeg: number;
+  radiusArcsec: number;
+  layerScopes: SkyDataPointScope[];
+  region: ObjectRegionSelectionInput;
+}
+
+export interface SkyPointInspectionMatch {
+  point: AstroObjectRecord;
+  separationArcsec: number;
+}
+
+export interface SkyPointInspectionResult {
+  raDeg: number;
+  decDeg: number;
+  radiusArcsec: number;
+  matches: SkyPointInspectionMatch[];
+  images: AstroObjectRecord[];
+  truncated: boolean;
+  indexing: boolean;
+}
+
+export interface SkyCoordinateBbox {
+  raMin: number;
+  raMax: number;
+  decMin: number;
+  decMax: number;
 }
 
 export interface AstroCoverageFact {
@@ -344,6 +401,47 @@ function validateCoordinate(value: unknown, name: string, minimum: number, maxim
     throw new RangeError(`${name} must be a finite number between ${minimum} and ${maximum}`);
   }
   return value;
+}
+
+export function coordinateSearchBbox(raDeg: number, decDeg: number, radiusArcsec: number): SkyCoordinateBbox {
+  const ra = validateCoordinate(raDeg, "raDeg", 0, 360) % 360;
+  const dec = validateCoordinate(decDeg, "decDeg", -90, 90);
+  const radius = validateCoordinate(radiusArcsec, "radiusArcsec", 0.1, 60) / 3600;
+  const decMin = Math.max(-90, dec - radius);
+  const decMax = Math.min(90, dec + radius);
+  if (decMin <= -90 || decMax >= 90) return { raMin: 0, raMax: 360, decMin, decMax };
+  const radiusRadians = radius * Math.PI / 180;
+  const decRadians = dec * Math.PI / 180;
+  const raHalfWidth = Math.asin(Math.min(1, Math.sin(radiusRadians) / Math.cos(decRadians))) * 180 / Math.PI;
+  return {
+    raMin: ((ra - raHalfWidth) % 360 + 360) % 360,
+    raMax: ((ra + raHalfWidth) % 360 + 360) % 360,
+    decMin,
+    decMax,
+  };
+}
+
+export function angularSeparationArcsec(ra1Deg: number, dec1Deg: number, ra2Deg: number, dec2Deg: number): number {
+  const ra1 = validateCoordinate(ra1Deg, "ra1Deg", 0, 360) * Math.PI / 180;
+  const ra2 = validateCoordinate(ra2Deg, "ra2Deg", 0, 360) * Math.PI / 180;
+  const dec1 = validateCoordinate(dec1Deg, "dec1Deg", -90, 90) * Math.PI / 180;
+  const dec2 = validateCoordinate(dec2Deg, "dec2Deg", -90, 90) * Math.PI / 180;
+  const sinDec = Math.sin((dec2 - dec1) / 2);
+  const sinRa = Math.sin((ra2 - ra1) / 2);
+  const haversine = sinDec ** 2 + Math.cos(dec1) * Math.cos(dec2) * sinRa ** 2;
+  return 2 * Math.atan2(Math.sqrt(haversine), Math.sqrt(Math.max(0, 1 - haversine))) * 180 / Math.PI * 3600;
+}
+
+export function coordinateInHealpixRegion(raDeg: number, decDeg: number, region: ObjectRegionSelectionInput): boolean {
+  const ra = validateCoordinate(raDeg, "raDeg", 0, 360) % 360;
+  const dec = validateCoordinate(decDeg, "decDeg", -90, 90);
+  const normalized = normalizeRegion(region);
+  if (!normalized) throw new RangeError("region is required");
+  const location = new Hploc();
+  location.setZ(Math.sin(dec * Math.PI / 180));
+  location.phi = ra * Math.PI / 180;
+  const pixel = new Healpix(normalized.parentNside).loc2pix(location);
+  return normalized.parentPixels.includes(pixel);
 }
 
 function isPowerOfTwo(value: number): boolean {
@@ -1135,11 +1233,29 @@ export class AstroObjectIndexService {
     return this.#coverageIndex;
   }
 
+  get imageFootprintIndex(): string {
+    return ASTRO_IMAGE_FOOTPRINT_INDEX;
+  }
+
   async getPoint(id: string, readIndices: readonly string[]): Promise<AstroObjectRecord | undefined> {
     if (!id || id.length > 512) throw new RangeError("Invalid point identity");
     const indices = readIndices.map((index) => normalizeIndex(index, "readIndex", this.#objectIndex));
     const result = await this.#requestJson(`/${indices.map(encodeURIComponent).join(",")}/_search?ignore_unavailable=true`, JSON.stringify({ size: 1, query: { term: { object_id: id } } }), "application/json") as ElasticsearchSearchResponse;
     return hitsFromResponse(result).map((hit) => objectFromHit(hit)).find((value) => value !== undefined);
+  }
+
+  async getPointsByIds(ids: readonly string[], readIndices: readonly string[]): Promise<AstroObjectRecord[]> {
+    if (!ids.length) return [];
+    if (ids.length > 2_000 || ids.some((id) => typeof id !== "string" || !/^[a-f0-9]{64}$/.test(id))) {
+      throw new RangeError("point ids must contain at most 2000 SHA-256 identities");
+    }
+    const indices = readIndices.map((index) => normalizeIndex(index, "readIndex", this.#objectIndex));
+    const response = await this.#requestJson(`/${indices.map(encodeURIComponent).join(",")}/_search?ignore_unavailable=true`, JSON.stringify({
+      size: ids.length,
+      query: { terms: { object_id: [...new Set(ids)] } },
+      sort: [{ object_id: "asc" }],
+    }), "application/json") as ElasticsearchSearchResponse;
+    return hitsFromResponse(response).map((hit) => objectFromHit(hit)).filter((point): point is AstroObjectRecord => Boolean(point));
   }
 
   async ensureIndices(): Promise<void> {
@@ -1184,6 +1300,87 @@ export class AstroObjectIndexService {
         preview_order: { type: "byte" },
       },
     });
+    await this.#ensureIndex(this.imageFootprintIndex, {
+      dynamic: "strict",
+      properties: {
+        point_id: { type: "keyword" },
+        asset_id: { type: "keyword" },
+        source_id: { type: "keyword" },
+        ra_min: { type: "double" },
+        ra_max: { type: "double" },
+        dec_min: { type: "double" },
+        dec_max: { type: "double" },
+      },
+    });
+  }
+
+  async bulkImageFootprints(documents: AstroImageFootprintDocument[]): Promise<number> {
+    if (!this.configured) throw new Error("ASTRO_ES_URL is not configured; cannot index image footprints");
+    if (!Array.isArray(documents)) throw new TypeError("image footprint documents must be an array");
+    if (!documents.length) return 0;
+    let lines: string[] = [];
+    let count = 0;
+    let bytes = 0;
+    const flush = async (): Promise<void> => {
+      if (!lines.length) return;
+      const response = await this.#requestJson("/_bulk", lines.join(""), "application/x-ndjson") as Record<string, unknown>;
+      const error = bulkResponseError(response);
+      if (error) throw error;
+      lines = [];
+      count = 0;
+      bytes = 0;
+    };
+    for (const document of documents) {
+      const { _id, _index, ...source } = document;
+      if (!/^[a-f0-9]{64}$/.test(_id) || _index !== this.imageFootprintIndex
+        || !/^[a-f0-9]{64}$/.test(document.point_id) || !document.asset_id
+        || ![document.ra_min, document.ra_max, document.dec_min, document.dec_max].every(Number.isFinite)
+        || document.ra_min < 0 || document.ra_max > 360 || document.ra_min > document.ra_max
+        || document.dec_min < -90 || document.dec_max > 90 || document.dec_min > document.dec_max) {
+        throw new RangeError("invalid image footprint document");
+      }
+      const payload = `${JSON.stringify({ index: { _index: this.imageFootprintIndex, _id } })}\n${JSON.stringify(source)}\n`;
+      const payloadBytes = Buffer.byteLength(payload);
+      if (payloadBytes > MAX_BULK_BYTES) throw new RangeError(`image footprint ${_id} exceeds the bulk request limit`);
+      if (count >= MAX_BULK_DOCUMENTS || (count > 0 && bytes + payloadBytes > MAX_BULK_BYTES)) await flush();
+      lines.push(payload);
+      count += 1;
+      bytes += payloadBytes;
+    }
+    await flush();
+    return documents.length;
+  }
+
+  async queryImageFootprints(input: AstroImageFootprintQuery): Promise<AstroImageFootprintQueryResult> {
+    const raDeg = validateCoordinate(input.raDeg, "raDeg", 0, 360);
+    const decDeg = validateCoordinate(input.decDeg, "decDeg", -90, 90);
+    const scopes = validateLayerScopes(input.layerScopes);
+    const limit = input.limit ?? 500;
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 2_000) throw new RangeError("image footprint limit must be between 1 and 2000");
+    if (!scopes.length || !this.configured) return { pointIds: [], total: 0, truncated: false };
+    let response: ElasticsearchSearchResponse;
+    try {
+      response = await this.#requestJson(`/${encodeURIComponent(this.imageFootprintIndex)}/_search`, JSON.stringify({
+        track_total_hits: true,
+        size: limit,
+        _source: ["point_id"],
+        query: { bool: { filter: [
+          { range: { ra_min: { lte: raDeg } } },
+          { range: { ra_max: { gte: raDeg } } },
+          { range: { dec_min: { lte: decDeg } } },
+          { range: { dec_max: { gte: decDeg } } },
+          scopedLayerFilter(scopes),
+        ] } },
+        sort: [{ point_id: "asc" }],
+      }), "application/json") as ElasticsearchSearchResponse;
+    } catch (error) {
+      if (error instanceof ElasticsearchUnavailableError) return { pointIds: [], total: 0, truncated: false };
+      throw error;
+    }
+    const hits = hitsFromResponse(response);
+    const total = totalFromHits(response.hits?.total);
+    const pointIds = [...new Set(hits.flatMap((hit) => isRecord(hit._source) && typeof hit._source.point_id === "string" ? [hit._source.point_id] : []))];
+    return { pointIds, total, truncated: total > pointIds.length };
   }
 
   async bulk(documents: LocalScanDocument[]): Promise<{ objectCount: number; coverageCount: number }> {

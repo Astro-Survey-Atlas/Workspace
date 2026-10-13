@@ -1,6 +1,6 @@
 {
   "name": "@astro-workspace/cli",
-  "version": "0.10.38",
+  "version": "0.0.1",
   "private": true,
   "type": "module",
   "bin": {

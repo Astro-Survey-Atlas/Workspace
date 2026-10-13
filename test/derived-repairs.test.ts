@@ -3,7 +3,7 @@ import test from "node:test";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { convertPositionHeaders, DerivedRepairService, pointDocument, SKY_DATA_POINT_INDEX } from "../src/derived-repairs.js";
+import { convertPositionHeaders, DerivedRepairService, imagePointsContainingCoordinate, pointDocument, SKY_DATA_POINT_INDEX } from "../src/derived-repairs.js";
 import { stageWarehouseInventory } from "../src/warehouse-inventory.js";
 import type { ConnectorIngestRunRecord } from "../src/connector-history.js";
 import type { ConnectorIngestRunCatalog } from "../src/connector-history.js";
@@ -112,7 +112,7 @@ test("index timeouts retry the same committed headers without rereading sources 
       assets: { get: async () => ({ id: "asset", origin: "user" }) } as unknown as DataCatalogRegistry,
       artifacts: {} as UserMocArtifactStore,
       warehouse: { startPositionReplay: async () => { throw new Error("Must reuse the existing header Job"); }, positionReplayState: async () => "missing" } as unknown as WarehouseScanService,
-      points: { ensureIndices: async () => {}, bulk: async (docs: Array<{ _id: string }>) => {
+      points: { ensureIndices: async () => {}, bulkImageFootprints: async () => {}, bulk: async (docs: Array<{ _id: string }>) => {
         calls++; docs.forEach((doc) => ids.add(doc._id));
         if (calls === 1) throw new Error("Elasticsearch request timed out after 30000 ms");
       } } as unknown as AstroObjectIndexService, downloads: async () => [] });
@@ -153,6 +153,20 @@ test("multiple science HDUs produce ICRS image centers, exclude DQ, preserve inh
 test("missing coordinates remain evidence errors instead of manufactured HEALPix centers", async () => {
   const result = await convertPositionHeaders([{ file_id: "empty", hdu_index: 0, header: header({ SIMPLE: true, NAXIS: 0 }) }]);
   assert.equal(result.length, 1); assert.match(String(result[0]?.error), /no usable/); assert.equal(result[0]?.ra_deg, undefined);
+});
+test("WCS image containment handles coordinates across the RA zero boundary", async () => {
+  const imageHeader = header({ XTENSION: "IMAGE", NAXIS: 2, NAXIS1: 100, NAXIS2: 100,
+    CRPIX1: 50.5, CRPIX2: 50.5, CRVAL1: 359.99, CRVAL2: 10,
+    CTYPE1: "RA---TAN", CTYPE2: "DEC--TAN", CDELT1: -0.001, CDELT2: 0.001 });
+  const points = [{ object_id: "ra-wrap-image", ra_deg: 359.99, dec_deg: 10, survey: "test", release: "r1",
+    product: "image", modality: "image", asset_id: "asset", attributes: {
+      position_role: "image_center", hdu_index: "1", header: imageHeader,
+    } }];
+
+  const inside = await imagePointsContainingCoordinate(points, 0.01, 10);
+  const outside = await imagePointsContainingCoordinate(points, 359.9, 10);
+  assert.deepEqual(inside.map((point) => point.object_id), ["ra-wrap-image"]);
+  assert.deepEqual(outside, []);
 });
 test("finite derived inventory validates completed snapshot and is reusable without reading normalized evidence", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "derived-inventory-"));

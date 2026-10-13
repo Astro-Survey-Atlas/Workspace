@@ -97,6 +97,12 @@ test.afterAll(async () => {
 async function proxyApi(page: Page): Promise<void> {
   await page.route("**/api/**", async (route) => {
     const requestUrl = new URL(route.request().url());
+    if (requestUrl.pathname === "/api/sky/points/inspect") {
+      await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({
+        raDeg: 0, decDeg: 0, radiusArcsec: 1, matches: [], images: [], truncated: false, indexing: false,
+      }) });
+      return;
+    }
     if (requestUrl.pathname === "/api/sky/points/scopes") { await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ scopes: [] }) }); return; }
     if (requestUrl.pathname.startsWith("/api/sky/points/") && requestUrl.pathname !== "/api/sky/points/query") { await route.fulfill({ status: 404, body: "{}" }); return; }
     // The UI suite uses the deployed catalog/resource-package APIs, but its
@@ -760,6 +766,10 @@ test("keeps a public Assets MOC and a user MOC on one ICRS/NESTED cell", async (
   await page.setViewportSize({ width: 1440, height: 900 });
   const publicSurveyId = "assets-fixture";
   const publicReleaseId = "assets-fixture-release";
+  const secondSurveyId = "assets-second-fixture";
+  const secondReleaseId = "assets-second-fixture-release";
+  const workspaceSurveyId = "workspace-survey-fixture";
+  const workspaceReleaseId = "workspace-survey-fixture-release";
   const userAssetId = "user-moc-fixture";
   const artifactId = "derived-user-moc-fixture";
   const objectRequests: Array<Record<string, any>> = [];
@@ -788,10 +798,48 @@ test("keeps a public Assets MOC and a user MOC on one ICRS/NESTED cell", async (
       coverage: { status: "verified", summary: "Fixture MOC", sourceUrl: "https://assets.example.test/fixture" },
     }],
   };
+  const secondSurvey = {
+    ...publicSurvey,
+    id: secondSurveyId,
+    name: "Second Public Fixture",
+    color: "#ef8db2",
+  };
+  const secondPublicRecord = {
+    ...secondSurvey,
+    releases: [{
+      id: secondReleaseId,
+      label: "Second Fixture Release",
+      kind: "public_release",
+      availability: "available",
+      modalities: ["catalog"],
+      products: [{ name: "Second Public MOC", modality: "catalog", description: "Fixture" }],
+      coverage: { status: "verified", summary: "Fixture MOC", sourceUrl: "https://assets.example.test/second" },
+    }],
+  };
+  const workspaceSurvey = {
+    ...publicSurvey,
+    id: workspaceSurveyId,
+    name: "Workspace Source Fixture",
+    color: "#f29a62",
+  };
+  const workspacePublicRecord = {
+    ...workspaceSurvey,
+    releases: [{
+      id: workspaceReleaseId,
+      label: "Workspace Fixture Release",
+      kind: "public_release",
+      availability: "available",
+      modalities: ["catalog"],
+      products: [{ name: "Workspace Fixture Product", modality: "catalog", description: "Fixture" }],
+      coverage: { status: "verified", summary: "Fixture MOC", sourceUrl: "https://assets.example.test/workspace" },
+    }],
+  };
   const asset = {
     id: userAssetId,
     name: "User MOC Fixture",
     description: "Deterministic user MOC fixture",
+    surveyId: workspaceSurveyId,
+    releaseId: workspaceReleaseId,
     product: "User MOC Fixture",
     kind: "catalog",
     modalities: ["catalog"],
@@ -809,6 +857,8 @@ test("keeps a public Assets MOC and a user MOC on one ICRS/NESTED cell", async (
     key: `moc:${artifactId}`,
     layerId: "derived-user-moc-layer",
     artifactId,
+    surveyId: workspaceSurveyId,
+    releaseId: workspaceReleaseId,
     productId: "User MOC Fixture",
     modality: "catalog",
     source: "asset",
@@ -840,10 +890,17 @@ test("keeps a public Assets MOC and a user MOC on one ICRS/NESTED cell", async (
       await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ surveys: [] }) });
     });
     await page.route("**/api/public-surveys", async (route) => {
-      await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ surveys: [publicSurvey] }) });
+      await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ surveys: [publicSurvey, secondSurvey, workspaceSurvey] }) });
     });
-    await page.route(`**/api/public-surveys/${publicSurveyId}`, async (route) => {
-      await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ survey: publicRecord }) });
+    await page.route("**/api/public-surveys/*", async (route) => {
+      const surveyId = new URL(route.request().url()).pathname.split("/").at(-1);
+      const survey = new Map([
+        [publicSurveyId, publicRecord],
+        [secondSurveyId, secondPublicRecord],
+        [workspaceSurveyId, workspacePublicRecord],
+      ]).get(surveyId ?? "");
+      if (!survey) return route.fallback();
+      await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ survey }) });
     });
     await page.route("**/api/survey-footprints", async (route) => {
       await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({
@@ -851,18 +908,44 @@ test("keeps a public Assets MOC and a user MOC on one ICRS/NESTED cell", async (
         generatedAt: "2026-08-27T00:00:00.000Z",
         coordinateFrame: "ICRS",
         nside: 16,
-        footprints: [{
-          surveyId: publicSurveyId,
-          releaseId: publicReleaseId,
-          product: "Assets Public MOC",
-          label: "Assets Fixture MOC",
-          nside: 16,
-          pixels: [0],
-          quality: "moc",
-          sourceUrl: "https://assets.example.test/fixture",
-          retrievedAt: "2026-08-27T00:00:00.000Z",
-          notes: "Deterministic public Assets MOC fixture",
-        }],
+        footprints: [
+          {
+            surveyId: publicSurveyId,
+            releaseId: publicReleaseId,
+            product: "Assets Public MOC",
+            label: "Assets Fixture MOC",
+            nside: 16,
+            pixels: [0],
+            quality: "moc",
+            sourceUrl: "https://assets.example.test/fixture",
+            retrievedAt: "2026-08-27T00:00:00.000Z",
+            notes: "Deterministic public Assets MOC fixture",
+          },
+          {
+            surveyId: secondSurveyId,
+            releaseId: secondReleaseId,
+            product: "Second Public MOC",
+            label: "Second Fixture MOC",
+            nside: 16,
+            pixels: [0],
+            quality: "moc",
+            sourceUrl: "https://assets.example.test/second",
+            retrievedAt: "2026-08-27T00:00:00.000Z",
+            notes: "Second deterministic public fixture",
+          },
+          {
+            surveyId: workspaceSurveyId,
+            releaseId: workspaceReleaseId,
+            product: "Workspace Fixture Product",
+            label: "Workspace Fixture MOC",
+            nside: 16,
+            pixels: [0],
+            quality: "moc",
+            sourceUrl: "https://assets.example.test/workspace",
+            retrievedAt: "2026-08-27T00:00:00.000Z",
+            notes: "Workspace layer identity collision regression fixture",
+          },
+        ],
       }) });
     });
     await page.route("**/api/resource-packages/config", async (route) => {
@@ -870,6 +953,9 @@ test("keeps a public Assets MOC and a user MOC on one ICRS/NESTED cell", async (
     });
     await page.route("**/api/connectors", async (route) => {
       await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ connectors: [] }) });
+    });
+    await page.route("**/api/data-assets/status**", async route => {
+      await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ statuses: [] }) });
     });
     await page.route("**/api/user-mocs", async (route) => {
       await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ artifacts: [{
@@ -926,6 +1012,12 @@ test("keeps a public Assets MOC and a user MOC on one ICRS/NESTED cell", async (
   const mocCard = page.locator("#sky-layer-list .workspace-extra-card");
   await expect(mocCard).toContainText("MOC · User MOC Fixture");
   await expect(mocCard.locator("input[type='checkbox']")).toBeChecked();
+  const secondSurveyToggle = page.locator(`[data-layer-key="public-survey:${secondSurveyId}"] input[type='checkbox']`);
+  await expect(secondSurveyToggle).toBeVisible();
+  await secondSurveyToggle.check();
+  const workspaceSurveyToggle = page.locator(`[data-layer-key="public-survey:${workspaceSurveyId}"] input[type='checkbox']`);
+  await expect(workspaceSurveyToggle).toBeVisible();
+  await expect(workspaceSurveyToggle).not.toBeChecked();
   await expect(canvas).toHaveAttribute("data-visible-workspace-layer-keys", `moc:${artifactId}`);
   const overview = await canvas.screenshot({ path: testInfo.outputPath("public-user-moc-overview.png") });
   expect(fragmentPixelCount(overview)).toBeGreaterThan(100);
@@ -933,6 +1025,12 @@ test("keeps a public Assets MOC and a user MOC on one ICRS/NESTED cell", async (
   const point = await findCanvasPoint(page, (state) => state.pixel === 0 && state.covered && state.selectable);
   await canvas.click({ position: point });
   await expect(canvas).toHaveAttribute("data-exploded-pixel", "0");
+  const selectedSurveyLabels = page.locator("#region-scene-legend .region-scene-survey");
+  await expect(selectedSurveyLabels).toHaveCount(2);
+  await expect(page.locator("#region-scene-legend .region-scene-asset")).toHaveCount(1);
+  await expect(page.locator("#region-scene-legend")).toContainText("Public Assets Fixture");
+  await expect(page.locator("#region-scene-legend")).toContainText("Second Public Fixture");
+  await expect(page.locator("#region-scene-legend")).not.toContainText("Workspace Source Fixture");
   await expect.poll(async () => Number(await canvas.getAttribute("data-exploded-layer-count")), { timeout: 3_000 }).toBeGreaterThan(1);
   await canvas.screenshot({ path: testInfo.outputPath("public-user-moc-selected.png") });
   await expect(page.locator("#inspector-content")).toContainText("Public Assets Fixture");
@@ -960,6 +1058,8 @@ test("sphere selection enters Aladin with an exact region snapshot", async ({ pa
   test.setTimeout(90_000);
   await page.setViewportSize({ width: 1440, height: 900 });
   const objectRequests: Array<{ assetIds?: string[]; layerScopes?: Array<{ assetId: string; sourceId?: string }>; surveyIds?: string[]; releaseIds?: string[]; region?: { nside?: number; pixels?: number[]; ordering?: string; coordinateFrame?: string }; bbox?: { raMin?: number; raMax?: number; decMin?: number; decMax?: number }; includeAttributes?: boolean }> = [];
+  const inspectionRequests: Array<{ raDeg?: number; decDeg?: number; radiusArcsec?: number; layerScopes?: Array<{ assetId: string; sourceId?: string }>; region?: { nside?: number; pixels?: number[]; ordering?: string; coordinateFrame?: string } }> = [];
+  let inspectionMode: "results" | "empty" | "error" = "results";
   await openFresh(page, async () => {
     await page.route("**/api/sky/points/query", async (route) => {
       const body = route.request().postDataJSON() as typeof objectRequests[number];
@@ -988,6 +1088,52 @@ test("sphere selection enters Aladin with an exact region snapshot", async ({ pa
           }],
           total: 1,
           limit: 1000,
+        }),
+      });
+    });
+    await page.route("**/api/sky/points/inspect", async (route) => {
+      const body = route.request().postDataJSON() as typeof inspectionRequests[number];
+      inspectionRequests.push(body);
+      if (inspectionMode === "error") {
+        await route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ error: "fixture unavailable" }) });
+        return;
+      }
+      if (inspectionMode === "empty") {
+        await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({
+          raDeg: body.raDeg, decDeg: body.decDeg, radiusArcsec: body.radiusArcsec,
+          matches: [], images: [], truncated: false, indexing: true,
+        }) });
+        return;
+      }
+      const assetId = body.layerScopes?.[0]?.assetId ?? "fixture-asset";
+      const record = (object_id: string, survey: string, recordAssetId: string, product: string) => ({
+        object_id,
+        ra_deg: body.raDeg ?? 0,
+        dec_deg: body.decDeg ?? 0,
+        survey,
+        release: `${survey}-release`,
+        product,
+        modality: "catalog",
+        asset_id: recordAssetId,
+        attributes: { flux: "12.4" },
+      });
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          raDeg: body.raDeg,
+          decDeg: body.decDeg,
+          radiusArcsec: body.radiusArcsec,
+          matches: [
+            { point: record("e2e-aladin-object", "cosmos-custom", assetId, "COSMOS"), separationArcsec: 0 },
+            { point: record("e2e-second-survey-object", "e2e-survey-b", "fixture-second-asset", "Second catalog"), separationArcsec: 0.72 },
+          ],
+          images: [{
+            ...record("e2e-aladin-image", "e2e-image-survey", "fixture-image-asset", "Imaging"),
+            attributes: { position_role: "image_center", file_name: "e2e-image.fits", hdu_index: "1" },
+          }],
+          truncated: false,
+          indexing: false,
         }),
       });
     });
@@ -1049,6 +1195,8 @@ test("sphere selection enters Aladin with an exact region snapshot", async ({ pa
   await expect(page.locator("#aladin-cockpit-rail")).toBeVisible();
   await expect(page.locator(".aladin-sector-banner")).toHaveCount(0);
   await expect(page.locator("#aladin-asset-drawer-toggle")).toBeVisible();
+  await expect(page.locator("#aladin-asset-drawer-toggle")).toHaveText("");
+  await expect(page.locator("#aladin-asset-drawer-toggle")).toHaveAttribute("aria-controls", "aladin-cockpit-rail");
   await expect(page.locator(".aladin-hud-reticle, .aladin-telemetry, .aladin-action-rail, #aladin-asset-drawer-pin")).toHaveCount(0);
   await expect(page.locator("#aladin-loaded-summary")).toBeVisible();
   await expect(page.locator("#aladin-cache-state")).toContainText(/CACHE|FETCH/);
@@ -1069,6 +1217,7 @@ test("sphere selection enters Aladin with an exact region snapshot", async ({ pa
   await expect(aladin).toHaveAttribute("data-pixels", selectedPixels!);
   await expect(aladin).toHaveAttribute("data-initial-fov-deg");
   await expect(aladin).toHaveAttribute("data-image-survey-id", "2mass");
+  await expect(aladin).toHaveAttribute("data-grid-color", "#ff6b8d");
   await page.locator("#scene-background-settings").click();
   await expect(page.locator("#scene-image-survey-controls")).toBeVisible();
   await expect(page.locator("#scene-background-color-controls")).toBeHidden();
@@ -1078,6 +1227,11 @@ test("sphere selection enters Aladin with an exact region snapshot", async ({ pa
   await expect(page.locator('[data-aladin-survey="allwise"]')).toHaveClass(/active/);
   await expect.poll(() => page.evaluate(() => localStorage.getItem("astro-workspace:aladin-image-survey:v1"))).toBe("allwise");
   await page.locator("#scene-background-close").click();
+  await page.locator("#theme-toggle").click();
+  await expect(page.locator("html")).toHaveAttribute("data-theme", "light");
+  await expect(aladin).toHaveAttribute("data-grid-color", "#f01951");
+  await page.locator("#theme-toggle").click();
+  await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
   await expect.poll(() => objectRequests.length, { timeout: 15_000 }).toBeGreaterThan(0);
   expect(objectRequests[0]!.region?.nside).toBe(16);
   expect(objectRequests[0]!.region?.pixels).toEqual(selectedPixels!.split(",").map(Number));
@@ -1111,6 +1265,48 @@ test("sphere selection enters Aladin with an exact region snapshot", async ({ pa
   await page.mouse.click(box!.x + marker!.x, box!.y + marker!.y);
   await expect(page.locator("#inspector-panel")).toHaveClass(/aladin-object-selected/);
   await expect(page.locator("#inspector-content")).toContainText("e2e-aladin-object");
+  await expect(page.locator("#inspector-content")).toContainText("e2e-second-survey-object");
+  await expect(page.locator("#inspector-content")).toContainText("e2e-image.fits");
+  await expect(page.locator("#inspector-content .aladin-inspector-group")).toHaveCount(2);
+  await page.screenshot({ path: testInfo.outputPath("aladin-inspector-desktop.png") });
+  const radius = page.locator(".aladin-inspector-radius input");
+  await expect(radius).toHaveValue("1");
+  await expect.poll(() => inspectionRequests.length).toBe(1);
+  expect(inspectionRequests[0]).toMatchObject({ radiusArcsec: 1, region: { nside: 16, ordering: "NESTED", coordinateFrame: "ICRS" } });
+  expect(inspectionRequests[0]?.layerScopes).toHaveLength(1);
+  await radius.fill("2.5");
+  await radius.press("Tab");
+  await expect.poll(() => inspectionRequests.length).toBe(2);
+  expect(inspectionRequests[1]?.radiusArcsec).toBe(2.5);
+  inspectionMode = "empty";
+  await radius.fill("3");
+  await radius.press("Tab");
+  await expect.poll(() => inspectionRequests.length).toBe(3);
+  await expect(page.locator("#inspector-content")).toContainText("该位置附近没有匹配的已索引星表对象。");
+  await expect(page.locator("#inspector-content")).toContainText("坐标索引补建中");
+  await expect(page.locator(".aladin-inspector-record")).toHaveCount(0);
+  inspectionMode = "error";
+  await radius.fill("4");
+  await radius.press("Tab");
+  await expect.poll(() => inspectionRequests.length).toBe(4);
+  await expect(page.locator(".aladin-inspector-status")).toContainText("查询失败：fixture unavailable");
+  await expect(page.locator(".aladin-inspector-results")).toBeEmpty();
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.locator("#inspector-close").click();
+  const drawerToggle = page.locator("#aladin-asset-drawer-toggle");
+  if (await drawerToggle.getAttribute("aria-expanded") === "false") await drawerToggle.click();
+  await expect(page.locator("#aladin-cockpit-rail")).toBeVisible();
+  const openedToggle = await drawerToggle.boundingBox();
+  expect(openedToggle).not.toBeNull();
+  expect(openedToggle!.x).toBeGreaterThanOrEqual(0);
+  expect(openedToggle!.x + openedToggle!.width).toBeLessThanOrEqual(390);
+  await page.screenshot({ path: testInfo.outputPath("aladin-mobile-deck.png") });
+  await drawerToggle.click();
+  const closedToggle = await drawerToggle.boundingBox();
+  expect(closedToggle).not.toBeNull();
+  expect(closedToggle!.x).toBeGreaterThanOrEqual(0);
+  expect(closedToggle!.x + closedToggle!.width).toBeLessThanOrEqual(390);
+  await page.setViewportSize({ width: 1440, height: 900 });
   await page.locator("#aladin-fullscreen").click();
   await expect(page.locator("#scene-stage")).toHaveAttribute("data-fullscreen", "true");
   await page.locator("#aladin-fullscreen").click();

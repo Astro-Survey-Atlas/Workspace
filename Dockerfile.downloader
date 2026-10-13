@@ -1,0 +1,28 @@
+ARG WORKSPACE_IMAGE=ghcr.io/astro-survey-atlas/asa-workspace:0.0.1
+ARG ARIA2_BUILD_IMAGE=debian:bookworm-slim
+FROM ${ARIA2_BUILD_IMAGE} AS aria2-build
+USER root
+ARG HTTP_PROXY
+ARG HTTPS_PROXY
+RUN http_proxy=${HTTP_PROXY} https_proxy=${HTTPS_PROXY} apt-get update \
+    && http_proxy=${HTTP_PROXY} https_proxy=${HTTPS_PROXY} apt-get install --yes --no-install-recommends \
+       ca-certificates curl build-essential libssl-dev zlib1g-dev pkg-config \
+    && rm -rf /var/lib/apt/lists/*
+WORKDIR /build
+RUN curl --http1.1 --tls-max 1.2 --retry 5 -fsSL \
+      https://github.com/aria2/aria2/releases/download/release-1.37.0/aria2-1.37.0.tar.xz -o aria2.tar.xz \
+    && echo '60a420ad7085eb616cb6e2bdf0a7206d68ff3d37fb5a956dc44242eb2f79b66b  aria2.tar.xz' | sha256sum -c - \
+    && tar -xf aria2.tar.xz \
+    && cd aria2-1.37.0 \
+    && ./configure --with-openssl --without-gnutls --without-libssh2 --without-libxml2 \
+       --without-libexpat --without-sqlite3 --without-libgmp --disable-bittorrent --disable-metalink \
+    && make -j2 \
+    && strip src/aria2c
+
+FROM ${WORKSPACE_IMAGE}
+USER root
+COPY --from=aria2-build /build/aria2-1.37.0/src/aria2c /usr/local/bin/aria2c
+COPY --from=aria2-build /etc/ssl/certs/ /etc/ssl/certs/
+RUN aria2c --version
+USER 10001:10001
+CMD ["node", "/app/dist/download-worker.js"]

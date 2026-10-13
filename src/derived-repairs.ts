@@ -1,12 +1,12 @@
 import { createHash, randomUUID } from "node:crypto";
 import { createReadStream } from "node:fs";
-import { mkdir, readFile, readdir, rename, stat, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { createInterface } from "node:readline";
 import { spawn } from "node:child_process";
 import { Healpix, Hploc } from "healpixjs";
-import type { AstroObjectIndexService, SkyDataPointScope } from "./astro-object-index.js";
+import type { AstroImageFootprintDocument, AstroObjectIndexService, AstroObjectRecord, SkyDataPointScope } from "./astro-object-index.js";
 import type { ConnectorIngestRunCatalog, ConnectorIngestRunRecord } from "./connector-history.js";
 import type { DataCatalogRegistry } from "./data-catalog.js";
 import type { CoverageDownloadJob } from "./coverage-downloads.js";
@@ -23,7 +23,7 @@ export interface DerivedRepair {
   phase: "staging" | "moc" | "headers" | "indexing" | "complete";
   createdAt: string; updatedAt: string; sourceSnapshotSha256: string; companion?: boolean; maxFiles?: number;
   processedFiles: number; fileCount: number; pointCount: number; coordinateErrors: number;
-  headerErrors: number; indexedBytes: number; jobName?: string; outputPath?: string;
+  headerErrors: number; indexedBytes: number; footprintIndexedBytes?: number; footprintCount?: number; footprintErrors?: number; jobName?: string; outputPath?: string;
   mocStatus?: string; error?: string;
   retryAttempts?: number; nextRetryAt?: string;
 }
@@ -32,7 +32,10 @@ function retryableIndexError(error: unknown): boolean {
   if (!(error instanceof Error)) return false;
   return /Elasticsearch request timed out|fetch failed|HTTP (429|502|503|504)\b|ECONNRESET|ECONNREFUSED|ETIMEDOUT/.test(error.message);
 }
-interface HeaderPoint extends Record<string, unknown> { file_id: string; source_uri: string; file_name: string; hdu_index: number; ra_deg: number; dec_deg: number }
+interface HeaderPoint extends Record<string, unknown> {
+  file_id: string; source_uri: string; file_name: string; hdu_index: number; ra_deg: number; dec_deg: number;
+  position_role?: string; footprint_bounds?: number[][];
+}
 export async function convertPositionHeaders(records: unknown[]): Promise<Record<string, unknown>[]> {
   if (!records.length) return [];
   const script = fileURLToPath(new URL("./sky-point-coordinates.py", import.meta.url));
@@ -62,6 +65,62 @@ export function pointDocument(point: HeaderPoint, asset: { id: string; surveyId?
       hdu_index: point.hdu_index, position_role: point.position_role, position_method: point.position_method, coordinate_frame: "ICRS",
       header: point.header, primary_header: point.primary_header, source_snapshot_sha256: run.sourceSnapshotSha256, source_id: sourceId }).filter(([, value]) => value !== undefined).map(([key, value]) => [key, String(value)])) };
 }
+
+export function imageFootprintDocuments(point: HeaderPoint, assetId: string, sourceId?: string): AstroImageFootprintDocument[] {
+  if (point.position_role !== "image_center" || !Array.isArray(point.footprint_bounds)) return [];
+  const pointId = createHash("sha256").update(`${assetId}\n${point.file_id}\n${point.hdu_index}\n${point.position_role}`).digest("hex");
+  return point.footprint_bounds.map((bounds, index) => {
+    if (!Array.isArray(bounds) || bounds.length !== 4 || !bounds.every(Number.isFinite)) throw new Error("Invalid WCS footprint bounds");
+    const [raMin, raMax, decMin, decMax] = bounds;
+    if (raMin! < 0 || raMax! > 360 || raMin! > raMax! || decMin! < -90 || decMax! > 90 || decMin! > decMax!) {
+      throw new Error("Invalid WCS footprint bounds");
+    }
+    const id = createHash("sha256").update(`${pointId}\n${index}`).digest("hex");
+    return { _id: id, _index: "astro_data_image_footprint_index_v1", point_id: pointId, asset_id: assetId,
+      ...(sourceId ? { source_id: sourceId } : {}), ra_min: raMin!, ra_max: raMax!, dec_min: decMin!, dec_max: decMax! };
+  });
+}
+
+export async function imagePointsContainingCoordinate(
+  points: readonly AstroObjectRecord[],
+  raDeg: number,
+  decDeg: number,
+): Promise<AstroObjectRecord[]> {
+  if (!Number.isFinite(raDeg) || raDeg < 0 || raDeg >= 360 || !Number.isFinite(decDeg) || decDeg < -90 || decDeg > 90) {
+    throw new RangeError("query coordinates must be finite ICRS degrees");
+  }
+  const candidates = points.filter((point) => point.attributes?.position_role === "image_center"
+    && typeof point.attributes.header === "string" && Number.isInteger(Number(point.attributes.hdu_index)));
+  if (!candidates.length) return [];
+  const script = fileURLToPath(new URL("./sky-point-coordinates.py", import.meta.url));
+  const results = await new Promise<Array<{ id: string; contains: boolean }>>((resolve, reject) => {
+    const child = spawn(process.env.ASTRO_PYTHON ?? "python3", [script, "--contains"], { stdio: ["pipe", "pipe", "pipe"] });
+    let output = "", errors = "", timedOut = false;
+    const timer = setTimeout(() => { timedOut = true; child.kill(); }, 120000);
+    child.stdout.on("data", (chunk: Buffer) => { output += chunk.toString(); if (output.length > 64 * 1024 * 1024) child.kill(); });
+    child.stderr.on("data", (chunk: Buffer) => { if (errors.length < 4000) errors += chunk.toString(); });
+    child.on("error", (error) => { clearTimeout(timer); reject(error); });
+    child.on("close", (code) => {
+      clearTimeout(timer);
+      if (timedOut) { reject(new Error("WCS containment check timed out")); return; }
+      if (code !== 0) { reject(new Error(`WCS containment check failed (${code}): ${errors.slice(0, 2000)}`)); return; }
+      try { resolve(output.trim() ? output.trim().split("\n").map((line) => JSON.parse(line) as { id: string; contains: boolean }) : []); }
+      catch (error) { reject(error); }
+    });
+    child.stdin.on("error", () => undefined);
+    child.stdin.end(candidates.map((point) => JSON.stringify({
+      id: point.object_id,
+      hdu_index: Number(point.attributes.hdu_index),
+      header: point.attributes.header,
+      ...(point.attributes.primary_header ? { primary_header: point.attributes.primary_header } : {}),
+      query_ra: raDeg,
+      query_dec: decDeg,
+    })).join("\n") + "\n");
+  });
+  const contains = new Set(results.filter((result) => result.contains).map((result) => result.id));
+  return candidates.filter((point) => contains.has(point.object_id));
+}
+
 export function downloadedFileSources(jobs: CoverageDownloadJob[]): Map<string, string> {
   const sources = new Map<string, string>();
   for (const job of jobs) if (job.outputPath) for (const transfer of job.transfer) {
@@ -89,6 +148,11 @@ export class DerivedRepairService {
     const result: DerivedRepair[] = [];
     for (const name of await readdir(this.#options.root)) if (/^derived-[a-f0-9]+\.json$/.test(name)) result.push(JSON.parse(await readFile(path.join(this.#options.root, name), "utf8")) as DerivedRepair);
     return result.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+  }
+  async clearFailedHistory(): Promise<string[]> {
+    const failed = (await this.list()).filter((task) => task.status === "failed");
+    for (const task of failed) await rm(path.join(this.#options.root, `${task.id}.json`), { force: true });
+    return failed.map((task) => task.id);
   }
   async submit(assetId: string, input: unknown): Promise<DerivedRepair> {
     if (!input || typeof input !== "object" || Array.isArray(input)) throw new RangeError("Repair input is required");
@@ -165,7 +229,8 @@ export class DerivedRepairService {
       task.processedFiles = Number(checkpoint.processedFiles); task.headerErrors = Number(checkpoint.failedFiles ?? 0);
       const committed = Number(checkpoint.outputBytes);
       if (committed > task.indexedBytes) await this.#indexBatch(task, run, committed);
-      if (checkpoint.phase !== "RUNNING" && task.indexedBytes === committed) {
+      if (committed > (task.footprintIndexedBytes ?? 0)) await this.#indexFootprintBatch(task, run, committed);
+      if (checkpoint.phase !== "RUNNING" && task.indexedBytes === committed && (task.footprintIndexedBytes ?? committed) === committed) {
         task.phase = "complete"; task.status = checkpoint.phase === "FAILED" || task.pointCount === 0 ? "failed"
           : checkpoint.phase === "PARTIAL" || task.coordinateErrors > 0 || task.mocStatus && task.mocStatus !== "ready" ? "partial" : "succeeded";
       }
@@ -199,6 +264,43 @@ export class DerivedRepairService {
     task.coordinateErrors += coordinateErrors; task.pointCount += documents.length; task.indexedBytes += bytes;
     delete task.nextRetryAt; delete task.retryAttempts;
     if (!task.mocStatus || task.mocStatus === "ready") delete task.error;
+  }
+  async #indexFootprintBatch(task: DerivedRepair, run: ConnectorIngestRunRecord, committed: number): Promise<void> {
+    if (task.maxFiles || !task.jobName || !task.outputPath) {
+      task.footprintIndexedBytes = committed;
+      return;
+    }
+    const start = task.footprintIndexedBytes ?? 0;
+    if (start >= committed) return;
+    const input = createReadStream(path.join(task.outputPath, task.companion ? "position-headers.ndjson" : "headers.ndjson"), { start, end: committed - 1 });
+    const reader = createInterface({ input, crlfDelay: Infinity });
+    let bytes = 0, fileId: string | undefined; const records: HeaderPoint[] = [];
+    try { for await (const line of reader) {
+      const record = JSON.parse(line) as HeaderPoint;
+      if (fileId !== record.file_id && bytes >= 8 * 1024 * 1024) break;
+      fileId = record.file_id; records.push(record); bytes += Buffer.byteLength(line) + 1;
+    } } finally { reader.close(); input.destroy(); }
+    const converted = await convertPositionHeaders(records);
+    const asset = await this.#options.assets.get(task.assetId);
+    const sources = downloadedFileSources(await this.#options.downloads());
+    const documents: AstroImageFootprintDocument[] = [];
+    let footprintErrors = 0;
+    for (const value of converted) {
+      if (value.error || value.position_role !== "image_center") continue;
+      try { documents.push(...imageFootprintDocuments(value as HeaderPoint, asset.id, fileSource(String(value.source_uri), sources))); }
+      catch { footprintErrors += 1; }
+    }
+    try {
+      await this.#options.points.ensureIndices();
+      await this.#options.points.bulkImageFootprints(documents);
+    } catch (error) {
+      if (retryableIndexError(error)) throw new RetryablePointIndexError(error instanceof Error ? error.message : String(error));
+      throw error;
+    }
+    task.footprintCount = (task.footprintCount ?? 0) + documents.length;
+    task.footprintErrors = (task.footprintErrors ?? 0) + footprintErrors;
+    task.footprintIndexedBytes = start + bytes;
+    delete task.nextRetryAt; delete task.retryAttempts;
   }
   async #save(task: DerivedRepair): Promise<void> {
     await mkdir(this.#options.root, { recursive: true }); task.updatedAt = new Date().toISOString();

@@ -27,12 +27,23 @@ export interface SkyReverseLookupResponse {
 }
 import type { ProductionPipelineDefinition, ProductionRun, ProductionRunInput } from "../../src/production";
 import type { AiProviderInput, AiProviderRecord, McpServerInput, McpServerRecord } from "../../src/system-config";
+import type { DownloadSettings, DownloadSettingsInput } from "../../src/system-config";
+import type { DownloadHealth } from "../../src/download-transport";
+
+export interface DownloadSettingsView {
+  settings: DownloadSettings;
+  health: DownloadHealth & { engineAvailable: boolean };
+  healthHistory: DownloadHealth[];
+  downloaderEnabled: boolean;
+}
 import type { WorkspaceAgentSession } from "../../src/workspace-agent";
 import type {
   AstroCellsQueryInput,
   AstroCellsQueryResult,
   ObjectRegionQueryInput,
   AstroObjectQueryResult,
+  SkyPointInspectionInput,
+  SkyPointInspectionResult,
 } from "../../src/astro-object-index";
 import type { RegionDownloadPreview, RegionDownloadPreviewEvent, RegionDownloadSelection } from "../../src/region-download-plan";
 
@@ -161,21 +172,7 @@ export interface CoverageDownloadFile {
   sourceId?: string;
 }
 
-export interface CoverageDownloadJob {
-  id: string;
-  status: "queued" | "running" | "completed" | "partial" | "failed" | "cancelled";
-  phase: "queued" | "downloading" | "verifying" | "registering" | "completed" | "partial" | "failed" | "cancelled";
-  files: CoverageDownloadFile[];
-  downloadedFiles: number;
-  totalFiles: number;
-  downloadedBytes: number;
-  totalBytes: number;
-  outputConnectorId?: string;
-  outputPath?: string;
-  error?: string;
-  createdAt: string;
-  updatedAt: string;
-}
+export type CoverageDownloadJob = import("../../src/coverage-downloads").CoverageDownloadJob;
 
 export interface ResourceCatalogConfig extends ResourceCatalogStatus {
   updatedAt?: string;
@@ -485,6 +482,9 @@ export const workspaceApi = {
   async skyPointsQuery(input: ObjectRegionQueryInput, signal?: AbortSignal): Promise<AstroObjectQueryResult> {
     return postJson<AstroObjectQueryResult>("/api/sky/points/query", input, signal);
   },
+  async skyPointInspect(input: SkyPointInspectionInput, signal?: AbortSignal): Promise<SkyPointInspectionResult> {
+    return postJson<SkyPointInspectionResult>("/api/sky/points/inspect", input, signal);
+  },
   async skyPointDetail(id: string): Promise<{ point: import("../../src/astro-object-index").AstroObjectRecord }> {
     return getJson(`/api/sky/points/${encodeURIComponent(id)}`);
   },
@@ -528,7 +528,13 @@ export const workspaceApi = {
     return (await postJson<{ job: CoverageDownloadJob }>("/api/coverage-downloads", input)).job;
   },
   async coverageDownloads(): Promise<CoverageDownloadJob[]> {
-    return (await getJson<{ jobs: CoverageDownloadJob[] }>("/api/coverage-downloads")).jobs;
+    return (await getJson<{ jobs: CoverageDownloadJob[] }>("/api/coverage-downloads")).jobs ?? [];
+  },
+  async downloadSettings(): Promise<DownloadSettingsView> { return getJson("/api/system-config/downloads"); },
+  async saveDownloadSettings(input: DownloadSettingsInput): Promise<DownloadSettingsView> { return putJson("/api/system-config/downloads", input); },
+  async testDownloadRoute(speed = false): Promise<DownloadSettingsView> { return postJson(`/api/system-config/downloads/${speed ? "speed-test" : "test"}`, {}); },
+  async downloadAction(id: string, action: "pause" | "resume" | "retry"): Promise<CoverageDownloadJob> {
+    return (await postJson<{ job: CoverageDownloadJob }>(`/api/coverage-downloads/${encodeURIComponent(id)}/${action}`, {})).job;
   },
   async coverageDownload(id: string): Promise<CoverageDownloadJob> {
     return (await getJson<{ job: CoverageDownloadJob }>(`/api/coverage-downloads/${encodeURIComponent(id)}`)).job;

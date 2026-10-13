@@ -7,6 +7,22 @@ import { SSEClientTransport } from "@modelcontextprotocol/sdk/client/sse.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 
 import { requestAiProviderCompletion } from "./ai-provider-client.js";
+import type { DownloadProxyConfig } from "./download-transport.js";
+
+export interface DownloadSettings {
+  proxyEnabled: boolean;
+  proxyUrl: string;
+  proxyUsername: string;
+  passwordConfigured: boolean;
+  revision: string;
+}
+
+export interface DownloadSettingsInput {
+  proxyEnabled: boolean;
+  proxyUrl: string;
+  proxyUsername?: string;
+  proxyPassword?: string | null;
+}
 
 export type AiProviderCheckStatus = "unknown" | "ok" | "failed";
 export type McpTransport = "streamable-http" | "sse";
@@ -67,6 +83,7 @@ interface PersistedConfig {
   version: 1;
   ai: Array<Omit<AiProviderRecord, "apiKeyConfigured"> & { apiKeyRef?: string }>;
   mcp: Array<Omit<McpServerRecord, "tokenConfigured"> & { tokenRef?: string }>;
+  downloads?: Omit<DownloadSettings, "passwordConfigured">;
 }
 
 interface SecretState {
@@ -137,6 +154,41 @@ export class SystemConfigStore {
 
   async listAiProviders(): Promise<AiProviderRecord[]> { await this.initialize(); return this.#config.ai.map((record) => publicAi(record, this.#secrets)); }
   async listMcpServers(): Promise<McpServerRecord[]> { await this.initialize(); return this.#config.mcp.map((record) => publicMcp(record, this.#secrets)); }
+
+  async getDownloadSettings(): Promise<DownloadSettings> {
+    await this.initialize();
+    return { ...(this.#config.downloads ?? { proxyEnabled: false, proxyUrl: "", proxyUsername: "", revision: "initial" }),
+      passwordConfigured: Boolean(this.#secrets.values["download-proxy-password"]) };
+  }
+
+  async downloadProxy(): Promise<DownloadProxyConfig> {
+    const settings = await this.getDownloadSettings();
+    return { enabled: settings.proxyEnabled, url: settings.proxyUrl, username: settings.proxyUsername,
+      password: this.#secrets.values["download-proxy-password"], revision: settings.revision };
+  }
+
+  async saveDownloadSettings(input: DownloadSettingsInput): Promise<DownloadSettings> {
+    await this.initialize();
+    if (!input || typeof input !== "object" || Array.isArray(input)) throw new RangeError("download settings must be an object");
+    if (typeof input.proxyEnabled !== "boolean") throw new RangeError("proxyEnabled must be boolean");
+    if (input.proxyUrl !== undefined && typeof input.proxyUrl !== "string") throw new RangeError("proxyUrl must be string");
+    if (input.proxyUsername !== undefined && typeof input.proxyUsername !== "string") throw new RangeError("proxyUsername must be string");
+    const address = typeof input.proxyUrl === "string" ? input.proxyUrl.trim() : "";
+    if (address || input.proxyEnabled) {
+      let proxy: URL;
+      try { proxy = new URL(address); } catch { throw new RangeError("请输入 HTTP 代理地址，例如 http://局域网IP:7890"); }
+      if (proxy.protocol !== "http:" || proxy.username || proxy.password || proxy.pathname !== "/" || proxy.search || proxy.hash) {
+        throw new RangeError("代理地址须为 HTTP 地址；认证信息请填写在独立字段中");
+      }
+    }
+    if (input.proxyPassword !== undefined && input.proxyPassword !== null && typeof input.proxyPassword !== "string") throw new RangeError("proxyPassword must be string or null");
+    if ((input.proxyUsername?.length ?? 0) > 256 || (input.proxyPassword?.length ?? 0) > 2048) throw new RangeError("代理认证信息过长");
+    this.#config.downloads = { proxyEnabled: input.proxyEnabled, proxyUrl: address, proxyUsername: input.proxyUsername?.trim() ?? "", revision: randomUUID() };
+    if (input.proxyPassword === null) delete this.#secrets.values["download-proxy-password"];
+    else if (input.proxyPassword !== undefined) this.#secrets.values["download-proxy-password"] = input.proxyPassword;
+    await this.#persist();
+    return this.getDownloadSettings();
+  }
 
   async getDefaultAiProvider(): Promise<{ record: AiProviderRecord; apiKey?: string } | undefined> {
     await this.initialize();
@@ -269,7 +321,7 @@ export class SystemConfigStore {
     const token = record.tokenRef ? this.#secrets.values[record.tokenRef] : undefined;
     const headers = token ? { Authorization: `Bearer ${token}` } : undefined;
     try {
-      const client = new Client({ name: "asa-workspace", version: "0.10.38" });
+      const client = new Client({ name: "asa-workspace", version: "0.0.1" });
       const endpoint = new URL(record.url);
       const requestInit = { headers, signal: AbortSignal.timeout(15_000) };
       const transports = record.transport === "sse"

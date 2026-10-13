@@ -11,10 +11,7 @@ export function coverageSourceGroups(sources: readonly SkyOverlapSource[], displ
   const section = document.createElement("section");
   section.className = "coverage-source-groups";
   section.setAttribute("aria-label", "来源");
-  const heading = document.createElement("h3");
-  heading.textContent = "来源";
-  section.append(heading);
-  const kinds = new Map<SkyOverlapSource["kind"], { element: HTMLElement; surveys: Map<string, { element: HTMLElement; releases: Map<string, HTMLUListElement> }> }>();
+  const kinds = new Map<SkyOverlapSource["kind"], { element: HTMLElement; surveys: Map<string, { element: HTMLElement; releases: Map<string, HTMLUListElement>; count: HTMLSpanElement; sourceCount: number }> }>();
   const seen = new Set<string>();
   for (const source of sources) {
     const identity = JSON.stringify([source.kind, source.id]);
@@ -28,12 +25,7 @@ export function coverageSourceGroups(sources: readonly SkyOverlapSource[], displ
       const title = document.createElement("h4");
       title.className = "coverage-source-kind-title";
       title.textContent = source.kind === "public" ? "公开覆盖" : "Workspace 数据";
-      const note = document.createElement("p");
-      note.className = "coverage-source-kind-note";
-      note.textContent = source.kind === "public"
-        ? "覆盖证据不代表文件已下载到 Workspace 或完成扫描。"
-        : "Workspace 资产或覆盖层；本地文件清单以对应扫描记录为准。";
-      element.append(title, note);
+      element.append(title);
       section.append(element);
       kind = { element, surveys: new Map() };
       kinds.set(source.kind, kind);
@@ -41,26 +33,30 @@ export function coverageSourceGroups(sources: readonly SkyOverlapSource[], displ
     const surveyId = source.surveyId ?? source.sourceIdentity?.surveyId;
     const releaseId = source.releaseId ?? source.sourceIdentity?.releaseId;
     const names = display(source);
-    const surveyKey = JSON.stringify([source.kind, surveyId ?? source.id]);
+    const surveyKey = JSON.stringify([source.kind, source.kind === "workspace" ? source.assetId ?? source.id : surveyId ?? source.id]);
     let survey = kind.surveys.get(surveyKey);
     if (!survey) {
       const element = document.createElement("div");
       element.className = "coverage-source-survey";
       element.dataset.surveyId = surveyId ?? "";
       element.style.setProperty("--survey-color", names.color);
-      const header = document.createElement("h5");
-      header.textContent = names.surveyName;
-      if (source.kind === "workspace") {
-        const badge = document.createElement("span");
-        badge.className = "coverage-source-local";
-        badge.textContent = source.assetId ? "本地资产" : "Workspace";
-        header.append(badge);
-      }
+      const header = document.createElement("header");
+      const swatch = document.createElement("i");
+      const name = document.createElement("strong");
+      name.textContent = names.surveyName;
+      const badge = document.createElement("span");
+      badge.className = source.kind === "workspace" ? "coverage-source-local" : "coverage-source-origin";
+      badge.textContent = source.kind === "workspace" ? (source.assetId ? "本地资产" : "Workspace") : "公开覆盖";
+      const count = document.createElement("span");
+      count.className = "coverage-source-count";
+      header.append(swatch, name, source.kind === "workspace" ? badge : count);
       element.append(header);
       kind.element.append(element);
-      survey = { element, releases: new Map() };
+      survey = { element, releases: new Map(), count, sourceCount: 0 };
       kind.surveys.set(surveyKey, survey);
     }
+    survey.sourceCount += 1;
+    survey.count.textContent = `${survey.sourceCount} ${survey.sourceCount === 1 ? "SOURCE" : "SOURCES"}`;
     const releaseKey = releaseId ?? "";
     let products = survey.releases.get(releaseKey);
     if (!products) {

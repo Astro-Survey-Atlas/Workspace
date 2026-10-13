@@ -10,8 +10,8 @@ import type { Request, Response } from "express";
 
 import { AgentService } from "./agent.js";
 import { AstroIndexService, ASTRO_FILE_INDEX, ASTRO_OVERVIEW_NSIDE, type AstroCoverageLayer, type AstroSkyQueryInput } from "./astro-index.js";
-import { DerivedRepairService, SKY_DATA_POINT_INDEX } from "./derived-repairs.js";
-import { AstroObjectIndexService, type AstroCellsQueryInput, type ObjectRegionQueryInput } from "./astro-object-index.js";
+import { DerivedRepairService, imagePointsContainingCoordinate, SKY_DATA_POINT_INDEX } from "./derived-repairs.js";
+import { angularSeparationArcsec, AstroObjectIndexService, coordinateInHealpixRegion, coordinateSearchBbox, type AstroCellsQueryInput, type AstroObjectRecord, type ObjectRegionQueryInput, type SkyDataPointScope } from "./astro-object-index.js";
 import { McpCatalogQueryClient } from "./catalog-mcp-client.js";
 import { createConnectorCredentialStore, type StoredConnectorCredentials } from "./connector-credentials.js";
 import { ConnectorRegistry, connectorLocationKey, validateConnectorInput, type ConnectorCheckInput, type ConnectorPublicRecord, type ConnectorRecord, type ConnectorRegistrationInput } from "./connectors.js";
@@ -36,7 +36,7 @@ import { UserMocArtifactStore, type UserMocArtifact } from "./user-moc-artifacts
 import { WarehouseIndexService, type WarehouseCoverageLayer } from "./warehouse-index.js";
 import { WarehouseScanService } from "./warehouse-scan.js";
 import { commonOverlapNside, calculateSkyOverlap, privateOverlapOrders, type SkyOverlapSource } from "./sky-overlap.js";
-import { CoverageDownloadService, type CoverageDownloadFile } from "./coverage-downloads.js";
+import { CoverageDownloadService, parseCoverageDownloadSubmissionOptions, type CoverageDownloadFile } from "./coverage-downloads.js";
 import { RegionDownloadPlanService } from "./region-download-plan.js";
 import { createRegionDownloadPreviewHandler } from "./region-download-http.js";
 import { ProductionService, ProductionStateError, type ProductionSourceResolver, type ProductionWarehouseHandoff } from "./production.js";
@@ -44,6 +44,8 @@ import { listProductionCapabilities } from "./production-capabilities.js";
 import { buildProvenance } from "./build-metadata.js";
 import { InstallationService } from "./installation.js";
 import { SystemConfigStore } from "./system-config.js";
+import type { DownloadSettingsInput } from "./system-config.js";
+import { DownloadWorkerClient } from "./download-worker-client.js";
 import { WorkspaceAgentService } from "./workspace-agent.js";
 import { AssetsCoverageOverviewClient, AssetsRegionClient, AssetsRegionRateLimitError, assetsLayerIdForIdentity, type AssetsRegionCoverageEvidence, type AssetsRegionFileEvidence, type AssetsRegionLookupSummary, type AssetsRegionScanScope, type AssetsRegionLookupResponse } from "./assets-region-client.js";
 import { regionContainsCell, WorkspaceDirectoryCollector, type WorkspaceDirectory, type WorkspaceFileLocation } from "./workspace-directories.js";
@@ -139,10 +141,13 @@ const installation = new InstallationService({
     configured: warehouseIndex.configured,
   }),
 });
+const downloadWorker = process.env.ASTRO_DOWNLOAD_WORKER_URL ? new DownloadWorkerClient(
+  process.env.ASTRO_DOWNLOAD_WORKER_URL, process.env.ASTRO_DOWNLOAD_WORKER_TOKEN ?? "", () => systemConfig.downloadProxy()) : undefined;
 const coverageDownloads = new CoverageDownloadService({
   root: coverageDownloadRoot,
   statePath: coverageDownloadStatePath,
   registerConnector: (input) => connectors.register(input),
+  worker: downloadWorker,
 });
 const derivedRepairs = new DerivedRepairService({ root: path.join(stateRoot, "derived-repairs"), evidenceRoot: process.env.ASTRO_WAREHOUSE_EVIDENCE_MOUNT_PATH ?? "/var/lib/atlas-evidence",
   runs: connectorRuns, assets: dataCatalog, artifacts: userMocs, warehouse: warehouseScans, points: skyDataPoints, downloads: () => coverageDownloads.list() });
@@ -235,7 +240,7 @@ const app = createMcpExpressApp({ host, allowedHosts });
 app.use("/api", express.json({ limit: "64kb" }));
 
 app.get("/healthz", (_request: Request, response: Response) => {
-  response.json({ status: "ok", service: "asa-workspace", version: "0.10.38" });
+  response.json({ status: "ok", service: "asa-workspace", version: "0.0.1" });
 });
 
 app.get("/api/capabilities", async (_request: Request, response: Response) => {
@@ -688,6 +693,40 @@ app.get("/api/connector-ingest-runs", async (request: Request, response: Respons
   try {
     if (warehouseEnabled) void warehouseScans.poll();
     response.json({ runs: publicConnectorRuns(await connectorRuns.list(connectorRunFilter(request))) });
+  } catch (error) {
+    sendApiError(response, error);
+  }
+});
+
+app.post("/api/maintenance/failed-history/clear", async (request: Request, response: Response) => {
+  const remoteAddress = request.socket.remoteAddress?.replace(/^::ffff:/, "");
+  if (remoteAddress !== "127.0.0.1" && remoteAddress !== "::1") {
+    response.status(404).end();
+    return;
+  }
+  if (request.body?.confirmation !== "CLEAR_FAILED_HISTORY") {
+    response.status(400).json({ error: "Explicit history cleanup confirmation is required" });
+    return;
+  }
+  try {
+    const failedRuns = await connectorRuns.list({ status: "failed" });
+    const failedRepairIds = await derivedRepairs.clearFailedHistory();
+    const [downloadJobs, productionRuns, removedRuns] = await Promise.all([
+      coverageDownloads.clearFailedHistory(),
+      productionService.clearFailedHistory(),
+      connectorRuns.clearFailedHistory(),
+    ]);
+    const mocArtifacts = await userMocs.clearErrorHistory(new Set([
+      ...failedRuns.map((run) => run.id),
+      ...failedRepairIds,
+    ]));
+    response.json({ cleared: {
+      connectorRuns: removedRuns.length,
+      downloadJobs,
+      productionRuns,
+      derivedRepairs: failedRepairIds.length,
+      mocArtifacts,
+    } });
   } catch (error) {
     sendApiError(response, error);
   }
@@ -1240,6 +1279,50 @@ app.post("/api/sky/points/query", async (request: Request, response: Response) =
     response.json({ ...result, indexing: await derivedRepairs.isIndexing(input.layerScopes) });
   } catch (error) { sendApiError(response, error); }
 });
+app.post("/api/sky/points/inspect", async (request: Request, response: Response) => {
+  try {
+    const body = request.body as Record<string, unknown> | null;
+    if (!body || typeof body !== "object" || Array.isArray(body)) throw new RangeError("Point inspection input is required");
+    if (!body.region || typeof body.region !== "object" || Array.isArray(body.region)) throw new RangeError("Point inspection requires an entry region");
+    if (!Array.isArray(body.layerScopes) || body.layerScopes.length > 512) throw new RangeError("Point inspection requires explicit layer scopes");
+    const raDeg = typeof body.raDeg === "number" ? ((body.raDeg % 360) + 360) % 360 : Number.NaN;
+    const decDeg = body.decDeg;
+    const radiusArcsec = body.radiusArcsec === undefined ? 1 : body.radiusArcsec;
+    const region = body.region as ObjectRegionQueryInput["region"];
+    const layerScopes = body.layerScopes as SkyDataPointScope[];
+    const bbox = coordinateSearchBbox(raDeg, decDeg as number, radiusArcsec as number);
+    if (!coordinateInHealpixRegion(raDeg, decDeg as number, region!)) throw new RangeError("Coordinate is outside the Aladin entry region");
+    if (!layerScopes.length) {
+      response.json({ raDeg, decDeg, radiusArcsec, matches: [], images: [], truncated: false, indexing: false });
+      return;
+    }
+    const [nearby, footprintCandidates] = await Promise.all([
+      astroObjectIndex.queryObjects({ bbox, region, layerScopes, limit: 2_000 }, [astroObjectIndex.objectIndex, SKY_DATA_POINT_INDEX]),
+      astroObjectIndex.queryImageFootprints({ raDeg, decDeg: decDeg as number, layerScopes, limit: 1_000 }),
+    ]);
+    if (nearby.status !== "ready") {
+      response.status(nearby.status === "unavailable" ? 503 : 502).json({ error: nearby.message ?? "Coordinate search failed" });
+      return;
+    }
+    const unique = new Map<string, { point: AstroObjectRecord; separationArcsec: number }>();
+    for (const point of nearby.objects) {
+      if (["image_center", "pointing"].includes(point.attributes?.position_role ?? "")) continue;
+      const separationArcsec = angularSeparationArcsec(raDeg, decDeg as number, point.ra_deg, point.dec_deg);
+      if (separationArcsec > (radiusArcsec as number)) continue;
+      const previous = unique.get(point.object_id);
+      if (!previous || separationArcsec < previous.separationArcsec) unique.set(point.object_id, { point, separationArcsec });
+    }
+    const matches = [...unique.values()].sort((left, right) => left.separationArcsec - right.separationArcsec
+      || left.point.object_id.localeCompare(right.point.object_id));
+    const indexedImages = footprintCandidates.pointIds.length
+      ? await astroObjectIndex.getPointsByIds(footprintCandidates.pointIds, [astroObjectIndex.objectIndex, SKY_DATA_POINT_INDEX])
+      : [];
+    const images = await imagePointsContainingCoordinate(indexedImages, raDeg, decDeg as number);
+    response.json({ raDeg, decDeg, radiusArcsec, matches, images,
+      truncated: nearby.total > nearby.objects.length || footprintCandidates.truncated,
+      indexing: await derivedRepairs.isIndexing(layerScopes) });
+  } catch (error) { sendApiError(response, error); }
+});
 app.get("/api/sky/points/:id", async (request: Request, response: Response) => {
   try { const point = await astroObjectIndex.getPoint(datasetIdFrom(request), [astroObjectIndex.objectIndex, SKY_DATA_POINT_INDEX]);
     if (!point) { response.status(404).json({ error: "Data point not found" }); return; } response.json({ point });
@@ -1744,6 +1827,10 @@ app.post("/api/sky/reverse-lookup", async (request: Request, response: Response)
 
 interface CoverageDownloadRequest {
   files: CoverageDownloadFile[];
+  concurrency?: number;
+  outputPrefix?: string;
+  requestKey?: string;
+  inventorySha256?: string;
   componentId?: string;
   sourceIds?: string[];
 }
@@ -1763,9 +1850,11 @@ function coverageDownloadInput(value: unknown): CoverageDownloadRequest {
   if (body.targetConnectorId !== undefined) {
     throw new RangeError("targetConnectorId is not supported; coverage downloads create a new Connector");
   }
+  const submissionOptions = parseCoverageDownloadSubmissionOptions(body);
   const componentId = text(body.componentId, "componentId");
   return {
     files: body.files as CoverageDownloadFile[],
+    ...submissionOptions,
     ...(componentId ? { componentId } : {}),
     ...(sourceIds?.length ? { sourceIds } : {}),
   };
@@ -1804,6 +1893,51 @@ app.get("/api/coverage-downloads/:id", async (request: Request, response: Respon
   } catch (error) {
     sendApiError(response, error);
   }
+});
+
+for (const action of ["pause", "resume", "retry"] as const) app.post(`/api/coverage-downloads/:id/${action}`, async (request: Request, response: Response) => {
+  try { response.json({ job: await coverageDownloads.action(datasetIdFrom(request), action) }); }
+  catch (error) { sendApiError(response, error); }
+});
+
+async function downloadSettingsView() {
+  const settings = await systemConfig.getDownloadSettings();
+  const [reportedHealth, history] = downloadWorker ? await Promise.all([
+    downloadWorker.health().catch(() => ({ status: "failed" as const, checkedAt: new Date().toISOString(),
+      revision: settings.revision, detail: "独立下载服务暂不可用", engineAvailable: false })),
+    downloadWorker.healthHistory().catch(() => []),
+  ]) : [{ status: "unknown" as const, checkedAt: "", revision: settings.revision, detail: "当前部署未启用独立下载服务", engineAvailable: false }, []];
+  let health = reportedHealth;
+  if (health.revision !== settings.revision) health = { status: "unknown", checkedAt: "", revision: settings.revision,
+    detail: "配置已保存，等待下载服务同步检测", engineAvailable: health.engineAvailable };
+  return { settings, health, healthHistory: history.filter(sample => sample.revision === settings.revision), downloaderEnabled: Boolean(downloadWorker) };
+}
+
+async function configureDownloadWorker(): Promise<void> {
+  const jobs = await coverageDownloads.list();
+  const job = jobs.find(job => job.transfer.some(entry => entry.status !== "verified")) ?? jobs[0];
+  const source = job?.transfer.find(entry => entry.status !== "verified")?.url ?? job?.transfer[0]?.url;
+  await downloadWorker?.configure(source);
+}
+
+app.get("/api/system-config/downloads", async (_request: Request, response: Response) => {
+  try { response.set("Cache-Control", "no-store"); response.json(await downloadSettingsView()); }
+  catch (error) { sendApiError(response, error); }
+});
+app.put("/api/system-config/downloads", async (request: Request, response: Response) => {
+  try {
+    await systemConfig.saveDownloadSettings(request.body as DownloadSettingsInput);
+    if (downloadWorker) await configureDownloadWorker().catch(() => undefined);
+    response.json(await downloadSettingsView());
+  } catch (error) { sendApiError(response, error); }
+});
+for (const action of ["test", "speed-test"] as const) app.post(`/api/system-config/downloads/${action}`, async (_request: Request, response: Response) => {
+  try {
+    if (!downloadWorker) throw new RangeError("当前部署未启用独立下载服务");
+    await configureDownloadWorker();
+    const health = action === "test" ? await downloadWorker.test() : await downloadWorker.health(true);
+    response.json({ ...(await downloadSettingsView()), health });
+  } catch (error) { sendApiError(response, error); }
 });
 
 app.post("/api/coverage-downloads/:id/cancel", async (request: Request, response: Response) => {
@@ -2501,9 +2635,13 @@ async function start(): Promise<void> {
   await dataCatalog.initialize();
   await connectors.initialize();
   await connectorRuns.initialize();
+  await systemConfig.initialize();
   await coverageDownloads.initialize();
   await productionService.initialize();
-  await systemConfig.initialize();
+  if (downloadWorker) {
+    await configureDownloadWorker().catch(() => undefined);
+    setInterval(() => void configureDownloadWorker().catch(() => undefined), 30_000).unref();
+  }
   await installation.initialize();
   await workspaceAgent.initialize();
   const recoveredLocalScans = await localCsvScans.recoverInterruptedRuns();

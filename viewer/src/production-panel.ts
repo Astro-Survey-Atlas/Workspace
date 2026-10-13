@@ -14,6 +14,8 @@ import type { ConnectorPublicRecord } from "../../src/connectors";
 import { parsePublicSourceId } from "../../src/public-source-identity";
 import { assetsLayerIdForIdentity } from "../../src/assets-region-client";
 import { notifyWorkspace } from "./notifications";
+import { downloadProgress } from "./download-progress";
+import type { CoverageDownloadJob } from "./api";
 
 export interface ProductionContext {
   nside: number;
@@ -114,6 +116,7 @@ function parameterValue(parameter: ProductionPipelineParameter): string | number
 }
 
 export class ProductionPanel {
+  private downloadJobs: CoverageDownloadJob[] = [];
   private pipelines: ProductionPipelineDefinition[] = [];
   private runs: ProductionRun[] = [];
   private assets: DataAssetRecord[] = [];
@@ -152,6 +155,7 @@ export class ProductionPanel {
     private readonly onError: (error: unknown) => void,
     private readonly onSummary: (summary: ProductionSummary) => void,
     private readonly renderInspectorView: (view: ProductionInspectorView | null) => void,
+    private readonly onOpenConnector: (connectorId: string) => void = () => {},
   ) {
     const dialog = byId<HTMLDialogElement>("production-run-dialog");
     byId<HTMLButtonElement>("production-run-dialog-close").addEventListener("click", () => dialog.close());
@@ -211,8 +215,9 @@ export class ProductionPanel {
     this.active = true;
     this.showDownloadHandoffIfRequested();
     if (!this.initialized) {
-      [this.pipelines, this.runs, this.assets, this.connectors] = await Promise.all([
+      [this.pipelines, this.runs, this.assets, this.connectors, this.downloadJobs] = await Promise.all([
         workspaceApi.productionPipelines(), workspaceApi.productionRuns(), workspaceApi.dataAssets(), workspaceApi.connectors(),
+        workspaceApi.coverageDownloads().catch(() => []),
       ]);
       this.initialized = true;
       const requested = this.requestedPipelineKey ? this.pipelines.find((pipeline) => pipeline.key === this.requestedPipelineKey) : undefined;
@@ -597,6 +602,8 @@ export class ProductionPanel {
       metadata.append(row);
     });
     content.append(metadata);
+    const downloadJob = this.downloadJobs.find(job => job.id === run.summary.downloadJobId);
+    if (downloadJob) content.append(downloadProgress(downloadJob, downloadJob.engine === "aria2" ? (id, action) => this.downloadAction(id, action) : undefined));
 
     const stepHeading = document.createElement("div");
     stepHeading.className = "form-section-title";
@@ -616,6 +623,51 @@ export class ProductionPanel {
       steps.append(item);
     });
     content.append(steps);
+
+    if (run.outputConnectorId) {
+      const connector = this.connectors.find((candidate) => candidate.id === run.outputConnectorId);
+      const handoff = document.createElement("section");
+      handoff.className = "production-output-connector";
+      const heading = document.createElement("div");
+      heading.className = "form-section-title";
+      heading.textContent = "下载结果 Connector";
+      handoff.append(heading);
+      const facts = document.createElement("dl");
+      facts.className = "production-run-detail-meta";
+      const rows: Array<[string, string]> = [
+        ["名称", connector?.name ?? "Connector 记录未加载"],
+        ["路径", run.outputPath ?? connector?.displayPath ?? "未记录"],
+        ["Connector ID", run.outputConnectorId],
+      ];
+      rows.forEach(([label, value]) => {
+        const row = document.createElement("div");
+        const term = document.createElement("dt");
+        const detail = document.createElement("dd");
+        term.textContent = label;
+        detail.textContent = value;
+        detail.title = value;
+        row.append(term, detail);
+        facts.append(row);
+      });
+      handoff.append(facts);
+      if (connector) {
+        const openConnector = document.createElement("button");
+        openConnector.type = "button";
+        openConnector.className = "command-button secondary production-open-connector";
+        openConnector.dataset.connectorId = connector.id;
+        const icon = document.createElement("i");
+        icon.dataset.lucide = "plug-zap";
+        const label = document.createElement("span");
+        label.textContent = "在 Connector 列表中查看";
+        openConnector.append(icon, label);
+        openConnector.addEventListener("click", () => {
+          byId<HTMLDialogElement>("production-run-dialog").close();
+          this.onOpenConnector(connector.id);
+        });
+        handoff.append(openConnector);
+      }
+      content.append(handoff);
+    }
 
     if (run.status === "awaiting-approval" && run.approval?.state === "pending") {
       const approvalSection = document.createElement("div");
@@ -789,6 +841,8 @@ export class ProductionPanel {
         nodes.append(button);
       });
       body.append(heading, nodes);
+      const downloadJob = this.downloadJobs.find(job => job.id === run.summary.downloadJobId);
+      if (downloadJob) body.append(downloadProgress(downloadJob, downloadJob.engine === "aria2" ? (id, action) => this.downloadAction(id, action) : undefined));
       const detail = document.createElement("button");
       detail.id = "production-inspector-run-detail";
       detail.type = "button";
@@ -1591,8 +1645,7 @@ export class ProductionPanel {
       publicDownload,
       exportFormat: String(draft.exportFormat ?? "json") as "json" | "csv",
       crawlerId: String(draft.crawlerId ?? "builtin-http"),
-      concurrency: Number(draft.concurrency ?? 4),
-      warehouseHandoff: "none",
+      concurrency: Number(draft.concurrency ?? 2),
       ...(draft.storageConnectorId ? { storageConnectorId: String(draft.storageConnectorId) } : {}),
     };
     this.submitLoading = true;
@@ -1692,8 +1745,8 @@ export class ProductionPanel {
       ? {
           pipelineKey: pipeline.key, region, ...(context.files?.length ? { files: context.files } : {}),
           exportFormat: String(draft.exportFormat ?? "json") as "json" | "csv",
-          crawlerId: String(draft.crawlerId ?? "builtin-http"), concurrency: Number(draft.concurrency ?? 4),
-          warehouseHandoff: draft.warehouseHandoff === "submit" ? "submit" as const : "none" as const,
+          crawlerId: String(draft.crawlerId ?? "builtin-http"), concurrency: Number(draft.concurrency ?? 2),
+          ...(draft.warehouseHandoff === undefined ? {} : { warehouseHandoff: draft.warehouseHandoff === "submit" ? "submit" as const : "none" as const }),
           ...(draft.storageConnectorId ? { storageConnectorId: String(draft.storageConnectorId) } : {}),
         }
       : {
@@ -1711,7 +1764,14 @@ export class ProductionPanel {
     this.schedulePoll(100);
   }
 
-  private async refreshRuns(): Promise<void> { this.runs = await workspaceApi.productionRuns(); }
+  private async refreshRuns(): Promise<void> {
+    [this.runs, this.downloadJobs] = await Promise.all([workspaceApi.productionRuns(), workspaceApi.coverageDownloads().catch(() => [])]);
+  }
+
+  private async downloadAction(id: string, action: "pause" | "resume" | "retry"): Promise<void> {
+    await workspaceApi.downloadAction(id, action);
+    await this.refreshRuns(); this.syncSelectedRun(); this.renderAll();
+  }
 
   private renderStatus(): void {
     const badge = byId("production-status-badge");

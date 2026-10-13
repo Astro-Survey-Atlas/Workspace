@@ -282,6 +282,7 @@ export interface SourceInventoryFile {
   unitId: string;
   resolver: SourceResolverKey;
   layerId?: string;
+  modality?: string;
   nativeUnitKind?: string;
   nativeUnitId?: string;
   relativePath: string;
@@ -369,7 +370,7 @@ function canonicalJson(value: unknown): string {
 /** Hash only stable identity/metadata; volatile server hints (etag/lastModified) are excluded. */
 function inventoryDigest(files: readonly SourceInventoryFile[], units: readonly SourceUnitResolution[]): string {
   const stableFiles = files
-    .map(({ sourceId, unitId, resolver, layerId, nativeUnitKind, nativeUnitId, relativePath, url, sizeBytes, sha256 }) => ({ sourceId, unitId, resolver, layerId, nativeUnitKind, nativeUnitId, relativePath, url, sizeBytes, sha256 }))
+    .map(({ sourceId, unitId, resolver, layerId, modality, nativeUnitKind, nativeUnitId, relativePath, url, sizeBytes, sha256 }) => ({ sourceId, unitId, resolver, layerId, modality, nativeUnitKind, nativeUnitId, relativePath, url, sizeBytes, sha256 }))
     .sort((left, right) => left.relativePath.localeCompare(right.relativePath));
   const stableUnits = [...units].sort((left, right) => left.unitId.localeCompare(right.unitId) || left.sourceId.localeCompare(right.sourceId));
   return sha256Hex(canonicalJson({ schemaVersion: 1, files: stableFiles, units: stableUnits }));

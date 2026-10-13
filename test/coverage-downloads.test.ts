@@ -5,8 +5,8 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { CoverageDownloadService } from "../src/coverage-downloads.js";
-import type { ConnectorRecord } from "../src/connectors.js";
+import { CoverageDownloadService, parseCoverageDownloadSubmissionOptions } from "../src/coverage-downloads.js";
+import type { ConnectorRecord, ConnectorRegistrationInput } from "../src/connectors.js";
 
 async function waitForTerminal(service: CoverageDownloadService, id: string): Promise<Awaited<ReturnType<CoverageDownloadService["get"]>>> {
   const deadline = Date.now() + 30_000;
@@ -53,16 +53,18 @@ test("chunked downloads retain confirmed source identity and do not infer a zero
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
 
-function registeredConnector(input: { config: Record<string, string> }): ConnectorRecord {
+function registeredConnector(input: ConnectorRegistrationInput): ConnectorRecord {
   const now = new Date().toISOString();
   return {
     id: "connector-downloaded",
     locationKey: `local://${input.config.rootPath}`,
     displayPath: input.config.rootPath!,
-    name: "Downloaded coverage",
-    description: "test",
+    name: input.name,
+    description: input.description ?? "test",
     kind: "local",
     config: input.config,
+    ...(input.surveyId ? { surveyId: input.surveyId } : {}),
+    ...(input.releaseId ? { releaseId: input.releaseId } : {}),
     status: "ready",
     createdAt: now,
     updatedAt: now,
@@ -75,22 +77,32 @@ test("downloads files, verifies checksums, and registers a local Connector", asy
   try {
     const bytes = Buffer.from("coverage-fixture\n");
     const sha256 = createHash("sha256").update(bytes).digest("hex");
-    const registrations: string[] = [];
+    const registrations: ConnectorRegistrationInput[] = [];
     const service = new CoverageDownloadService({
       root: path.join(directory, "downloads"),
       statePath: path.join(directory, "jobs.json"),
       fetchImpl: async () => new Response(bytes, { status: 200, headers: { "content-length": String(bytes.length) } }),
       registerConnector: async (input) => {
-        registrations.push(input.config.rootPath!);
+        registrations.push(input);
         return registeredConnector(input);
       },
     });
-    const submitted = await service.submit({ files: [{ url: "https://example.test/file.csv", name: "file.csv", sizeBytes: bytes.length, sha256 }] });
+    const sourceId = "public:euclid:euclid-q1:Euclid%20Q1%20color%20imaging:layerId=euclid-euclid-q1-euclid-q1-color-imaging-moc";
+    const submitted = await service.submit({
+      files: [{ url: "https://example.test/file.csv", name: "file.csv", sizeBytes: bytes.length, sha256, sourceId }],
+      sourceIds: [sourceId],
+      componentId: "C01",
+      outputPrefix: "prd_20261010060559_8d1cca8a",
+    });
     const completed = await waitForTerminal(service, submitted.id);
     assert.equal(completed.status, "completed");
     assert.equal(completed.outputConnectorId, "connector-downloaded");
     assert.equal(completed.downloadedFiles, 1);
     assert.equal(registrations.length, 1);
+    assert.equal(registrations[0]?.name, "Euclid Q1 color imaging · euclid/euclid-q1 · C01 · 8d1cca8a");
+    assert.equal(registrations[0]?.surveyId, "euclid");
+    assert.equal(registrations[0]?.releaseId, "euclid-q1");
+    assert.match(registrations[0]?.description ?? "", /Workspace 重合区域下载结果/);
     assert.equal(await readFile(path.join(completed.outputPath!, "file.csv"), "utf8"), bytes.toString("utf8"));
   } finally {
     await rm(directory, { recursive: true, force: true });
@@ -326,6 +338,72 @@ test("restarts a partial file when no safe resume validator exists", async () =>
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
+});
+
+test("resumes immutable Euclid Q1 EAS files with bounded byte ranges when EAS omits validators", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "astro-euclid-q1-range-"));
+  const bytes = Buffer.from("EUCLID-SCIENCE");
+  const fileName = "EUC_MER_BGSUB-MOSAIC-CFIS-U_TILE102157301-CFF8C7_20241024T172119.513029Z_00.00.fits";
+  const url = `https://eas.esac.esa.int/sas-dd/data?TAPCLIENT=ESASky&RELEASE=q1&FILE_NAME=${encodeURIComponent(fileName)}&RETRIEVAL_TYPE=FILE`;
+  const ranges: string[] = [];
+  let interrupted = false;
+  try {
+    const service = new CoverageDownloadService({
+      root: path.join(directory, "downloads"),
+      fetchImpl: async (_input, init) => {
+        const headers = (init?.headers ?? {}) as Record<string, string>;
+        const range = headers.Range;
+        assert.ok(range, "trusted EAS Q1 requests must use byte ranges");
+        assert.equal(headers["If-Range"], undefined);
+        ranges.push(range);
+        const match = range.match(/^bytes=(\d+)-(\d+)$/);
+        assert.ok(match);
+        const start = Number(match[1]);
+        const end = Math.min(Number(match[2]), bytes.length - 1);
+        const body = bytes.subarray(start, end + 1);
+        if (start === 0 && !interrupted) {
+          interrupted = true;
+          let emitted = false;
+          return new Response(new ReadableStream<Uint8Array>({
+            pull(controller) {
+              if (!emitted) {
+                emitted = true;
+                controller.enqueue(body.subarray(0, 5));
+                return;
+              }
+              controller.error(Object.assign(new Error("terminated"), { cause: Object.assign(new Error("socket closed"), { code: "UND_ERR_SOCKET" }) }));
+            },
+          }, { highWaterMark: 0 }), { status: 206, headers: { "content-range": `bytes 0-${end}/${bytes.length}`, "content-length": String(body.length) } });
+        }
+        return new Response(body, { status: 206, headers: {
+          "content-range": `bytes ${start}-${end}/${bytes.length}`,
+          "content-length": String(body.length),
+        } });
+      },
+    });
+    const submitted = await service.submit({ files: [{
+      url,
+      name: fileName,
+      sizeBytes: bytes.length,
+      sourceId: "public:euclid:euclid-q1:Euclid%20Q1%20color%20imaging:layerId=euclid-q1-color-imaging",
+    }], concurrency: 1 });
+    const completed = await waitForTerminal(service, submitted.id);
+    assert.equal(completed.status, "completed", completed.error);
+    assert.equal(ranges[0]?.startsWith("bytes=0-"), true);
+    assert.equal(ranges[1]?.startsWith("bytes=5-"), true);
+    assert.equal(await readFile(path.join(completed.outputPath!, fileName), "utf8"), bytes.toString("utf8"));
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("normalizes HTTP idempotency and staging options for resumable coverage downloads", () => {
+  assert.deepEqual(parseCoverageDownloadSubmissionOptions({ concurrency: 4, outputPrefix: "prj-123", requestKey: "production:prj-123",
+    inventorySha256: "A".repeat(64) }), { concurrency: 4, outputPrefix: "prj-123", requestKey: "production:prj-123",
+    inventorySha256: "a".repeat(64) });
+  assert.throws(() => parseCoverageDownloadSubmissionOptions({ concurrency: 0 }), /concurrency/);
+  assert.throws(() => parseCoverageDownloadSubmissionOptions({ requestKey: 42 }), /requestKey/);
+  assert.throws(() => parseCoverageDownloadSubmissionOptions({ inventorySha256: "not-a-hash" }), /SHA-256/);
 });
 
 test("keeps successful siblings while a failed file is skipped, then resumes that file on retry", async () => {

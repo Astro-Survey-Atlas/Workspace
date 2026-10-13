@@ -705,6 +705,18 @@ export class UserMocArtifactStore {
     return result.sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
   }
 
+  async clearErrorHistory(relatedRunIds: ReadonlySet<string>): Promise<number> {
+    let removed = 0;
+    for (const artifact of await this.list()) {
+      const failed = artifact.status === "failed" || artifact.status === "unavailable";
+      const pendingFromFailedRun = artifact.status === "pending" && relatedRunIds.has(artifact.scanRunId);
+      if (!failed && !pendingFromFailedRun) continue;
+      await rm(path.join(this.#directory(artifact.layerId, artifact.scanRunId), "metadata.json"), { force: true });
+      removed += 1;
+    }
+    return removed;
+  }
+
   async filePath(layerId: string, scanRunId: string, name: string): Promise<{ artifact: UserMocArtifact; filePath: string }> {
     const artifact = await this.get(layerId, scanRunId);
     const normalized = path.basename(name);

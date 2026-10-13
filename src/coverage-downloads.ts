@@ -1,12 +1,14 @@
 import { randomUUID, createHash } from "node:crypto";
 import type { Hash } from "node:crypto";
-import { mkdir, open, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, open, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 import { assertPublicHttpUrl, type RemoteHostnameResolver } from "./remote-url-policy.js";
 import { fetchPublicHttp } from "./public-http.js";
 import type { ConnectorRegistrationInput, ConnectorRecord } from "./connectors.js";
+import { parsePublicSourceId } from "./public-source-identity.js";
 import { validateRelativePath } from "./source-crawler.js";
+import type { DownloadWorkerClient } from "./download-worker-client.js";
 
 export interface CoverageDownloadFile {
   url: string;
@@ -25,7 +27,7 @@ export interface CoverageDownloadFile {
 }
 
 export type CoverageDownloadStatus = "queued" | "running" | "completed" | "partial" | "failed" | "cancelled";
-export type CoverageDownloadPhase = "queued" | "resuming" | "downloading" | "verifying" | "registering" | "completed" | "partial" | "failed" | "cancelled";
+export type CoverageDownloadPhase = "queued" | "resuming" | "downloading" | "verifying" | "registering" | "completed" | "partial" | "failed" | "cancelled" | "paused" | "waiting_network" | "retrying";
 export type CoverageFileTransferStatus = "pending" | "partial" | "verified" | "failed";
 
 export interface CoverageDownloadFileState {
@@ -40,6 +42,15 @@ export interface CoverageDownloadFileState {
   actualSha256?: string;
   etag?: string;
   lastModified?: string;
+  lastErrorCode?: string;
+  gid?: string;
+  engineState?: string;
+  speedBytesPerSecond?: number;
+  etaSeconds?: number;
+  lastProgressAt?: string;
+  retryCount?: number;
+  consecutiveFailures?: number;
+  nextRetryAt?: string;
   error?: string;
   sourceId?: string;
   unitId?: string;
@@ -70,6 +81,8 @@ export interface CoverageDownloadJob {
   error?: string;
   createdAt: string;
   updatedAt: string;
+  engine?: "aria2";
+  attempts?: Array<{ at: string; error?: string }>;
 }
 
 export interface CoverageDownloadOptions {
@@ -81,6 +94,7 @@ export interface CoverageDownloadOptions {
   resolveHostname?: RemoteHostnameResolver;
   skipDnsLookup?: boolean;
   maxFiles?: number;
+  worker?: DownloadWorkerClient;
 }
 
 export interface CoverageDownloadSubmitInput {
@@ -97,6 +111,33 @@ export interface CoverageDownloadSubmitInput {
   targetConnectorId?: string;
 }
 
+export type CoverageDownloadSubmissionOptions = Pick<CoverageDownloadSubmitInput,
+  "concurrency" | "outputPrefix" | "requestKey" | "inventorySha256">;
+
+export function parseCoverageDownloadSubmissionOptions(input: Record<string, unknown>): CoverageDownloadSubmissionOptions {
+  if (input.concurrency !== undefined
+    && (!Number.isSafeInteger(input.concurrency) || Number(input.concurrency) < 1 || Number(input.concurrency) > 16)) {
+    throw new RangeError("concurrency must be an integer between 1 and 16");
+  }
+  const text = (value: unknown, name: string): string | undefined => {
+    if (value === undefined) return undefined;
+    if (typeof value !== "string" || !value.trim() || value.trim().length > 180) throw new RangeError(`${name} is invalid`);
+    return value.trim();
+  };
+  const outputPrefix = text(input.outputPrefix, "outputPrefix");
+  const requestKey = text(input.requestKey, "requestKey");
+  if (input.inventorySha256 !== undefined
+    && (typeof input.inventorySha256 !== "string" || !/^[a-f0-9]{64}$/i.test(input.inventorySha256))) {
+    throw new RangeError("inventorySha256 must be a SHA-256 hex digest");
+  }
+  return {
+    ...(input.concurrency === undefined ? {} : { concurrency: input.concurrency as number }),
+    ...(outputPrefix ? { outputPrefix } : {}),
+    ...(requestKey ? { requestKey } : {}),
+    ...(typeof input.inventorySha256 === "string" ? { inventorySha256: input.inventorySha256.toLowerCase() } : {}),
+  };
+}
+
 interface PersistedState {
   schemaVersion: number;
   jobs: CoverageDownloadJob[];
@@ -104,11 +145,48 @@ interface PersistedState {
 
 const DEFAULT_MAX_FILES = 128;
 const COPY_CHUNK_BYTES = 1024 * 1024;
+const EUCLID_RANGE_CHUNK_BYTES = 4 * 1024 * 1024;
+const DOWNLOAD_IDLE_TIMEOUT_MS = 120_000;
 const MAX_TRANSFER_RETRIES = 3;
 
 function now(): string { return new Date().toISOString(); }
 
 function clone<T>(value: T): T { return structuredClone(value); }
+
+function downloadedConnectorInput(job: CoverageDownloadJob, directory: string, connectorPath?: string): ConnectorRegistrationInput {
+  const identities = new Map<string, NonNullable<ReturnType<typeof parsePublicSourceId>>>();
+  for (const sourceId of new Set([...(job.sourceIds ?? []), ...job.transfer.flatMap((entry) => entry.sourceId ? [entry.sourceId] : [])])) {
+    const identity = parsePublicSourceId(sourceId);
+    if (identity) identities.set([identity.surveyId, identity.releaseId, identity.product].join("\0"), identity);
+  }
+  const sources = [...identities.values()];
+  const sourceLabels = sources.map((source) => `${source.product} · ${source.surveyId}/${source.releaseId}`);
+  const sourceLabel = sourceLabels.length === 0
+    ? "Overlap download"
+    : sourceLabels.length <= 2
+      ? sourceLabels.join(" + ")
+      : `${sourceLabels.slice(0, 2).join(" + ")} +${sourceLabels.length - 2} sources`;
+  const componentId = job.componentId?.trim().slice(0, 24);
+  const reference = (job.outputPrefix ?? job.id).replace(/[^a-zA-Z0-9]/g, "").slice(-8) || job.id.slice(-8);
+  const suffix = [componentId, reference].filter(Boolean).join(" · ");
+  const name = `${sourceLabel.slice(0, Math.max(1, 120 - suffix.length - 3)).trimEnd()} · ${suffix}`;
+  const sourceDescription = sourceLabels.length <= 2
+    ? sourceLabels.join("；")
+    : `${sourceLabels.slice(0, 2).join("；")} 等 ${sourceLabels.length} 个来源`;
+  const surveyIds = new Set(sources.map((source) => source.surveyId));
+  const releaseIds = new Set(sources.map((source) => source.releaseId));
+  const surveyId = surveyIds.size === 1 ? sources[0]?.surveyId : undefined;
+  const releaseId = surveyId && releaseIds.size === 1 ? sources[0]?.releaseId : undefined;
+  return {
+    name,
+    description: `Workspace 重合区域下载结果；来源：${sourceDescription || "未标注"}。${componentId ? ` 区块 ${componentId}。` : ""}包含已校验文件，可关联用户资产并扫描覆盖。`.slice(0, 500),
+    kind: "local",
+    config: { rootPath: connectorPath ?? directory },
+    status: "ready",
+    ...(surveyId ? { surveyId } : {}),
+    ...(releaseId ? { releaseId } : {}),
+  };
+}
 
 function safeInteger(value: unknown): number | undefined {
   return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : undefined;
@@ -121,14 +199,67 @@ function strongValidator(etag: string | undefined, lastModified: string | undefi
 }
 
 class RetryableDownloadError extends Error {
-  constructor(message: string) {
-    super(message);
+  constructor(message: string, options?: ErrorOptions) {
+    super(message, options);
     this.name = "RetryableDownloadError";
   }
 }
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function transferErrorCode(error: unknown): string | undefined {
+  let current: unknown = error;
+  for (let depth = 0; depth < 5 && current && typeof current === "object"; depth += 1) {
+    const record = current as Record<string, unknown>;
+    if (typeof record.code === "string" && /^[A-Z0-9_]{1,80}$/i.test(record.code)) return record.code;
+    current = record.cause;
+  }
+  return undefined;
+}
+
+export function isImmutableEuclidQ1EasFile(entry: CoverageDownloadFileState): boolean {
+  if (!entry.sourceId?.startsWith("public:euclid:euclid-q1:")) return false;
+  try {
+    const url = new URL(entry.url);
+    const fileName = basenameOf(entry.relativePath);
+    return url.protocol === "https:" && url.hostname === "eas.esac.esa.int" && url.pathname === "/sas-dd/data"
+      && url.searchParams.get("RELEASE")?.toLowerCase() === "q1"
+      && url.searchParams.get("RETRIEVAL_TYPE")?.toUpperCase() === "FILE"
+      && url.searchParams.get("FILE_NAME") === fileName
+      && /^EUC_MER_BGSUB-MOSAIC-[A-Z0-9-]+_TILE\d+-[A-F0-9]+_\d{8}T\d{6}\.\d+Z_\d{2}\.\d{2}\.fits$/i.test(fileName);
+  } catch {
+    return false;
+  }
+}
+
+function createProgressWatchdog(parentSignal: AbortSignal, relativePath: string): {
+  signal: AbortSignal;
+  timedOut: () => boolean;
+  markProgress: () => void;
+  dispose: () => void;
+} {
+  const controller = new AbortController();
+  let timer: ReturnType<typeof setTimeout>;
+  let timedOut = false;
+  const onAbort = () => controller.abort(parentSignal.reason ?? Object.assign(new Error("The operation was aborted"), { name: "AbortError" }));
+  const markProgress = () => {
+    clearTimeout(timer);
+    timer = setTimeout(() => {
+      timedOut = true;
+      controller.abort(new Error(`下载超过 ${DOWNLOAD_IDLE_TIMEOUT_MS / 1000} 秒没有进展: ${relativePath}`));
+    }, DOWNLOAD_IDLE_TIMEOUT_MS);
+  };
+  if (parentSignal.aborted) onAbort();
+  else parentSignal.addEventListener("abort", onAbort, { once: true });
+  markProgress();
+  return {
+    signal: controller.signal,
+    timedOut: () => timedOut,
+    markProgress,
+    dispose: () => { clearTimeout(timer); parentSignal.removeEventListener("abort", onAbort); },
+  };
 }
 
 function isAbortError(error: unknown): boolean {
@@ -174,7 +305,7 @@ async function hashInto(filePath: string, hash: Hash): Promise<number> {
   }
 }
 
-async function hashFile(filePath: string): Promise<{ sha256: string; sizeBytes: number }> {
+export async function hashFile(filePath: string): Promise<{ sha256: string; sizeBytes: number }> {
   const hash = createHash("sha256");
   const sizeBytes = await hashInto(filePath, hash);
   return { sha256: hash.digest("hex"), sizeBytes };
@@ -269,7 +400,7 @@ function refreshProgress(job: CoverageDownloadJob): void {
     if (entry.status === "verified") {
       files += 1;
       bytes += entry.actualSizeBytes ?? entry.bytesPresent;
-    } else if (entry.status === "partial") {
+    } else {
       bytes += entry.bytesPresent;
     }
     declaredBytes += entry.expectedSizeBytes ?? 0;
@@ -288,6 +419,8 @@ export class CoverageDownloadService {
   readonly #resolveHostname?: RemoteHostnameResolver;
   readonly #skipDnsLookup: boolean;
   readonly #maxFiles: number;
+  readonly #worker?: DownloadWorkerClient;
+  readonly #monitoring = new Set<string>();
   readonly #jobs = new Map<string, CoverageDownloadJob>();
   readonly #controllers = new Map<string, AbortController>();
   #persisting: Promise<void> = Promise.resolve();
@@ -303,6 +436,7 @@ export class CoverageDownloadService {
     this.#resolveHostname = options.resolveHostname;
     this.#skipDnsLookup = options.skipDnsLookup ?? Boolean(options.fetchImpl && !options.resolveHostname);
     this.#maxFiles = Math.max(1, Math.min(4096, options.maxFiles ?? DEFAULT_MAX_FILES));
+    this.#worker = options.worker;
   }
 
   async initialize(): Promise<void> {
@@ -323,7 +457,7 @@ export class CoverageDownloadService {
         job.transfer = Array.isArray(job.files) ? job.files.map((file) => transferState(normalizedFile(file))) : [];
       }
       job.files = job.transfer.map(publicFile);
-      if (job.status === "queued" || job.status === "running") {
+      if ((job.status === "queued" || job.status === "running") && !this.#worker) {
         // Active jobs cannot be reattached after a process restart. Staging
         // files and the per-file ledger are intentionally preserved so an
         // idempotent resubmission (requestKey) can resume instead of
@@ -340,6 +474,9 @@ export class CoverageDownloadService {
       refreshProgress(job);
       this.#jobs.set(job.id, job);
     }
+    if (this.#worker) for (const job of this.#jobs.values()) {
+      if (job.status === "queued" || job.status === "running") void this.#runExternal(job);
+    }
     await this.#persist();
   }
 
@@ -348,6 +485,29 @@ export class CoverageDownloadService {
     return [...this.#jobs.values()]
       .sort((left, right) => right.createdAt.localeCompare(left.createdAt))
       .map(job => { refreshProgress(job); return clone(job); });
+  }
+
+  async clearFailedHistory(): Promise<number> {
+    await this.initialize();
+    await this.#persisting;
+    let removed = 0;
+    for (const [id, job] of this.#jobs) {
+      if (job.status !== "failed" || this.#monitoring.has(id)) continue;
+      this.#jobs.delete(id);
+      removed += 1;
+    }
+    if (removed) await this.#persist();
+    await this.#persisting;
+
+    const directory = path.dirname(this.#statePath);
+    const prefix = `${path.basename(this.#statePath)}.`;
+    for (const name of await readdir(directory).catch(() => [])) {
+      if (!name.startsWith(prefix) || !name.endsWith(".tmp")) continue;
+      const temporary = path.join(directory, name);
+      const details = await stat(temporary).catch(() => undefined);
+      if (details && Date.now() - details.mtimeMs > 5 * 60_000) await rm(temporary, { force: true });
+    }
+    return removed;
   }
 
   async get(id: string): Promise<CoverageDownloadJob> {
@@ -376,7 +536,7 @@ export class CoverageDownloadService {
     for (const plan of plans) {
       await assertPublicHttpUrl(plan.url, { resolveHostname: this.#resolveHostname, skipDnsLookup: this.#skipDnsLookup });
     }
-    const concurrency = input.concurrency === undefined ? 4 : input.concurrency;
+    const concurrency = input.concurrency === undefined ? 2 : input.concurrency;
     if (!Number.isSafeInteger(concurrency) || concurrency < 1 || concurrency > 16) throw new RangeError("concurrency must be an integer between 1 and 16");
     const outputRoot = input.outputRoot === undefined ? undefined : path.resolve(input.outputRoot);
     if (outputRoot !== undefined && !path.isAbsolute(outputRoot)) throw new RangeError("outputRoot must be absolute");
@@ -397,6 +557,10 @@ export class CoverageDownloadService {
       }
       if (existing && existing.inventorySha256 && input.inventorySha256 && existing.inventorySha256 !== input.inventorySha256) {
         throw new RangeError(`下载清单与暂存目录不一致，无法复用 requestKey: ${requestKey}`);
+      }
+      if (existing && this.#worker) {
+        await this.action(existing.id, "retry");
+        return clone(existing);
       }
       const job = this.#createJob(plans, {
         concurrency,
@@ -429,6 +593,7 @@ export class CoverageDownloadService {
     await this.initialize();
     const job = this.#jobs.get(id);
     if (!job) throw new Error(`Coverage download not found: ${id}`);
+    if (this.#worker && job.engine === "aria2") return this.action(id, "cancel");
     if (job.status === "queued") {
       job.status = "cancelled";
       job.phase = "cancelled";
@@ -517,15 +682,77 @@ export class CoverageDownloadService {
     return job.outputRoot ? path.join(job.outputRoot, base) : path.join(this.#root, "files", base);
   }
 
+  get externalDownloads(): boolean { return Boolean(this.#worker); }
+
+  async action(id: string, action: "pause" | "resume" | "retry" | "cancel"): Promise<CoverageDownloadJob> {
+    await this.initialize();
+    const job = this.#jobs.get(id);
+    if (!job) throw new RangeError(`Coverage download not found: ${id}`);
+    if (!this.#worker) throw new RangeError("当前部署未启用独立下载服务");
+    if (job.requestKey) {
+      const latest = [...this.#jobs.values()].filter(candidate => candidate.requestKey === job.requestKey)
+        .sort((left, right) => right.createdAt.localeCompare(left.createdAt))[0];
+      if (latest && latest.id !== job.id) throw new RangeError(`此历史记录已有恢复任务，请操作 ${latest.id}`);
+    }
+    await this.#worker.submit(job.id, this.#directoryFor(job), job.transfer);
+    const snapshot = await this.#worker.action(job.id, action);
+    if (action === "retry") job.attempts = [...(job.attempts ?? []), { at: now(), error: job.error }].slice(-50);
+    job.engine = "aria2";
+    Object.assign(job, { status: snapshot.status, phase: snapshot.phase, transfer: snapshot.transfer, error: snapshot.error, updatedAt: snapshot.updatedAt });
+    refreshProgress(job);
+    await this.#persist();
+    if (job.status === "queued" || job.status === "running") void this.#runExternal(job);
+    return clone(job);
+  }
+
+  async #runExternal(job: CoverageDownloadJob): Promise<void> {
+    if (!this.#worker || this.#monitoring.has(job.id)) return;
+    this.#monitoring.add(job.id);
+    job.engine = "aria2";
+    let submitted = false;
+    try {
+      while (job.status === "queued" || job.status === "running") {
+        try {
+          const snapshot = submitted ? await this.#worker.get(job.id)
+            : await this.#worker.submit(job.id, this.#directoryFor(job), job.transfer);
+          submitted = true;
+          Object.assign(job, { status: snapshot.status, phase: snapshot.phase, transfer: snapshot.transfer, error: snapshot.error, updatedAt: snapshot.updatedAt });
+          refreshProgress(job);
+          if ((snapshot.status === "completed" || snapshot.status === "partial") && job.downloadedFiles > 0) {
+            const directory = this.#directoryFor(job);
+            if (!job.outputConnectorId && this.#registerConnector) {
+              const connector = await this.#registerConnector(downloadedConnectorInput(job, directory, this.#connectorPath));
+              job.outputConnectorId = connector.id;
+            }
+            job.outputPath = directory;
+          }
+        } catch (error) {
+          // Service outages preserve the run and durable engine identity.
+          if (job.status !== "queued" && job.status !== "running") {
+            job.status = "running";
+          }
+          job.phase = "waiting_network";
+          job.error = `等待下载服务恢复：${errorMessage(error).slice(0, 250)}`;
+          job.updatedAt = now();
+          submitted = false;
+        }
+        await this.#persist();
+        if (job.status === "queued" || job.status === "running") await waitForRetry(2_000, new AbortController().signal);
+      }
+    } finally { this.#monitoring.delete(job.id); }
+  }
+
   async #transferWithRetries(job: CoverageDownloadJob, entry: CoverageDownloadFileState, directory: string, signal: AbortSignal): Promise<void> {
     for (let retry = 0; ; retry += 1) {
       if (signal.aborted) throw signal.reason ?? Object.assign(new Error("The operation was aborted"), { name: "AbortError" });
       try {
         await this.#transferOne(job, entry, directory, signal);
         delete entry.error;
+        delete entry.lastErrorCode;
         return;
       } catch (error) {
         if (signal.aborted || isAbortError(error)) throw error;
+        entry.lastErrorCode = transferErrorCode(error);
         if (!(error instanceof RetryableDownloadError)) {
           throw new Error(`文件 ${entry.relativePath} 下载失败：${errorMessage(error)}`);
         }
@@ -545,6 +772,7 @@ export class CoverageDownloadService {
   async #run(id: string): Promise<void> {
     const job = this.#jobs.get(id);
     if (!job || job.status !== "queued") return;
+    if (this.#worker) { await this.#runExternal(job); return; }
     const directory = this.#directoryFor(job);
     job.status = "running";
     job.phase = "resuming";
@@ -575,6 +803,7 @@ export class CoverageDownloadService {
             if (controller.signal.aborted || isAbortError(error)) throw error;
             entry.status = "failed";
             entry.error = errorMessage(error).slice(0, 500);
+            entry.lastErrorCode = transferErrorCode(error) ?? entry.lastErrorCode;
             refreshProgress(job);
             job.updatedAt = now();
             await this.#persist();
@@ -601,12 +830,7 @@ export class CoverageDownloadService {
         job.phase = "registering";
         job.updatedAt = now();
         await this.#persist();
-        const connector = await this.#registerConnector({
-          name: `Coverage download ${id.slice(-12)}`,
-          kind: "local",
-          config: { rootPath: this.#connectorPath ?? directory },
-          status: "ready",
-        });
+        const connector = await this.#registerConnector(downloadedConnectorInput(job, directory, this.#connectorPath));
         job.outputConnectorId = connector.id;
       }
       job.outputPath = directory;
@@ -668,11 +892,12 @@ export class CoverageDownloadService {
     let offset = 0;
     let hash = createHash("sha256");
     const validator = strongValidator(entry.etag, entry.lastModified);
+    const resumableEuclid = isImmutableEuclidQ1EasFile(entry);
     try {
       const partStats = await stat(partPath);
-      if (partStats.size > 0 && validator) {
-        // Resume only with a strong validator so bytes are never concatenated
-        // across different remote object versions.
+      if (partStats.size > 0 && (validator || resumableEuclid)) {
+        // EAS Q1 is immutable and versioned in the release/file identity even
+        // though that endpoint does not return a validator.
         offset = await hashInto(partPath, hash);
         entry.status = "partial";
         entry.bytesPresent = offset;
@@ -685,6 +910,12 @@ export class CoverageDownloadService {
       // No partial file; start from zero.
     }
 
+    const source = await assertPublicHttpUrl(entry.url, { resolveHostname: this.#resolveHostname, skipDnsLookup: this.#skipDnsLookup });
+    if (resumableEuclid) {
+      await this.#transferEuclidQ1Chunks(job, entry, partPath, target, source, offset, hash, signal);
+      return;
+    }
+
     const headers: Record<string, string> = { "Accept-Encoding": "identity" };
     if (offset > 0) {
       headers.Range = `bytes=${offset}-`;
@@ -693,130 +924,258 @@ export class CoverageDownloadService {
       if (entry.etag && !entry.etag.startsWith("W/")) headers["If-Match"] = entry.etag;
       else if (entry.lastModified) headers["If-Unmodified-Since"] = entry.lastModified;
     }
-    const source = await assertPublicHttpUrl(entry.url, { resolveHostname: this.#resolveHostname, skipDnsLookup: this.#skipDnsLookup });
-    let response: Response;
+    const watchdog = createProgressWatchdog(signal, entry.relativePath);
     try {
-      response = await fetchPublicHttp(source, { headers, signal }, {
-        fetchImpl: this.#fetchImpl, resolveHostname: this.#resolveHostname, skipDnsLookup: this.#skipDnsLookup,
-      });
-    } catch (error) {
-      if (signal.aborted) throw signal.reason ?? error;
-      throw new RetryableDownloadError(errorMessage(error));
-    }
-    if (!response.ok) {
-      if (response.status === 416 && offset > 0) {
-        const contentRange = response.headers.get("content-range") ?? "";
-        const match = contentRange.match(/bytes\s+\*\/(\d+)/i);
-        if (match && Number(match[1]) === offset) {
-          // The partial bytes already are the complete object.
-          const digest = await hashFile(partPath);
-          if (entry.expectedSizeBytes !== undefined && digest.sizeBytes !== entry.expectedSizeBytes) {
-            throw new Error(`文件大小不符: 期望 ${entry.expectedSizeBytes} 字节，实际 ${digest.sizeBytes}`);
+      let response: Response;
+      try {
+        response = await fetchPublicHttp(source, { headers, signal: watchdog.signal }, {
+          fetchImpl: this.#fetchImpl, resolveHostname: this.#resolveHostname, skipDnsLookup: this.#skipDnsLookup,
+        });
+      } catch (error) {
+        if (signal.aborted) throw signal.reason ?? error;
+        throw new RetryableDownloadError(watchdog.timedOut() ? errorMessage(watchdog.signal.reason) : errorMessage(error), { cause: error });
+      }
+      if (!response.ok) {
+        if (response.status === 416 && offset > 0) {
+          const contentRange = response.headers.get("content-range") ?? "";
+          const match = contentRange.match(/bytes\s+\*\/(\d+)/i);
+          if (match && Number(match[1]) === offset) {
+            const digest = await hashFile(partPath);
+            if (entry.expectedSizeBytes !== undefined && digest.sizeBytes !== entry.expectedSizeBytes) {
+              throw new Error(`文件大小不符: 期望 ${entry.expectedSizeBytes} 字节，实际 ${digest.sizeBytes}`);
+            }
+            if (entry.expectedSha256 && digest.sha256 !== entry.expectedSha256) {
+              throw new Error(`文件校验失败: ${entry.relativePath}`);
+            }
+            await this.#finalizeEntry(entry, partPath, target, offset, digest.sha256);
+            return;
           }
-          if (entry.expectedSha256 && digest.sha256 !== entry.expectedSha256) {
-            throw new Error(`文件校验失败: ${entry.relativePath}`);
-          }
-          await this.#finalizeEntry(entry, partPath, target, offset, digest.sha256);
-          return;
         }
-      }
-      await response.body?.cancel().catch(() => undefined);
-      const message = `下载失败 HTTP ${response.status}: ${entry.relativePath}`;
-      if (response.status === 408 || response.status === 425 || response.status === 429 || response.status >= 500) {
-        throw new RetryableDownloadError(message);
-      }
-      throw new Error(message);
-    }
-    const contentType = response.headers.get("content-type") ?? "";
-    if (/\.(?:fits?|fz)(?:\.gz)?$/i.test(entry.relativePath) && /^(?:text\/html|application\/json)(?:;|$)/i.test(contentType)) {
-      await response.body?.cancel();
-      throw new Error(`来源返回页面或元数据，未返回科学 FITS 文件: ${entry.relativePath}`);
-    }
-    const responseEtag = response.headers.get("etag");
-    if (entry.etag && !entry.etag.startsWith("W/") && responseEtag && responseEtag !== entry.etag) {
-      await response.body?.cancel();
-      throw new Error(`源文件版本已变化；请重新预览后创建新任务: ${entry.relativePath}`);
-    }
-
-    let appending = false;
-    if (offset > 0) {
-      if (response.status === 206) {
-        const contentRange = response.headers.get("content-range") ?? "";
-        const match = contentRange.match(/^bytes\s+(\d+)-/i);
-        if (!match || Number(match[1]) !== offset) throw new Error("服务器返回的 Content-Range 与续传偏移不一致");
-        appending = true;
-      } else if (response.status === 200) {
-        // Server ignored Range; restart cleanly instead of concatenating
-        // potentially different object versions.
-        offset = 0;
-        hash = createHash("sha256");
-        await rm(partPath, { force: true });
-        entry.bytesPresent = 0;
-        entry.status = "pending";
-      } else {
-        throw new Error(`不支持的续传响应 HTTP ${response.status}`);
-      }
-    } else if (response.status !== 200) {
-      throw new Error(`不支持的响应 HTTP ${response.status}`);
-    }
-
-    if (entry.expectedSizeBytes === undefined && response.status === 200) {
-      const rawLength = response.headers.get("content-length");
-      const length = rawLength === null ? undefined : Number(rawLength);
-      if (length !== undefined && Number.isSafeInteger(length) && length >= 0) entry.expectedSizeBytes = length;
-    }
-    if (entry.etag === undefined) entry.etag = response.headers.get("etag") ?? undefined;
-    if (entry.lastModified === undefined) entry.lastModified = response.headers.get("last-modified") ?? undefined;
-
-    const handle = await open(partPath, appending ? "a" : "w");
-    let lastProgressPersistMs = 0;
-    try {
-      const reader = response.body?.getReader();
-      if (!reader) throw new Error("下载响应没有内容流");
-      while (true) {
-        let chunk: ReadableStreamReadResult<Uint8Array>;
-        try {
-          chunk = await reader.read();
-        } catch (error) {
-          if (signal.aborted) throw signal.reason ?? error;
-          throw new RetryableDownloadError(errorMessage(error));
+        await response.body?.cancel().catch(() => undefined);
+        const message = `下载失败 HTTP ${response.status}: ${entry.relativePath}`;
+        if (response.status === 408 || response.status === 425 || response.status === 429 || response.status >= 500) {
+          throw new RetryableDownloadError(message);
         }
-        const { done, value } = chunk;
-        if (done) break;
-        if (!value?.byteLength) continue;
-        let written = 0;
-        while (written < value.byteLength) {
-          const result = await handle.write(value, written, value.byteLength - written, null);
-          if (result.bytesWritten <= 0) throw new Error(`写入下载文件时没有进展: ${entry.relativePath}`);
-          written += result.bytesWritten;
-        }
-        hash.update(value);
-        offset += value.byteLength;
-        entry.bytesPresent = offset;
-        entry.status = "partial";
-        // Keep validators and partial progress recoverable during long files
-        // without writing the full ledger for every incoming network chunk.
-        if (Date.now() - lastProgressPersistMs >= 5_000) {
-          lastProgressPersistMs = Date.now();
-          refreshProgress(job);
-          job.updatedAt = now();
-          await this.#persist();
-        }
-      }
-      if (entry.expectedSizeBytes !== undefined && offset !== entry.expectedSizeBytes) {
-        const message = `文件大小不符: 期望 ${entry.expectedSizeBytes} 字节，实际 ${offset}`;
-        if (offset < entry.expectedSizeBytes) throw new RetryableDownloadError(message);
         throw new Error(message);
       }
-      const digest = hash.digest("hex");
-      if (entry.expectedSha256 && digest !== entry.expectedSha256) {
-        throw new Error(`文件校验失败: ${entry.relativePath}`);
+      const contentType = response.headers.get("content-type") ?? "";
+      if (/\.(?:fits?|fz)(?:\.gz)?$/i.test(entry.relativePath) && /^(?:text\/html|application\/json)(?:;|$)/i.test(contentType)) {
+        await response.body?.cancel();
+        throw new Error(`来源返回页面或元数据，未返回科学 FITS 文件: ${entry.relativePath}`);
       }
-      await handle.sync();
-      await this.#finalizeEntry(entry, partPath, target, offset, digest);
+      const responseEtag = response.headers.get("etag");
+      if (entry.etag && !entry.etag.startsWith("W/") && responseEtag && responseEtag !== entry.etag) {
+        await response.body?.cancel();
+        throw new Error(`源文件版本已变化；请重新预览后创建新任务: ${entry.relativePath}`);
+      }
+
+      let appending = false;
+      if (offset > 0) {
+        if (response.status === 206) {
+          const contentRange = response.headers.get("content-range") ?? "";
+          const match = contentRange.match(/^bytes\s+(\d+)-/i);
+          if (!match || Number(match[1]) !== offset) throw new Error("服务器返回的 Content-Range 与续传偏移不一致");
+          appending = true;
+        } else if (response.status === 200) {
+          offset = 0;
+          hash = createHash("sha256");
+          await rm(partPath, { force: true });
+          entry.bytesPresent = 0;
+          entry.status = "pending";
+        } else {
+          throw new Error(`不支持的续传响应 HTTP ${response.status}`);
+        }
+      } else if (response.status !== 200) {
+        throw new Error(`不支持的响应 HTTP ${response.status}`);
+      }
+
+      if (entry.expectedSizeBytes === undefined && response.status === 200) {
+        const rawLength = response.headers.get("content-length");
+        const length = rawLength === null ? undefined : Number(rawLength);
+        if (length !== undefined && Number.isSafeInteger(length) && length >= 0) entry.expectedSizeBytes = length;
+      }
+      if (entry.etag === undefined) entry.etag = response.headers.get("etag") ?? undefined;
+      if (entry.lastModified === undefined) entry.lastModified = response.headers.get("last-modified") ?? undefined;
+
+      const handle = await open(partPath, appending ? "a" : "w");
+      let lastProgressPersistMs = 0;
+      try {
+        const reader = response.body?.getReader();
+        if (!reader) throw new Error("下载响应没有内容流");
+        while (true) {
+          let chunk: ReadableStreamReadResult<Uint8Array>;
+          try {
+            chunk = await reader.read();
+          } catch (error) {
+            if (signal.aborted) throw signal.reason ?? error;
+            throw new RetryableDownloadError(watchdog.timedOut() ? errorMessage(watchdog.signal.reason) : errorMessage(error), { cause: error });
+          }
+          const { done, value } = chunk;
+          if (done) break;
+          if (!value?.byteLength) continue;
+          watchdog.markProgress();
+          let written = 0;
+          while (written < value.byteLength) {
+            const result = await handle.write(value, written, value.byteLength - written, null);
+            if (result.bytesWritten <= 0) throw new Error(`写入下载文件时没有进展: ${entry.relativePath}`);
+            written += result.bytesWritten;
+          }
+          hash.update(value);
+          offset += value.byteLength;
+          entry.bytesPresent = offset;
+          entry.status = "partial";
+          if (Date.now() - lastProgressPersistMs >= 5_000) {
+            lastProgressPersistMs = Date.now();
+            refreshProgress(job);
+            job.updatedAt = now();
+            await this.#persist();
+          }
+        }
+        if (entry.expectedSizeBytes !== undefined && offset !== entry.expectedSizeBytes) {
+          const message = `文件大小不符: 期望 ${entry.expectedSizeBytes} 字节，实际 ${offset}`;
+          if (offset < entry.expectedSizeBytes) throw new RetryableDownloadError(message);
+          throw new Error(message);
+        }
+        const digest = hash.digest("hex");
+        if (entry.expectedSha256 && digest !== entry.expectedSha256) {
+          throw new Error(`文件校验失败: ${entry.relativePath}`);
+        }
+        await handle.sync();
+        await this.#finalizeEntry(entry, partPath, target, offset, digest);
+      } finally {
+        await handle.close();
+      }
     } finally {
-      await handle.close();
+      watchdog.dispose();
     }
+  }
+
+  async #transferEuclidQ1Chunks(
+    job: CoverageDownloadJob,
+    entry: CoverageDownloadFileState,
+    partPath: string,
+    target: string,
+    source: URL,
+    initialOffset: number,
+    initialHash: Hash,
+    signal: AbortSignal,
+  ): Promise<void> {
+    let offset = initialOffset;
+    let hash = initialHash;
+    let lastProgressPersistMs = 0;
+    while (entry.expectedSizeBytes === undefined || offset < entry.expectedSizeBytes) {
+      const requestedEnd = offset + EUCLID_RANGE_CHUNK_BYTES - 1;
+      const validator = strongValidator(entry.etag, entry.lastModified);
+      const headers: Record<string, string> = { "Accept-Encoding": "identity", Range: `bytes=${offset}-${requestedEnd}` };
+      if (offset > 0 && validator) headers["If-Range"] = validator;
+      const watchdog = createProgressWatchdog(signal, entry.relativePath);
+      try {
+        let response: Response;
+        try {
+          response = await fetchPublicHttp(source, { headers, signal: watchdog.signal }, {
+            fetchImpl: this.#fetchImpl, resolveHostname: this.#resolveHostname, skipDnsLookup: this.#skipDnsLookup,
+          });
+        } catch (error) {
+          if (signal.aborted) throw signal.reason ?? error;
+          throw new RetryableDownloadError(watchdog.timedOut() ? errorMessage(watchdog.signal.reason) : errorMessage(error), { cause: error });
+        }
+        if (response.status === 416) {
+          const match = (response.headers.get("content-range") ?? "").match(/^bytes\s+\*\/(\d+)$/i);
+          await response.body?.cancel().catch(() => undefined);
+          if (match && Number(match[1]) === offset && entry.expectedSizeBytes === offset) {
+            const digest = hash.digest("hex");
+            if (entry.expectedSha256 && digest !== entry.expectedSha256) throw new Error(`文件校验失败: ${entry.relativePath}`);
+            await this.#finalizeEntry(entry, partPath, target, offset, digest);
+            return;
+          }
+          throw new Error(`Euclid EAS 返回了无效的 416 范围响应: ${entry.relativePath}`);
+        }
+        if (response.status !== 206) {
+          await response.body?.cancel().catch(() => undefined);
+          const message = `Euclid EAS 未接受分块 Range 请求（HTTP ${response.status}）: ${entry.relativePath}`;
+          if (response.status === 408 || response.status === 425 || response.status === 429 || response.status >= 500) {
+            throw new RetryableDownloadError(message);
+          }
+          throw new Error(message);
+        }
+        const range = (response.headers.get("content-range") ?? "").match(/^bytes\s+(\d+)-(\d+)\/(\d+)$/i);
+        if (!range || Number(range[1]) !== offset) {
+          await response.body?.cancel().catch(() => undefined);
+          throw new Error(`Euclid EAS Content-Range 与请求偏移不一致: ${entry.relativePath}`);
+        }
+        const rangeStart = Number(range[1]);
+        const rangeEnd = Number(range[2]);
+        const totalBytes = Number(range[3]);
+        const expectedEnd = Math.min(requestedEnd, totalBytes - 1);
+        if (!Number.isSafeInteger(totalBytes) || totalBytes <= rangeStart || rangeEnd !== expectedEnd
+          || entry.expectedSizeBytes !== undefined && totalBytes !== entry.expectedSizeBytes) {
+          await response.body?.cancel().catch(() => undefined);
+          throw new Error(`Euclid EAS 文件大小或 Content-Range 已变化: ${entry.relativePath}`);
+        }
+        const contentType = response.headers.get("content-type") ?? "";
+        if (/^(?:text\/html|application\/json)(?:;|$)/i.test(contentType)) {
+          await response.body?.cancel().catch(() => undefined);
+          throw new Error(`来源返回页面或元数据，未返回科学 FITS 文件: ${entry.relativePath}`);
+        }
+        entry.expectedSizeBytes = totalBytes;
+        if (entry.etag === undefined) entry.etag = response.headers.get("etag") ?? undefined;
+        if (entry.lastModified === undefined) entry.lastModified = response.headers.get("last-modified") ?? undefined;
+        refreshProgress(job);
+        job.updatedAt = now();
+        await this.#persist();
+
+        const handle = await open(partPath, offset > 0 ? "a" : "w");
+        let chunkBytes = 0;
+        try {
+          const reader = response.body?.getReader();
+          if (!reader) throw new RetryableDownloadError(`Euclid EAS 响应没有内容流: ${entry.relativePath}`);
+          while (true) {
+            let chunk: ReadableStreamReadResult<Uint8Array>;
+            try {
+              chunk = await reader.read();
+            } catch (error) {
+              if (signal.aborted) throw signal.reason ?? error;
+              throw new RetryableDownloadError(watchdog.timedOut() ? errorMessage(watchdog.signal.reason) : errorMessage(error), { cause: error });
+            }
+            if (chunk.done) break;
+            if (!chunk.value?.byteLength) continue;
+            watchdog.markProgress();
+            if (chunkBytes + chunk.value.byteLength > rangeEnd - rangeStart + 1) {
+              throw new Error(`Euclid EAS 返回的数据超出请求范围: ${entry.relativePath}`);
+            }
+            let written = 0;
+            while (written < chunk.value.byteLength) {
+              const result = await handle.write(chunk.value, written, chunk.value.byteLength - written, null);
+              if (result.bytesWritten <= 0) throw new Error(`写入下载文件时没有进展: ${entry.relativePath}`);
+              written += result.bytesWritten;
+            }
+            hash.update(chunk.value);
+            chunkBytes += chunk.value.byteLength;
+            offset += chunk.value.byteLength;
+            entry.bytesPresent = offset;
+            entry.status = "partial";
+            if (Date.now() - lastProgressPersistMs >= 5_000) {
+              lastProgressPersistMs = Date.now();
+              refreshProgress(job);
+              job.updatedAt = now();
+              await this.#persist();
+            }
+          }
+          if (chunkBytes !== rangeEnd - rangeStart + 1) {
+            throw new RetryableDownloadError(`Euclid EAS 分块未传完: ${entry.relativePath} (${chunkBytes}/${rangeEnd - rangeStart + 1} bytes)`);
+          }
+          await handle.sync();
+        } finally {
+          await handle.close();
+        }
+      } finally {
+        watchdog.dispose();
+      }
+    }
+
+    const digest = hash.digest("hex");
+    if (entry.expectedSha256 && digest !== entry.expectedSha256) throw new Error(`文件校验失败: ${entry.relativePath}`);
+    await this.#finalizeEntry(entry, partPath, target, offset, digest);
   }
 
   async #finalizeEntry(entry: CoverageDownloadFileState, partPath: string, target: string, sizeBytes: number, sha256: string): Promise<void> {
@@ -826,6 +1185,7 @@ export class CoverageDownloadService {
     entry.actualSizeBytes = sizeBytes;
     entry.actualSha256 = sha256;
     delete entry.error;
+    delete entry.lastErrorCode;
   }
 
   async #persist(): Promise<void> {

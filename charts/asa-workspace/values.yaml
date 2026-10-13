@@ -8,7 +8,7 @@ global:
 
 image:
   repository: ghcr.io/astro-survey-atlas/asa-workspace
-  tag: "0.10.38-20260907-164814"
+  tag: "0.0.1"
   pullPolicy: IfNotPresent
 
 imagePullSecrets: []
@@ -69,6 +69,22 @@ productionData:
   size: 20Gi
   mountPath: /data/production
   scannerMountPath: /data/production
+
+downloads:
+  enabled: false
+  image:
+    repository: ghcr.io/astro-survey-atlas/asa-workspace-downloader
+    tag: "aria2-1.37.0"
+    pullPolicy: IfNotPresent
+  existingSecret: ""
+  secretKey: token
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: "1"
+      memory: 512Mi
 
 # Search is required independently of the optional data warehouse. In external
 # mode, the Secret value is the complete Elasticsearch base URL, including any

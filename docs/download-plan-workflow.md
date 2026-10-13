@@ -202,12 +202,16 @@ whether a transfer can complete. Executor concurrency defaults to 4 and accepts
 values from 1 through 16. Allow public HTTP sources only. Tasks write to Workspace runtime storage
 in Dev; delivery to a desktop user follows the existing Workspace download
 path. Connector-backed destinations require connector verification first.
-The desktop preview flow registers a local Connector after download. To scan
-those files, register a user asset with its real source identity and FITS/CSV
-coverage recipe, link the Connector, then submit a separate scan. It does not
-offer automatic Warehouse handoff for an unregistered output Connector. The
-existing API handoff remains available for a destination that already has the
-required asset and recipe.
+After verified FITS image files download, Workspace registers a local
+Connector, creates one source-scoped user image asset for each concrete public
+image identity, checks the Connector, and submits those paths to Warehouse
+when Warehouse is enabled. Only verified files are scanned. The generated
+assets retain the survey, release, product, Connector, and relative source
+path, so their coverage remains tied to the downloaded files. Set
+`warehouseHandoff: "none"` to keep a download-only run; when omitted, an
+enabled Warehouse receives eligible image files automatically. Other source
+formats still receive a Connector but require a matching user asset and scan
+recipe before coverage can be generated.
 
 Each file is retried independently. After its retries are exhausted, that file
 is marked failed and the queue continues. Fully verified files remain in the

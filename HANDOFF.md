@@ -1,20 +1,27 @@
 # Workspace handoff
 
-Updated: 2026-10-10, Asia/Shanghai.
+Updated: 2026-10-13, Asia/Shanghai.
 
 ## Current work
 
 The user authorized private coverage/MOC repair and FITS coordinate backfill,
-scoped Aladin exploration, and Workspace Dev deployment. Do not rescan the
-existing coverage sources or enumerate their directories. Header replay uses
-the finite inventory of the existing successful Warehouse scan. Flink is not
-running or required. Preserve the original successful coverage, failed history,
-resource limits, and the substantial unrelated dirty worktree.
+scoped Aladin exploration, Workspace Dev deployment, and cleanup of historical
+errors. Do not rescan existing coverage sources or enumerate their directories.
+Header replay uses the finite inventory of the successful Warehouse scan. Flink
+is not running or required. Preserve successful coverage and success records,
+resource limits, and the substantial existing worktree changes.
 
 Assets public data, evidence and releases are outside this task. Private files,
 coordinates, repair inventories and receipts remain in Workspace. The sibling
 `Astro-Survey-Atlas-Warehouse` is the active Warehouse repository;
 `/home/aaron/Repo/data-warehouse` is frozen legacy code.
+
+The user also authorized the complete overlap/UI/download plan, independent
+aria2 deployment in the existing k3s cluster, LAN HTTP proxy configuration and
+recovery of the existing five-file Euclid download. This work is now complete;
+see the October 12 results below. Failed retry records were cleared on October
+13; the verified output and Connector remain. Do not start another download of
+these files.
 
 ## Implementation
 
@@ -49,6 +56,30 @@ coordinates, repair inventories and receipts remain in Workspace. The sibling
   creates no points. Initial field of view follows the entry region.
   Entry creates layer descriptors without querying an entire region first;
   coordinates are requested only once the actual Aladin viewport exists.
+- The selected-region legend derives public survey names from the selected,
+  visible footprint artifacts. Workspace asset entries are marked separately,
+  so a Workspace survey identity cannot add an unchecked public survey to the
+  survey list.
+- Aladin grid lines use theme-specific red. Its icon handle is integrated with
+  the Exploration Deck rail, layer rows are compact, and clicking a data point
+  opens a coordinate Inspector grouped by selected layer, with nearby catalog
+  matches and indexed images plus an adjustable match radius.
+- Overlap computation displays a spinner until the current response arrives,
+  distinguishes empty/error states, discards stale responses and automatically
+  selects C01. Source cards share the HEALPix Inspector style, grouped by actual
+  public source and Workspace asset identity.
+- Downloads run in a separate aria2 1.37.0 supervisor with shared production
+  storage, authenticated internal API, loopback RPC, persisted engine session,
+  Range/version checks and final size/SHA verification. Workspace reattaches
+  instead of interrupting transfers on restart. Legacy `.part` files are reused.
+- System Settings has download HTTP proxy configuration, masked credentials,
+  30-second persistent route heartbeat and a bounded speed probe. Dev uses
+  `http://10.15.49.212:7890`. Heartbeat synchronization supplies the actual
+  download source on every attempt; ESA homepage redirects are a poor probe.
+  Source transport failures/429/5xx, DNS errors and temporary overload retry
+  with durable 15–300-second backoff; progress resets consecutive failures
+  while preserving the total retry count. File/version/range/auth failures
+  retain their diagnostic and partial data for explicit handling.
 - Queries indicate ongoing production backfill with `indexing`; Aladin keeps
   existing points and refreshes unchanged viewports every 10 seconds until
   complete. Empty selection and disposal stop refresh. Image centers/pointings
@@ -59,15 +90,22 @@ coordinates, repair inventories and receipts remain in Workspace. The sibling
 
 ## Verification baseline
 
-Workspace `npm run verify` passed: 365 tests, 363 passed and 2 skipped; server,
-viewer, CLI and strict Helm checks passed. Four Aladin browser regressions passed,
-including viewport-only queries, frozen region/layers, Escape and unchanged-view
-refresh during backfill. Public package activation state was restored afterward.
+Workspace `npm run verify` passed after the refinements: 367 tests passed and 2
+were skipped; server, viewer, CLI and strict Helm checks passed. Aladin browser
+regressions cover viewport-only queries, frozen region/layers, Escape,
+unchanged-view refresh during backfill, multi-survey Inspector results, empty
+and failed Inspector queries, match-radius changes and mobile drawer layout.
+The selected-region legend regression models two visible public surveys and an
+unchecked third survey whose identity is also present on a selected Workspace
+MOC; it verifies only the two visible public surveys appear. That focused browser
+test passed again after the regression was added. `npm run verify:types`,
+`npm run build:viewer` and `git diff --check` also passed. Public package
+activation state was restored afterward.
 Logs are outside Git under `/tmp/workspace-verify-header-r6.log` and
-`/tmp/workspace-aladin-final-r5-e2e.log`. The final r6 change only removes obsolete
-run errors from a ready operational status; current diagnostics and historical
-records remain. Its regression was observed failing before the fix and passing
-afterward.
+`/tmp/workspace-aladin-final-r5-e2e.log`. At that point the final r6 change only
+removed obsolete run errors from a ready operational status; the separate
+October 13 maintenance operation later cleared failed history as requested.
+The r6 regression was observed failing before the fix and passing afterward.
 
 Warehouse static gate passed in full: Maven test/verify/quality, both Helm
 lints/renders, Compose config, mapping sync, shell syntax and diff checks.
@@ -97,20 +135,32 @@ is separate from the header extraction measurement.
 ## Live tasks
 
 - HST successful positions: `derived-c485b1dc71bd469e8458934a`.
+- HST footprint repair `derived-f9a0f22be38f4361b1c75893` succeeded using the
+  existing header evidence: 2 footprints, 0 errors.
+- Euclid download `coverage-download-48e6840d-6541-4235-aeda-60793190635d`
+  completed on October 12: 5/5 verified, 7,372,828,800 bytes. The same request
+  key `production:prd_20261010060559_8d1cca8a`, inventory SHA-256
+  `820bd646d773d9e5975668fb51a17579b5c632247d6dce2615619a292270c92e`,
+  output `/data/production/files/prd_20261010060559_8d1cca8a` and Connector
+  `connector-de8c51e0-f518-40d1-a8c6-ea688d9a3af9` were retained.
+  CFIS-U and PANSTARRS-I resumed their old partials; the other three hashes
+  stayed unchanged. Independent disk hashes and FITS primary headers passed
+  for all five. New ProductionRun `prd_20261012042740_a44da7e5` succeeded,
+  reusing the original approved inventory and the same download job. Original
+  The earlier failed download and ProductionRun records were inspected before
+  cleanup; October 13 maintenance removed those two failed history entries.
+  The completed download, its successful ProductionRun and Connector remain.
+  Receipt: `/tmp/workspace-download-recovery-final.json`.
 - CSST successful sample: `derived-6a930a34a0094899bcd3f276`.
-- Earlier failed MOC repair: `derived-b5c84ec5a2574350a2991432`, retained.
 - Successful CSST MOC repair: `derived-7c11ab92d14b4549a4cd056e`.
   Actual decoded native maximum O10, 32,250 MOC cells, 18,525 O8 query pixels,
   unchanged 372 O4 preview pixels, precision estimated. All five artifact
   sizes/hashes verified; receipt `/tmp/workspace-csst-moc-validation.json`.
-- Original full CSST header task `derived-fb2c156981584665bfc38dbc` is retained
-  as failed after a transient ES indexing timeout. Its metadata-only Job is
-  still running and checkpointing; do not start another reader.
-- Recovery task `derived-54cf71e7a197406f8fb82663` reuses that exact Job/output
-  and indexes committed headers with stable point IDs. At 05:44:45 UTC it remained
-  running with 37,356 indexed points, zero header/coordinate errors. The header
-  Job had processed 97,300 / 356,112 files. This is incomplete; use the current
-  task/checkpoint or operational status API for newer progress.
+- Full CSST positions replay `derived-54cf71e7a197406f8fb82663` completed on
+  October 10 using the existing metadata-only Job and stable point IDs:
+  356,112/356,112 files processed, 356,112 points indexed, 10,555,871,904
+  bytes indexed, and zero header or coordinate errors. The successful task
+  remains available in Workspace.
 - CSST original coverage: 356,112 files, 7,167,326 rows, zero errors, ACTIVE O10.
   The original Workspace import failure was the Node 2 GiB whole-buffer limit,
   not a failed Warehouse scientific scan.
@@ -121,28 +171,186 @@ Use `curl --noproxy '*'` for this local endpoint. Helm release is `asa` in
 1 GiB; local ES request/limit is 1/2 GiB with 512 MiB heap. Do not change these
 as part of data repair.
 
-A running full replay is not a completed backfill; continue monitoring its
-durable task and checkpoints without submitting another coverage scan.
-Original CSST/HST ScanRequest spec/status were compared exactly and remained
-unchanged. The original CSST failed MOC metadata also compares unchanged.
+The full CSST replay is complete; do not submit another coverage scan. Original
+CSST/HST ScanRequest spec/status were compared exactly before history cleanup
+and remained unchanged. Failed MOC metadata entries were removed on October
+13; successful MOC artifacts and their files remain.
 
-## Final Dev deployment
+## Previous Dev deployment (October 10)
 
-Helm revision **83** is deployed and healthy, one ready Workspace Pod and zero
-restarts. Image `0.10.38-dev-20261010-header-repair-r6`, registry digest
-`sha256:c94482ac1e9323de8586307f58c401a0b6081a5fa04c42070ab214acd10e26a0`.
-The final image uses the verified immutable r5 image as its base and replaces
-only the compiled operational-status module; its runtime SHA-256 matches the
-local verified build. Full source builds remain supported by the repository
-Dockerfile. Workspace and ES limits were retained, scanner unchanged.
+Helm revision **84** is deployed and healthy, one ready Workspace Pod and zero
+restarts. Image `0.10.38-dev-20261010-aladin-inspector-r1`, registry digest
+`sha256:10aafc7ab2cbf5b64e819755fd3862f89df02d41c99cc0e39114ebe5b940c748`.
+The image is based on the verified immutable r6 runtime layer and includes the
+updated service, viewer and coordinate conversion script; container syntax
+checks passed. The complete Docker source build did not finish because npm
+network access failed in the build environment. Local `npm run verify` passed.
+Workspace requests remain 100m CPU / 128 MiB memory and limits remain 1 CPU /
+1 GiB; Elasticsearch settings and scanner are unchanged. `/api/capabilities`
+and the page's updated JavaScript and CSS were confirmed on Dev.
 
 The CSST header Job retained its original UID and creation time through both
 deployments. Its committed header output exceeds 2 GiB and continues normally;
 the indexer consumes bounded batches. The tested scoped region increased from
 98 to 531 matching image centers and returns `indexing:true`. Operational
 status reports ready coverage, ongoing point backfill, and no obsolete import
-error. HST reports ready coverage and two points with a succeeded point task.
+error. HST reports ready coverage, two points with a succeeded point task, and
+the successful two-footprint repair.
 
 Private verification record: `docs/workspace-header-repair-verification-20261010.md`.
 Machine receipt: `/tmp/workspace-header-repair-final-receipt.json`. Logs,
 screenshots and receipts remain outside Assets; no private data was published.
+
+## Previous Dev deployment (October 12, R2)
+
+Helm revision **86**, image `0.10.38-dev-20261012-download-worker-r2`, digest
+`sha256:44f5572027ebf4868d54c01a3a5c005d73854991106b4e90bb8b862644b455b1`.
+Workspace and downloader are ready with zero container restarts. The worker
+uses `asa-workspace-production-data`; only one worker replica owns transfers.
+Workspace and ES limits are unchanged. Downloader requests 100m/128 MiB and
+limits 1 CPU/512 MiB. Worker restart preserved a paused task at 7,293,442,560
+bytes; after resume, Workspace-only restart retained the same downloader Pod
+and downloads completed. Production recovered automatically and succeeded.
+
+Type checks, server/viewer/CLI builds and Helm strict/default/downloads-enabled
+rendering passed. Before the final worker refinements, full unit results were
+369 passed/2 skipped. Final focused checks: 4/4 worker tests (real aria2 resume,
+pause/restart, transient 503 recovery, Workspace reattachment, private URL and
+credential handling) and 28/28 related download/production tests passed.
+Browser checks passed: overlap 10/10, settings 1/1, Aladin 3/3 and the focused
+Selected-source regression 1/1. Its initial fixture failure was corrected by
+mocking operational status so unrelated slow live calls cannot stall the test.
+The live Dev browser also verified C01 automatic selection, actual HST points
+and coordinate Inspector, proxy health and the current styling without page
+errors. It needed an explicit browser proxy bypass for the local Dev host.
+
+ESA through the configured proxy currently uses certificate-verified TLS 1.2,
+scoped only to `eas.esac.esa.int`, based on observed default handshake failures.
+The source Dockerfiles build normally; this release used the verified previous
+runtime with fresh local compiled outputs, CA certificates and the pinned
+aria2 binary because upstream npm/Docker Hub access was unreliable.
+
+Verification: `docs/workspace-download-ui-verification-20261012.md`.
+Screenshots/receipt: `/tmp/workspace-live-download-ui/`.
+No further Euclid download work is pending. October 10 CSST/header progress
+above is historical; query the existing task for its current status instead
+of restarting scans or enumerating directories.
+
+## Previous Dev deployment and download-to-coverage closure (October 12, r3)
+
+Helm revision **87** deploys Workspace and downloader image
+`0.10.38-dev-20261012-download-closure-r3`. Both Pods are Ready with zero
+restarts. Registry manifest digest:
+`sha256:61633a02e40d533913cb0c7b5533f80eb60c38f9297ee3c7cfba8328bcbf6ba0`.
+The update used `--reuse-values`; existing resource limits, shared storage,
+proxy settings, Warehouse settings, and aria2 configuration were retained.
+
+The scan failure was reproducible: the automatically-created Euclid Connector
+had no current successful connection check and no linked user image asset.
+Connector self-scan rejected it first for the missing check, then for the
+missing asset after the check succeeded. Production now creates a user image
+asset for verified image/imaging FITS files, records its survey/release/product
+and source-relative directory, checks the local Connector, and submits the
+Warehouse coverage scan with an idempotency key. Other FITS files are not
+assumed to be images.
+
+The already-downloaded Euclid files were not downloaded again. The existing
+Connector `connector-de8c51e0-f518-40d1-a8c6-ea688d9a3af9` was checked, and
+asset `user-6316849e-5111-40b0-9bc0-449486883025` was registered for
+`euclid/euclid-q1`, product `Euclid Q1 color imaging`, at
+`sources/public-euclid-euclid-q1-euclid-20q1-20co-80100982`. Its scan
+`ingest-cef3169f-6a5a-4b85-aad7-60f3f89847e8` succeeded: 5 FITS files,
+525 coverage records, zero errors, O10 coverage and a ready MOC. The follow-on
+position index contains five image centers and reports success. No existing
+CSST/HST coverage sources were rescanned or enumerated.
+
+System Settings now contains the saved download proxy endpoint and a plot of
+the latest 24 proxy/direct-route latency checks. Download history is not shown
+there. The corresponding UI and scan evidence is recorded in
+`docs/workspace-download-ui-verification-20261012.md`.
+
+## Previous Dev deployment and Connector discovery (October 12, r4)
+
+Helm revision **88** deploys Workspace and downloader image
+`0.10.38-dev-20261012-connector-link-r4`. Both Pods are Ready with zero
+restarts. The pulled image digest is
+`sha256:e8a7018ce840eef87da3a4f61b5d42be655c9afa531a0514c2ef01572930efdb`.
+
+Workspace's production execution detail resolves `outputConnectorId` and shows
+the live Connector name, output path and ID, with a button that opens the same
+record in Connector Registry. Connector search accepts the Connector ID and
+associated asset metadata. Production record `prd_20261012042740_a44da7e5`
+links to Connector `connector-de8c51e0-f518-40d1-a8c6-ea688d9a3af9`. The
+download reused its existing request/job and storage directory, so its output
+remains `/data/production/files/prd_20261010060559_8d1cca8a`; the older run ID
+in the path does not identify a different download or Connector.
+
+Using Workspace's Connector editor, the record was renamed to
+`Euclid Q1 color imaging (Workspace)` and its description now identifies the
+production record, linked `euclid/euclid-q1` asset and successful O10 scan. The
+existing scan `ingest-cef3169f-6a5a-4b85-aad7-60f3f89847e8` is visible in
+Workspace scan history and succeeded with 5 FITS files, 525 coverage records,
+zero errors and a ready O10 MOC. Its five image-center index entries also
+succeeded.
+
+The production record's Warehouse submission step remains `skipped`: that
+execution predates the automatic handoff. The successful coverage scan is a
+separate later Workspace record using the already-downloaded files. Scan
+history retains the Connector name captured at execution time,
+`Coverage download 60793190635d`; it is the same Connector ID above, not a
+second Connector. Current details, production-to-Connector navigation and
+scan-history lookup were verified in the live Workspace UI. Screenshots are
+outside Git under `/tmp/workspace-production-connector-r4-final.png`,
+`/tmp/workspace-euclid-connector-final.png` and
+`/tmp/workspace-euclid-scan-history-final.png`.
+
+## Previous Dev deployment and product-aware Connector names (October 13, r5)
+
+Helm revision **89** deploys Workspace image
+`0.10.38-dev-20261013-product-connector-r5`; the Workspace Pod is Ready with
+zero restarts. Its pulled image digest is
+`sha256:2f1fc081de089afba2ac8ed9b3926f4906ae33c43a53ec9f12d8c99eb6b3a1e1`.
+The downloader remains on `0.10.38-dev-20261012-connector-link-r4`.
+
+New download-created Connectors now use the source product, survey/release,
+overlap component and output-directory reference in their name. A single-source
+Connector also receives survey and release tags. The live Euclid record is
+`Euclid Q1 color imaging · euclid/euclid-q1 · C01 · 8d1cca8a`; its unchanged ID
+is `connector-de8c51e0-f518-40d1-a8c6-ea688d9a3af9`, and its directory remains
+`/data/production/files/prd_20261010060559_8d1cca8a`.
+
+The existing Euclid Connector was updated through the Workspace Connector
+editor to match the automatic naming rule; no download or scan was repeated.
+The live `/api/connectors` response includes this name, product description,
+`euclid/euclid-q1` tags and successful local path check. The Connector tab
+renders this same `name` field in its list row, so the downloaded product is
+identifiable directly in the list. The earlier r4 name
+`Euclid Q1 color imaging (Workspace)` was an intermediate UI-edited name.
+Connector-name code and regression details are in
+`docs/workspace-download-ui-verification-20261012.md`.
+
+## Current Dev deployment and error-history cleanup (October 13, r6)
+
+Helm revision **90** deploys Workspace image
+`0.0.1-dev-20261013-cleanup-r1`; the Pod is Ready with zero restarts. The
+download worker stayed on its prior image. The upgrade used `--reuse-values`,
+preserving existing storage, proxy, Warehouse and resource configuration.
+
+The loopback-only `POST /api/maintenance/failed-history/clear` endpoint was
+called from inside the Workspace Pod with its explicit confirmation value.
+It removed 10 failed Connector scans, 2 failed downloads, 4 failed Production
+runs, 2 failed derived repairs, and 12 failed, unavailable or dangling-pending
+MOC metadata entries. It deletes MOC metadata records only; successful MOC
+artifacts, downloaded science files and completed records were preserved.
+Public Workspace API verification found zero failed/unavailable entries and
+retained 4 successful Production runs, 4 completed downloads, 3 successful
+Connector scans, 7 successful derived repairs and 3 ready MOC artifacts.
+Kubernetes reported no failed Jobs. The maintenance endpoint returned 404
+through the public ingress.
+
+Live CSST status was verified through Workspace during this deployment:
+356,112 files processed, 356,112 points indexed and zero header/coordinate
+errors. `npm run verify:types`, `npm run build`, `npm run verify:chart` and
+`git diff --check` passed. The Dockerfile source build hit an npm internal error
+in `npm ci`; this Dev image overlays the validated local build outputs on the
+currently deployed runtime image. Release `v0.0.1` is being prepared separately.

@@ -6,7 +6,7 @@ import { connectorConfigurationHash, connectorLocationKey, hasCurrentSuccessfulC
 import type { ConnectorCredentialStore, StoredConnectorCredentials } from "./connector-credentials.js";
 import { ConnectorIngestRunCatalog, type ConnectorIngestRunRecord, type ConnectorScanTargetSnapshot } from "./connector-history.js";
 import { coverageJobSnapshot, scannerCoverageProperties, validateCoverageFileNamePattern, validateCoverageJobSnapshot, validateCoverageJobSubmission, type CoverageJobSnapshot } from "./coverage-jobs.js";
-import type { DataAssetAccess, DataAssetRecord, DataCatalogRegistry } from "./data-catalog.js";
+import type { DataAssetAccess, DataAssetRecord, DataAssetRegistrationInput, DataCatalogRegistry } from "./data-catalog.js";
 import { CoveragePreviewCache, type CoveragePreviewLayer } from "./coverage-preview.js";
 import { DataWarehouseDisabledError, ConnectorScanCapabilityError, ConnectorScanPreconditionError, connectorScanPath, connectorScanTarget, type GenericScanInput } from "./scan-contract.js";
 import type { UserMocArtifact, UserMocArtifactContext, UserMocArtifactStore, UserMocPrecision } from "./user-moc-artifacts.js";
@@ -14,6 +14,8 @@ import { defaultMocCoreAdapter, type MocCoreAdapter } from "./moc-core-adapter.j
 import { WAREHOUSE_FILE_INDEX } from "./warehouse-index.js";
 import type { WarehouseInventory } from "./warehouse-inventory.js";
 import { assetsCoreContext } from "./assets-core.js";
+import { parsePublicSourceId } from "./public-source-identity.js";
+import type { SourceFileInventory, SourceInventoryFile } from "./source-crawler.js";
 
 export const WAREHOUSE_SCAN_API = "/apis/atlas.zhejianglab.org/v1alpha1";
 export const WORKSPACE_TRACK_LABELS = {
@@ -421,6 +423,43 @@ function coverageForAsset(asset: DataAssetRecord, connector?: ConnectorRecord): 
     if (error instanceof ConnectorScanPreconditionError) throw error;
     throw new ConnectorScanPreconditionError(`Asset coverage configuration is invalid: ${error instanceof Error ? error.message : String(error)}`);
   }
+}
+
+interface ProductionImageSource {
+  sourceId: string;
+  files: SourceInventoryFile[];
+  sourcePath: string;
+  surveyId: string;
+  releaseId: string;
+  product: string;
+  modality: string;
+}
+
+function productionImageSources(inventory: SourceFileInventory, verifiedRelativePaths: readonly string[]): ProductionImageSource[] {
+  const verified = new Set(verifiedRelativePaths);
+  const grouped = new Map<string, SourceInventoryFile[]>();
+  for (const file of inventory.files) {
+    if (!verified.has(file.relativePath) || !/\.fits?(?:\.gz)?$/i.test(file.relativePath)) continue;
+    const files = grouped.get(file.sourceId) ?? [];
+    files.push(file);
+    grouped.set(file.sourceId, files);
+  }
+
+  const sources: ProductionImageSource[] = [];
+  for (const [sourceId, files] of grouped) {
+    const identity = parsePublicSourceId(sourceId);
+    const modality = files.map((file) => file.modality).find((value) => value?.trim()) ?? identity?.product ?? "";
+    if (!identity || !/(?:^|[^a-z])imag(?:e|es|ing)(?:$|[^a-z])/i.test(modality)) continue;
+    if (identity.surveyId.length > 120 || identity.releaseId.length > 120 || identity.product.length > 160) continue;
+    const roots = files.map((file) => {
+      const segments = file.relativePath.split("/");
+      if (segments.length < 3 || segments[0] !== "sources" || segments.some((segment) => !segment || segment === "." || segment === ".." || segment.includes("\\"))) return undefined;
+      return segments.slice(0, 2).join("/");
+    });
+    if (roots.some((root) => !root) || new Set(roots).size !== 1) continue;
+    sources.push({ sourceId, files, sourcePath: roots[0]!, surveyId: identity.surveyId, releaseId: identity.releaseId, product: identity.product, modality });
+  }
+  return sources.sort((left, right) => left.sourceId.localeCompare(right.sourceId));
 }
 
 function defaultSuffixesForCoverage(coverage: CoverageJobSnapshot): string[] {
@@ -950,7 +989,12 @@ export class WarehouseScanService {
     const asset = assets[0];
     if (!asset) throw new ConnectorScanPreconditionError("Connector self-scan requires one linked user asset with a persisted coverage recipe");
     const coverage = coverageForAsset(asset, connector);
-    return this.submitScan(connectorId, { assetId: asset.id, allowedSuffixes: defaultSuffixesForCoverage(coverage), coverage }, key);
+    return this.submitScan(connectorId, {
+      assetId: asset.id,
+      ...(connector.kind === "local" && asset.sourceRelativePath ? { path: asset.sourceRelativePath } : {}),
+      allowedSuffixes: defaultSuffixesForCoverage(coverage),
+      coverage,
+    }, key);
   }
 
   /**
@@ -961,15 +1005,70 @@ export class WarehouseScanService {
    * scanner failures stay visible in connector ingest history and never
    * retroactively fail the production run.
    */
-  async submitProductionHandoff(input: { runId: string; connectorId: string; inventorySha256: string }): Promise<{ accepted: boolean; scanRunIds: string[] }> {
+  async submitProductionHandoff(input: {
+    runId: string;
+    connectorId: string;
+    inventorySha256: string;
+    inventory?: SourceFileInventory;
+    verifiedRelativePaths?: string[];
+  }): Promise<{ accepted: boolean; scanRunIds: string[]; message?: string }> {
     if (!this.#enabled) throw new DataWarehouseDisabledError();
-    const connector = await this.#connectors.get(input.connectorId);
-    if (connector.kind !== "local" && connector.kind !== "s3") throw new ConnectorScanCapabilityError(connector.kind);
-    const record = await this.submitConnectorScan(input.connectorId, `production:${input.runId}`);
-    if (record.status === "failed") {
-      throw new Error(record.error ?? "Warehouse 扫描请求创建失败");
+    if (!input.inventory || !input.verifiedRelativePaths) {
+      const legacy = await this.submitConnectorScan(input.connectorId, `production:${input.runId}`);
+      if (legacy.status === "failed") throw new Error(legacy.error ?? "Warehouse 扫描请求创建失败");
+      return { accepted: true, scanRunIds: [legacy.batchId ?? legacy.id] };
     }
-    return { accepted: true, scanRunIds: [record.batchId ?? record.id] };
+    if (input.inventory.inventorySha256 !== input.inventorySha256) throw new ConnectorScanPreconditionError("Production inventory digest changed before Warehouse handoff");
+    const sources = productionImageSources(input.inventory, input.verifiedRelativePaths);
+    if (!sources.length) {
+      return { accepted: false, scanRunIds: [], message: "已验证文件中没有带有 image/imaging 身份的 FITS 图像；未创建扫描资产" };
+    }
+    let connector = await this.#connectors.get(input.connectorId);
+    if (connector.kind !== "local" && connector.kind !== "s3") throw new ConnectorScanCapabilityError(connector.kind);
+    connector = await this.#connectors.check(connector.id);
+    if (!hasCurrentSuccessfulConnectorCheck(connector)) {
+      throw new ConnectorScanPreconditionError(connector.lastCheck?.summary ?? "下载输出 Connector 检查失败");
+    }
+
+    const existingAssets = await this.#dataCatalog.list();
+    const scanRunIds: string[] = [];
+    for (const source of sources) {
+      const asset = existingAssets.find((candidate) => candidate.origin === "user"
+        && candidate.kind === "image"
+        && candidate.surveyId === source.surveyId
+        && candidate.releaseId === source.releaseId
+        && candidate.product === source.product
+        && candidate.sourceRelativePath === source.sourcePath
+        && ((candidate.connectorIds ?? []).includes(connector.id) || (candidate.connectorLocationKeys ?? []).includes(connector.locationKey)));
+      const access: DataAssetAccess = { connector: "local", uri: connector.displayPath, format: "directory", connectorId: connector.id, label: "Verified Workspace download" };
+      const registered = asset ?? await this.#dataCatalog.register({
+        name: `${source.surveyId} ${source.product} (${source.releaseId})`.slice(0, 120),
+        description: `Workspace automatically registered verified FITS image files from ${source.sourceId}.`,
+        surveyId: source.surveyId,
+        releaseId: source.releaseId,
+        product: source.product,
+        kind: "image",
+        modalities: [source.modality],
+        tags: ["downloaded", "FITS image"],
+        connector: "local",
+        sourceUri: connector.displayPath,
+        format: "directory",
+        accesses: [access],
+        connectorIds: [connector.id],
+        connectorLocationKeys: [connector.locationKey],
+        sourceRelativePath: source.sourcePath,
+        status: "ready",
+        projectState: "acquired",
+      } satisfies DataAssetRegistrationInput);
+      const record = await this.submitScan(connector.id, {
+        assetId: registered.id,
+        path: source.sourcePath,
+        allowedSuffixes: [".fits", ".fit", ".fits.gz"],
+      }, `production:${input.runId}:${registered.id}`);
+      if (record.status === "failed") throw new Error(record.error ?? "Warehouse 扫描请求创建失败");
+      scanRunIds.push(record.batchId ?? record.id);
+    }
+    return { accepted: true, scanRunIds };
   }
 
   async taskLogs(connectorId: string, runId: string): Promise<WarehouseTaskLogs> {

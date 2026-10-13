@@ -218,12 +218,14 @@
         <div id="aladin-controls" class="aladin-controls" hidden>
           <div class="aladin-vignette" aria-hidden="true"></div>
           <div class="aladin-scanlines" aria-hidden="true"></div>
-          <button id="aladin-asset-drawer-toggle" class="aladin-drawer-tab" type="button" aria-expanded="false" aria-label="展开用户资产抽屉" title="展开用户资产抽屉"><i data-lucide="chevron-right"></i><span>资产</span></button>
-          <aside id="aladin-cockpit-rail" class="aladin-cockpit-rail" aria-label="数据点图层">
-            <header class="aladin-cockpit-heading"><span class="panel-kicker">EXPLORATION DECK</span><strong>所选图层</strong><output id="aladin-cache-state">CACHE IDLE</output><small>DATA POINT CHANNEL / 01</small></header>
-            <div id="aladin-asset-nav" class="aladin-asset-nav" role="group" aria-label="所选图层导航"></div>
-            <div class="aladin-rail-summary"><span>VIEWPORT LOAD</span><output id="aladin-loaded-summary">--</output></div>
-          </aside>
+          <div id="aladin-deck" class="aladin-deck">
+            <aside id="aladin-cockpit-rail" class="aladin-cockpit-rail" aria-label="数据点图层">
+              <header class="aladin-cockpit-heading"><span class="panel-kicker">EXPLORATION DECK</span><strong>所选图层</strong><output id="aladin-cache-state">CACHE IDLE</output></header>
+              <div id="aladin-asset-nav" class="aladin-asset-nav" role="group" aria-label="所选图层导航"></div>
+              <div class="aladin-rail-summary"><span>VIEWPORT LOAD</span><output id="aladin-loaded-summary">--</output></div>
+            </aside>
+            <button id="aladin-asset-drawer-toggle" class="aladin-drawer-tab" type="button" aria-controls="aladin-cockpit-rail" aria-expanded="false" aria-label="展开图层抽屉" title="展开图层抽屉"><i data-lucide="chevron-right"></i></button>
+          </div>
         </div>
         <div class="scene-hud-top">
           <div class="scene-readout">
@@ -375,6 +377,7 @@
           <button type="button" class="settings-tab" role="tab" aria-selected="false" data-settings-tab="mcp">MCP Server</button>
           <button type="button" class="settings-tab" role="tab" aria-selected="false" data-settings-tab="warehouse">Warehouse</button>
           <button type="button" class="settings-tab" role="tab" aria-selected="false" data-settings-tab="runtime">数据服务</button>
+          <button type="button" class="settings-tab" role="tab" aria-selected="false" data-settings-tab="downloads">下载</button>
           <button type="button" class="settings-tab" role="tab" aria-selected="false" data-settings-tab="capabilities">生产能力</button>
         </div>
         <section id="settings-ai-view" class="settings-view" role="tabpanel">
@@ -397,6 +400,29 @@
         <section id="settings-capabilities-view" class="settings-view" role="tabpanel" hidden>
           <p class="control-note">全部生产能力的版本、职责与源码锚点均为构建期只读注册，不能在页面中修改。</p>
           <div id="capability-list" class="settings-record-list"></div>
+        </section>
+        <section id="settings-downloads-view" class="settings-view" role="tabpanel" hidden>
+          <form id="download-settings-form" class="settings-record download-settings-form">
+            <header><strong>下载代理</strong></header>
+            <label class="download-proxy-toggle"><input id="download-proxy-enabled" type="checkbox" />启用 HTTP 代理</label>
+            <label class="field-label" for="download-proxy-url">代理地址</label>
+            <input id="download-proxy-url" class="field-input" type="url" placeholder="http://局域网IP:7890" />
+            <details class="download-proxy-auth">
+              <summary>代理认证（可选）</summary>
+              <div class="catalog-form-grid">
+              <label><span class="field-label">用户名（可选）</span><input id="download-proxy-username" class="field-input" autocomplete="off" /></label>
+              <label><span class="field-label">密码（可选）</span><input id="download-proxy-password" class="field-input" type="password" autocomplete="new-password" /></label>
+              </div>
+            </details>
+            <div class="settings-record-actions">
+              <button class="primary-command compact-command" type="submit">保存</button>
+              <button id="download-proxy-test" class="command-button secondary" type="button">保存并检测</button>
+              <button id="download-proxy-clear" class="command-button secondary" type="button">清除认证</button>
+            </div>
+            <p id="download-proxy-feedback" role="status" aria-live="polite"></p>
+            <p class="control-note">下载服务每 30 秒检查代理连接和下载源响应。</p>
+          </form>
+          <article id="download-route-health" class="settings-record" aria-live="polite"></article>
         </section>
       </section>
 

@@ -1,4 +1,5 @@
 import type { ConnectorKind, ConnectorPublicRecord, ConnectorRegistrationInput, ConnectorStatus } from "../../src/connectors";
+import type { DataAssetRecord } from "../../src/data-catalog";
 import type { SurveyCard, SurveyRecord } from "../../src/survey-registry";
 import { createIcons, Pencil, Play, ScrollText, SearchCheck, Trash2 } from "lucide";
 
@@ -44,6 +45,7 @@ export class ConnectorPanel {
   readonly #onError: (error: unknown) => void;
   readonly #onMetrics: (metrics: ConnectorMetrics) => void;
   #records: ConnectorPublicRecord[] = [];
+  #assets: DataAssetRecord[] = [];
   #runs: ConnectorScanRun[] = [];
   #surveys: SurveyCard[] = [];
   #capabilities: WorkspaceCapabilities = { dataWarehouse: { enabled: false }, metadataStore: { engine: "unknown" } };
@@ -102,11 +104,15 @@ export class ConnectorPanel {
 
   async activate(selectedId?: string): Promise<void> {
     this.#active = true;
-    const [connectorRecords, surveys, runs, capabilities] = await Promise.all([workspaceApi.connectors(), workspaceApi.surveys(), workspaceApi.connectorIngestRuns(), workspaceApi.capabilities()]);
+    const [connectorRecords, surveys, runs, capabilities, assets] = await Promise.all([
+      workspaceApi.connectors(), workspaceApi.surveys(), workspaceApi.connectorIngestRuns(), workspaceApi.capabilities(),
+      workspaceApi.dataAssets().catch(() => []),
+    ]);
     this.#records = connectorRecords;
     this.#runs = runs;
     this.#surveys = surveys;
     this.#capabilities = capabilities;
+    this.#assets = assets;
     this.#updateMetrics(runs);
     const records = await Promise.all(this.#surveys.map((survey) => workspaceApi.survey(survey.id)));
     this.#surveyRecords = new Map(records.map((record) => [record.id, record]));
@@ -328,7 +334,8 @@ export class ConnectorPanel {
         .flatMap(([key, value]) => [key, value
           .replace(/\/\/[^/@\s]+@/g, "//")
           .replace(/([?;&](?:auth|credential|secret|password|passphrase|token|access.?key|api.?key|private.?key|session|user(?:name)?)=)[^&;\s]*/gi, "$1")]);
-      const searchable = [record.name, record.description, record.kind, record.status, record.displayPath, record.surveyId, record.releaseId, record.locationKey, ...config]
+      const assetSearchTerms = this.#linkedAssets(record).flatMap((asset) => [asset.name, asset.surveyId, asset.releaseId, asset.product, asset.sourceRelativePath]);
+      const searchable = [record.id, record.name, record.description, record.kind, record.status, record.displayPath, record.surveyId, record.releaseId, record.locationKey, ...config, ...assetSearchTerms]
         .filter(Boolean)
         .join(" ")
         .toLocaleLowerCase();
@@ -415,6 +422,11 @@ export class ConnectorPanel {
     const description = document.createElement("p"); description.className = "catalog-detail-copy"; description.textContent = record.description;
     const summary = document.createElement("dl");
     const rows: Array<[string, string]> = [["类型", KIND_LABELS[record.kind]], ["连接状态", statusPill(record).textContent ?? STATUS_LABELS[record.status]], ["巡天标签", record.surveyId ?? "未设置"], ["发布标签", record.releaseId ?? "未设置"]];
+    const linkedAssets = this.#linkedAssets(record);
+    linkedAssets.forEach((asset, index) => {
+      rows.push([linkedAssets.length === 1 ? "关联资产" : `关联资产 ${index + 1}`, `${asset.name} · ${asset.surveyId ?? "未标注巡天"}/${asset.releaseId ?? "未标注发布"} · ${asset.product}`]);
+      rows.push([linkedAssets.length === 1 ? "扫描子目录" : `资产 ${index + 1} 扫描子目录`, asset.sourceRelativePath ?? "Connector 根目录"]);
+    });
     if (record.kind === "s3") {
       rows.push(["Bucket", record.config.bucket ?? ""], ["Prefix", record.config.prefix || "根目录"], ["Access Key", record.credentials.accessKeyId || "未配置"], ["Secret Key", record.credentials.secretConfigured ? "••••••••••••" : "未配置"]);
     }
@@ -423,6 +435,12 @@ export class ConnectorPanel {
     });
     const scanCommand = this.#scanCommand(record);
     return [header, pathValue, statusPill(record), description, summary, scanCommand];
+  }
+
+  #linkedAssets(record: ConnectorPublicRecord): DataAssetRecord[] {
+    return this.#assets.filter((asset) => (asset.connectorIds ?? []).includes(record.id)
+      || (asset.connectorLocationKeys ?? []).includes(record.locationKey)
+      || [asset.access, ...(asset.accesses ?? [])].some((access) => access.connectorId === record.id || access.uri === record.locationKey));
   }
 
   #iconButton(label: string, iconName: string, action: () => void, tone = ""): HTMLButtonElement {
@@ -439,11 +457,23 @@ export class ConnectorPanel {
   }
 
   #scanUnavailableReason(record: ConnectorPublicRecord): string | undefined {
-    if (!this.#capabilities.dataWarehouse.enabled) return "数据仓库不可用，当前不能执行扫描。";
-    if (record.kind === "local") return "本地覆盖扫描需要已登记的图像或数据立方体资产；当前只能查看配置和历史记录。";
+    if (!this.#capabilities.dataWarehouse.enabled || this.#capabilities.dataWarehouse.configured === false) return "数据仓库不可用，当前不能执行扫描。";
     if (record.kind === "jdbc") return "JDBC 扫描执行器尚未接入；当前只能查看配置和历史记录。";
     if (record.status === "disabled") return "Connector 已停用，当前不能执行扫描。";
-    if (record.status !== "ready" && record.lastCheck?.status !== "ok") return "请先检测连接并确认 S3 / OSS 可用。";
+    if (record.lastCheck?.status !== "ok") return record.kind === "local" ? "请先检测本地目录是否可读。" : "请先检测连接并确认 S3 / OSS 可用。";
+    if (record.kind === "local") {
+      const linked = this.#assets.filter((asset) => (asset.connectorIds ?? []).includes(record.id)
+        || (asset.connectorLocationKeys ?? []).includes(record.locationKey));
+      if (!linked.length) return "请先登记并关联一个包含扫描配方的数据资产。";
+      if (linked.length > 1) return "此 Connector 关联了多个资产，请从单个资产的扫描操作中选择目标。";
+      const asset = linked[0]!;
+      if (!asset.surveyId || !asset.releaseId || !asset.product
+        || !((asset.kind === "catalog" && asset.scanSpec?.format === "csv")
+          || ((asset.kind === "image" || asset.kind === "cube") && [asset.access, ...(asset.accesses ?? [])].some((access) => /^(directory|fits?|fits\.gz|application\/fits)$/i.test(access.format))))) {
+        return "关联资产缺少有效的巡天身份或扫描配方。";
+      }
+      return undefined;
+    }
     if (!record.credentials.accessKeyId || !record.credentials.secretConfigured) return "S3 / OSS 凭据不完整，当前不能执行扫描。";
     return undefined;
   }

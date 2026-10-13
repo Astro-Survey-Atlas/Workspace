@@ -32,10 +32,39 @@ def image_position(record):
     wcs = WCS(header).celestial
     if not wcs.has_celestial:
         return None
-    center = wcs.pixel_to_world((width - 1) / 2, (height - 1) / 2).icrs
+    center_pixel = ((width - 1) / 2, (height - 1) / 2)
+    center = wcs.pixel_to_world(*center_pixel).icrs
+    samples = max(64, min(4096, math.ceil(2 * (width + height) / 32)))
+    edge = [i / samples for i in range(samples + 1)]
+    x = [t * (width - 1) for t in edge] + [width - 1] * samples + [(1 - t) * (width - 1) for t in edge] + [0] * samples
+    y = [0] * (samples + 1) + [t * (height - 1) for t in edge[1:]] + [height - 1] * (samples + 1) + [(1 - t) * (height - 1) for t in edge[1:]]
+    boundary = SkyCoord(*wcs.pixel_to_world_values(x, y), unit="deg", frame="icrs")
+    ras = boundary.ra.deg
+    decs = boundary.dec.deg
+    angular_steps = boundary[:-1].separation(boundary[1:]).deg
+    margin = max(float(max(angular_steps, default=0.0)) * 2, 1 / 3600)
+    dec_min = max(-90.0, float(min(decs)) - margin)
+    dec_max = min(90.0, float(max(decs)) + margin)
     result = dict(record)
     result.update(ra_deg=float(center.ra.deg) % 360, dec_deg=float(center.dec.deg),
                   position_role="image_center", position_method="astropy_wcs", coordinate_frame="ICRS")
+    if dec_min <= -90 or dec_max >= 90:
+        result["footprint_bounds"] = [[0.0, 360.0, dec_min, dec_max]]
+    else:
+        center_ra = float(center.ra.deg) % 360
+        unwrapped = [center_ra + ((float(ra) - center_ra + 180) % 360 - 180) for ra in ras]
+        cos_dec = max(math.cos(math.radians(max(abs(dec_min), abs(dec_max)))), 1e-6)
+        ra_margin = min(180.0, margin / cos_dec)
+        ra_min = min(unwrapped) - ra_margin
+        ra_max = max(unwrapped) + ra_margin
+        if ra_max - ra_min >= 360:
+            result["footprint_bounds"] = [[0.0, 360.0, dec_min, dec_max]]
+        else:
+            left = ra_min % 360
+            right = ra_max % 360
+            result["footprint_bounds"] = [[left, right, dec_min, dec_max]] if left <= right else [
+                [0.0, right, dec_min, dec_max], [left, 360.0, dec_min, dec_max]
+            ]
     return result
 
 def pointing_position(record):

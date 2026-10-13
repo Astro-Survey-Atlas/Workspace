@@ -57,7 +57,7 @@ ENV NODE_ENV=production \
 
 WORKDIR /app
 RUN apt-get update \
-    && apt-get install --no-install-recommends --yes python3 \
+    && apt-get install --no-install-recommends --yes python3 ca-certificates \
     && rm -rf /var/lib/apt/lists/* \
     && groupadd --gid 10001 astro \
     && useradd --uid 10001 --gid astro --no-create-home astro \

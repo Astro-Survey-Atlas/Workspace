@@ -50,8 +50,10 @@ FITS 图像或 CSV 坐标配方。空请求不能额外指定子目录或 basena
 
 本地扫描的 `plan.source.location` 仅包含 scanner 容器内的 `rootPath`；
 PVC 的相对子路径放在 `scanner.sourceVolume.subPath`，并挂载到同一个
-`scanner.sourceVolume.mountPath`。本地来源不创建 source 凭据。新下载生成的
-Connector 需要先在「用户资产」登记并关联，才能提交扫描。
+`scanner.sourceVolume.mountPath`。本地来源不创建 source 凭据。生产下载完成后，
+Workspace 会为已验证的 image/imaging FITS 文件自动创建来源范围内的用户资产，
+关联 Connector、检测本地目录，并提交 Warehouse 覆盖扫描。其他文件类型仍需要
+先登记带有真实巡天身份和扫描配方的用户资产。
 
 一个 Connector 如果关联多个 `origin=user` 资产，Workspace 会以
 `ConnectorScanPreconditionError` 拒绝这次无 `assetId` 的自扫描，不会静默选择

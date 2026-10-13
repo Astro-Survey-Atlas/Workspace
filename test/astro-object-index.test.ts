@@ -1,12 +1,17 @@
 import assert from "node:assert/strict";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import test from "node:test";
+import { Healpix, Hploc } from "healpixjs";
 
 import {
   ASTRO_COVERAGE_INDEX,
+  ASTRO_IMAGE_FOOTPRINT_INDEX,
   ASTRO_OBJECT_INDEX,
   ASTRO_OBJECT_NATIVE_NSIDE,
   AstroObjectIndexService,
+  angularSeparationArcsec,
+  coordinateInHealpixRegion,
+  coordinateSearchBbox,
   nestedDescendantPixels,
   nestedDescendantRange,
   nestedDescendantRanges,
@@ -97,6 +102,24 @@ test("normalizes NESTED descendant ranges without changing selected cells", () =
   assert.equal(ASTRO_OBJECT_NATIVE_NSIDE, 256);
 });
 
+test("builds coordinate search bounds across RA zero and matches ICRS NESTED cells", () => {
+  const wrapped = coordinateSearchBbox(359.9999, 0, 1);
+  assert.ok(wrapped.raMin > wrapped.raMax);
+  assert.ok(wrapped.decMin < 0 && wrapped.decMax > 0);
+  const polar = coordinateSearchBbox(17, 89.9999, 1);
+  assert.deepEqual([polar.raMin, polar.raMax], [0, 360]);
+  assert.ok(Math.abs(angularSeparationArcsec(359.9999, 0, 0.0001, 0) - 0.72) < 0.001);
+
+  const region = { nside: 16, pixels: [1234], coordinateFrame: "ICRS", ordering: "NESTED" } as const;
+  const healpix = new Healpix(16);
+  const location = new Hploc();
+  location.setZ(0.25);
+  location.phi = 1.75;
+  const pixel = healpix.loc2pix(location);
+  assert.equal(coordinateInHealpixRegion(1.75 * 180 / Math.PI, Math.asin(0.25) * 180 / Math.PI, { ...region, pixels: [pixel] }), true);
+  assert.throws(() => coordinateInHealpixRegion(0, 0, { ...region, pixels: [-1] }), /pixels/);
+});
+
 test("bulk sends object and coverage documents as action/source NDJSON", async () => {
   const requests: Array<{ url: string; contentType: string; lines: unknown[] }> = [];
   await withServer(async (request, response) => {
@@ -148,13 +171,17 @@ test("ensureIndices creates strict object and coverage mappings when absent", as
   }, async (baseUrl) => {
     await new AstroObjectIndexService({ baseUrl }).ensureIndices();
   });
-  assert.deepEqual(created.map((request) => request.url), [`/${ASTRO_OBJECT_INDEX}`, `/${ASTRO_COVERAGE_INDEX}`]);
+  assert.deepEqual(created.map((request) => request.url), [`/${ASTRO_OBJECT_INDEX}`, `/${ASTRO_COVERAGE_INDEX}`, `/${ASTRO_IMAGE_FOOTPRINT_INDEX}`]);
   const objectMappings = created[0]?.body.mappings as { dynamic?: unknown; properties?: Record<string, { type?: string }> };
   assert.equal(objectMappings.dynamic, "strict");
   assert.equal(objectMappings.properties?.sky_position?.type, "geo_point");
   assert.equal(objectMappings.properties?.attributes?.type, "flattened");
   const coverageMappings = created[1]?.body.mappings as { properties?: Record<string, { type?: string }> };
   assert.equal(coverageMappings.properties?.healpix_pixel?.type, "integer");
+  const footprintMappings = created[2]?.body.mappings as { dynamic?: unknown; properties?: Record<string, { type?: string }> };
+  assert.equal(footprintMappings.dynamic, "strict");
+  assert.equal(footprintMappings.properties?.source_id?.type, "keyword");
+  assert.equal(footprintMappings.properties?.ra_min?.type, "double");
 });
 
 test("query builds a wrapped bbox with deduplicated multi-survey filters and search_after", async () => {

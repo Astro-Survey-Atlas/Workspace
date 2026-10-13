@@ -100,6 +100,7 @@ interface SnapshotState {
 interface SourceBinding {
   sourceUnit: SourceUnit;
   native: NativeDownloadUnitIdentity;
+  modality?: string;
 }
 
 function canonicalJson(value: unknown): string {
@@ -308,7 +309,7 @@ function sourceBindings(unit: AssetsRegionSpatialUnit): { bindings: SourceBindin
     const observationId = mastObservationId(unit);
     if (!observationId) return { bindings: [], reason: "HST unit is not a supported MAST observation identity" };
     const unitId = sourceUnitId(native, `mast:${observationId}`);
-    return { bindings: [{ native, sourceUnit: { sourceId, unitId, resolver: "mast-observation@1", observationId } }] };
+    return { bindings: [{ native, ...(unit.modality ? { modality: unit.modality } : {}), sourceUnit: { sourceId, unitId, resolver: "mast-observation@1", observationId } }] };
   }
 
   const uris = accessUris(unit);
@@ -330,7 +331,7 @@ function sourceBindings(unit: AssetsRegionSpatialUnit): { bindings: SourceBindin
       tileId: Number(tileText),
       lastNight,
     };
-    return { bindings: [{ native, sourceUnit }] };
+    return { bindings: [{ native, ...(unit.modality ? { modality: unit.modality } : {}), sourceUnit }] };
   }
 
   if (unit.surveyId !== "euclid" && unit.surveyId !== "legacy-surveys") {
@@ -344,7 +345,7 @@ function sourceBindings(unit: AssetsRegionSpatialUnit): { bindings: SourceBindin
     if (!filename || !SCIENCE_FILE_NAME.test(filename)) return [];
     const unitId = sourceUnitId(native, `file:${sha256(`${uri}\n${filename}`).slice(0, 20)}`);
     const sourceUnit: DirectFileSourceUnit = { sourceId, unitId, resolver: "direct-file@1", url: uri, filename };
-    return [{ native, sourceUnit }];
+    return [{ native, ...(unit.modality ? { modality: unit.modality } : {}), sourceUnit }];
   });
   return supported.length
     ? { bindings: supported }
@@ -574,6 +575,7 @@ export class RegionDownloadPlanService {
     }
 
     const bindingsByUnitId = new Map(sourceBindingsList.map(({ sourceUnit, native }) => [sourceUnit.unitId, native]));
+    const modalityByUnitId = new Map(sourceBindingsList.map(({ sourceUnit, modality }) => [sourceUnit.unitId, modality]));
     const maxTotalFiles = Math.max(1, Math.min(MAX_PREVIEW_FILES, this.#sourceResolveOptions.maxTotalFiles ?? MAX_PREVIEW_FILES));
     const skipDnsLookup = this.#sourceResolveOptions.skipDnsLookup
       ?? Boolean(this.#sourceResolveOptions.fetchImpl && !this.#sourceResolveOptions.resolveHostname);
@@ -583,7 +585,13 @@ export class RegionDownloadPlanService {
     const attributeFile = (file: SourceFileInventory["files"][number]) => {
       const native = bindingsByUnitId.get(file.unitId);
       return {
-        file: native ? { ...file, layerId: native.layerId, nativeUnitKind: native.unitKind, nativeUnitId: native.unitId } : file,
+        file: native ? {
+          ...file,
+          layerId: native.layerId,
+          ...(modalityByUnitId.get(file.unitId) ? { modality: modalityByUnitId.get(file.unitId)! } : {}),
+          nativeUnitKind: native.unitKind,
+          nativeUnitId: native.unitId,
+        } : file,
         ownerKey: `${native ? identityKey(native) : file.unitId}\n${file.unitId}\n${file.relativePath}`,
       };
     };

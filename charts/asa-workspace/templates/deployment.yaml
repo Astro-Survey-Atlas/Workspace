@@ -36,6 +36,15 @@ spec:
             - name: http
               containerPort: 3000
           env:
+            {{- if .Values.downloads.enabled }}
+            - name: ASTRO_DOWNLOAD_WORKER_URL
+              value: {{ printf "http://%s-downloader:7080" (include "asa-workspace.fullname" .) | quote }}
+            - name: ASTRO_DOWNLOAD_WORKER_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ default (printf "%s-downloader" (include "asa-workspace.fullname" .)) .Values.downloads.existingSecret }}
+                  key: {{ .Values.downloads.secretKey }}
+            {{- end }}
             - name: HOST
               value: 0.0.0.0
             - name: PORT

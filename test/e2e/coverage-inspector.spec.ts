@@ -41,7 +41,7 @@ function publicResult(pixel: number, page = 1, empty = false) {
     page: { pageSize: 1, shown: empty ? 0 : 1, omitted: 0, hasMore: !empty && page === 1, ...(page === 1 ? { nextCursor: "synthetic-page-2" } : {}) } };
 }
 
-type Mock = { pixel: number; lookupRequests: Array<Record<string, unknown>>; unmatched: string[]; empty?: boolean; fail?: boolean };
+type Mock = { pixel: number; lookupRequests: Array<Record<string, unknown>>; unmatched: string[]; empty?: boolean; fail?: boolean; overlapDelayMs?: number; noOverlap?: boolean };
 
 async function installMock(page: Page, options: Partial<Mock> = {}): Promise<Mock> {
   const mock: Mock = { pixel: 0, lookupRequests: [], unmatched: [], ...options };
@@ -70,9 +70,13 @@ async function installMock(page: Page, options: Partial<Mock> = {}): Promise<Moc
       if (path === "/api/coverage-downloads") return fulfill(route, { jobs: [] });
       if (path === "/api/sky/coverage") return fulfill(route, { status: "ready", nside: 16, pixels: [], layers: [], byAsset: [] });
     }
-    if (request.method() === "POST" && path === "/api/sky/overlap") return fulfill(route, { status: "ready", order: 4, nside: 16,
+    if (request.method() === "POST" && path === "/api/sky/overlap") {
+      if (mock.overlapDelayMs) await new Promise(resolve => setTimeout(resolve, mock.overlapDelayMs));
+      if (mock.noOverlap) return fulfill(route, { status: "empty", order: 4, nside: 16, pixels: [], sourceIds: sources.map(s => s.id), sources, components: [] });
+      return fulfill(route, { status: "ready", order: 4, nside: 16,
       sourceIds: [...sources, outsideSource].map(s => s.id), sources: [...sources, sources[3], outsideSource], pixels: [mock.pixel],
       components: [{ id: "C01", order: 4, nside: 16, cells: [mock.pixel], sourceIds: sources.map(s => s.id), areaDeg2: 13.4, bounds: { raMin: 0, raMax: 360, decMin: -90, decMax: 90 } }] });
+    }
     if (request.method() === "POST" && path === "/api/sky/reverse-lookup") {
       const input = request.postDataJSON() as Record<string, unknown>;
       mock.lookupRequests.push(input);
@@ -87,7 +91,7 @@ async function installMock(page: Page, options: Partial<Mock> = {}): Promise<Moc
   return mock;
 }
 
-async function openOverlap(page: Page, mock: Mock, theme = "dark", width = 1440) {
+async function openOverlap(page: Page, mock: Mock, theme = "dark", width = 1440, wait = true) {
   await page.setViewportSize({ width, height: 900 });
   await page.addInitScript(theme => { localStorage.clear(); localStorage.setItem("astro-workspace:theme:v1", theme); }, theme);
   await page.goto("/?mode=layers");
@@ -102,14 +106,13 @@ async function openOverlap(page: Page, mock: Mock, theme = "dark", width = 1440)
   expect(point.raw).toBeTruthy();
   mock.pixel = point.pixel;
   await page.keyboard.press("g");
-  await expect(page.locator("#inspector-content h2")).toHaveText("G · 天区重合");
+  if (wait) await expect(page.locator("#inspector-content h2")).toHaveText(mock.noOverlap ? "G · 天区重合" : "重合区块 C01");
   return point;
 }
 
-async function inspectComponent(page: Page, point: { x: number; y: number }) {
-  if (await page.locator("#inspector-panel").evaluate(el => el.classList.contains("mobile-open"))) await page.locator("#inspector-close").click();
-  await page.mouse.click(point.x, point.y);
+async function inspectComponent(page: Page, _point: { x: number; y: number }) {
   await expect(page.locator("#inspector-content h2")).toHaveText("重合区块 C01");
+  await expect(page.locator('[data-overlap-component-id="C01"]')).toHaveAttribute("aria-pressed", "true");
 }
 
 test("G coverage sources preserve survey, release and distinct source identities", async ({ page }) => {
@@ -120,11 +123,11 @@ test("G coverage sources preserve survey, release and distinct source identities
   await expect(groups.locator(".coverage-source-survey")).toHaveCount(4);
   await expect(groups.locator('[data-survey-id="desi"]')).toContainText("DR1");
   await expect(groups.locator('[data-survey-id="desi"]')).toContainText("Early Data Release");
-  await expect(groups.locator('[data-survey-id="desi"]')).toContainText("DR2");
+  await expect(groups.locator('[data-survey-id="desi"]')).not.toContainText("DR2");
   await expect(groups.locator('[data-survey-id="euclid"] [data-release-id="q1"] .coverage-source-product')).toHaveCount(3);
   await expect(groups.locator('[data-survey-id="csst"]')).toContainText("本地资产");
   await expect(groups.locator('[data-source-kind="public"]')).toContainText("公开覆盖");
-  await expect(groups.locator('[data-source-kind="public"]')).toContainText("不代表文件已下载");
+  await expect(groups.locator('[data-source-kind="public"]')).not.toContainText("覆盖证据不代表文件已下载");
   await expect(groups.locator('[data-source-kind="workspace"]')).toContainText("Workspace 数据");
   await expect(groups).not.toContainText("未标注发布");
   await expect(groups).toContainText("Legacy DR9 view");
@@ -226,7 +229,7 @@ test("G coverage keeps grouped sources for empty results and lookup failures", a
   await page.keyboard.press("g");
   mock.fail = true;
   await page.keyboard.press("g");
-  await expect(page.locator("#inspector-content h2")).toHaveText("G · 天区重合");
+  await expect(page.locator("#inspector-content h2")).toHaveText("重合区块 C01");
   await inspectComponent(page, point);
   await expect(page.locator("#inspector-content")).toContainText("反查失败");
   await expect(page.locator(".coverage-source-groups")).toContainText("Euclid Q1 VIS");
@@ -284,4 +287,72 @@ test("G coverage streaming progress uses the same compact records before complet
     server.closeAllConnections();
     await new Promise<void>(resolve => server.close(() => resolve()));
   }
+});
+
+test("slow overlap shows pending state and automatically selects C01", async ({ page }) => {
+  const mock = await installMock(page, { overlapDelayMs: 1500 });
+  await openOverlap(page, mock, "dark", 1440, false);
+  await expect(page.locator('.coverage-lookup-progress[aria-busy="true"]')).toContainText("正在计算重合区域");
+  await expect(page.locator(".coverage-lookup-spinner")).toBeVisible();
+  await inspectComponent(page, { x: 0, y: 0 });
+  await expect.poll(() => mock.lookupRequests.length).toBe(1);
+});
+
+test("empty overlap stays unselected and late responses cannot restore an exited mode", async ({ page }) => {
+  const mock = await installMock(page, { noOverlap: true });
+  await openOverlap(page, mock);
+  await expect(page.locator("#inspector-content")).toContainText("没有共同覆盖");
+  await expect(page.locator(".overlap-component-button")).toHaveCount(0);
+  expect(mock.lookupRequests).toHaveLength(0);
+  await page.keyboard.press("g");
+  mock.noOverlap = false; mock.overlapDelayMs = 1000;
+  await page.keyboard.press("g");
+  await expect(page.locator(".coverage-lookup-spinner")).toBeVisible();
+  await page.keyboard.press("g");
+  await expect(page.locator("#scene-canvas")).toHaveAttribute("data-overlap-mode", "false");
+  await page.waitForTimeout(1200);
+  await expect(page.locator("#scene-canvas")).toHaveAttribute("data-overlap-mode", "false");
+  expect(mock.lookupRequests).toHaveLength(0);
+});
+
+test("download settings preserve edits during heartbeat refresh and show route failures", async ({ page }, testInfo) => {
+  await installMock(page);
+  let settings = { proxyEnabled: false, proxyUrl: "", proxyUsername: "", passwordConfigured: false, revision: "fixture-0" };
+  let health = { status: "unknown", checkedAt: "", revision: settings.revision, detail: "尚未检测", engineAvailable: true, proxyConnectMs: 0, sourceResponseMs: 0 };
+  let fail = false;
+  const reply = (route: Route, body: unknown) => route.fulfill({ contentType: "application/json", body: JSON.stringify(body) });
+  await page.route("**/api/**", async route => {
+    const req = route.request(), path = new URL(req.url()).pathname;
+    if (path === "/api/system-config/ai-providers") return reply(route, { providers: [] });
+    if (path === "/api/system-config/mcp-servers") return reply(route, { servers: [] });
+    if (path === "/api/system-config/runtime") return reply(route, { catalog: { available: false }, workspaceSearch: { configured: false, indices: {} }, warehouse: { enabled: false } });
+    if (path === "/api/installation/warehouse") return reply(route, { installation: null });
+    if (path.startsWith("/api/system-config/downloads")) {
+      if (req.method() === "PUT") {
+        const body = req.postDataJSON();
+        settings = { proxyEnabled: body.proxyEnabled, proxyUrl: body.proxyUrl, proxyUsername: body.proxyUsername,
+          passwordConfigured: Boolean(body.proxyPassword) || settings.passwordConfigured, revision: `fixture-${Date.now()}` };
+      }
+      if (path.endsWith("/test")) health = { status: fail ? "failed" : "ok", checkedAt: new Date().toISOString(), revision: settings.revision,
+        detail: fail ? "代理连接失败 ECONNREFUSED" : "代理和下载源站可用", engineAvailable: true, proxyConnectMs: 4, sourceResponseMs: 240 };
+      return reply(route, { settings, health, downloaderEnabled: true });
+    }
+    return route.fallback();
+  });
+  await page.goto("/?mode=layers");
+  await page.locator('[data-mode="system"]').click();
+  await page.locator('[data-settings-tab="downloads"]').click();
+  await page.locator("#download-proxy-enabled").check();
+  await page.locator("#download-proxy-url").fill("http://10.15.49.212:7890");
+  await page.locator("#download-proxy-username").fill("fixture-user");
+  await page.locator("#download-proxy-password").fill("fixture-password");
+  await page.locator("#download-proxy-test").click();
+  await expect(page.locator("#download-route-health")).toContainText("240 ms");
+  await expect(page.locator("#download-proxy-password")).toHaveValue("");
+  await page.locator("#download-proxy-url").fill("http://10.15.49.212:7891");
+  await page.waitForTimeout(5500);
+  await expect(page.locator("#download-proxy-url")).toHaveValue("http://10.15.49.212:7891");
+  fail = true; await page.locator("#download-proxy-test").click();
+  await expect(page.locator("#download-route-health")).toContainText("ECONNREFUSED");
+  await page.screenshot({ path: testInfo.outputPath("download-settings.png") });
 });

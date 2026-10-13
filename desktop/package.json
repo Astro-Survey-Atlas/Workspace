@@ -1,7 +1,7 @@
 {
   "name": "astro-survey-atlas-workspace-desktop",
   "productName": "Astro Survey Atlas Workspace",
-  "version": "0.10.38",
+  "version": "0.0.1",
   "private": true,
   "description": "Desktop distribution of the Astro Survey Atlas workspace.",
   "main": "src/main.cjs",
