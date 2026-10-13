@@ -114,8 +114,6 @@ jobs:
     name: Windows installer → GitHub Releases
     runs-on: windows-latest
     needs: validate
-    env:
-      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -138,29 +136,41 @@ jobs:
       - name: Prepare embedded python + moc-core
         working-directory: desktop
         run: npm run prepare:python
-      - name: Build & publish installer
+      - name: Build installer
         working-directory: desktop
         env:
           CSC_IDENTITY_AUTO_DISCOVERY: "false"
-        run: npx electron-builder --win --publish always
+        run: npx electron-builder --win --publish never
+      - uses: actions/upload-artifact@v4
+        with:
+          name: workspace-windows-installer
+          path: |
+            desktop/release/*.exe
+            desktop/release/*.blockmap
+            desktop/release/*.yml
+          if-no-files-found: error
+          compression-level: 0
 
   publish:
     name: Publish GitHub Release
     runs-on: ubuntu-latest
     needs: [validate, docker, chart, desktop]
     steps:
-      - uses: actions/github-script@v7
+      - uses: actions/download-artifact@v4
         with:
-          script: |
-            const { data: release } = await github.rest.repos.getReleaseByTag({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              tag: context.ref_name,
-            });
-            const { data: published } = await github.rest.repos.updateRelease({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              release_id: release.id,
-              draft: false,
-            });
-            core.info(`Published ${published.html_url}`);
+          name: workspace-windows-installer
+          path: ${{ runner.temp }}/windows-installer
+      - name: Upload installer and publish release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          VERSION="${TAG#v}"
+          if ! gh release view "${TAG}" --repo "${GITHUB_REPOSITORY}" > /dev/null 2>&1; then
+            gh release create "${TAG}" --repo "${GITHUB_REPOSITORY}" --draft \
+              --title "Astro Survey Atlas Workspace ${VERSION}" \
+              --notes "Astro Survey Atlas Workspace ${VERSION}."
+          fi
+          gh release upload "${TAG}" "${RUNNER_TEMP}/windows-installer"/* \
+            --repo "${GITHUB_REPOSITORY}" --clobber
+          gh release edit "${TAG}" --repo "${GITHUB_REPOSITORY}" --draft=false
