@@ -36,7 +36,7 @@ export interface DataAssetAccess {
   label?: string;
 }
 
-export interface DataAssetScanSpec {
+export interface DataAssetCsvScanSpec {
   format: "csv";
   objectIdColumn: string;
   raColumn: string;
@@ -47,10 +47,16 @@ export interface DataAssetScanSpec {
   product?: string;
 }
 
-/**
- * Selection metadata for image/cube Warehouse scans. This is deliberately
- * separate from the CSV-only scanSpec used by the legacy local executor.
- */
+export interface DataAssetFitsScanSpec {
+  format: "fits";
+  fileNamePattern?: string;
+  modality?: string;
+  product?: string;
+}
+
+export type DataAssetScanSpec = DataAssetCsvScanSpec | DataAssetFitsScanSpec;
+
+/** Legacy scan selector retained while old assets are normalized. */
 export interface DataAssetWarehouseScanSpec {
   fileNamePattern: string;
 }
@@ -117,6 +123,7 @@ const PROJECT_STATES: readonly DataAssetProjectState[] = ["public_reference", "a
 const PROJECT_STATE_PRIORITY: readonly DataAssetProjectState[] = ["deliverable", "processed", "acquired", "public_reference", "planned"];
 const SCAN_SPEC_FIELDS = new Set([
   "format",
+  "fileNamePattern",
   "objectIdColumn",
   "raColumn",
   "decColumn",
@@ -173,7 +180,14 @@ function validateScanSpec(value: unknown): DataAssetScanSpec | undefined {
   if (unknown.length) throw new RangeError(`scanSpec contains unknown field: ${unknown[0]}`);
 
   const format = scanSpecText(scanSpec.format, "scanSpec.format", 20);
-  if (format !== "csv") throw new RangeError("scanSpec.format must be csv");
+  if (format === "fits") {
+    const fileNamePattern = scanSpecText(scanSpec.fileNamePattern, "scanSpec.fileNamePattern", 256, false);
+    if (fileNamePattern) validateCoverageFileNamePattern(fileNamePattern, "scanSpec.fileNamePattern");
+    const modality = scanSpecText(scanSpec.modality, "scanSpec.modality", SCAN_SPEC_TEXT_MAXIMUM, false);
+    const product = scanSpecText(scanSpec.product, "scanSpec.product", SCAN_SPEC_TEXT_MAXIMUM, false);
+    return { format, ...(fileNamePattern ? { fileNamePattern } : {}), ...(modality ? { modality } : {}), ...(product ? { product } : {}) };
+  }
+  if (format !== "csv") throw new RangeError("scanSpec.format must be csv or fits");
   const objectIdColumn = scanSpecText(scanSpec.objectIdColumn, "scanSpec.objectIdColumn", SCAN_SPEC_COLUMN_MAXIMUM)!;
   const raColumn = scanSpecText(scanSpec.raColumn, "scanSpec.raColumn", SCAN_SPEC_COLUMN_MAXIMUM)!;
   const decColumn = scanSpecText(scanSpec.decColumn, "scanSpec.decColumn", SCAN_SPEC_COLUMN_MAXIMUM)!;
@@ -313,6 +327,9 @@ function validateInput(input: DataAssetRegistrationInput): DataAssetRegistration
   const connectorLocationKeys = validateConnectorLocationKeys(value.connectorLocationKeys);
   const projectStates = validProjectStates(value.projectStates);
   const scanSpec = validateScanSpec(value.scanSpec);
+  if (scanSpec?.format === "fits" && value.kind !== "image" && value.kind !== "cube") {
+    throw new RangeError("FITS scanSpec is supported only for image and cube assets");
+  }
   const warehouseScanSpec = validateWarehouseScanSpec(value.warehouseScanSpec);
   if (warehouseScanSpec && value.kind !== "image" && value.kind !== "cube") {
     throw new RangeError("warehouseScanSpec is supported only for image and cube assets");

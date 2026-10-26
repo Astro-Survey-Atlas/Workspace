@@ -265,6 +265,24 @@ export class InstallationService {
     };
   }
 
+  async restoreDesiredBinding(value: unknown): Promise<void> {
+    await this.initialize();
+    if (value === null || value === undefined) {
+      this.#desired = null;
+      await this.#persist();
+      return;
+    }
+    if (!value || typeof value !== "object" || Array.isArray(value)) throw new RangeError("Warehouse binding backup is invalid");
+    const binding = value as Partial<WarehouseBindingState>;
+    if (typeof binding.enabled !== "boolean" || typeof binding.elasticsearchUrl !== "string") throw new RangeError("Warehouse binding backup is invalid");
+    this.#desired = binding.enabled ? {
+      enabled: true,
+      elasticsearchUrl: normalizeUrl(text(binding.elasticsearchUrl, "Warehouse Elasticsearch endpoint", 2_048)).toString().replace(/\/+$/, ""),
+      namespace: normalizeNamespace(binding.namespace),
+    } : { enabled: false, elasticsearchUrl: "", namespace: normalizeNamespace(binding.namespace) };
+    await this.#persist();
+  }
+
   async reconcile(intentValue: unknown): Promise<InstallationOperation> {
     await this.initialize();
     const intent = this.#validateIntent(intentValue);

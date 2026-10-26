@@ -32,9 +32,10 @@ function retryableIndexError(error: unknown): boolean {
   if (!(error instanceof Error)) return false;
   return /Elasticsearch request timed out|fetch failed|HTTP (429|502|503|504)\b|ECONNRESET|ECONNREFUSED|ETIMEDOUT/.test(error.message);
 }
-interface HeaderPoint extends Record<string, unknown> {
+export interface HeaderPoint extends Record<string, unknown> {
   file_id: string; source_uri: string; file_name: string; hdu_index: number; ra_deg: number; dec_deg: number;
   position_role?: string; footprint_bounds?: number[][];
+  moc_header?: Record<string, unknown>;
 }
 export async function convertPositionHeaders(records: unknown[]): Promise<Record<string, unknown>[]> {
   if (!records.length) return [];

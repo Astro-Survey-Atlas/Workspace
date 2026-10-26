@@ -14,6 +14,7 @@ declare module "ali-oss" {
 
   interface AliOssClient {
     list(options?: Record<string, unknown>): Promise<{ objects?: unknown[]; isTruncated?: boolean; nextMarker?: string }>;
+    getStream(name: string, options?: Record<string, unknown>): Promise<{ stream: { destroy?: () => void } | null; res: { status?: number; headers?: Record<string, string> } }>;
   }
 
   const OSS: new (options: AliOssOptions) => AliOssClient;

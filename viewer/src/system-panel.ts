@@ -3,6 +3,7 @@ import type { RuntimeDataServices, WarehouseInstallationView } from "./api";
 import type { AiProviderRecord, McpServerRecord } from "../../src/system-config";
 import { notifyWorkspace } from "./notifications";
 import type { DownloadSettingsView } from "./api";
+import type { WorkspaceBackupPreview, PublicSelectionRestore } from "../../src/workspace-config-backup";
 
 function byId<T extends HTMLElement>(id: string): T {
   const element = document.getElementById(id);
@@ -20,10 +21,15 @@ export interface SystemSummary {
   connected: number;
 }
 
-type SystemSection = "ai" | "mcp" | "warehouse" | "runtime" | "capabilities" | "downloads";
+type SystemSection = "ai" | "mcp" | "warehouse" | "runtime" | "capabilities" | "downloads" | "backup";
+
+const BACKUP_PREFERENCE_KEYS = [
+  "astro-workspace:survey-layer-preferences:v4", "astro-workspace:survey-layer-preferences:v3", "astro-workspace:survey-layer-preferences:v1",
+  "astro-workspace:theme:v1", "astro-workspace:scene-background:v1", "astro-workspace:aladin-image-survey:v1",
+];
 
 function settingsSection(value: string | undefined): SystemSection {
-  return value === "mcp" || value === "warehouse" || value === "runtime" || value === "capabilities" || value === "downloads" ? value : "ai";
+  return value === "mcp" || value === "warehouse" || value === "runtime" || value === "capabilities" || value === "downloads" || value === "backup" ? value : "ai";
 }
 
 export class SystemPanel {
@@ -37,6 +43,10 @@ export class SystemPanel {
   private downloads: DownloadSettingsView | null = null;
   private downloadTimer?: ReturnType<typeof setInterval>;
   private downloadsRefreshing = false;
+  private backupFile?: File;
+  private backupPreview?: WorkspaceBackupPreview;
+  private publicRestore?: PublicSelectionRestore;
+  private publicRestoreTimer?: ReturnType<typeof setTimeout>;
 
   constructor(private readonly onError: (error: unknown) => void, private readonly onSummary: (summary: SystemSummary) => void) {
     byId<HTMLButtonElement>("ai-provider-new").addEventListener("click", () => this.openProvider());
@@ -54,6 +64,17 @@ export class SystemPanel {
     byId<HTMLFormElement>("download-settings-form").addEventListener("submit", event => { event.preventDefault(); void this.saveDownloads().catch(error => this.fail(error)); });
     byId("download-proxy-test").addEventListener("click", () => void this.saveDownloads("test").catch(error => this.fail(error)));
     byId("download-proxy-clear").addEventListener("click", () => void this.saveDownloads("clear").catch(error => this.fail(error)));
+    byId<HTMLInputElement>("config-backup-file").addEventListener("change", event => {
+      this.backupFile = (event.currentTarget as HTMLInputElement).files?.[0];
+      this.backupPreview = undefined;
+      byId("config-backup-preview-result").hidden = true;
+      byId("config-backup-path-mappings").replaceChildren();
+      byId("config-backup-apply").hidden = true;
+      byId<HTMLButtonElement>("config-backup-preview").disabled = !this.backupFile;
+    });
+    byId<HTMLButtonElement>("config-backup-export").addEventListener("click", () => void this.exportBackup().catch(error => this.fail(error)));
+    byId<HTMLButtonElement>("config-backup-preview").addEventListener("click", () => void this.previewBackup().catch(error => this.fail(error)));
+    byId<HTMLButtonElement>("config-backup-apply").addEventListener("click", () => void this.applyBackup().catch(error => this.fail(error)));
   }
 
   async activate(): Promise<void> {
@@ -65,9 +86,15 @@ export class SystemPanel {
     await this.refreshDownloads(true);
     if (this.downloadTimer) clearInterval(this.downloadTimer);
     this.downloadTimer = setInterval(() => void this.refreshDownloads(false).catch(() => undefined), 30_000);
+    await this.refreshPublicSelection();
   }
 
-  deactivate(): void { if (this.downloadTimer) clearInterval(this.downloadTimer); this.downloadTimer = undefined; }
+  deactivate(): void {
+    if (this.downloadTimer) clearInterval(this.downloadTimer);
+    this.downloadTimer = undefined;
+    if (this.publicRestoreTimer) clearTimeout(this.publicRestoreTimer);
+    this.publicRestoreTimer = undefined;
+  }
   debugState(): Record<string, unknown> { return { aiProviders: this.providers.length, mcpServers: this.servers.length, runtime: this.runtime ? "loaded" : "unavailable", installation: this.installation ? this.installation.observed.state : "unavailable" }; }
 
   private async refresh(): Promise<void> {
@@ -100,6 +127,117 @@ export class SystemPanel {
     byId("settings-runtime-view").hidden = section !== "runtime";
     byId("settings-capabilities-view").hidden = section !== "capabilities";
     byId("settings-downloads-view").hidden = section !== "downloads";
+    byId("settings-backup-view").hidden = section !== "backup";
+    if (section === "backup") void this.refreshPublicSelection();
+  }
+
+  private backupPassword(): string { return byId<HTMLInputElement>("config-backup-password").value; }
+
+  private browserPreferences(): Record<string, string> {
+    const preferences: Record<string, string> = {};
+    for (const key of BACKUP_PREFERENCE_KEYS) {
+      try { const value = localStorage.getItem(key); if (value !== null) preferences[key] = value; } catch { /* storage may be unavailable */ }
+    }
+    return preferences;
+  }
+
+  private async exportBackup(): Promise<void> {
+    const button = byId<HTMLButtonElement>("config-backup-export");
+    button.disabled = true;
+    try {
+      const blob = await workspaceApi.exportConfigBackup(this.backupPassword(), this.browserPreferences());
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a"); link.href = url; link.download = `workspace-config-${new Date().toISOString().slice(0, 10)}.asaworkspace`;
+      link.click(); URL.revokeObjectURL(url);
+      byId("config-backup-feedback").textContent = "加密备份已导出。";
+    } finally { button.disabled = false; }
+  }
+
+  private async previewBackup(): Promise<void> {
+    if (!this.backupFile) throw new Error("请选择一个备份文件");
+    const button = byId<HTMLButtonElement>("config-backup-preview");
+    button.disabled = true;
+    byId("config-backup-feedback").textContent = "正在校验密码和备份文件…";
+    try {
+      this.backupPreview = await workspaceApi.previewConfigBackup(this.backupFile, this.backupPassword());
+      const result = byId("config-backup-preview-result");
+      const summary = this.backupPreview.summary;
+      result.replaceChildren();
+      const heading = document.createElement("strong"); heading.textContent = "备份内容";
+      const totals = document.createElement("p"); totals.textContent = `${summary.connectors} 个 Connector（${summary.credentialedConnectors} 个含凭据） · ${summary.assets} 个资产 · ${summary.surveys} 个用户巡天 · ${summary.aiProviders} 个 AI Provider · ${summary.mcpServers} 个 MCP Server · ${summary.publicPackages} 个公开资源包`;
+      const replace = document.createElement("p"); replace.className = "config-backup-replace-note"; replace.textContent = "应用后会替换这些配置，现有文件与扫描、下载、生产历史保留。导入的 Connector 需要重新检测。";
+      result.append(heading, totals, replace);
+      const mappings = byId("config-backup-path-mappings");
+      mappings.replaceChildren();
+      for (const missing of summary.missingLocalRoots) {
+        const row = document.createElement("label"); row.className = "config-backup-path-row";
+        const detail = document.createElement("span"); detail.textContent = `${missing.name} · 原路径 ${missing.rootPath}`;
+        const input = document.createElement("input"); input.className = "field-input"; input.type = "text"; input.dataset.sourcePath = missing.rootPath;
+        input.placeholder = "可选：填写新环境内已授权的目录路径";
+        row.append(detail, input); mappings.append(row);
+      }
+      result.hidden = false;
+      byId("config-backup-apply").hidden = false;
+      byId("config-backup-feedback").textContent = `校验通过 · 预览有效至 ${new Date(this.backupPreview.expiresAt).toLocaleTimeString()}`;
+    } finally { button.disabled = !this.backupFile; }
+  }
+
+  private async applyBackup(): Promise<void> {
+    if (!this.backupPreview) throw new Error("请先校验并预览备份文件");
+    const pathMappings: Record<string, string> = {};
+    byId("config-backup-path-mappings").querySelectorAll<HTMLInputElement>("input[data-source-path]").forEach(input => {
+      if (input.value.trim()) pathMappings[input.dataset.sourcePath!] = input.value.trim();
+    });
+    const button = byId<HTMLButtonElement>("config-backup-apply"); button.disabled = true;
+    byId("config-backup-feedback").textContent = "正在应用配置…";
+    try {
+      const result = await workspaceApi.applyConfigBackup(this.backupPreview.previewId, pathMappings);
+      for (const key of BACKUP_PREFERENCE_KEYS) {
+        try { localStorage.removeItem(key); } catch { /* storage may be unavailable */ }
+      }
+      for (const [key, value] of Object.entries(result.browserPreferences)) {
+        if (BACKUP_PREFERENCE_KEYS.includes(key)) { try { localStorage.setItem(key, value); } catch { /* storage may be unavailable */ } }
+      }
+      byId("config-backup-feedback").textContent = `已导入 ${result.imported.connectors} 个 Connector、${result.imported.assets} 个资产和 ${result.imported.surveys} 个巡天。正在恢复公开资源选择。`;
+      notifyWorkspace("配置导入完成", "页面即将重新载入；新环境中的 Connector 需要重新检测。", { tone: "success" });
+      setTimeout(() => window.location.reload(), 900);
+    } finally { button.disabled = false; }
+  }
+
+  private async refreshPublicSelection(): Promise<void> {
+    try {
+      this.publicRestore = (await workspaceApi.configBackupPublicSelection()) ?? undefined;
+      this.renderPublicSelection();
+      if (this.publicRestore?.status === "running" && this.#backupVisible()) {
+        if (this.publicRestoreTimer) clearTimeout(this.publicRestoreTimer);
+        this.publicRestoreTimer = setTimeout(() => { this.publicRestoreTimer = undefined; void this.refreshPublicSelection(); }, 1500);
+      }
+    } catch { /* status is optional before the first restore */ }
+  }
+
+  #backupVisible(): boolean { return !byId("settings-backup-view").hidden; }
+
+  private renderPublicSelection(): void {
+    const root = byId("config-backup-public-restore");
+    const restore = this.publicRestore;
+    root.hidden = !restore;
+    if (!restore) return;
+    const heading = document.createElement("header");
+    const title = document.createElement("strong"); title.textContent = "公开资源恢复";
+    const status = document.createElement("span"); status.textContent = restore.status === "succeeded" ? "已完成" : restore.status === "running" ? "正在下载" : restore.status === "partial" ? "部分失败" : "等待恢复";
+    heading.append(title, status);
+    const rows = restore.packages.map(item => {
+      const row = document.createElement("p");
+      row.textContent = `${item.packageId} · ${item.status === "succeeded" ? "已准备" : item.status === "running" ? "下载中" : item.status === "failed" ? `失败：${item.error ?? "可重试"}` : "等待中"}`;
+      return row;
+    });
+    root.replaceChildren(heading, ...rows);
+    if (restore.status === "partial" || restore.status === "pending") {
+      const actions = document.createElement("div"); actions.className = "settings-record-actions";
+      const retry = document.createElement("button"); retry.type = "button"; retry.className = "command-button secondary"; retry.textContent = "重试公开资源恢复";
+      retry.addEventListener("click", () => void workspaceApi.retryConfigBackupPublicSelection().then(value => { this.publicRestore = value; this.renderPublicSelection(); void this.refreshPublicSelection(); }).catch(error => this.fail(error)));
+      actions.append(retry); root.append(actions);
+    }
   }
 
   private async refreshDownloads(form: boolean): Promise<void> {

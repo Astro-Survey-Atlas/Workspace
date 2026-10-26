@@ -108,8 +108,8 @@ const COVERAGE_STATE_LABELS: Record<string, string> = {
 };
 
 const NEXT_ACTION_LABELS: Record<string, string> = {
-  scan_local: "扫描本地文件",
-  scan_remote: "提交远程扫描",
+  scan_local: "Workspace 扫描",
+  scan_remote: "Workspace 扫描",
   retry: "重试上次扫描",
   configure_connector: "配置可扫描 Connector",
   configure_index: "配置空间索引",
@@ -632,7 +632,7 @@ type WorkspaceTheme = "light" | "dark";
 const LIGHT_THEME_LOGO_SRC = "/icon_without_name_lon_web.svg";
 const DARK_THEME_LOGO_SRC = "/icon_without_name_lon_web_dark.svg";
 
-createIcons({ icons: { ChevronLeft, ChevronRight, Download, Globe2, GripVertical, Info, Layers3, Maximize2, MessageSquare, Minimize2, Moon, Play, Plus, RefreshCw, RotateCcw, Send, Settings2, SlidersHorizontal, Sun, Undo2, X } });
+createIcons({ icons: { ChevronLeft, ChevronRight, Download, FileJson2, Globe2, GripVertical, Info, Layers3, Maximize2, MessageSquare, Minimize2, Moon, Play, Plus, RefreshCw, RotateCcw, Send, Settings2, SlidersHorizontal, Sun, Undo2, X } });
 
 const themeQuery = window.matchMedia("(prefers-color-scheme: dark)");
 const themeToggle = byId<HTMLButtonElement>("theme-toggle");
@@ -993,7 +993,7 @@ function renderAladinStatus(status: AladinExplorerStatus): void {
       : `${formatInteger(status.returned)} / ${formatInteger(status.total)} DATA POINTS`;
   byId("layer-selection-count").textContent = `${formatInteger(status.returned)} DATA POINTS`;
   const loadedSummary = byId<HTMLOutputElement>("aladin-loaded-summary");
-  loadedSummary.textContent = `${formatInteger(status.returned)} / ${formatInteger(status.total)} DATA POINTS${status.indexing ? " · 索引补建中" : ""}`;
+  loadedSummary.textContent = `${formatInteger(status.returned)} / ${formatInteger(status.total)} DATA POINTS${status.indexing ? " · 索引生成中" : ""}`;
   byId("aladin-cache-state").textContent = status.indexing ? "自动更新中" : status.assets?.some((asset) => asset.cacheState === "cached") ? "CACHE RETAINED" : status.phase === "loading" ? "FETCHING NEW SKY" : "CACHE READY";
   if (aladinSnapshot) renderAladinAssetNavigation(aladinSnapshot.assetTargets, aladinExplorer?.getActiveAssetId() ?? null);
   syncAladinView();
@@ -1197,7 +1197,8 @@ function renderSurveyContextMenu(menu: SkyRegionMenu): void {
     : "构建公开数据下载任务";
   const crossmatchableAssets = menu.assetIds.filter((assetId) => {
     const asset = dataAssets.find((candidate) => candidate.id === assetId);
-    return asset?.kind === "catalog" && Boolean(asset.scanSpec?.raColumn && asset.scanSpec?.decColumn && asset.scanSpec?.objectIdColumn);
+    const scan = asset?.scanSpec?.format === "csv" ? asset.scanSpec : undefined;
+    return asset?.kind === "catalog" && Boolean(scan?.raColumn && scan.decColumn && scan.objectIdColumn);
   });
   buildCrossmatch.disabled = crossmatchableAssets.length < 2;
   buildCrossmatch.title = buildCrossmatch.disabled ? "需要两个已建立 RA / Dec 对象索引的 catalog 资产" : "构建对象交叉匹配任务";
@@ -2042,7 +2043,7 @@ function queryAladinPoint(point: SurveyObjectPoint, radiusArcsec: number, status
     },
   }, controller.signal).then((result) => {
     if (controller.signal.aborted || generation !== aladinPointInspectionGeneration) return;
-    const indexing = result.indexing ? " · 坐标索引补建中" : "";
+    const indexing = result.indexing ? " · 坐标索引生成中" : "";
     const truncated = result.truncated ? " · 结果已截断" : "";
     status.textContent = `${formatInteger(result.matches.length)} 个附近对象 · ${formatInteger(result.images.length)} 张覆盖影像${indexing}${truncated}`;
     appendAladinInspectionResults(result, results);
@@ -3297,11 +3298,15 @@ function remoteCoverageRecordForSurvey(id: string): SurveyRecord | undefined {
 }
 
 function assetHasS3Connector(asset: DataAssetRecord): boolean {
-  return [asset.access, ...(asset.accesses ?? [])].some((access) => access.connector === "s3");
+  return linkedWorkspaceConnectors(asset).some((connector) => connector.kind === "s3");
 }
 
-function assetHasLocalConnector(asset: DataAssetRecord): boolean {
-  return [asset.access, ...(asset.accesses ?? [])].some((access) => access.connector === "local");
+function linkedWorkspaceConnectors(asset: DataAssetRecord): ConnectorPublicRecord[] {
+  const accesses = [asset.access, ...(asset.accesses ?? [])];
+  const connectorIds = new Set([...(asset.connectorIds ?? []), ...accesses.map((access) => access.connectorId).filter((id): id is string => Boolean(id))]);
+  const locations = new Set([...(asset.connectorLocationKeys ?? []), ...accesses.map((access) => access.uri)]);
+  return workspaceConnectors.filter((connector) => (connector.kind === "local" || connector.kind === "s3")
+    && (connectorIds.has(connector.id) || locations.has(connector.locationKey)));
 }
 
 function linkedS3Connectors(asset: DataAssetRecord, connectors: readonly ConnectorPublicRecord[]): ConnectorPublicRecord[] {
@@ -3346,6 +3351,7 @@ function syncRemoteCoverageMode(): void {
 }
 
 function populateRemoteCoverageForm(asset: DataAssetRecord, connectors: readonly ConnectorPublicRecord[]): void {
+  const csvScan = asset.scanSpec?.format === "csv" ? asset.scanSpec : undefined;
   remoteCoverageAssetId = asset.id;
   const surveySelect = byId<HTMLSelectElement>("remote-coverage-survey");
   const surveyOptions = [new Option("选择巡天", "")];
@@ -3377,9 +3383,9 @@ function populateRemoteCoverageForm(asset: DataAssetRecord, connectors: readonly
     ? "catalog-radec"
     : asset.kind === "image" || asset.kind === "cube" ? "fits-wcs" : "catalog-radec";
   byId<HTMLSelectElement>("remote-coverage-mode").value = defaultMode;
-  byId<HTMLInputElement>("remote-coverage-ra-column").value = asset.scanSpec?.raColumn ?? "ra";
-  byId<HTMLInputElement>("remote-coverage-dec-column").value = asset.scanSpec?.decColumn ?? "dec";
-  byId<HTMLSelectElement>("remote-coverage-coordinate-units").value = asset.scanSpec?.coordinateUnits ?? "deg";
+  byId<HTMLInputElement>("remote-coverage-ra-column").value = csvScan?.raColumn ?? "ra";
+  byId<HTMLInputElement>("remote-coverage-dec-column").value = csvScan?.decColumn ?? "dec";
+  byId<HTMLSelectElement>("remote-coverage-coordinate-units").value = csvScan?.coordinateUnits ?? "deg";
   byId<HTMLInputElement>("remote-coverage-healpix-column").value = "healpix";
   byId<HTMLInputElement>("remote-coverage-healpix-order").value = "8";
   syncRemoteCoverageMode();
@@ -3454,6 +3460,33 @@ function delay(milliseconds: number): Promise<void> {
 }
 
 const remoteCoverageWatchers = new Set<string>();
+const workspaceScanWatchers = new Set<string>();
+
+async function watchWorkspaceScan(assetId: string, runId: string): Promise<void> {
+  if (workspaceScanWatchers.has(runId)) return;
+  workspaceScanWatchers.add(runId);
+  try {
+    for (let attempt = 0; attempt < 120; attempt += 1) {
+      await delay(5000);
+      const runs = await workspaceApi.dataAssetScanRuns(assetId);
+      const run = runs.find((candidate) => candidate.id === runId);
+      if (attempt % 2 === 0 || !run || run.status === "failed" || run.status === "succeeded") {
+        await refreshWorkspaceAssets(assetId).catch((error) => console.warn("Unable to refresh Workspace scan status", error));
+      }
+      if (!run || run.status === "failed" || run.status === "succeeded") {
+        if (run?.status === "succeeded") {
+          notifyWorkspace("Workspace 扫描完成", dataAssets.find((asset) => asset.id === assetId)?.name ?? assetId, { tone: "success" });
+        } else if (run?.status === "failed") {
+          notifyWorkspace("Workspace 扫描失败", run.error ?? "扫描未完成", { tone: "error" });
+        }
+        return;
+      }
+    }
+    notifyWorkspace("Workspace 扫描仍在运行", "扫描进度会在资产详情中继续更新。", { tone: "info" });
+  } finally {
+    workspaceScanWatchers.delete(runId);
+  }
+}
 
 async function watchRemoteCoverageScan(assetId: string, runId: string): Promise<void> {
   if (remoteCoverageWatchers.has(runId)) return;
@@ -3532,34 +3565,48 @@ function renderLayerAssetDetails(asset: DataAssetRecord): void {
   const layer = workspaceAssetLayers.get(asset.id);
   const scan = asset.scanSpec;
   const operational = coverageStatusesByAsset.get(asset.id);
+  const coverageState = operational?.coverage ?? (layer?.coverageStatus === "pending" || layer?.status === "pending" ? "pending" : layer?.coverageStatus === "ready" && layer.pixels.length ? "ready" : layer?.coverageStatus === "error" ? "failed" : layer?.coverageStatus === "unavailable" ? "unavailable" : "not_started");
   const actions: HTMLButtonElement[] = [];
-  const runLocalScan = (): void => {
-    if (!scan) return;
-    const scanButton = actions.find((button) => button.dataset.action === "local-scan");
+  const linkedConnectors = linkedWorkspaceConnectors(asset);
+  const supportsWorkspaceScan = scan?.format === "csv" || scan?.format === "fits" || asset.kind === "image" || asset.kind === "cube";
+  const workspaceScanAvailable = workspaceCapabilities?.localScan?.enabled !== false && workspaceCapabilities?.localScan?.configured !== false;
+  const runWorkspaceScan = (): void => {
+    const explicitConnectorId = asset.access?.connectorId ?? asset.accesses?.find((access) => access.connectorId)?.connectorId;
+    const connectorId = explicitConnectorId && linkedConnectors.some((connector) => connector.id === explicitConnectorId)
+      ? explicitConnectorId
+      : linkedConnectors.length === 1 ? linkedConnectors[0]!.id : undefined;
+    if (!connectorId) {
+      notifyWorkspace("无法确定扫描 Connector", "该资产关联了多个 Connector，请在 Connector tab 中选择对应来源。", { tone: "warning" });
+      return;
+    }
+    const scanButton = actions.find((button) => button.dataset.action === "workspace-scan");
     if (scanButton) scanButton.disabled = true;
-    notifyWorkspace("正在提交用户资产扫描", asset.name, { tone: "info" });
-    void workspaceApi.executeDataAssetLocalScan(asset.id)
+    notifyWorkspace("正在提交 Workspace 扫描", asset.name, { tone: "info" });
+    void workspaceApi.executeDataAssetWorkspaceScan(asset.id, connectorId)
       .then((run) => {
-        notifyWorkspace("用户资产扫描已提交", `${asset.name} · ${run.taskKind ?? "user_scan"}`, { tone: "success" });
+        notifyWorkspace("Workspace 扫描已提交", `${asset.name} · ${run.fileCount ?? 0} 个文件`, { tone: "success" });
+        void watchWorkspaceScan(asset.id, run.id).catch((error) => console.warn("Unable to monitor Workspace scan", error));
         return refreshWorkspaceAssets(asset.id).catch((error) => {
-          notifyWorkspace("用户资产覆盖刷新失败", error instanceof Error ? error.message : String(error), { tone: "warning" });
+          notifyWorkspace("资产扫描状态刷新失败", error instanceof Error ? error.message : String(error), { tone: "warning" });
         });
       })
-      .catch((error) => notifyWorkspace("用户资产扫描失败", error instanceof Error ? error.message : String(error), { tone: "error" }))
+      .catch((error) => notifyWorkspace("Workspace 扫描提交失败", error instanceof Error ? error.message : String(error), { tone: "error" }))
       .finally(() => { if (scanButton) scanButton.disabled = false; });
   };
-  if (scan && assetHasLocalConnector(asset) && (operational?.nextAction === "scan_local" || operational?.nextAction === "retry" || !operational)) {
-    const scanButton = actionButton(operational?.nextAction === "retry" ? "重试本地扫描" : "扫描本地文件", runLocalScan);
-    scanButton.dataset.action = "local-scan";
+  const canStartWorkspaceScan = operational?.nextAction === "scan_local" || operational?.nextAction === "scan_remote" || operational?.nextAction === "retry" || !operational;
+  if (workspaceScanAvailable && supportsWorkspaceScan && linkedConnectors.length && canStartWorkspaceScan) {
+    const scanButton = actionButton("Workspace 扫描", runWorkspaceScan);
+    scanButton.dataset.action = "workspace-scan";
+    scanButton.disabled = linkedConnectors.length > 1 && !asset.access?.connectorId && !asset.accesses?.some((access) => access.connectorId);
+    scanButton.title = scanButton.disabled ? "请在资产访问描述中指定一个 Connector" : "Workspace 读取 CSV / FITS 并生成覆盖与数据点";
     actions.push(scanButton);
   }
-  if (assetHasS3Connector(asset) && (operational?.nextAction === "scan_remote" || operational?.nextAction === "retry" || operational?.nextAction === "configure_index" || !operational)) {
-    const warehouseDisabled = workspaceCapabilities?.dataWarehouse.enabled === false || workspaceCapabilities?.dataWarehouse.configured === false;
-    const remoteButton = actionButton(operational?.nextAction === "retry" ? "重试远程扫描" : warehouseDisabled ? "Warehouse 未启用" : "提交远程覆盖扫描", () => {
+  const warehouseAvailable = Boolean(workspaceCapabilities?.dataWarehouse.enabled && workspaceCapabilities.dataWarehouse.configured !== false);
+  if (warehouseAvailable && assetHasS3Connector(asset) && coverageState !== "pending" && coverageState !== "ready" && coverageState !== "empty") {
+    const remoteButton = actionButton("Warehouse 扫描（可选）", () => {
       void openRemoteCoverageDialog(asset);
     });
-    remoteButton.disabled = warehouseDisabled;
-    remoteButton.title = warehouseDisabled ? "当前 Workspace 未配置可用的 Warehouse；本地 ES 不受影响" : "使用 Warehouse 读取 S3 / OSS 并生成用户 MOC";
+    remoteButton.title = "可选：由 Warehouse 扫描 S3 / OSS，结果仍写入 Workspace 索引";
     actions.push(remoteButton);
   }
   if (operational?.nextAction === "configure_connector") {
@@ -3569,15 +3616,11 @@ function renderLayerAssetDetails(asset: DataAssetRecord): void {
   }
   if (operational?.nextAction === "configure_index") {
     const hint = actionButton("查看空间索引配置", () => {
-      notifyWorkspace("空间索引尚未配置", "请配置 ASTRO_ES_URL 或启用 Warehouse 后重新扫描。", { tone: "warning" });
+      notifyWorkspace("Workspace 空间索引尚未配置", "请配置 ASTRO_ES_URL 后重新扫描。", { tone: "warning" });
     });
     hint.disabled = true;
     actions.push(hint);
   }
-  if (operational?.coverage === "ready" && (asset.kind === "image" || asset.kind === "cube")) {
-    actions.push(actionButton("修复 MOC / 补建数据点", () => { void workspaceApi.derivedRepair(asset.id, "both").then(() => { notifyWorkspace("补建已提交", "从现有文件清单读取 header，保留已有覆盖", { tone: "info" }); }).catch(showFatal); }));
-  }
-  const coverageState = operational?.coverage ?? (layer?.coverageStatus === "pending" || layer?.status === "pending" ? "pending" : layer?.coverageStatus === "ready" && layer.pixels.length ? "ready" : layer?.coverageStatus === "error" ? "failed" : layer?.coverageStatus === "unavailable" ? "unavailable" : "not_started");
   const coverage = coverageState === "pending"
     ? "处理中"
     : coverageState === "ready"
@@ -3587,6 +3630,8 @@ function renderLayerAssetDetails(asset: DataAssetRecord): void {
           : coverageState === "unavailable" ? operational?.message ?? "空间索引不可用"
             : "未开始";
   const nextAction = operational?.nextAction ? (NEXT_ACTION_LABELS[operational.nextAction] ?? operational.nextAction) : "--";
+  const statusLabels: Record<string, string> = { queued: "排队中", running: "扫描中", succeeded: "已生成", failed: "失败", partial: "部分完成", not_indexed: "尚未生成" };
+  const phaseLabels: Record<string, string> = { staging: "准备文件", reading: "读取文件", coverage: "生成覆盖", indexing: "写入索引", complete: "完成" };
   const projectState = asset.projectState === "acquired"
     ? "已掌握（已登记访问权，不代表已有空间覆盖）"
     : PROJECT_STATE_LABELS[asset.projectState] ?? asset.projectState;
@@ -3595,13 +3640,15 @@ function renderLayerAssetDetails(asset: DataAssetRecord): void {
     ["数据类型", asset.kind],
     ["使用阶段", projectState],
     ["覆盖状态", `${COVERAGE_STATE_LABELS[coverageState] ?? coverageState}${coverage && coverage !== COVERAGE_STATE_LABELS[coverageState] ? ` · ${coverage}` : ""}`],
-    ["数据点", `${formatInteger(operational?.dataPointCount ?? 0)} · ${operational?.dataPointStatus ?? "尚未补建"}`],
-    ...(operational?.dataPointProgress ? [["补建进度", `${formatInteger(operational.dataPointProgress.processedFiles)} / ${formatInteger(operational.dataPointProgress.fileCount)} 文件 · ${operational.dataPointProgress.errors} 项问题`] as [string, string]] : []),
+    ["数据点", `${formatInteger(operational?.dataPointCount ?? 0)} · ${statusLabels[operational?.dataPointStatus ?? "not_indexed"] ?? operational?.dataPointStatus ?? "尚未生成"}`],
+    ...(operational?.scanProgress ? [["扫描进度", `${phaseLabels[operational.scanProgress.phase ?? ""] ?? "处理中"} · ${formatInteger(operational.scanProgress.processedFiles)} / ${formatInteger(operational.scanProgress.fileCount)} 文件 · ${operational.scanProgress.failedFiles} 项失败`] as [string, string]] : []),
+    ...(operational?.dataPointProgress && !operational.scanProgress ? [["扫描进度", `${formatInteger(operational.dataPointProgress.processedFiles)} / ${formatInteger(operational.dataPointProgress.fileCount)} 文件 · ${operational.dataPointProgress.errors} 项问题`] as [string, string]] : []),
     ["目录对象查询", operational?.objects === "queryable" ? "可查询" : operational?.objects === "unavailable" ? "索引不可用" : "尚未建立对象索引"],
     ["下一步", nextAction],
     ...(operational?.message ? [["说明", operational.message] as [string, string]] : []),
-    ["CSV 文件", asset.sourceRelativePath ?? "未指定"],
-    ["对象列", scan ? `${scan.objectIdColumn} · RA ${scan.raColumn} · Dec ${scan.decColumn}` : "未配置 CSV scanSpec"],
+    ["源路径", asset.sourceRelativePath ?? "Connector 根目录"],
+    ...(scan?.format === "csv" ? [["对象列", `${scan.objectIdColumn} · RA ${scan.raColumn} · Dec ${scan.decColumn}`] as [string, string]] : []),
+    ...(scan?.format === "fits" || asset.kind === "image" || asset.kind === "cube" ? [["扫描格式", "FITS 图像范围与 WCS 中心"] as [string, string]] : []),
   ], actions);
 }
 

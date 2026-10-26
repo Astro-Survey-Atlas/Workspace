@@ -139,7 +139,7 @@
             <div class="catalog-columns"><span>数据资产</span><span>巡天</span><span>类型</span><span>使用阶段 <button class="status-help" type="button" aria-label="使用阶段说明"><i data-lucide="info" aria-hidden="true"></i><span class="sr-only">使用阶段说明</span><span class="status-help-tooltip" role="tooltip">计划中：已登记但尚未准备使用。已掌握：已获得数据或访问权，但不代表已经建立空间覆盖。已处理：已完成项目处理。可用：可作为项目交付或分析输入。公开参考：仅作为公开说明参考。</span></button></span></div>
         <div id="catalog-asset-list" class="catalog-asset-list"></div>
         <div id="catalog-empty" class="catalog-empty" hidden>没有符合当前筛选条件的用户资产。</div>
-        <footer class="catalog-stage-footer">可选 Warehouse 会读取这里登记的用户访问描述；Workspace 也可以在本地扫描并生成用户 MOC。</footer>
+        <footer class="catalog-stage-footer">Workspace 可直接读取已关联的本地目录或 S3 / OSS，并生成用户覆盖与数据点；Warehouse 是可选扫描执行器。</footer>
       </section>
 
       <section id="resource-package-stage" class="catalog-stage resource-package-stage" aria-label="公开资源集" hidden>
@@ -184,6 +184,7 @@
         <div class="connector-view-tabs" role="tablist" aria-label="连接器视图">
           <button id="connector-list-tab" class="active" type="button" role="tab" aria-controls="connector-list-view" aria-selected="true" data-connector-view="list">Connector list</button>
           <button id="connector-history-tab" type="button" role="tab" aria-controls="connector-history-view" aria-selected="false" data-connector-view="history">扫描记录</button>
+          <button id="connector-statistics-tab" type="button" role="tab" aria-controls="connector-statistics-view" aria-selected="false" data-connector-view="statistics">数据统计</button>
         </div>
         <section id="connector-list-view" role="tabpanel" aria-labelledby="connector-list-tab">
           <div id="connector-list-search" class="catalog-search-bar connector-search-bar">
@@ -209,6 +210,14 @@
           <div class="connector-history-columns"><span>扫描任务</span><span>Connector</span><span>执行器</span><span>状态</span><span>开始时间</span></div>
           <div id="connector-history-list" class="connector-history-list"></div>
           <div id="connector-history-empty" class="catalog-empty" hidden>还没有扫描记录。</div>
+        </section>
+        <section id="connector-statistics-view" role="tabpanel" aria-labelledby="connector-statistics-tab" hidden>
+          <div class="connector-statistics-toolbar">
+            <p id="connector-statistics-status" role="status" aria-live="polite">显示最近一次手动统计和成功扫描快照。</p>
+            <button id="connector-statistics-refresh" class="command-button secondary" type="button"><i data-lucide="refresh-cw"></i><span>刷新统计</span></button>
+          </div>
+          <div id="connector-statistics-summary" class="connector-statistics-summary"></div>
+          <div id="connector-statistics-list" class="connector-statistics-list"></div>
         </section>
       </section>
 
@@ -379,6 +388,7 @@
           <button type="button" class="settings-tab" role="tab" aria-selected="false" data-settings-tab="runtime">数据服务</button>
           <button type="button" class="settings-tab" role="tab" aria-selected="false" data-settings-tab="downloads">下载</button>
           <button type="button" class="settings-tab" role="tab" aria-selected="false" data-settings-tab="capabilities">生产能力</button>
+          <button type="button" class="settings-tab" role="tab" aria-selected="false" data-settings-tab="backup">备份与恢复</button>
         </div>
         <section id="settings-ai-view" class="settings-view" role="tabpanel">
           <div class="settings-view-actions"><button id="ai-provider-new" class="primary-command compact-command" type="button"><i data-lucide="plus"></i><span>注册 Provider</span></button></div>
@@ -423,6 +433,24 @@
             <p class="control-note">下载服务每 30 秒检查代理连接和下载源响应。</p>
           </form>
           <article id="download-route-health" class="settings-record" aria-live="polite"></article>
+        </section>
+        <section id="settings-backup-view" class="settings-view" role="tabpanel" hidden>
+          <div class="settings-record config-backup-record">
+            <header><strong>Workspace 配置备份</strong></header>
+            <p>包含 Connector 凭据、用户资产与巡天、系统设置、已应用公开资源选择和浏览器偏好。扫描、下载与生产记录及可重建数据不包含在内。</p>
+            <label class="field-label" for="config-backup-password">备份密码</label>
+            <input id="config-backup-password" class="field-input" type="password" autocomplete="new-password" minlength="12" maxlength="256" placeholder="至少 12 个字符" />
+            <div class="settings-record-actions">
+              <button id="config-backup-export" class="command-button secondary" type="button"><i data-lucide="download"></i><span>导出加密备份</span></button>
+              <label class="command-button secondary config-backup-file-label" for="config-backup-file"><i data-lucide="file-json-2"></i><span>选择备份文件</span><input id="config-backup-file" type="file" accept=".asaworkspace,application/vnd.asa.workspace-config-backup+json,application/json" /></label>
+              <button id="config-backup-preview" class="command-button secondary" type="button" disabled>校验并预览</button>
+            </div>
+            <div id="config-backup-preview-result" class="config-backup-preview" hidden></div>
+            <div id="config-backup-path-mappings" class="config-backup-path-mappings"></div>
+            <div class="settings-record-actions"><button id="config-backup-apply" class="primary-command compact-command" type="button" hidden>应用并替换当前配置</button></div>
+            <p id="config-backup-feedback" role="status" aria-live="polite"></p>
+          </div>
+          <article id="config-backup-public-restore" class="settings-record" aria-live="polite" hidden></article>
         </section>
       </section>
 
@@ -513,7 +541,7 @@
         <form method="dialog" class="dialog-form connector-run-logs-dialog-form">
           <header>
             <div>
-              <span class="panel-kicker">WAREHOUSE TASK</span>
+              <span class="panel-kicker">SCAN TASK</span>
               <h2 id="connector-run-logs-dialog-title">任务日志</h2>
             </div>
             <button id="connector-run-logs-dialog-close" class="icon-button" type="button" aria-label="关闭任务日志" title="关闭任务日志"><i data-lucide="x"></i></button>
@@ -534,7 +562,7 @@
           <div class="catalog-form-grid"><label><span class="field-label">巡天 ID</span><input name="id" class="field-input" placeholder="csst" pattern="[a-z0-9][a-z0-9._-]*" required /></label><label><span class="field-label">名称</span><input name="name" class="field-input" placeholder="CSST" maxlength="160" required /></label><label><span class="field-label">任务 / 项目</span><input name="mission" class="field-input" placeholder="Chinese Space Station Telescope" maxlength="160" /></label><label><span class="field-label">来源 URL</span><input name="sourceUrl" class="field-input" type="url" placeholder="https://..." required /></label></div>
           <label class="field-label" for="survey-registration-description">说明</label><input id="survey-registration-description" name="description" class="field-input" maxlength="1000" />
           <label class="field-label" for="survey-registration-modalities">模态</label><select id="survey-registration-modalities" name="modalities" class="field-input" multiple required><option value="imaging">图像</option><option value="spectroscopy">光谱</option><option value="photometry">测光</option><option value="time-domain">时域</option><option value="integral-field">积分场</option><option value="ultraviolet">紫外</option><option value="infrared">红外</option><option value="catalog">目录</option><option value="simulation">仿真</option></select>
-          <fieldset class="survey-release-field"><legend class="field-label">首个发布</legend><div class="catalog-form-grid"><label><span class="field-label">发布 ID</span><input name="releaseId" class="field-input" placeholder="cosmos-custom-v1" pattern="[a-z0-9][a-z0-9._-]*" required /></label><label><span class="field-label">发布名称</span><input name="releaseLabel" class="field-input" placeholder="COSMOS custom v1" maxlength="160" required /></label><label><span class="field-label">产品</span><input name="product" class="field-input" placeholder="Photometric catalog" maxlength="160" required /></label><label><span class="field-label">产品模态</span><select name="productModality" class="field-input"><option value="photometry">测光</option><option value="imaging">图像</option><option value="spectroscopy">光谱</option><option value="catalog">目录</option></select></label></div><label class="field-label" for="survey-registration-product-description">产品说明</label><input id="survey-registration-product-description" name="productDescription" class="field-input" maxlength="500" required /><p class="control-note">本地巡天和发布不要求存在于 Assets 目录。公开巡天可直接用于资产登记；覆盖资源包按需下载。本地文件由 Workspace 扫描，S3/OSS 远程扫描由可选 Warehouse 执行。</p></fieldset>
+          <fieldset class="survey-release-field"><legend class="field-label">首个发布</legend><div class="catalog-form-grid"><label><span class="field-label">发布 ID</span><input name="releaseId" class="field-input" placeholder="cosmos-custom-v1" pattern="[a-z0-9][a-z0-9._-]*" required /></label><label><span class="field-label">发布名称</span><input name="releaseLabel" class="field-input" placeholder="COSMOS custom v1" maxlength="160" required /></label><label><span class="field-label">产品</span><input name="product" class="field-input" placeholder="Photometric catalog" maxlength="160" required /></label><label><span class="field-label">产品模态</span><select name="productModality" class="field-input"><option value="photometry">测光</option><option value="imaging">图像</option><option value="spectroscopy">光谱</option><option value="catalog">目录</option></select></label></div><label class="field-label" for="survey-registration-product-description">产品说明</label><input id="survey-registration-product-description" name="productDescription" class="field-input" maxlength="500" required /><p class="control-note">本地巡天和发布不要求存在于 Assets 目录。公开巡天可直接用于资产登记；覆盖资源包按需下载。Workspace 可扫描本地文件和 S3 / OSS；Warehouse 可作为可选执行器。</p></fieldset>
           <footer><button id="survey-registration-cancel" class="command-button secondary" type="button">取消</button><button class="command-button" type="submit">登记巡天</button></footer>
         </form>
       </dialog>

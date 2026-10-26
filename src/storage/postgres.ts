@@ -1,6 +1,7 @@
 import { Pool, type PoolClient, type QueryResultRow } from "pg";
 
 import type { ConnectorIngestRunFilter, ConnectorIngestRunRecord } from "../connector-history.js";
+import type { StatisticsEntry, StatisticsSnapshot, StatisticsTotals } from "../data-statistics-types.js";
 import type { ConnectorRecord } from "../connectors.js";
 import type { DataAssetRecord } from "../data-catalog.js";
 import { assertPersistableDataAsset, type MetadataStore, type MetadataTransaction, type SurveyIdentityRecord } from "./types.js";
@@ -25,6 +26,43 @@ class PostgresTransaction implements MetadataTransaction {
     await this.client.query(`INSERT INTO ${this.schema}.survey_identities (id, source, source_id, record)
       VALUES ($1, $2, $3, $4) ON CONFLICT (id) DO UPDATE SET record = excluded.record`,
     [record.id, record.source, record.sourceId, record]);
+  }
+
+  async deleteSurveyIdentity(id: string): Promise<boolean> {
+    return (await this.client.query(`DELETE FROM ${this.schema}.survey_identities WHERE id=$1`, [id])).rowCount === 1;
+  }
+
+  async listStatisticsSnapshots(): Promise<StatisticsSnapshot[]> {
+    return this.records<StatisticsSnapshot>(`SELECT record FROM ${this.schema}.statistics_snapshots ORDER BY updated_at DESC,id DESC`);
+  }
+
+  async putStatisticsSnapshot(record: StatisticsSnapshot): Promise<void> {
+    await this.client.query(`INSERT INTO ${this.schema}.statistics_snapshots(id,slot,updated_at,record) VALUES($1,$2,$3,$4)
+      ON CONFLICT(id) DO UPDATE SET record=excluded.record,updated_at=excluded.updated_at`, [record.id,record.slot,record.updatedAt,record]);
+  }
+
+  async putStatisticsEntries(snapshotId: string, entries: StatisticsEntry[]): Promise<void> {
+    if (!entries.length) return;
+    await this.client.query(`INSERT INTO ${this.schema}.statistics_entries(snapshot_id,file_key,size_bytes)
+      SELECT $1, key, bytes FROM jsonb_to_recordset($2::jsonb) AS e(key text,bytes double precision)
+      ON CONFLICT(snapshot_id,file_key) DO UPDATE SET size_bytes=excluded.size_bytes`, [snapshotId, JSON.stringify(entries)]);
+  }
+
+  async deleteStatisticsSnapshot(id: string): Promise<void> {
+    await this.client.query(`DELETE FROM ${this.schema}.statistics_entries WHERE snapshot_id=$1`, [id]);
+    await this.client.query(`DELETE FROM ${this.schema}.statistics_snapshots WHERE id=$1`, [id]);
+  }
+
+  async statisticsTotals(snapshotIds: string[]): Promise<StatisticsTotals> {
+    if (!snapshotIds.length) return { files: 0, knownBytes: 0, unknownFiles: 0 };
+    const result = await this.client.query(`SELECT COUNT(*) files, COALESCE(SUM(size_bytes),0) known_bytes,
+      COUNT(*) FILTER(WHERE size_bytes IS NULL) unknown_files FROM (
+      SELECT size_bytes, ROW_NUMBER() OVER(PARTITION BY file_key ORDER BY s.updated_at DESC,s.id DESC) rank
+      FROM ${this.schema}.statistics_entries e JOIN ${this.schema}.statistics_snapshots s ON s.id=e.snapshot_id
+      WHERE snapshot_id=ANY($1::text[])
+    ) selected WHERE rank=1`, [snapshotIds]);
+    const row = result.rows[0];
+    return { files: Number(row.files), knownBytes: Number(row.known_bytes), unknownFiles: Number(row.unknown_files) };
   }
 
   async listConnectors(): Promise<ConnectorRecord[]> {
@@ -244,6 +282,17 @@ export class PostgresMetadataStore implements MetadataStore {
         )`);
         await client.query(`INSERT INTO ${this.quotedSchema}.schema_migrations (version, applied_at) VALUES (3, now())`);
       }
+      const appliedV4 = await client.query(`SELECT version FROM ${this.quotedSchema}.schema_migrations WHERE version = 4`);
+      if (appliedV4.rowCount === 0) {
+        await client.query(`CREATE TABLE ${this.quotedSchema}.statistics_snapshots (
+          id text PRIMARY KEY, slot text NOT NULL, updated_at text NOT NULL, record jsonb NOT NULL
+        ); CREATE INDEX statistics_snapshots_slot_idx ON ${this.quotedSchema}.statistics_snapshots(slot);
+        CREATE TABLE ${this.quotedSchema}.statistics_entries (
+          snapshot_id text NOT NULL, file_key text NOT NULL, size_bytes double precision,
+          PRIMARY KEY(snapshot_id,file_key)
+        )`);
+        await client.query(`INSERT INTO ${this.quotedSchema}.schema_migrations(version,applied_at) VALUES(4,now())`);
+      }
       await client.query("COMMIT");
       this.initialized = true;
     } catch (error) {
@@ -277,6 +326,12 @@ export class PostgresMetadataStore implements MetadataStore {
 
   listSurveyIdentities = () => this.direct().listSurveyIdentities();
   putSurveyIdentity = (record: SurveyIdentityRecord) => this.transaction((transaction) => transaction.putSurveyIdentity(record));
+  deleteSurveyIdentity = (id: string) => this.transaction(tx => tx.deleteSurveyIdentity(id));
+  listStatisticsSnapshots = () => this.direct().listStatisticsSnapshots();
+  putStatisticsSnapshot = (record: StatisticsSnapshot) => this.transaction(tx => tx.putStatisticsSnapshot(record));
+  putStatisticsEntries = (id: string, entries: StatisticsEntry[]) => this.transaction(tx => tx.putStatisticsEntries(id, entries));
+  deleteStatisticsSnapshot = (id: string) => this.transaction(tx => tx.deleteStatisticsSnapshot(id));
+  statisticsTotals = (ids: string[]) => this.direct().statisticsTotals(ids);
   listConnectors = () => this.direct().listConnectors();
   getConnector = (id: string) => this.direct().getConnector(id);
   getConnectorByLocationKey = (locationKey: string) => this.direct().getConnectorByLocationKey(locationKey);

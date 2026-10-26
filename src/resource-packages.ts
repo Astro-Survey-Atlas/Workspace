@@ -1031,6 +1031,36 @@ export class ResourcePackageManager {
     });
   }
 
+  activeSelection(): ResourcePackageLoad[] {
+    return this.#state.packages.filter(record => record.activeReleaseIds.length)
+      .map(record => ({ packageId: record.id, releaseIds: [...record.activeReleaseIds] }));
+  }
+
+  async clearActiveSelection(): Promise<void> {
+    await this.#mutate(async () => {
+      const next = this.#state.packages.map(record => ({ ...record, activeReleaseIds: [] as string[] }));
+      await this.#persist(next);
+      this.#state = { schemaVersion: STATE_SCHEMA_VERSION, packages: next };
+    });
+  }
+
+  async restoreActiveSelection(loads: ResourcePackageLoad[]): Promise<void> {
+    if (this.available) { await this.setActive(loads); return; }
+    await this.#mutate(async () => {
+      const next = this.#state.packages.map(record => ({ ...record, activeReleaseIds: [] as string[] }));
+      for (const load of loads) {
+        const installed = next.find(record => record.id === load.packageId);
+        const manifest = this.#installedFootprints.get(load.packageId);
+        if (!installed || !manifest || load.releaseIds.some(id => !this.#releaseIds(manifest).includes(id))) {
+          throw new RangeError(`Cannot restore previous public resource selection: ${load.packageId}`);
+        }
+        installed.activeReleaseIds = [...load.releaseIds];
+      }
+      await this.#persist(next);
+      this.#state = { schemaVersion: STATE_SCHEMA_VERSION, packages: next };
+    });
+  }
+
   get(id: string): PublicResourcePackage {
     this.#assertAvailable();
     const result = this.#publicRecord(id);

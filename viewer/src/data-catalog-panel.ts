@@ -2,6 +2,7 @@ import type { ConnectorPublicRecord } from "../../src/connectors";
 import type { DataAssetAccess, DataAssetKind, DataAssetLineage, DataAssetProjectState, DataAssetRecord, DataAssetRegistrationInput, DataAssetSource } from "../../src/data-catalog";
 import type { TagDefinition } from "../../src/tags";
 import type { SurveyCard, SurveyRecord } from "../../src/survey-registry";
+import type { DataAmount, DataStatisticsView } from "../../src/data-statistics-types";
 import { workspaceApi, type LocalCsvInspection } from "./api";
 import { notifyWorkspace } from "./notifications";
 
@@ -22,6 +23,15 @@ const PROJECT_LABELS: Record<DataAssetProjectState, string> = {
   deliverable: "可用",
   planned: "计划中",
 };
+
+function amountBytes(amount: DataAmount | undefined): string {
+  if (!amount || amount.bytes === null) return amount?.state === "partial" ? "部分统计" : amount?.state === "unsupported" ? "不支持" : "未统计";
+  if (amount.bytes < 1024) return `${amount.bytes} B`;
+  const units = ["KiB", "MiB", "GiB", "TiB"];
+  let value = amount.bytes / 1024, unit = 0;
+  while (value >= 1024 && unit < units.length - 1) { value /= 1024; unit++; }
+  return `${value.toFixed(value >= 100 ? 0 : value >= 10 ? 1 : 2)} ${units[unit]}`;
+}
 
 function projectStatesLabel(asset: DataAssetRecord): string {
   const states = asset.projectStates?.length ? asset.projectStates : [asset.projectState];
@@ -52,6 +62,7 @@ export class DataCatalogPanel {
   #active = false;
   #scanInspection: LocalCsvInspection | null = null;
   #scanConnectorId: string | null = null;
+  #statistics?: DataStatisticsView;
 
   constructor(onError: (error: unknown) => void, onConnectorSelected?: (connectorId: string) => void, onNewConnector?: () => void, onAssetChanged?: (assetId?: string) => void | Promise<void>) {
     this.#onError = onError;
@@ -79,7 +90,9 @@ export class DataCatalogPanel {
   async activate(surveys: SurveyCard[], records: Map<string, SurveyRecord>): Promise<void> {
     this.#active = true;
     await this.refreshSurveys();
-    [this.#assets, this.#connectors, this.#tags] = await Promise.all([this.#loadUserAssets(), workspaceApi.connectors(), workspaceApi.tags()]);
+    [this.#assets, this.#connectors, this.#tags, this.#statistics] = await Promise.all([
+      this.#loadUserAssets(), workspaceApi.connectors(), workspaceApi.tags(), workspaceApi.dataStatistics().catch(() => undefined),
+    ]);
     this.#renderCreateConnectors();
     if (!this.#selectedId || !this.#assets.some((asset) => asset.id === this.#selectedId)) this.#selectedId = this.#assets[0]?.id ?? null;
     this.#render();
@@ -253,8 +266,12 @@ export class DataCatalogPanel {
       const name = document.createElement("strong");
       name.textContent = asset.name;
       const product = document.createElement("small");
+      const statistics = this.#statistics?.assets.find(entry => entry.assetId === asset.id);
       product.textContent = `${asset.product} · ${this.#tagText((asset.tags ?? asset.modalities).slice(0, 3)) || "未标注 Tag"}`;
-      identity.append(name, product);
+      const sizes = document.createElement("small");
+      sizes.className = "catalog-row-statistics";
+      sizes.textContent = `资产 ${amountBytes(statistics?.size)} · Connector ${amountBytes(statistics?.connectorTotal)}`;
+      identity.append(name, product, sizes);
       const survey = document.createElement("span");
       survey.className = "catalog-row-survey";
       survey.textContent = this.#surveyName(this.#effectiveSurveyId(asset));
@@ -289,7 +306,14 @@ export class DataCatalogPanel {
     const note = document.createElement("p");
     note.className = "catalog-detail-copy";
     note.textContent = asset.description || "暂无说明";
-    const basic = this.#detailEditing === "basic" ? this.#basicEditor(asset) : this.#rows([["资产 ID", asset.id], ["来源", "用户登记"], ["巡天 / 发布", `${this.#surveyName(this.#effectiveSurveyId(asset))} / ${this.#effectiveReleaseId(asset) ?? "未设置"}`], ["产品 / 类型", `${asset.product} / ${asset.kind}`], ["Tag", this.#tagText(asset.tags ?? asset.modalities) || "未标注"], ["使用阶段", projectStatesLabel(asset)], ...(projectStatesLabel(asset).includes("已掌握") ? [["已掌握说明", "已获得数据或访问权，但尚未证明建立空间覆盖；请扫描或删除旧记录。"] as [string, string]] : [])]);
+    const statistics = this.#statistics?.assets.find(entry => entry.assetId === asset.id);
+    const basic = this.#detailEditing === "basic" ? this.#basicEditor(asset) : this.#rows([
+      ["资产 ID", asset.id], ["来源", "用户登记"], ["巡天 / 发布", `${this.#surveyName(this.#effectiveSurveyId(asset))} / ${this.#effectiveReleaseId(asset) ?? "未设置"}`],
+      ["产品 / 类型", `${asset.product} / ${asset.kind}`], ["资产大小", `${statistics?.size.files.toLocaleString() ?? "--"} 个文件 · ${amountBytes(statistics?.size)}`],
+      ["关联 Connector 总大小", `${statistics?.connectorTotal.files.toLocaleString() ?? "--"} 个文件 · ${amountBytes(statistics?.connectorTotal)}`],
+      ["Tag", this.#tagText(asset.tags ?? asset.modalities) || "未标注"], ["使用阶段", projectStatesLabel(asset)],
+      ...(projectStatesLabel(asset).includes("已掌握") ? [["已掌握说明", "已获得数据或访问权，但尚未证明建立空间覆盖；请扫描或删除旧记录。"] as [string, string]] : []),
+    ]);
     const sourceList = this.#detailEditing === "sources" ? this.#sourceEditor(asset) : document.createElement("ul");
     if (this.#detailEditing !== "sources") { (asset.sources ?? []).forEach((source) => { const item = document.createElement("li"); const link = document.createElement("a"); link.href = source.url; link.target = "_blank"; link.rel = "noreferrer"; link.textContent = `${source.label}: ${source.url}`; item.append(link); source.description && item.append(` · ${source.description}`); sourceList.append(item); }); if (!sourceList.childElementCount) sourceList.textContent = "尚未登记公开来源"; }
     const accessList = this.#detailEditing === "access" ? this.#accessEditor(asset) : document.createElement("ul");

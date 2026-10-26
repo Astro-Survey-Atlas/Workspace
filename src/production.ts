@@ -125,6 +125,8 @@ export interface ProductionRunInput {
   crawlerId?: string;
   concurrency?: number;
   storageConnectorId?: string;
+  scanExecutor?: "workspace" | "warehouse" | "none";
+  /** @deprecated Use scanExecutor. Kept for stored/older callers. */
   warehouseHandoff?: "none" | "submit";
   leftAssetId?: string;
   rightAssetId?: string;
@@ -145,10 +147,13 @@ export interface ProductionSourceResolution {
   blocked: Array<{ sourceId: string; reason: string }>;
 }
 
-/** Adapter that registers source-scoped image assets and submits verified files to Warehouse. */
-export interface ProductionWarehouseHandoff {
+/** Adapter that registers source-scoped image assets and submits verified files to a scan executor. */
+export interface ProductionScanHandoff {
   submit(input: ProductionWarehouseHandoffInput): Promise<ProductionWarehouseHandoffReceipt>;
 }
+
+/** @deprecated Use ProductionScanHandoff. */
+export type ProductionWarehouseHandoff = ProductionScanHandoff;
 
 export interface ProductionWarehouseHandoffInput {
   runId: string;
@@ -179,22 +184,23 @@ export const PRODUCTION_PIPELINES: readonly ProductionPipelineDefinition[] = [
     version: 1,
     key: "overlap-download@1",
     title: "重合区域数据下载",
-    description: "解析重合区域的来源单元，审批清单后流式下载；Warehouse 可用时自动登记并扫描 FITS 图像。",
+    description: "解析重合区域的来源单元并流式下载；默认由 Workspace 登记和扫描 FITS 图像，也可选择 Warehouse 或仅下载。",
     availability: "available",
-    inputRequirements: ["RegionSnapshot", "来源解析", "清单审批", "并发", "存储位置", "Warehouse 提交"],
-    outputs: ["区域 JSON/CSV", "下载清单 download-plan.json", "下载账本 download-manifest.json", "来源资产", "Warehouse FITS 覆盖", "新的本地 Connector"],
+    inputRequirements: ["RegionSnapshot", "来源解析", "清单审批", "并发", "存储位置", "覆盖扫描执行器"],
+    outputs: ["区域 JSON/CSV", "下载清单 download-plan.json", "下载账本 download-manifest.json", "来源资产", "FITS 覆盖与数据点", "新的本地 Connector"],
     dag: [
       { id: "region", title: "固定区域快照", description: "保存重合区域的 ICRS / NESTED HEALPix 快照。" },
       { id: "resolve", title: "来源单元解析", description: "把区域来源解析为 typed source units 并展开规范文件清单。", dependsOn: ["region"] },
       { id: "approval", title: "清单审批", description: "人工确认清单内容与目标；审批绑定清单 SHA-256。", dependsOn: ["resolve"] },
       { id: "download", title: "流式下载与校验", description: "按并发配置流式下载清单文件，支持断点续传与校验。", dependsOn: ["approval"] },
       { id: "connector", title: "登记结果 Connector", description: "把下载目录登记为新的 Workspace Connector。", dependsOn: ["download"] },
-      { id: "warehouse", title: "Warehouse 扫描提交", description: "按已验证文件的巡天来源登记图像资产并提交覆盖扫描。", dependsOn: ["connector"] },
+      { id: "warehouse", title: "覆盖扫描", description: "按已校验文件的巡天来源登记图像资产，并由所选执行器生成覆盖与数据点。", dependsOn: ["connector"] },
     ],
     parameters: [
       { key: "exportFormat", label: "区域导出格式", type: "select", defaultValue: "json", options: ["json", "csv"] },
       { key: "crawlerId", label: "爬虫执行器", type: "select", defaultValue: "builtin-http", options: ["builtin-http"] },
       { key: "concurrency", label: "并发数", type: "number", defaultValue: 2 },
+      { key: "scanExecutor", label: "扫描执行器", type: "select", defaultValue: "workspace", options: ["workspace", "warehouse", "none"] },
     ],
   },
   {
@@ -338,7 +344,7 @@ function crossmatchCsv(rows: readonly Record<string, unknown>[]): string {
 
 function assetSupportsObjects(asset: DataAssetRecord): boolean {
   const scan = asset.scanSpec;
-  if (!scan) return false;
+  if (!scan || scan.format !== "csv") return false;
   return asset.kind === "catalog" && Boolean(scan.raColumn && scan.decColumn && scan.objectIdColumn)
     && scan.coordinateFrame === "ICRS" && scan.coordinateUnits === "deg";
 }
@@ -394,7 +400,8 @@ interface ProductionServiceOptions {
   sourceResolver?: ProductionSourceResolver;
   sourceResolveOptions?: ResolveSourceInventoryOptions;
   confirmPublicDownload?: (confirmation: RegionDownloadConfirmation) => Promise<SourceFileInventory>;
-  warehouseHandoff?: ProductionWarehouseHandoff;
+  workspaceHandoff?: ProductionScanHandoff;
+  warehouseHandoff?: ProductionScanHandoff;
 }
 
 interface PersistedState {
@@ -413,7 +420,8 @@ export class ProductionService {
   readonly #sourceResolver?: ProductionSourceResolver;
   readonly #sourceResolveOptions?: ResolveSourceInventoryOptions;
   readonly #confirmPublicDownload?: ProductionServiceOptions["confirmPublicDownload"];
-  readonly #warehouseHandoff?: ProductionWarehouseHandoff;
+  readonly #workspaceHandoff?: ProductionScanHandoff;
+  readonly #warehouseHandoff?: ProductionScanHandoff;
   readonly #runs = new Map<string, ProductionRun>();
   readonly #writes = new Map<string, Promise<void>>();
   readonly #locks = new Map<string, Promise<unknown>>();
@@ -433,6 +441,7 @@ export class ProductionService {
     this.#sourceResolver = options.sourceResolver;
     this.#sourceResolveOptions = options.sourceResolveOptions;
     this.#confirmPublicDownload = options.confirmPublicDownload;
+    this.#workspaceHandoff = options.workspaceHandoff;
     this.#warehouseHandoff = options.warehouseHandoff;
   }
 
@@ -467,6 +476,10 @@ export class ProductionService {
           ...legacyRun,
           steps: Array.isArray(legacyRun.steps) ? legacyRun.steps.map(normalizeStep) : [],
         };
+        if (run.pipelineKey === "overlap-download@1") {
+          const legacyExecutor = run.input.warehouseHandoff === "none" ? "none" : run.input.warehouseHandoff === "submit" ? "warehouse" : undefined;
+          run.input.scanExecutor ??= legacyExecutor ?? (this.#workspaceHandoff ? "workspace" : this.#warehouseHandoff ? "warehouse" : "none");
+        }
         if ((run.status === "queued" || run.status === "running" || run.status === "resolving")
           && !(this.#downloads.externalDownloads && run.pipelineKey === "overlap-download@1" && run.summary?.downloadJobId)) {
           run.status = "failed";
@@ -508,7 +521,19 @@ export class ProductionService {
   }
 
   listPipelines(): ProductionPipelineDefinition[] {
-    return PRODUCTION_PIPELINES.map(clone);
+    return PRODUCTION_PIPELINES.map((pipeline) => {
+      const result = clone(pipeline);
+      const executor = result.parameters.find((parameter) => parameter.key === "scanExecutor");
+      if (executor) {
+        executor.options = [
+          ...(this.#workspaceHandoff ? ["workspace"] : []),
+          ...(this.#warehouseHandoff ? ["warehouse"] : []),
+          "none",
+        ];
+        executor.defaultValue = this.#workspaceHandoff ? "workspace" : this.#warehouseHandoff ? "warehouse" : "none";
+      }
+      return result;
+    });
   }
 
   async listRuns(): Promise<ProductionRun[]> {
@@ -591,9 +616,15 @@ export class ProductionService {
       normalized.crawlerId = crawlerId;
       normalized.concurrency = concurrency;
       if (input.storageConnectorId !== undefined) normalized.storageConnectorId = text(input.storageConnectorId, "storageConnectorId");
-      const warehouseHandoff = input.warehouseHandoff ?? (this.#warehouseHandoff ? "submit" : "none");
-      if (warehouseHandoff !== "none" && warehouseHandoff !== "submit") throw new RangeError("warehouseHandoff must be none or submit");
-      normalized.warehouseHandoff = warehouseHandoff;
+      if (input.warehouseHandoff !== undefined && input.warehouseHandoff !== "none" && input.warehouseHandoff !== "submit") {
+        throw new RangeError("warehouseHandoff must be none or submit");
+      }
+      const legacyExecutor = input.warehouseHandoff === "none" ? "none" : input.warehouseHandoff === "submit" ? "warehouse" : undefined;
+      const scanExecutor = input.scanExecutor ?? legacyExecutor ?? (this.#workspaceHandoff ? "workspace" : this.#warehouseHandoff ? "warehouse" : "none");
+      if (scanExecutor !== "workspace" && scanExecutor !== "warehouse" && scanExecutor !== "none") throw new RangeError("scanExecutor must be workspace, warehouse, or none");
+      if (scanExecutor === "workspace" && !this.#workspaceHandoff) throw new RangeError("Workspace scan executor is not configured");
+      if (scanExecutor === "warehouse" && !this.#warehouseHandoff) throw new RangeError("Warehouse scan executor is not configured");
+      normalized.scanExecutor = scanExecutor;
       // Runs without pre-expanded files resolve their source units inside the
       // run and pause at a human approval gate before any transfer.
       if (!hasLegacyFiles && !confirmedInventory && !reuse) initialStatus = "resolving";
@@ -989,31 +1020,36 @@ export class ProductionService {
     await this.writeArtifact(run, "download-manifest.json", "application/json", `${JSON.stringify({ region, crawlerId: run.input.crawlerId, inventory, job: current }, null, 2)}\n`);
     await this.setStep(run, "connector", "succeeded", current.outputConnectorId ?? "已登记");
 
-    // --- warehouse ---
-    const handoffMode = run.input.warehouseHandoff === "none" ? "none" : "submit";
-    if (handoffMode === "none") {
-      await this.setStep(run, "warehouse", "skipped", "未请求 Warehouse 扫描");
+    // --- coverage scan ---
+    const scanExecutor = run.input.scanExecutor === "warehouse" ? "warehouse"
+      : run.input.scanExecutor === "none" ? "none" : "workspace";
+    if (scanExecutor === "none") {
+      await this.setStep(run, "warehouse", "skipped", "未请求覆盖扫描");
       return;
     }
-    if (!this.#warehouseHandoff) {
-      await this.setStep(run, "warehouse", "failed", "当前部署未启用 Warehouse 扫描适配器");
-      throw new Error("请求提交 Warehouse 扫描，但当前部署未启用 Warehouse（请设置 warehouseHandoff=none 或启用 Warehouse）");
-    }
-    if (!run.outputConnectorId) throw new Error("缺少输出 Connector，无法提交 Warehouse 扫描");
-    await this.setStep(run, "warehouse", "running", "提交 Warehouse 扫描请求");
-    const receipt = await this.#warehouseHandoff.submit({
+    const handoff = scanExecutor === "workspace" ? this.#workspaceHandoff : this.#warehouseHandoff;
+    if (!handoff) throw new Error(`${scanExecutor === "workspace" ? "Workspace" : "Warehouse"} scan executor is not configured`);
+    if (!run.outputConnectorId) throw new Error("缺少下载结果 Connector，无法提交覆盖扫描");
+    await this.setStep(run, "warehouse", "running", `提交 ${scanExecutor === "workspace" ? "Workspace" : "Warehouse"} 覆盖扫描`);
+    const receipt = await handoff.submit({
       runId: originId,
       connectorId: run.outputConnectorId,
       inventorySha256: inventory.inventorySha256,
       inventory,
       verifiedRelativePaths: current.transfer.filter((entry) => entry.status === "verified").map((entry) => entry.relativePath),
     });
-    run.summary = { ...run.summary, warehouseScanRuns: receipt.scanRunIds, ...(receipt.message ? { warehouseHandoffMessage: receipt.message } : {}) };
+    run.summary = {
+      ...run.summary,
+      scanExecutor,
+      scanRuns: receipt.scanRunIds,
+      ...(scanExecutor === "workspace" ? { workspaceScanRuns: receipt.scanRunIds } : { warehouseScanRuns: receipt.scanRunIds }),
+      ...(receipt.message ? { scanHandoffMessage: receipt.message } : {}),
+    };
     if (!receipt.accepted) {
       await this.setStep(run, "warehouse", "skipped", receipt.message ?? "下载内容没有可自动扫描的 FITS 图像资产");
       return;
     }
-    await this.setStep(run, "warehouse", "succeeded", `Warehouse 已受理 ${receipt.scanRunIds.length} 个扫描请求`);
+    await this.setStep(run, "warehouse", "succeeded", `${scanExecutor === "workspace" ? "Workspace" : "Warehouse"} 已受理 ${receipt.scanRunIds.length} 个扫描请求`);
   }
 
   async #executeCrossmatch(run: ProductionRun): Promise<void> {

@@ -21,9 +21,15 @@ export interface DataAssetCoverageEvidence {
 export interface DataAssetRunEvidence {
   status?: string;
   taskKind?: string;
+  executor?: string;
   error?: string;
   createdAt?: string;
   updatedAt?: string;
+  phase?: string;
+  processedFiles?: number;
+  fileCount?: number;
+  failedFiles?: number;
+  pointCount?: number;
 }
 
 export interface DataAssetOperationalStatus {
@@ -34,6 +40,7 @@ export interface DataAssetOperationalStatus {
   dataPointCount?: number;
   dataPointStatus?: string;
   dataPointProgress?: { processedFiles: number; fileCount: number; errors: number };
+  scanProgress?: { status: string; executor?: string; phase?: string; processedFiles: number; fileCount: number; failedFiles: number };
   message?: string;
 }
 
@@ -105,6 +112,7 @@ export function deriveDataAssetOperationalStatus(input: DataAssetStatusInput): D
   if (state === "failed") nextAction = "retry";
   else if (state === "not_started") {
     if (hasLocal && input.localScanConfigured) nextAction = "scan_local";
+    else if (hasRemote && input.localScanConfigured) nextAction = "scan_remote";
     else if (hasRemote && input.warehouseConfigured) nextAction = "scan_remote";
     else if (!connectorAvailable) nextAction = "configure_connector";
     else if (hasLocal || hasRemote) nextAction = "configure_index";

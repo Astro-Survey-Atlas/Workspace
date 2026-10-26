@@ -748,7 +748,7 @@ test("registering a survey restores the asset draft with its first release selec
 
 test("connector actions and unified scan history expose only supported execution", async ({ page }) => {
   const now = "2026-08-13T10:00:00.000Z";
-  let warehouseEnabled = true;
+  let warehouseEnabled = false;
   let submittedBody: unknown;
   const connectors = [
     {
@@ -760,7 +760,8 @@ test("connector actions and unified scan history expose only supported execution
     {
       id: "connector-local-fixture", locationKey: "local:///data/catalog", displayPath: "/data/catalog",
       name: "Local mounted catalog", description: "Fixture local connector", kind: "local", config: { rootPath: "/data/catalog" },
-      status: "ready", createdAt: now, updatedAt: now, origin: "user", credentials: { accessKeyId: "", secretConfigured: false },
+      status: "ready", createdAt: now, updatedAt: now, origin: "user",
+      lastCheck: { status: "ok", checkedAt: now, summary: "目录可读" }, credentials: { accessKeyId: "", secretConfigured: false },
     },
     {
       id: "connector-jdbc-fixture", locationKey: "jdbc:fixture", displayPath: "jdbc:postgresql://db/catalog/public",
@@ -768,6 +769,15 @@ test("connector actions and unified scan history expose only supported execution
       status: "ready", createdAt: now, updatedAt: now, origin: "user", credentials: { accessKeyId: "", secretConfigured: false },
     },
   ];
+  const assets = [{
+    id: "asset-s3", name: "Fixture FITS images", description: "Workspace scan fixture", surveyId: "fixture-survey", releaseId: "fixture-r1",
+    product: "FITS images", kind: "image", modalities: ["imaging"], tags: ["imaging"],
+    access: { connector: "s3", uri: "s3://fixture/catalog", format: "directory", connectorId: "connector-s3-fixture" },
+    accesses: [{ connector: "s3", uri: "s3://fixture/catalog", format: "directory", connectorId: "connector-s3-fixture" }],
+    connectorIds: ["connector-s3-fixture"], connectorLocationKeys: ["s3://fixture/catalog"],
+    scanSpec: { format: "fits", modality: "imaging", product: "FITS images" }, status: "ready", projectState: "acquired",
+    footprintIds: [], origin: "user", createdAt: now, updatedAt: now,
+  }];
   const runs: ConnectorIngestRun[] = [
     {
       id: "run-flink", locationKey: "s3://fixture/catalog", connectorId: "connector-s3-fixture", connectorName: "S3 science archive", connectorKind: "s3", executor: "flink-ingest",
@@ -788,7 +798,12 @@ test("connector actions and unified scan history expose only supported execution
     },
   ];
 
-  await page.route("**/api/capabilities", (route) => route.fulfill({ json: { dataWarehouse: { enabled: warehouseEnabled }, metadataStore: { engine: "postgres" } } }));
+  await page.route("**/api/capabilities", (route) => route.fulfill({ json: {
+    dataWarehouse: { enabled: warehouseEnabled, configured: warehouseEnabled },
+    localScan: { enabled: true, configured: true, executor: "workspace", objectIndex: "astro_objects_v1", coverageIndex: "astro_object_coverage_v1" },
+    metadataStore: { engine: "postgres" },
+  } }));
+  await page.route("**/api/data-assets", (route) => route.fulfill({ json: { assets } }));
   await page.route("**/api/connectors", (route) => route.fulfill({ json: { connectors } }));
   await page.route("**/api/connector-ingest-runs", (route) => route.fulfill({ json: { runs } }));
   await page.route("**/api/connectors/connector-s3-fixture/scan-runs", async (route) => {
@@ -821,11 +836,11 @@ test("connector actions and unified scan history expose only supported execution
   const iconTops = await inspector.locator(".connector-icon-actions button").evaluateAll((buttons) => buttons.map((button) => button.getBoundingClientRect().top));
   expect(new Set(iconTops.map((top) => Math.round(top))).size).toBe(1);
 
-  const execute = inspector.getByRole("button", { name: "执行覆盖扫描" });
+  const execute = inspector.getByRole("button", { name: "执行 Workspace 扫描" });
   await expect(execute).toBeEnabled();
   await expect(execute).toHaveClass(/primary-command/);
   await execute.click();
-  await expect(page.locator("#workspace-notification-deck .workspace-notification").filter({ hasText: "覆盖扫描任务已提交" })).toBeVisible();
+  await expect(page.locator("#workspace-notification-deck .workspace-notification").filter({ hasText: "Workspace 扫描已提交" })).toBeVisible();
   expect(submittedBody).toEqual({});
 
   await page.getByRole("tab", { name: "扫描记录" }).click();
@@ -890,16 +905,16 @@ test("connector actions and unified scan history expose only supported execution
   const connectorTabUnderline = await page.locator("#connector-list-tab").evaluate((button) => getComputedStyle(button, "::after").backgroundColor);
   expect(connectorTabUnderline).not.toBe("rgb(66, 212, 198)");
   await page.locator("#connector-list .connector-row", { hasText: "Local mounted catalog" }).click();
-  await expect(inspector.getByRole("button", { name: "执行覆盖扫描" })).toBeDisabled();
-  await expect(inspector).toContainText("本地覆盖扫描需要已登记的图像或数据立方体资产");
+  await expect(inspector.getByRole("button", { name: "执行 Workspace 扫描" })).toBeDisabled();
+  await expect(inspector).toContainText("请先登记并关联一个支持 CSV 或 FITS 的用户资产");
   await page.locator("#connector-list .connector-row", { hasText: "JDBC science database" }).click();
-  await expect(inspector.getByRole("button", { name: "执行覆盖扫描" })).toBeDisabled();
+  await expect(inspector.getByRole("button", { name: "执行 Workspace 扫描" })).toBeDisabled();
   await expect(inspector).toContainText("JDBC 扫描执行器尚未接入");
 
   warehouseEnabled = false;
   await page.locator('[data-mode="catalog"]').click();
   await page.locator('[data-mode="connectors"]').click();
   await page.locator("#connector-list .connector-row", { hasText: "S3 science archive" }).click();
-  await expect(inspector.getByRole("button", { name: "执行覆盖扫描" })).toBeDisabled();
-  await expect(inspector).toContainText("数据仓库不可用");
+  await expect(inspector.getByRole("button", { name: "执行 Workspace 扫描" })).toBeEnabled();
+  await expect(inspector).toContainText("使用 Workspace 扫描已关联资产并生成覆盖与数据点");
 });

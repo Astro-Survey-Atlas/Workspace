@@ -417,6 +417,8 @@ export class LocalCsvScanExecutor {
   }
 
   async #execute(scan: PreparedLocalScan): Promise<ConnectorIngestRunRecord> {
+    const scanSpec = scan.asset.scanSpec;
+    if (!scanSpec || scanSpec.format !== "csv") throw new LocalScanPreconditionError("CSV scan requires a CSV scanSpec");
     const baseArtifactContext: UserMocArtifactContext = {
       layerId: workspaceLayerId(scan.asset.id),
       scanRunId: scan.run.id,
@@ -435,9 +437,9 @@ export class LocalCsvScanExecutor {
         ...(this.#maxFileBytes === undefined ? {} : { maxFileBytes: this.#maxFileBytes }),
       };
       const scanOptions = {
-        objectIdColumn: scan.asset.scanSpec!.objectIdColumn,
-        raColumn: scan.asset.scanSpec!.raColumn,
-        decColumn: scan.asset.scanSpec!.decColumn,
+        objectIdColumn: scanSpec.objectIdColumn,
+        raColumn: scanSpec.raColumn,
+        decColumn: scanSpec.decColumn,
         surveyId: scan.surveyId,
         releaseId: scan.releaseId,
         product: scan.product,

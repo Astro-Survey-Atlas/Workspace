@@ -4,6 +4,7 @@ import type { SurveyCard, SurveyRecord } from "../../src/survey-registry";
 import { createIcons, Pencil, Play, ScrollText, SearchCheck, Trash2 } from "lucide";
 
 import { workspaceApi, type ConnectorScanRun, type WarehouseTaskLogs, type WorkspaceCapabilities } from "./api";
+import type { DataAmount, DataStatisticsView } from "../../src/data-statistics-types";
 import { notifyWorkspace } from "./notifications";
 
 export interface ConnectorMetrics {
@@ -29,7 +30,16 @@ const STATUS_LABELS: Record<ConnectorStatus, string> = { draft: "未检测", rea
 const RUN_STATUS_LABELS: Record<ConnectorScanRun["status"], string> = { queued: "排队中", running: "执行中", succeeded: "成功", failed: "失败" };
 const SENSITIVE_CONFIG_KEY = /(auth|credential|secret|password|passphrase|token|access.?key|api.?key|private.?key|session|user(name)?)/i;
 
-type ConnectorView = "list" | "history";
+type ConnectorView = "list" | "history" | "statistics";
+
+function formatBytes(amount: DataAmount): string {
+  if (amount.bytes === null) return amount.state === "unsupported" ? "不支持" : amount.state === "partial" ? "部分统计" : "未统计";
+  if (amount.bytes < 1024) return `${amount.bytes} B`;
+  const units = ["KiB", "MiB", "GiB", "TiB"];
+  let value = amount.bytes / 1024, unit = 0;
+  while (value >= 1024 && unit < units.length - 1) { value /= 1024; unit++; }
+  return `${value.toFixed(value >= 100 ? 0 : value >= 10 ? 1 : 2)} ${units[unit]}`;
+}
 
 function connectorLocation(record: ConnectorPublicRecord): string { return record.displayPath; }
 
@@ -58,6 +68,8 @@ export class ConnectorPanel {
   #view: ConnectorView = "list";
   #active = false;
   #runPollTimer: ReturnType<typeof setTimeout> | undefined;
+  #statistics?: DataStatisticsView;
+  #statisticsPollTimer: ReturnType<typeof setTimeout> | undefined;
 
   constructor(onError: (error: unknown) => void, onMetrics: (metrics: ConnectorMetrics) => void = () => {}) {
     this.#onError = onError;
@@ -81,8 +93,10 @@ export class ConnectorPanel {
       button.addEventListener("click", () => {
         this.#view = button.dataset.connectorView as ConnectorView;
         this.#render();
+        if (this.#view === "statistics") void this.#loadStatistics();
       });
     });
+    byId<HTMLButtonElement>("connector-statistics-refresh").addEventListener("click", () => void this.#refreshStatistics());
     byId<HTMLInputElement>("connector-run-search").addEventListener("input", () => this.#renderHistory());
     ["connector-run-status-filter", "connector-run-kind-filter"].forEach((id) => {
       byId<HTMLSelectElement>(id).addEventListener("change", () => this.#renderHistory());
@@ -151,6 +165,8 @@ export class ConnectorPanel {
     this.#closeRunLogsDialog();
     if (this.#runPollTimer) clearTimeout(this.#runPollTimer);
     this.#runPollTimer = undefined;
+    if (this.#statisticsPollTimer) clearTimeout(this.#statisticsPollTimer);
+    this.#statisticsPollTimer = undefined;
   }
 
   #renderConfigFieldsFrom(form: HTMLFormElement, requireNewSecret: boolean): void {
@@ -172,8 +188,10 @@ export class ConnectorPanel {
     });
     byId("connector-list-view").hidden = this.#view !== "list";
     byId("connector-history-view").hidden = this.#view !== "history";
+    byId("connector-statistics-view").hidden = this.#view !== "statistics";
     byId("connector-list-search").hidden = this.#view !== "list";
     byId("connector-history-search").hidden = this.#view !== "history";
+    if (this.#view === "statistics") { this.#renderStatistics(); return; }
     const connectorFiltersDisabled = this.#view === "history";
     byId<HTMLSelectElement>("connector-kind-filter").disabled = connectorFiltersDisabled;
     byId<HTMLSelectElement>("connector-status-filter").disabled = connectorFiltersDisabled;
@@ -215,6 +233,62 @@ export class ConnectorPanel {
     empty.textContent = this.#records.length ? "没有符合当前搜索和筛选条件的 Connector。" : "还没有登记 Connector。";
     if (facetCount) facetCount.textContent = `${records.length} / ${this.#records.length}`;
     this.#renderDetail();
+  }
+
+  async #loadStatistics(): Promise<void> {
+    if (!this.#active || this.#view !== "statistics") return;
+    try {
+      this.#statistics = await workspaceApi.dataStatistics();
+      this.#renderStatistics();
+      if (this.#statistics.refresh?.status === "running") this.#scheduleStatisticsPoll();
+    } catch (error) { this.#onError(error); }
+  }
+
+  async #refreshStatistics(): Promise<void> {
+    const button = byId<HTMLButtonElement>("connector-statistics-refresh");
+    button.disabled = true;
+    try {
+      await workspaceApi.refreshDataStatistics();
+      await this.#loadStatistics();
+      this.#scheduleStatisticsPoll();
+    } catch (error) { this.#onError(error); }
+    finally { button.disabled = false; }
+  }
+
+  #scheduleStatisticsPoll(): void {
+    if (this.#statisticsPollTimer) clearTimeout(this.#statisticsPollTimer);
+    this.#statisticsPollTimer = setTimeout(() => { this.#statisticsPollTimer = undefined; void this.#loadStatistics(); }, 1800);
+  }
+
+  #renderStatistics(): void {
+    if (!this.#active || this.#view !== "statistics") return;
+    const view = this.#statistics;
+    const status = byId("connector-statistics-status");
+    if (!view) { status.textContent = "正在读取已保存的统计快照…"; return; }
+    const refresh = view.refresh;
+    status.textContent = refresh?.status === "running" ? `${refresh.phase} · ${refresh.processedFiles.toLocaleString()} 个文件 · ${refresh.completedConnectors}/${refresh.totalConnectors} 个 Connector` : refresh?.status === "partial" ? `${refresh.phase} · ${refresh.errors.length} 个来源需要检查` : refresh?.status === "failed" ? refresh.phase : refresh?.status === "succeeded" ? `${refresh.phase} · ${new Date(refresh.updatedAt).toLocaleString()}` : "显示最近一次手动统计和成功扫描快照。";
+    const summary = byId("connector-statistics-summary");
+    const metrics: Array<[string, string, string]> = [
+      ["可访问数据", `${view.accessible.files.toLocaleString()} 个文件`, formatBytes(view.accessible)],
+      ["成功扫描数据", `${view.scanned.files.toLocaleString()} 个文件`, formatBytes(view.scanned)],
+      ["Connector", `${view.connectorCount} 个`, `${view.assetCount} 个用户资产`],
+    ];
+    summary.replaceChildren(...metrics.map(([label, count, bytes]) => {
+      const item = document.createElement("article"); item.className = "connector-statistic-metric";
+      const title = document.createElement("span"); title.textContent = label;
+      const main = document.createElement("strong"); main.textContent = count;
+      const detail = document.createElement("small"); detail.textContent = bytes;
+      item.append(title, main, detail); return item;
+    }));
+    const list = byId("connector-statistics-list");
+    list.replaceChildren(...view.connectors.map(connector => {
+      const row = document.createElement("article"); row.className = "connector-statistics-row";
+      const identity = document.createElement("div"); const name = document.createElement("strong"); name.textContent = connector.name;
+      const detail = document.createElement("small"); detail.textContent = `${connector.kind.toUpperCase()} · ${connector.assetCount} 个关联资产${connector.error ? ` · ${connector.error}` : ""}`; identity.append(name, detail);
+      const accessible = document.createElement("div"); accessible.dataset.label = "可访问"; accessible.textContent = `${connector.accessible.files.toLocaleString()} 文件 · ${formatBytes(connector.accessible)}`;
+      const scanned = document.createElement("div"); scanned.dataset.label = "已扫描"; scanned.textContent = `${connector.scanned.files.toLocaleString()} 文件 · ${formatBytes(connector.scanned)}`;
+      row.append(identity, accessible, scanned); return row;
+    }));
   }
 
   #updateMetrics(runs: ConnectorScanRun[]): void {
@@ -457,24 +531,18 @@ export class ConnectorPanel {
   }
 
   #scanUnavailableReason(record: ConnectorPublicRecord): string | undefined {
-    if (!this.#capabilities.dataWarehouse.enabled || this.#capabilities.dataWarehouse.configured === false) return "数据仓库不可用，当前不能执行扫描。";
+    if (!this.#capabilities.localScan?.enabled || !this.#capabilities.localScan.configured) return "Workspace 空间索引未配置，当前不能执行扫描。";
     if (record.kind === "jdbc") return "JDBC 扫描执行器尚未接入；当前只能查看配置和历史记录。";
     if (record.status === "disabled") return "Connector 已停用，当前不能执行扫描。";
     if (record.lastCheck?.status !== "ok") return record.kind === "local" ? "请先检测本地目录是否可读。" : "请先检测连接并确认 S3 / OSS 可用。";
-    if (record.kind === "local") {
-      const linked = this.#assets.filter((asset) => (asset.connectorIds ?? []).includes(record.id)
-        || (asset.connectorLocationKeys ?? []).includes(record.locationKey));
-      if (!linked.length) return "请先登记并关联一个包含扫描配方的数据资产。";
-      if (linked.length > 1) return "此 Connector 关联了多个资产，请从单个资产的扫描操作中选择目标。";
-      const asset = linked[0]!;
-      if (!asset.surveyId || !asset.releaseId || !asset.product
-        || !((asset.kind === "catalog" && asset.scanSpec?.format === "csv")
-          || ((asset.kind === "image" || asset.kind === "cube") && [asset.access, ...(asset.accesses ?? [])].some((access) => /^(directory|fits?|fits\.gz|application\/fits)$/i.test(access.format))))) {
-        return "关联资产缺少有效的巡天身份或扫描配方。";
-      }
-      return undefined;
+    const linked = this.#linkedAssets(record);
+    if (!linked.length) return "请先登记并关联一个支持 CSV 或 FITS 的用户资产。";
+    if (linked.length > 1) return "此 Connector 关联了多个资产，请从对应资产详情启动扫描。";
+    const asset = linked[0]!;
+    if (!(asset.scanSpec?.format === "csv" || asset.scanSpec?.format === "fits" || asset.kind === "image" || asset.kind === "cube")) {
+      return "关联资产尚未配置 Workspace 支持的 CSV 或 FITS 扫描格式。";
     }
-    if (!record.credentials.accessKeyId || !record.credentials.secretConfigured) return "S3 / OSS 凭据不完整，当前不能执行扫描。";
+    if (record.kind === "s3" && (!record.credentials.accessKeyId || !record.credentials.secretConfigured)) return "S3 / OSS 凭据不完整，当前不能执行扫描。";
     return undefined;
   }
 
@@ -484,15 +552,15 @@ export class ConnectorPanel {
     const button = document.createElement("button");
     button.type = "button";
     button.className = "primary-command connector-execute-scan";
-    button.setAttribute("aria-label", "执行覆盖扫描");
+    button.setAttribute("aria-label", "执行 Workspace 扫描");
     const icon = document.createElement("i"); icon.dataset.lucide = "play";
-    const label = document.createElement("span"); label.textContent = "执行覆盖扫描";
+    const label = document.createElement("span"); label.textContent = "执行 Workspace 扫描";
     button.append(icon, label);
     const note = document.createElement("p");
     note.className = "connector-scan-availability";
     const reason = this.#scanUnavailableReason(record);
     button.disabled = Boolean(reason);
-    button.title = reason ?? "使用已保存的 Connector 配置生成用户覆盖证据";
+    button.title = reason ?? "使用 Workspace 扫描已关联资产并生成覆盖与数据点";
     note.textContent = reason ?? "使用已保存的 Connector 配置生成用户覆盖证据。";
     button.addEventListener("click", () => void this.#executeScan(record, button));
     section.append(button, note);
@@ -501,13 +569,13 @@ export class ConnectorPanel {
 
   async #executeScan(record: ConnectorPublicRecord, button: HTMLButtonElement): Promise<void> {
     button.disabled = true;
-    notifyWorkspace("正在提交覆盖扫描任务", `${record.name} · 使用已保存的 Connector 配置`, { tone: "info" });
+    notifyWorkspace("正在提交 Workspace 扫描", `${record.name} · 使用已保存的 Connector 配置`, { tone: "info" });
     try {
       const submitted = await workspaceApi.executeConnectorScan(record.id);
       this.#runs = await workspaceApi.connectorIngestRuns();
       this.#selectedRunId = submitted.id ?? this.#runs[0]?.id ?? null;
       this.#updateMetrics(this.#runs);
-      notifyWorkspace("覆盖扫描任务已提交", `${record.name} · ${submitted.taskKind === "user_coverage" ? "用户覆盖任务" : "用户覆盖任务"}`, { tone: "success" });
+      notifyWorkspace("Workspace 扫描已提交", `${record.name} · ${submitted.assetName ?? submitted.assetId ?? "用户资产"}`, { tone: "success" });
     } catch (error) {
       button.disabled = false;
       notifyWorkspace("覆盖扫描任务提交失败", error instanceof Error ? error.message : String(error), { tone: "error" });
@@ -706,7 +774,7 @@ export class ConnectorPanel {
     createIcons({ icons: { ScrollText }, attrs: { "aria-hidden": "true" } });
     const logDialog = byId<HTMLDialogElement>("connector-run-logs-dialog");
     if (logDialog.open) this.#renderRunLogsDialog(run);
-    if (this.#capabilities.dataWarehouse.enabled && this.#runs.some((candidate) => candidate.status === "queued" || candidate.status === "running")) this.#scheduleRunPoll();
+    if (this.#runs.some((candidate) => candidate.status === "queued" || candidate.status === "running")) this.#scheduleRunPoll();
   }
 
   #closeRunLogsDialog(): void {

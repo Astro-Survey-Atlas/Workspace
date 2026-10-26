@@ -6,7 +6,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { createMcpExpressApp } from "@modelcontextprotocol/sdk/server/express.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import express from "express";
-import type { Request, Response } from "express";
+import type { NextFunction, Request, Response } from "express";
 
 import { AgentService } from "./agent.js";
 import { AstroIndexService, ASTRO_FILE_INDEX, ASTRO_OVERVIEW_NSIDE, type AstroCoverageLayer, type AstroSkyQueryInput } from "./astro-index.js";
@@ -16,6 +16,8 @@ import { McpCatalogQueryClient } from "./catalog-mcp-client.js";
 import { createConnectorCredentialStore, type StoredConnectorCredentials } from "./connector-credentials.js";
 import { ConnectorRegistry, connectorLocationKey, validateConnectorInput, type ConnectorCheckInput, type ConnectorPublicRecord, type ConnectorRecord, type ConnectorRegistrationInput } from "./connectors.js";
 import { ConnectorIngestRunCatalog, publicConnectorIngestRun, type ConnectorIngestRunFilter, type ConnectorIngestRunRecord, type ConnectorIngestRunStatus } from "./connector-history.js";
+import { DataStatisticsModule } from "./data-statistics.js";
+import { WorkspaceConfigBackupService } from "./workspace-config-backup.js";
 import { DataCatalogRegistry, type DataAssetAccess, type DataAssetRecord, type DataAssetRegistrationInput } from "./data-catalog.js";
 import { deriveDataAssetOperationalStatus, type DataAssetCoverageEvidence, type DataAssetRunEvidence } from "./data-asset-status.js";
 import { ConnectorScanCapabilityError, ConnectorScanPreconditionError, DataWarehouseDisabledError, dataWarehouseEnabled, validateConnectorSelfScanBody } from "./warehouse-scan.js";
@@ -31,7 +33,8 @@ import { createMetadataStore, importJsonState } from "./storage/index.js";
 import { SurveyDirectory } from "./survey-directory.js";
 import { LocalConnectorRootsPolicy, LocalConnectorPolicyError, localConnectorRootsResponse } from "./local-connector-roots.js";
 import { inspectLocalCsv, listLocalCsvFiles, LocalSourceInspectionCapabilityError, LocalSourceInspectionError } from "./local-source-inspection.js";
-import { LocalCsvScanExecutor, LocalScanCapabilityError, LocalScanDisabledError, LocalScanPreconditionError, localScanEnabled, LOCAL_CSV_SCAN_EXECUTOR, type LocalCsvScanInput } from "./local-scan-executor.js";
+import { LocalCsvScanExecutor, LocalScanCapabilityError, LocalScanDisabledError, LocalScanPreconditionError, localScanEnabled, LOCAL_CSV_SCAN_EXECUTOR } from "./local-scan-executor.js";
+import { WorkspaceScanExecutor, workspaceScanEnabled } from "./workspace-scan-executor.js";
 import { UserMocArtifactStore, type UserMocArtifact } from "./user-moc-artifacts.js";
 import { WarehouseIndexService, type WarehouseCoverageLayer } from "./warehouse-index.js";
 import { WarehouseScanService } from "./warehouse-scan.js";
@@ -39,7 +42,7 @@ import { commonOverlapNside, calculateSkyOverlap, privateOverlapOrders, type Sky
 import { CoverageDownloadService, parseCoverageDownloadSubmissionOptions, type CoverageDownloadFile } from "./coverage-downloads.js";
 import { RegionDownloadPlanService } from "./region-download-plan.js";
 import { createRegionDownloadPreviewHandler } from "./region-download-http.js";
-import { ProductionService, ProductionStateError, type ProductionSourceResolver, type ProductionWarehouseHandoff } from "./production.js";
+import { ProductionService, ProductionStateError, type ProductionScanHandoff, type ProductionSourceResolver, type ProductionWarehouseHandoff } from "./production.js";
 import { listProductionCapabilities } from "./production-capabilities.js";
 import { buildProvenance } from "./build-metadata.js";
 import { InstallationService } from "./installation.js";
@@ -93,6 +96,7 @@ const warehouseEsCoverageIndex = process.env.ASTRO_WAREHOUSE_COVERAGE_INDEX ?? "
 const userMocRoot = process.env.ASTRO_USER_MOC_ROOT ?? path.join(stateRoot, "user-mocs");
 const warehouseEnabled = dataWarehouseEnabled();
 const localCsvScanEnabled = localScanEnabled();
+const workspaceScanningEnabled = workspaceScanEnabled();
 const metadataStoreEngine = process.env.ASTRO_METADATA_STORE || "sqlite";
 
 const workflowStore = new WorkflowStore(workflowRoot);
@@ -104,6 +108,9 @@ const connectors = new ConnectorRegistry(metadataStore, localConnectorRoots);
 const connectorCredentials = createConnectorCredentialStore();
 const connectorRuns = new ConnectorIngestRunCatalog(metadataStore);
 const userMocs = new UserMocArtifactStore({ root: userMocRoot });
+const dataStatistics = new DataStatisticsModule({ store: metadataStore, connectors, credentials: connectorCredentials, assets: dataCatalog,
+  roots: localConnectorRoots, workspaceScanRoot: path.join(stateRoot, "workspace-scans"),
+  evidenceRoot: process.env.ASTRO_WAREHOUSE_EVIDENCE_MOUNT_PATH ?? "/var/lib/atlas-evidence" });
 const astroObjectIndex = new AstroObjectIndexService({ baseUrl: astroEsUrl });
 const skyDataPoints = new AstroObjectIndexService({ baseUrl: astroEsUrl, objectIndex: SKY_DATA_POINT_INDEX });
 const localCsvScans = new LocalCsvScanExecutor({
@@ -114,6 +121,19 @@ const localCsvScans = new LocalCsvScanExecutor({
   roots: localConnectorRoots,
   indexService: astroObjectIndex,
   artifacts: userMocs,
+});
+const workspaceScans = new WorkspaceScanExecutor({
+  enabled: workspaceScanningEnabled,
+  root: path.join(stateRoot, "workspace-scans"),
+  connectors,
+  credentials: connectorCredentials,
+  dataCatalog,
+  runs: connectorRuns,
+  roots: localConnectorRoots,
+  objectIndex: astroObjectIndex,
+  skyPoints: skyDataPoints,
+  artifacts: userMocs,
+  statistics: dataStatistics,
 });
 const resourcePackages = new ResourcePackageManager({ catalogUrl: resourceCatalogUrl, root: resourcePackageRoot, statePath: resourcePackageStatePath, snapshotRoot: resourceSnapshotRoot, allowedOrigins: resourceCatalogAllowedOrigins });
 // Search indices are independent from the optional warehouse integration.
@@ -211,6 +231,9 @@ const productionSourceResolver: ProductionSourceResolver = {
 const warehouseProductionHandoff: ProductionWarehouseHandoff = {
   submit: (input) => warehouseScans.submitProductionHandoff(input),
 };
+const workspaceProductionHandoff: ProductionScanHandoff = {
+  submit: (input) => workspaceScans.submitProductionHandoff(input),
+};
 const productionService = new ProductionService({
   root: productionRoot,
   downloads: coverageDownloads,
@@ -220,7 +243,8 @@ const productionService = new ProductionService({
   localRoots: localConnectorRoots,
   sourceResolver: productionSourceResolver,
   confirmPublicDownload: confirmation => regionDownloadPlans.confirm(confirmation),
-  ...(warehouseScans.enabled ? { warehouseHandoff: warehouseProductionHandoff } : {}),
+  ...(workspaceScanningEnabled && astroObjectIndex.configured ? { workspaceHandoff: workspaceProductionHandoff } : {}),
+  ...(warehouseScans.enabled && warehouseIndex.configured ? { warehouseHandoff: warehouseProductionHandoff } : {}),
 });
 const systemConfig = new SystemConfigStore(systemConfigRoot);
 const assetsRegionClient = new AssetsRegionClient({
@@ -233,11 +257,75 @@ const assetsCoverageOverviewClient = new AssetsCoverageOverviewClient({
   getApiKey: () => systemConfig.getAssetsApiKey(),
 });
 const workspaceAgent = new WorkspaceAgentService({ root: path.join(stateRoot, "agent"), config: systemConfig, dataCatalog, connectors, production: productionService });
+const configBackup = new WorkspaceConfigBackupService({ root: systemConfigRoot, store: metadataStore, credentials: connectorCredentials,
+  roots: localConnectorRoots, systemConfig, installation, resourcePackages, surveys, isBusy: async () => {
+    if (dataStatistics.busy) return "数据统计刷新";
+    if ((await connectorRuns.list()).some(run => run.status === "queued" || run.status === "running")) return "扫描任务";
+    if ((await coverageDownloads.list()).some(job => job.status === "queued" || job.status === "running")) return "下载任务";
+    if ((await productionService.listRuns()).some(run => ["queued", "resolving", "awaiting-approval", "running"].includes(run.status))) return "生产任务";
+    if ((await derivedRepairs.list()).some(task => task.status === "queued" || task.status === "running")) return "派生数据任务";
+    return undefined;
+  } });
 const workflowEngine = new WorkflowEngine(workflowStore, new McpCatalogQueryClient(catalogMcpUrl, catalogMcpTimeoutMs, 1));
 const agentService = new AgentService(workflowStore, workflowEngine);
 const app = createMcpExpressApp({ host, allowedHosts });
 
+function configBackupPassword(request: Request): string {
+  const value = request.get("X-Backup-Password");
+  if (!value || !/^[A-Za-z0-9_-]+$/.test(value)) throw new RangeError("Backup password header is missing or invalid");
+  try {
+    const decoded = Buffer.from(value, "base64url").toString("utf8");
+    if (Buffer.from(decoded, "utf8").toString("base64url") !== value) throw new Error("Invalid encoded password");
+    return decoded;
+  } catch { throw new RangeError("Backup password header is invalid"); }
+}
+
+app.post("/api/config-backup/preview", express.raw({ type: "application/octet-stream", limit: "64mb" }), async (request: Request, response: Response) => {
+  try {
+    if (!Buffer.isBuffer(request.body)) throw new RangeError("Upload the encrypted backup as application/octet-stream");
+    response.set("Cache-Control", "no-store");
+    response.json(await configBackup.preview(request.body, configBackupPassword(request)));
+  } catch (error) { sendApiError(response, error); }
+});
+
 app.use("/api", express.json({ limit: "64kb" }));
+
+app.use("/api", (request: Request, response: Response, next: NextFunction) => {
+  const backupControl = request.path === "/config-backup/preview" || request.path === "/config-backup/apply";
+  if (configBackup.busy && request.method !== "GET" && !backupControl) {
+    response.status(409).json({ error: "Workspace configuration is being replaced; retry this operation shortly" });
+    return;
+  }
+  next();
+});
+
+app.post("/api/config-backup/export", async (request: Request, response: Response) => {
+  try {
+    const preferences = request.body && typeof request.body === "object" && !Array.isArray(request.body)
+      ? (request.body as { browserPreferences?: unknown }).browserPreferences : undefined;
+    const encrypted = await configBackup.export(configBackupPassword(request), preferences);
+    response.set({ "Cache-Control": "no-store", "Content-Type": "application/vnd.asa.workspace-config-backup+json",
+      "Content-Disposition": `attachment; filename="workspace-config-${new Date().toISOString().slice(0, 10)}.asaworkspace"` });
+    response.send(encrypted);
+  } catch (error) { sendApiError(response, error); }
+});
+
+app.post("/api/config-backup/apply", async (request: Request, response: Response) => {
+  try {
+    const body = request.body && typeof request.body === "object" && !Array.isArray(request.body) ? request.body as Record<string, unknown> : {};
+    response.json(await configBackup.apply(body.previewId, body.pathMappings));
+  } catch (error) { sendApiError(response, error); }
+});
+
+app.get("/api/config-backup/public-selection", async (_request: Request, response: Response) => {
+  try { response.set("Cache-Control", "no-store"); response.json({ restore: await configBackup.publicSelectionStatus() ?? null }); }
+  catch (error) { sendApiError(response, error); }
+});
+
+app.post("/api/config-backup/public-selection/retry", async (_request: Request, response: Response) => {
+  try { response.status(202).json({ restore: await configBackup.retryPublicSelection() }); }
+  catch (error) { sendApiError(response, error); }
+});
 
 app.get("/healthz", (_request: Request, response: Response) => {
   response.json({ status: "ok", service: "asa-workspace", version: "0.0.1" });
@@ -248,14 +336,32 @@ app.get("/api/capabilities", async (_request: Request, response: Response) => {
     dataWarehouse: { enabled: warehouseEnabled, configured: warehouseIndex.configured, namespace: warehouseNamespace, layerIndex: warehouseIndex.layerIndex, coverageIndex: warehouseIndex.coverageIndex },
     userMocs: { rootConfigured: Boolean(userMocRoot), count: (await userMocs.list()).length },
     localScan: {
-      enabled: localCsvScanEnabled,
+      enabled: workspaceScanningEnabled,
       configured: astroObjectIndex.configured,
-      executor: LOCAL_CSV_SCAN_EXECUTOR,
+      executor: "workspace",
       objectIndex: astroObjectIndex.objectIndex,
       coverageIndex: astroObjectIndex.coverageIndex,
     },
     metadataStore: { engine: metadataStoreEngine },
   });
+});
+
+app.get("/api/data-statistics", async (_request: Request, response: Response) => {
+  try {
+    response.set("Cache-Control", "no-store");
+    response.json(await dataStatistics.view());
+  } catch (error) { sendApiError(response, error); }
+});
+
+app.post("/api/data-statistics/refresh", async (request: Request, response: Response) => {
+  try {
+    const body = request.body && typeof request.body === "object" && !Array.isArray(request.body)
+      ? request.body as { connectorIds?: unknown } : {};
+    if (body.connectorIds !== undefined && (!Array.isArray(body.connectorIds) || body.connectorIds.some(id => typeof id !== "string"))) {
+      throw new RangeError("connectorIds must be an array of strings");
+    }
+    response.status(202).json({ refresh: await dataStatistics.refresh(body.connectorIds as string[] | undefined) });
+  } catch (error) { sendApiError(response, error); }
 });
 
 function publicConnectorRuns(records: ConnectorIngestRunRecord[]) {
@@ -527,6 +633,9 @@ app.get("/api/data-assets/status", async (_request: Request, response: Response)
       const latestRun = [...runs]
         .filter((run) => run.assetId === asset.id || run.assetIds?.includes(asset.id))
         .sort((left, right) => `${right.updatedAt ?? right.createdAt}\u0000${right.id}`.localeCompare(`${left.updatedAt ?? left.createdAt}\u0000${left.id}`))[0];
+      const latestWorkspaceRun = [...runs]
+        .filter((run) => (run.assetId === asset.id || run.assetIds?.includes(asset.id)) && run.executor === "workspace")
+        .sort((left, right) => `${right.updatedAt ?? right.createdAt}\u0000${right.id}`.localeCompare(`${left.updatedAt ?? left.createdAt}\u0000${left.id}`))[0];
       let coverage: DataAssetCoverageEvidence | undefined;
       try {
         const [legacy, local] = await Promise.all([
@@ -563,14 +672,36 @@ app.get("/api/data-assets/status", async (_request: Request, response: Response)
         coverage,
         latestRun: latestRun as DataAssetRunEvidence | undefined,
         objectIndexConfigured: astroObjectIndex.configured,
-        localScanConfigured: localCsvScanEnabled && astroObjectIndex.configured,
+        localScanConfigured: workspaceScanningEnabled && astroObjectIndex.configured,
         warehouseConfigured: warehouseEnabled && warehouseIndex.configured,
       });
       const pointQuery = await skyDataPoints.queryObjects({ bbox: { raMin: 0, raMax: 360, decMin: -90, decMax: 90 }, layerScopes: [{ assetId: asset.id }], limit: 1, includeAttributes: false });
       const repair = repairs.find((task) => task.assetId === asset.id && task.mode !== "moc" && !task.maxFiles);
-      return { ...derived, assetName: asset.name, dataPointCount: pointQuery.status === "ready" ? pointQuery.total : 0,
-        dataPointStatus: repair?.status ?? (pointQuery.total > 0 ? "succeeded" : "not_indexed"),
-        ...(repair ? { dataPointProgress: { processedFiles: repair.processedFiles, fileCount: repair.fileCount, errors: repair.headerErrors + repair.coordinateErrors } } : {}) };
+      return {
+        ...derived,
+        assetName: asset.name,
+        dataPointCount: pointQuery.status === "ready" ? pointQuery.total : 0,
+        dataPointStatus: latestWorkspaceRun?.status ?? repair?.status ?? (pointQuery.total > 0 ? "succeeded" : "not_indexed"),
+        ...(latestWorkspaceRun?.fileCount !== undefined ? {
+          dataPointProgress: {
+            processedFiles: latestWorkspaceRun.processedFiles ?? 0,
+            fileCount: latestWorkspaceRun.fileCount,
+            errors: latestWorkspaceRun.failedFiles ?? 0,
+          },
+        } : repair ? {
+          dataPointProgress: { processedFiles: repair.processedFiles, fileCount: repair.fileCount, errors: repair.headerErrors + repair.coordinateErrors },
+        } : {}),
+        ...(latestRun?.fileCount !== undefined ? {
+          scanProgress: {
+            status: latestRun.status,
+            ...(latestRun.executor ? { executor: latestRun.executor } : {}),
+            ...(latestRun.phase ? { phase: latestRun.phase } : {}),
+            processedFiles: latestRun.processedFiles ?? 0,
+            fileCount: latestRun.fileCount,
+            failedFiles: latestRun.failedFiles ?? 0,
+          },
+        } : {}),
+      };
     }));
     response.json({ statuses });
   } catch (error) {
@@ -590,14 +721,19 @@ app.get("/api/data-assets/:id", async (request: Request, response: Response) => 
   }
 });
 
-app.post("/api/data-assets/:id/local-scan", async (request: Request, response: Response) => {
+const submitWorkspaceAssetScan = async (request: Request, response: Response): Promise<void> => {
   try {
-    const run = await localCsvScans.submitAsset(datasetIdFrom(request), request.body as LocalCsvScanInput, idempotencyKey(request));
+    const body = (request.body && typeof request.body === "object" && !Array.isArray(request.body) ? request.body : {}) as Record<string, unknown>;
+    const connectorId = typeof body.connectorId === "string" ? body.connectorId : undefined;
+    const { connectorId: _connectorId, ...input } = body;
+    const run = await workspaceScans.submitAsset(datasetIdFrom(request), input, connectorId, idempotencyKey(request));
     response.status(202).json({ run: publicConnectorIngestRun(run) });
   } catch (error) {
     sendApiError(response, error);
   }
-});
+};
+app.post("/api/data-assets/:id/workspace-scan", submitWorkspaceAssetScan);
+app.post("/api/data-assets/:id/local-scan", submitWorkspaceAssetScan);
 
 app.post("/api/data-assets/:id/remote-scan", async (request: Request, response: Response) => {
   try {
@@ -796,8 +932,17 @@ app.post("/api/connectors/check", async (request: Request, response: Response) =
 
 app.post("/api/connectors/:id/scan-runs", async (request: Request, response: Response) => {
   try {
-    validateConnectorSelfScanBody(request.body);
-    const run = await warehouseScans.submitConnectorScan(datasetIdFrom(request), idempotencyKey(request));
+    const body = (request.body && typeof request.body === "object" && !Array.isArray(request.body) ? request.body : {}) as Record<string, unknown>;
+    const executor = body.executor;
+    const { executor: _executor, ...input } = body;
+    let run: ConnectorIngestRunRecord;
+    if (executor === "warehouse") {
+      validateConnectorSelfScanBody(input);
+      run = await warehouseScans.submitConnectorScan(datasetIdFrom(request), idempotencyKey(request));
+    } else {
+      if (executor !== undefined && executor !== "workspace") throw new RangeError("executor must be workspace or warehouse");
+      run = await workspaceScans.submitConnector(datasetIdFrom(request), input, idempotencyKey(request));
+    }
     response.status(202).json({ run: publicConnectorIngestRun(run) });
   } catch (error) {
     sendApiError(response, error);
@@ -806,11 +951,18 @@ app.post("/api/connectors/:id/scan-runs", async (request: Request, response: Res
 
 app.post("/api/connectors/:id/local-scan", async (request: Request, response: Response) => {
   try {
-    const run = await localCsvScans.submit(
-      datasetIdFrom(request),
-      request.body as LocalCsvScanInput,
-      idempotencyKey(request),
-    );
+    const run = await workspaceScans.submitConnector(datasetIdFrom(request), request.body as { assetId?: string; relativePath?: string }, idempotencyKey(request));
+    response.status(202).json({ run: publicConnectorIngestRun(run) });
+  } catch (error) {
+    sendApiError(response, error);
+  }
+});
+
+app.post("/api/connectors/:id/ingest-runs/:runId/retry", async (request: Request, response: Response) => {
+  try {
+    const runId = typeof request.params.runId === "string" ? request.params.runId.trim() : "";
+    if (!runId) throw new RangeError("runId is required");
+    const run = await workspaceScans.retry(datasetIdFrom(request), runId);
     response.status(202).json({ run: publicConnectorIngestRun(run) });
   } catch (error) {
     sendApiError(response, error);
@@ -2635,6 +2787,7 @@ async function start(): Promise<void> {
   await dataCatalog.initialize();
   await connectors.initialize();
   await connectorRuns.initialize();
+  await dataStatistics.initialize();
   await systemConfig.initialize();
   await coverageDownloads.initialize();
   await productionService.initialize();
@@ -2644,9 +2797,12 @@ async function start(): Promise<void> {
   }
   await installation.initialize();
   await workspaceAgent.initialize();
+  await resourcePackages.initialize();
+  await configBackup.initialize();
   const recoveredLocalScans = await localCsvScans.recoverInterruptedRuns();
   if (recoveredLocalScans) console.warn(`Marked ${recoveredLocalScans} interrupted local CSV scan(s) as failed`);
-  await resourcePackages.initialize();
+  const recoveredWorkspaceScans = await workspaceScans.recoverInterruptedRuns();
+  if (recoveredWorkspaceScans) console.info(`Resumed ${recoveredWorkspaceScans} interrupted Workspace scan(s)`);
   warehouseScans.start();
   if (warehouseEnabled) derivedRepairs.start();
 

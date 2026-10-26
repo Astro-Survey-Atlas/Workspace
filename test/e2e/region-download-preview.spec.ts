@@ -379,7 +379,7 @@ test("public file preview defaults eligible files on and submits the checked sub
   await expect(confirm).toBeDisabled();
   await expect(confirm).toContainText("正在创建任务");
   expect(api.runSubmissions).toHaveLength(1);
-  expect(api.runSubmissions[0]!.warehouseHandoff).toBe("none");
+  expect(api.runSubmissions[0]!.scanExecutor).toBe("workspace");
   api.releaseRunSubmission();
   await expect(page.locator('[data-run-id="synthetic-run-1"]')).toHaveClass(/active/);
   await expect(page.locator("#inspector-kicker")).toHaveText("EXECUTION OVERVIEW");

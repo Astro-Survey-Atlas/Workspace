@@ -48,6 +48,11 @@ def image_position(record):
     result = dict(record)
     result.update(ra_deg=float(center.ra.deg) % 360, dec_deg=float(center.dec.deg),
                   position_role="image_center", position_method="astropy_wcs", coordinate_frame="ICRS")
+    celestial_header = wcs.to_header(relax=True)
+    celestial_header["NAXIS"] = 2
+    celestial_header["NAXIS1"] = width
+    celestial_header["NAXIS2"] = height
+    result["moc_header"] = dict(celestial_header.items())
     if dec_min <= -90 or dec_max >= 90:
         result["footprint_bounds"] = [[0.0, 360.0, dec_min, dec_max]]
     else:

@@ -1,4 +1,5 @@
-import { readFile } from "node:fs/promises";
+import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import path from "node:path";
 
 export interface StoredConnectorCredentials {
   accessKeyId: string;
@@ -67,6 +68,82 @@ export class MemoryConnectorCredentialStore implements ConnectorCredentialStore 
 
   async remove(reference: string): Promise<void> {
     if (this.isManaged(reference)) this.#values.delete(reference);
+  }
+}
+
+interface FileCredentialState {
+  version: 1;
+  values: Record<string, StoredConnectorCredentials>;
+}
+
+export class FileConnectorCredentialStore implements ConnectorCredentialStore {
+  readonly #namespace: string;
+  readonly #filePath: string;
+  #state: FileCredentialState = { version: 1, values: {} };
+  #initialized?: Promise<void>;
+  #writes: Promise<void> = Promise.resolve();
+
+  constructor(options: { namespace: string; filePath: string }) {
+    this.#namespace = options.namespace;
+    this.#filePath = path.resolve(options.filePath);
+  }
+
+  managedReference(connectorId: string): string {
+    return `${this.#namespace}/${managedSecretName(connectorId)}`;
+  }
+
+  isManaged(reference: string): boolean {
+    const parsed = parseReference(reference);
+    return parsed.namespace === this.#namespace && parsed.name.startsWith(MANAGED_SECRET_PREFIX);
+  }
+
+  async get(reference: string): Promise<StoredConnectorCredentials | undefined> {
+    await this.#initialize();
+    const value = this.#state.values[reference];
+    return value ? structuredClone(value) : undefined;
+  }
+
+  async put(reference: string, credentials: StoredConnectorCredentials): Promise<void> {
+    await this.#initialize();
+    if (!this.isManaged(reference)) throw new RangeError("Managed credentials must use the workspace namespace and name prefix");
+    this.#state.values[reference] = structuredClone(credentials);
+    await this.#persist();
+  }
+
+  async remove(reference: string): Promise<void> {
+    await this.#initialize();
+    if (!this.isManaged(reference)) return;
+    delete this.#state.values[reference];
+    await this.#persist();
+  }
+
+  async #initialize(): Promise<void> {
+    this.#initialized ??= (async () => {
+      try {
+        const state = JSON.parse(await readFile(this.#filePath, "utf8")) as Partial<FileCredentialState>;
+        if (state.version === 1 && state.values && typeof state.values === "object") this.#state = { version: 1, values: state.values };
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      }
+    })();
+    await this.#initialized;
+  }
+
+  async #persist(): Promise<void> {
+    const state = structuredClone(this.#state);
+    const next = this.#writes.then(async () => {
+      await mkdir(path.dirname(this.#filePath), { recursive: true });
+      const temporary = `${this.#filePath}.${process.pid}.${Date.now()}.tmp`;
+      try {
+        await writeFile(temporary, `${JSON.stringify(state)}\n`, { encoding: "utf8", mode: 0o600, flag: "wx" });
+        await rename(temporary, this.#filePath);
+      } catch (error) {
+        await rm(temporary, { force: true }).catch(() => undefined);
+        throw error;
+      }
+    });
+    this.#writes = next.catch(() => undefined);
+    await next;
   }
 }
 
@@ -149,9 +226,9 @@ export class KubernetesConnectorCredentialStore implements ConnectorCredentialSt
   }
 }
 
-export function createConnectorCredentialStore(): ConnectorCredentialStore {
+export function createConnectorCredentialStore(stateRoot = process.env.ASTRO_STATE_ROOT ?? "/state"): ConnectorCredentialStore {
   const namespace = process.env.POD_NAMESPACE ?? "asa-workspace";
-  if (!process.env.KUBERNETES_SERVICE_HOST) return new MemoryConnectorCredentialStore(namespace);
+  if (!process.env.KUBERNETES_SERVICE_HOST) return new FileConnectorCredentialStore({ namespace, filePath: path.join(stateRoot, "connector-credentials.json") });
   const host = process.env.KUBERNETES_SERVICE_HOST;
   const port = process.env.KUBERNETES_SERVICE_PORT_HTTPS ?? process.env.KUBERNETES_SERVICE_PORT ?? "443";
   return new KubernetesConnectorCredentialStore({ namespace, apiUrl: `https://${host}:${port}` });

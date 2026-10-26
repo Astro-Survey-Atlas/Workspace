@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -79,17 +79,20 @@ export interface McpServerInput {
   enabled?: boolean;
 }
 
-interface PersistedConfig {
+export interface PersistedConfig {
   version: 1;
   ai: Array<Omit<AiProviderRecord, "apiKeyConfigured"> & { apiKeyRef?: string }>;
   mcp: Array<Omit<McpServerRecord, "tokenConfigured"> & { tokenRef?: string }>;
   downloads?: Omit<DownloadSettings, "passwordConfigured">;
 }
 
-interface SecretState {
+export interface SecretState {
   version: 1;
   values: Record<string, string>;
 }
+
+export interface SystemConfigBackupState { config: PersistedConfig; secrets: SecretState }
+export interface SystemConfigRestorePoint { id: string; configExists: boolean; secretsExist: boolean }
 
 function now(): string { return new Date().toISOString(); }
 function clone<T>(value: T): T { return structuredClone(value); }
@@ -150,6 +153,80 @@ export class SystemConfigStore {
       const value = JSON.parse(await readFile(this.#secretPath, "utf8")) as SecretState;
       if (value.version === 1 && value.values && typeof value.values === "object") this.#secrets = value;
     } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") console.warn("Ignoring invalid system secrets", error); }
+  }
+
+  async exportBackupState(): Promise<SystemConfigBackupState> {
+    await this.initialize();
+    const referenced = new Set<string>([ASSETS_API_KEY_REF, "download-proxy-password"]);
+    for (const item of this.#config.ai) if (item.apiKeyRef) referenced.add(item.apiKeyRef);
+    for (const item of this.#config.mcp) if (item.tokenRef) referenced.add(item.tokenRef);
+    return { config: clone(this.#config), secrets: { version: 1, values: Object.fromEntries(
+      Object.entries(this.#secrets.values).filter(([key]) => referenced.has(key))) } };
+  }
+
+  async replaceBackupState(value: unknown): Promise<void> {
+    await this.initialize();
+    const state = validateSystemConfigBackupState(value);
+    this.#config = state.config;
+    this.#secrets = state.secrets;
+    await this.#persist();
+  }
+
+  async createRestorePoint(id: string): Promise<SystemConfigRestorePoint> {
+    await this.initialize();
+    if (!/^[a-f0-9-]{36}$/.test(id)) throw new RangeError("Invalid system configuration restore point id");
+    await this.#writeChain;
+    await mkdir(this.#root, { recursive: true, mode: 0o700 });
+    const configFile = this.#restorePath(id, "config");
+    const secretsFile = this.#restorePath(id, "secrets");
+    const config = await this.#copyIfPresent(this.#configPath, configFile);
+    const secrets = await this.#copyIfPresent(this.#secretPath, secretsFile);
+    return { id, configExists: config, secretsExist: secrets };
+  }
+
+  async restoreRestorePoint(point: SystemConfigRestorePoint): Promise<void> {
+    await this.initialize();
+    if (!/^[a-f0-9-]{36}$/.test(point.id)) throw new RangeError("Invalid system configuration restore point id");
+    await this.#writeChain;
+    await mkdir(this.#root, { recursive: true, mode: 0o700 });
+    await this.#restoreFile(this.#restorePath(point.id, "config"), this.#configPath, point.configExists);
+    await this.#restoreFile(this.#restorePath(point.id, "secrets"), this.#secretPath, point.secretsExist);
+    this.#config = await this.#readConfigFile();
+    this.#secrets = await this.#readSecretsFile();
+  }
+
+  async discardRestorePoint(point: SystemConfigRestorePoint): Promise<void> {
+    if (!/^[a-f0-9-]{36}$/.test(point.id)) return;
+    await Promise.all([this.#restorePath(point.id, "config"), this.#restorePath(point.id, "secrets")]
+      .map(filename => unlink(filename).catch(error => { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; })));
+  }
+
+  #restorePath(id: string, kind: "config" | "secrets"): string { return path.join(this.#root, `.restore-${id}-${kind}.json`); }
+
+  async #copyIfPresent(source: string, target: string): Promise<boolean> {
+    try { await writeFile(target, await readFile(source), { mode: 0o600, flag: "w" }); return true; }
+    catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return false; throw error; }
+  }
+
+  async #restoreFile(source: string, target: string, exists: boolean): Promise<void> {
+    if (!exists) { await unlink(target).catch(error => { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }); return; }
+    const temporary = `${target}.${randomUUID()}.tmp`;
+    await writeFile(temporary, await readFile(source), { mode: 0o600, flag: "wx" });
+    await rename(temporary, target);
+  }
+
+  async #readConfigFile(): Promise<PersistedConfig> {
+    try {
+      const value = JSON.parse(await readFile(this.#configPath, "utf8")) as PersistedConfig;
+      return value.version === 1 && Array.isArray(value.ai) && Array.isArray(value.mcp) ? value : configDefaults();
+    } catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return configDefaults(); throw error; }
+  }
+
+  async #readSecretsFile(): Promise<SecretState> {
+    try {
+      const value = JSON.parse(await readFile(this.#secretPath, "utf8")) as SecretState;
+      return value.version === 1 && value.values && typeof value.values === "object" ? value : secretDefaults();
+    } catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return secretDefaults(); throw error; }
   }
 
   async listAiProviders(): Promise<AiProviderRecord[]> { await this.initialize(); return this.#config.ai.map((record) => publicAi(record, this.#secrets)); }
@@ -364,4 +441,51 @@ export class SystemConfigStore {
     });
     return this.#writeChain;
   }
+}
+
+export function validateSystemConfigBackupState(value: unknown): SystemConfigBackupState {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new RangeError("System configuration backup must be an object");
+  const state = value as { config?: unknown; secrets?: unknown };
+  const config = state.config as PersistedConfig | undefined;
+  const secrets = state.secrets as SecretState | undefined;
+  if (!config || config.version !== 1 || !Array.isArray(config.ai) || !Array.isArray(config.mcp)
+    || !secrets || secrets.version !== 1 || !secrets.values || typeof secrets.values !== "object" || Array.isArray(secrets.values)) {
+    throw new RangeError("System configuration backup schema is invalid");
+  }
+  const refs = new Set<string>([ASSETS_API_KEY_REF, "download-proxy-password"]);
+  const ids = new Set<string>();
+  const cleanAi = config.ai.map(record => {
+    if (!record || typeof record.id !== "string" || !record.id || ids.has(record.id) || typeof record.name !== "string"
+      || typeof record.model !== "string" || typeof record.baseUrl !== "string" || typeof record.enabled !== "boolean" || typeof record.isDefault !== "boolean") {
+      throw new RangeError("AI Provider backup record is invalid");
+    }
+    ids.add(record.id); validHttpUrl(record.baseUrl, "AI Provider baseUrl");
+    if (record.apiKeyRef !== undefined) refs.add(requiredText(record.apiKeyRef, "AI Provider apiKeyRef", 160));
+    return { ...record, lastCheck: undefined };
+  });
+  if (cleanAi.filter(record => record.isDefault).length > 1) throw new RangeError("Only one AI Provider can be default");
+  ids.clear();
+  const cleanMcp = config.mcp.map(record => {
+    if (!record || typeof record.id !== "string" || !record.id || ids.has(record.id) || typeof record.name !== "string"
+      || typeof record.url !== "string" || typeof record.enabled !== "boolean" || !["sse", "streamable-http"].includes(record.transport)) {
+      throw new RangeError("MCP Server backup record is invalid");
+    }
+    ids.add(record.id); validHttpUrl(record.url, "MCP Server url");
+    if (record.tokenRef !== undefined) refs.add(requiredText(record.tokenRef, "MCP Server tokenRef", 160));
+    return { ...record, tools: [], lastCheck: undefined };
+  });
+  if (config.downloads && (typeof config.downloads.proxyEnabled !== "boolean" || typeof config.downloads.proxyUrl !== "string"
+    || typeof config.downloads.proxyUsername !== "string" || typeof config.downloads.revision !== "string")) throw new RangeError("Download settings backup record is invalid");
+  if (config.downloads?.proxyEnabled && !config.downloads.proxyUrl) throw new RangeError("Enabled download proxy requires an address");
+  if (config.downloads?.proxyUrl) {
+    let url: URL;
+    try { url = new URL(config.downloads.proxyUrl); } catch { throw new RangeError("Download proxy URL is invalid"); }
+    if (url.protocol !== "http:" || url.username || url.password) throw new RangeError("Download proxy must be an HTTP URL without embedded credentials");
+  }
+  const values: Record<string, string> = {};
+  for (const [key, secret] of Object.entries(secrets.values)) {
+    if (!refs.has(key) || typeof secret !== "string" || secret.length > 16_384) throw new RangeError("System secret backup contains an invalid entry");
+    values[key] = secret;
+  }
+  return { config: { version: 1, ai: cleanAi, mcp: cleanMcp, ...(config.downloads ? { downloads: { ...config.downloads } } : {}) }, secrets: { version: 1, values } };
 }

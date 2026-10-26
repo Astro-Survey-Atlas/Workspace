@@ -10,6 +10,7 @@ import { pathToFileURL } from "node:url";
 
 import { ASTRO_FILE_INDEX } from "../src/astro-index.js";
 import { ASTRO_IMAGE_FOOTPRINT_INDEX } from "../src/astro-object-index.js";
+import { SKY_DATA_POINT_INDEX } from "../src/derived-repairs.js";
 import { UserMocArtifactStore } from "../src/user-moc-artifacts.js";
 
 const FITS_BLOCK_BYTES = 2_880;
@@ -164,7 +165,7 @@ test("HTTP local CSV scan writes object and coverage documents and serves a mult
       response.end(JSON.stringify({ error: "workspace Elasticsearch unavailable" }));
       return;
     }
-    if (request.method === "HEAD" && (pathname === "/astro_object_index_v1" || pathname === "/astro_coverage_index_v1"
+    if (request.method === "HEAD" && (pathname === "/astro_object_index_v1" || pathname === `/${SKY_DATA_POINT_INDEX}` || pathname === "/astro_coverage_index_v1"
       || pathname === `/${ASTRO_IMAGE_FOOTPRINT_INDEX}`)) {
       response.statusCode = 200;
       response.end();
@@ -229,7 +230,7 @@ test("HTTP local CSV scan writes object and coverage documents and serves a mult
       return;
     }
     response.statusCode = 404;
-    response.end(JSON.stringify({ error: "not found" }));
+    response.end(JSON.stringify({ error: `not found: ${request.method} ${pathname}` }));
   });
   const esPort = await listen(esServer);
   const staleWarehouseServer = createServer(async (request, response) => {
@@ -289,7 +290,7 @@ test("HTTP local CSV scan writes object and coverage documents and serves a mult
     assert.deepEqual(capabilities.localScan, {
       enabled: true,
       configured: true,
-      executor: "local-csv",
+      executor: "workspace",
       objectIndex: "astro_object_index_v1",
       coverageIndex: "astro_coverage_index_v1",
     });
@@ -433,7 +434,7 @@ test("HTTP local CSV scan writes object and coverage documents and serves a mult
       {
         method: "POST",
         headers: { "Idempotency-Key": "http-local-scan" },
-        body: JSON.stringify({ relativePath: "catalog.csv", maxRows: 2 }),
+        body: JSON.stringify({ relativePath: "catalog.csv" }),
       },
     );
     assert.equal(submitted.run.status, "queued");

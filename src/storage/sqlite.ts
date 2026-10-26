@@ -3,6 +3,7 @@ import path from "node:path";
 import { DatabaseSync, type StatementSync } from "node:sqlite";
 
 import type { ConnectorIngestRunFilter, ConnectorIngestRunRecord } from "../connector-history.js";
+import type { StatisticsEntry, StatisticsSnapshot, StatisticsTotals } from "../data-statistics-types.js";
 import type { ConnectorRecord } from "../connectors.js";
 import type { DataAssetRecord } from "../data-catalog.js";
 import { assertPersistableDataAsset, type MetadataStore, type MetadataTransaction, type SurveyIdentityRecord } from "./types.js";
@@ -79,6 +80,16 @@ const MIGRATIONS = [{
     UNIQUE (source, source_id),
     CHECK (json_extract(record, '$.id') = id)
   ) STRICT;`,
+}, {
+  version: 4,
+  sql: `CREATE TABLE statistics_snapshots (
+    id TEXT PRIMARY KEY, slot TEXT NOT NULL, updated_at TEXT NOT NULL, record TEXT NOT NULL CHECK(json_valid(record))
+  ) STRICT;
+  CREATE INDEX statistics_snapshots_slot_idx ON statistics_snapshots(slot);
+  CREATE TABLE statistics_entries (
+    snapshot_id TEXT NOT NULL, file_key TEXT NOT NULL, size_bytes REAL,
+    PRIMARY KEY(snapshot_id, file_key)
+  ) STRICT;`,
 }];
 
 type SqliteRow = Record<string, unknown>;
@@ -94,6 +105,40 @@ class SqliteTransaction implements MetadataTransaction {
     this.database.prepare(`INSERT INTO survey_identities (id, source, source_id, record) VALUES (?, ?, ?, ?)
       ON CONFLICT (id) DO UPDATE SET record = excluded.record`)
       .run(record.id, record.source, record.sourceId, JSON.stringify(record));
+  }
+
+  async deleteSurveyIdentity(id: string): Promise<boolean> {
+    return this.database.prepare("DELETE FROM survey_identities WHERE id = ?").run(id).changes > 0;
+  }
+
+  async listStatisticsSnapshots(): Promise<StatisticsSnapshot[]> {
+    return this.records<StatisticsSnapshot>("SELECT record FROM statistics_snapshots ORDER BY updated_at DESC, id DESC");
+  }
+
+  async putStatisticsSnapshot(record: StatisticsSnapshot): Promise<void> {
+    this.database.prepare("INSERT INTO statistics_snapshots(id, slot, updated_at, record) VALUES (?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET record=excluded.record, updated_at=excluded.updated_at")
+      .run(record.id, record.slot, record.updatedAt, JSON.stringify(record));
+  }
+
+  async putStatisticsEntries(snapshotId: string, entries: StatisticsEntry[]): Promise<void> {
+    const statement = this.database.prepare("INSERT INTO statistics_entries(snapshot_id,file_key,size_bytes) VALUES (?,?,?) ON CONFLICT(snapshot_id,file_key) DO UPDATE SET size_bytes=excluded.size_bytes");
+    for (const entry of entries) statement.run(snapshotId, entry.key, entry.bytes);
+  }
+
+  async deleteStatisticsSnapshot(id: string): Promise<void> {
+    this.database.prepare("DELETE FROM statistics_entries WHERE snapshot_id=?").run(id);
+    this.database.prepare("DELETE FROM statistics_snapshots WHERE id=?").run(id);
+  }
+
+  async statisticsTotals(snapshotIds: string[]): Promise<StatisticsTotals> {
+    if (!snapshotIds.length) return { files: 0, knownBytes: 0, unknownFiles: 0 };
+    const row = this.database.prepare(`SELECT COUNT(*) files, COALESCE(SUM(size_bytes),0) known_bytes,
+      COALESCE(SUM(CASE WHEN size_bytes IS NULL THEN 1 ELSE 0 END),0) unknown_files FROM (
+      SELECT size_bytes, ROW_NUMBER() OVER(PARTITION BY file_key ORDER BY s.updated_at DESC,s.id DESC) rank
+      FROM statistics_entries e JOIN statistics_snapshots s ON s.id=e.snapshot_id
+      WHERE snapshot_id IN (${snapshotIds.map(() => "?").join(",")})
+    ) WHERE rank=1`).get(...snapshotIds) as SqliteRow;
+    return { files: Number(row.files), knownBytes: Number(row.known_bytes), unknownFiles: Number(row.unknown_files) };
   }
 
   async listConnectors(): Promise<ConnectorRecord[]> {
@@ -268,6 +313,12 @@ export class SqliteMetadataStore implements MetadataStore {
 
   listSurveyIdentities = () => this.read((transaction) => transaction.listSurveyIdentities());
   putSurveyIdentity = (record: SurveyIdentityRecord) => this.transaction((transaction) => transaction.putSurveyIdentity(record));
+  deleteSurveyIdentity = (id: string) => this.transaction(tx => tx.deleteSurveyIdentity(id));
+  listStatisticsSnapshots = () => this.read(tx => tx.listStatisticsSnapshots());
+  putStatisticsSnapshot = (record: StatisticsSnapshot) => this.transaction(tx => tx.putStatisticsSnapshot(record));
+  putStatisticsEntries = (id: string, entries: StatisticsEntry[]) => this.transaction(tx => tx.putStatisticsEntries(id, entries));
+  deleteStatisticsSnapshot = (id: string) => this.transaction(tx => tx.deleteStatisticsSnapshot(id));
+  statisticsTotals = (ids: string[]) => this.read(tx => tx.statisticsTotals(ids));
   listConnectors = () => this.read((transaction) => transaction.listConnectors());
   getConnector = (id: string) => this.read((transaction) => transaction.getConnector(id));
   getConnectorByLocationKey = (locationKey: string) => this.read((transaction) => transaction.getConnectorByLocationKey(locationKey));

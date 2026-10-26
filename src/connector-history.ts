@@ -8,6 +8,7 @@ export type ConnectorIngestRunStatus = "queued" | "running" | "succeeded" | "fai
 export type AtlasTaskKind = "user_scan" | "user_coverage";
 export type ScanBackend = "local" | "warehouse" | "legacy-warehouse";
 export type ScanPrecision = "exact" | "estimated" | "entrypoint-only";
+export type WorkspaceScanPhase = "staging" | "reading" | "coverage" | "indexing" | "complete";
 
 export interface ConnectorScanTargetSnapshot {
   uri: string;
@@ -57,6 +58,10 @@ export interface ConnectorIngestRun {
   evidencePath?: string;
   /** Present only for an optional user-asset remote scan with coverage context. */
   coverage?: CoverageJobSnapshot;
+  phase?: WorkspaceScanPhase;
+  processedFiles?: number;
+  failedFiles?: number;
+  pointCount?: number;
   createdAt: string;
   updatedAt?: string;
 }
@@ -99,6 +104,10 @@ export interface ConnectorIngestRunInput {
   coverageRole?: string;
   evidencePath?: string;
   coverage?: CoverageJobSnapshot;
+  phase?: WorkspaceScanPhase;
+  processedFiles?: number;
+  failedFiles?: number;
+  pointCount?: number;
 }
 
 export interface ConnectorIngestRunInternalInput extends ConnectorIngestRunInput {
@@ -173,6 +182,12 @@ function optionalMocStatus(value: unknown): ConnectorIngestRun["mocStatus"] {
   if (value === undefined || value === null) return undefined;
   if (!["pending", "ready", "failed", "unavailable"].includes(value as string)) throw new RangeError("mocStatus is not supported");
   return value as ConnectorIngestRun["mocStatus"];
+}
+
+function optionalPhase(value: unknown): WorkspaceScanPhase | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (!["staging", "reading", "coverage", "indexing", "complete"].includes(value as string)) throw new RangeError("phase is not supported");
+  return value as WorkspaceScanPhase;
 }
 
 function optionalTarget(value: unknown): ConnectorScanTargetSnapshot | undefined {
@@ -283,6 +298,10 @@ export class ConnectorIngestRunCatalog {
       ...(input.coverageRole === undefined ? {} : { coverageRole: optionalText(input.coverageRole, 80) }),
       ...(input.evidencePath === undefined ? {} : { evidencePath: optionalText(input.evidencePath, 2048) }),
       ...(input.coverage === undefined ? {} : { coverage: validateCoverageJobSnapshot(input.coverage) }),
+      ...(input.phase === undefined ? {} : { phase: optionalPhase(input.phase) }),
+      ...(input.processedFiles === undefined ? {} : { processedFiles: optionalCount(input.processedFiles, "processedFiles") }),
+      ...(input.failedFiles === undefined ? {} : { failedFiles: optionalCount(input.failedFiles, "failedFiles") }),
+      ...(input.pointCount === undefined ? {} : { pointCount: optionalCount(input.pointCount, "pointCount") }),
       secretName: optionalText(input.secretName, 63),
       idempotencyKeyHash: keyHash,
       createdAt: now,
@@ -338,6 +357,10 @@ export class ConnectorIngestRunCatalog {
       ...(patch.coverageRole === undefined ? {} : { coverageRole: optionalText(patch.coverageRole, 80) }),
       ...(patch.evidencePath === undefined ? {} : { evidencePath: optionalText(patch.evidencePath, 2048) }),
       ...(patch.coverage === undefined ? {} : { coverage: validateCoverageJobSnapshot(patch.coverage) }),
+      ...(patch.phase === undefined ? {} : { phase: optionalPhase(patch.phase) }),
+      ...(patch.processedFiles === undefined ? {} : { processedFiles: optionalCount(patch.processedFiles, "processedFiles") }),
+      ...(patch.failedFiles === undefined ? {} : { failedFiles: optionalCount(patch.failedFiles, "failedFiles") }),
+      ...(patch.pointCount === undefined ? {} : { pointCount: optionalCount(patch.pointCount, "pointCount") }),
       ...(patch.secretName === undefined ? {} : { secretName: optionalText(patch.secretName, 63) }),
       updatedAt: new Date().toISOString(),
     };
@@ -385,12 +408,16 @@ export function normalizeConnectorIngestRuns(entries: unknown[]): ConnectorInges
     optionalOrder(record.maxOrder, "maxOrder");
     if (record.precision !== undefined && !["exact", "estimated", "entrypoint-only"].includes(record.precision)) throw new Error("connector ingest run state contains an invalid precision");
     if (record.mocStatus !== undefined && !["pending", "ready", "failed", "unavailable"].includes(record.mocStatus)) throw new Error("connector ingest run state contains an invalid MOC status");
+    optionalPhase(record.phase);
     record.taskKind = inferAtlasTaskKind(record);
     optionalAssetIds(record.assetIds);
     optionalTarget(record.target);
     optionalSha256(record.sourceSnapshotSha256);
     optionalCount(record.fileCount, "fileCount");
     optionalCount(record.documentCount, "documentCount");
+    optionalCount(record.processedFiles, "processedFiles");
+    optionalCount(record.failedFiles, "failedFiles");
+    optionalCount(record.pointCount, "pointCount");
     if (record.coverage !== undefined) validateCoverageJobSnapshot(record.coverage);
     return structuredClone(record);
   });

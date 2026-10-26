@@ -1,14 +1,14 @@
 # Workspace handoff
 
-Updated: 2026-10-13, Asia/Shanghai.
+Updated: 2026-10-15, Asia/Shanghai.
 
 ## Current work
 
-The user authorized private coverage/MOC repair and FITS coordinate backfill,
-scoped Aladin exploration, Workspace Dev deployment, and cleanup of historical
-errors. Do not rescan existing coverage sources or enumerate their directories.
-Header replay uses the finite inventory of the successful Warehouse scan. Flink
-is not running or required. Preserve successful coverage and success records,
+The current request adds Connector and asset size statistics plus an encrypted
+configuration backup/import flow. Its implementation and validation are in the
+October 15 section below. It is in the local worktree and has not been deployed.
+Statistics refresh is manual; do not enumerate production Connector roots or
+start scans while validating it. Preserve successful coverage, downloads,
 resource limits, and the substantial existing worktree changes.
 
 Assets public data, evidence and releases are outside this task. Private files,
@@ -22,6 +22,10 @@ recovery of the existing five-file Euclid download. This work is now complete;
 see the October 12 results below. Failed retry records were cleared on October
 13; the verified output and Connector remain. Do not start another download of
 these files.
+
+Earlier private MOC repair, FITS position indexing, Aladin work, historical
+error cleanup, and the v0.0.1 release are complete and documented below. They
+are not instructions to start another repair or deployment for those datasets.
 
 ## Implementation
 
@@ -380,3 +384,81 @@ the registry endpoint from the host and a Pod, deployment of the official image
 succeeded. Current API checks still show zero failed/unavailable records:
 4 successful Production runs, 4 completed downloads, 3 successful Connector
 scans, 7 successful derived repairs and 3 ready MOC artifacts.
+
+## Workspace-independent scanning (October 13, worktree)
+
+Workspace asset and Connector scans now use `WorkspaceScanExecutor` for local
+directories and S3/OSS. It processes configured CSV catalogs and FITS image or
+cube assets directly in Workspace, writes MOCs and data points to the Workspace
+indices, checkpoints tasks, and resumes queued/running scans during service
+startup. The Warehouse remote scan dialog remains available only as an explicit
+optional operation when Warehouse is enabled and configured.
+
+Production download tasks persist `scanExecutor` (`workspace`, `warehouse`, or
+`none`), default to Workspace when its local index is configured, and retain
+compatibility with stored `warehouseHandoff` choices. A successful download
+registers verified FITS image assets and submits their Workspace scans. The
+production detail includes the selected executor and resulting scan run IDs.
+The asset view reports scan phase/file progress. The standalone user action
+"修复 MOC / 补建数据点" was removed; existing derived-repair support remains
+available internally for older Warehouse results.
+
+`npm run build:server`, `npm run build:viewer`, and `git diff --check` passed.
+Tests were not run in this turn. These changes are only in the local worktree;
+the Dev deployment remains Helm revision 93 / Workspace `0.0.1` until a later
+deployment is requested.
+
+## Connector statistics and encrypted config transfer (October 15, worktree)
+
+Connector statistics are stored as version-4 metadata snapshots. A user-triggered
+refresh enumerates only selected, enabled local/S3 Connectors; successful scan
+inventories are recorded after commit and historical successful manifests can be
+backfilled. Totals deduplicate physical files. GET and asset views read cached
+snapshots and never walk Connector roots. JDBC size totals are explicitly
+unsupported. Connector has a Statistics tab alongside list and scan history;
+user asset rows/details show asset size and associated Connector total.
+
+System Settings exports Connector credentials, user assets/surveys, system
+configuration and referenced secrets, desired Warehouse binding, active public
+resource selection, and a whitelist of browser preferences into a scrypt/AES-GCM
+encrypted file. Import validates and previews before replacing configuration,
+remaps IDs and credentials, supports local-root remapping, retains scan/download/
+production history, and records asynchronous public package restoration for
+retry. A durable rollback journal is removed before best-effort cleanup of
+restore-point files, so cleanup interruption does not invalidate recovery.
+
+Focused tests cover SQLite file deduplication, wrong-password and tamper checks,
+Connector/credential/asset remapping, missing local roots, retained history,
+rollback cleanup failure, and public package restore retry. The Workspace local
+scan HTTP fixture now models its data-point index and the minimal MOC Core
+build/merge/project contract. FITS `scanSpec` validation is restricted to image
+and cube assets.
+
+Validation on October 15: `npm run verify:types`, `npm run build:server`,
+`npm run build:viewer`, and `git diff --check` passed. `npm test` passed with
+373 tests, 4 skipped. `npm run build` and `npm run verify:chart` also passed
+before deployment. No statistics refresh, scan, production download, or release
+was run during deployment.
+
+## Dev deployment (October 15, revision 94)
+
+Helm release `asa` in namespace `asa-workspace` is deployed at revision **94**.
+Workspace image:
+`crpi-wixjy6gci86ms14e.cn-hongkong.personal.cr.aliyuncs.com/ay-dev/asa-workspace:0.0.1-dev-20261015-config-backup-statistics-r1`,
+pulled digest `sha256:59a249c476af1fe5b9ebbec1027d101e448fa4595632f7a2140f57bb37b5a9f6`.
+The image overlays this worktree's compiled server, Viewer and CLI plus the
+coordinate helper onto the verified October 13 runtime base. The Helm upgrade
+used `--reuse-values`; shared storage, downloader, Warehouse, proxy and resource
+settings were retained.
+
+Workspace, downloader and Elasticsearch are Ready with zero restarts; the
+search-init hook Job succeeded. All Workspace, production-data and evidence
+PVCs remain Bound. `http://astro.workspace.dev.72602.space:32080/healthz`
+reports `ok` / `0.0.1`; `/api/data-statistics` returns successfully and reports
+five Connectors and four assets. Its byte totals remain unknown until a user
+manually refreshes the Statistics tab. No Connector directory was enumerated
+for deployment verification.
+
+The registry endpoint timed out through the configured local HTTP proxy; the
+same endpoint responded directly, so only the image push bypassed proxy
+variables. The Dev site is available at `http://astro.workspace.dev.72602.space:32080`.

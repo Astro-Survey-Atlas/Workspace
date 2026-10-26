@@ -10,6 +10,7 @@ import { Pool } from "pg";
 import type { ConnectorIngestRunRecord } from "../src/connector-history.js";
 import type { ConnectorRecord } from "../src/connectors.js";
 import type { DataAssetRecord } from "../src/data-catalog.js";
+import type { StatisticsSnapshot } from "../src/data-statistics-types.js";
 import { createMetadataStore, PostgresMetadataStore, SqliteMetadataStore, type MetadataStore } from "../src/storage/index.js";
 
 const timestamp = "2026-08-12T12:00:00.000Z";
@@ -121,7 +122,7 @@ test("SQLite metadata store satisfies the storage contract and persists one DELE
 
     const database = new DatabaseSync(filename);
     assert.equal(database.prepare("PRAGMA journal_mode").get()?.journal_mode, "delete");
-    assert.deepEqual(database.prepare("SELECT version FROM schema_migrations ORDER BY version").all().map((row) => row.version), [1, 2, 3]);
+    assert.deepEqual(database.prepare("SELECT version FROM schema_migrations ORDER BY version").all().map((row) => row.version), [1, 2, 3, 4]);
     database.close();
 
     const reopened = new SqliteMetadataStore(filename);
@@ -133,6 +134,23 @@ test("SQLite metadata store satisfies the storage contract and persists one DELE
     await store.close();
     await rm(directory, { recursive: true, force: true });
   }
+});
+
+test("SQLite statistics totals deduplicate files across selected snapshots", async (t) => {
+  const store = new SqliteMetadataStore(":memory:");
+  t.after(() => store.close());
+  await store.initialize();
+  const snapshots: StatisticsSnapshot[] = [
+    { id: "accessible", slot: "accessible:connector-one", category: "accessible", connectorId: "connector-one", fingerprint: "a", updatedAt: "2026-08-12T12:00:00.000Z", state: "complete" },
+    { id: "scanned", slot: "scanned:connector-one:asset-one", category: "scanned", connectorId: "connector-one", assetId: "asset-one", fingerprint: "b", updatedAt: "2026-08-13T12:00:00.000Z", state: "complete" },
+  ];
+  for (const snapshot of snapshots) await store.putStatisticsSnapshot(snapshot);
+  await store.putStatisticsEntries("accessible", [{ key: "shared", bytes: 100 }, { key: "accessible-only", bytes: 5 }]);
+  await store.putStatisticsEntries("scanned", [{ key: "shared", bytes: 30 }, { key: "unknown-size", bytes: null }]);
+
+  assert.deepEqual(await store.statisticsTotals(["accessible", "scanned"]), { files: 3, knownBytes: 35, unknownFiles: 1 });
+  assert.deepEqual(await store.statisticsTotals(["accessible"]), { files: 2, knownBytes: 105, unknownFiles: 0 });
+  assert.deepEqual(await store.statisticsTotals([]), { files: 0, knownBytes: 0, unknownFiles: 0 });
 });
 
 test("SQLite v2 migration retains legacy connector ingest runs", async () => {
@@ -171,7 +189,7 @@ test("SQLite v2 migration retains legacy connector ingest runs", async () => {
     await store.initialize();
     assert.deepEqual(await store.getConnectorIngestRun(legacy.id), legacy);
     const migrated = new DatabaseSync(filename);
-    assert.deepEqual(migrated.prepare("SELECT version FROM schema_migrations ORDER BY version").all().map((row) => row.version), [1, 2, 3]);
+    assert.deepEqual(migrated.prepare("SELECT version FROM schema_migrations ORDER BY version").all().map((row) => row.version), [1, 2, 3, 4]);
     migrated.close();
     await store.close();
   } finally {

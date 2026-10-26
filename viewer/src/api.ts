@@ -14,6 +14,7 @@ import type { WarehouseTaskLogs } from "../../src/warehouse-scan";
 export type { WarehouseTaskLogs };
 import type { CoverageJobSpec } from "../../src/coverage-jobs";
 import type { DataAssetCoverageState, DataAssetNextAction, DataAssetObjectState, DataAssetOperationalStatus } from "../../src/data-asset-status";
+import type { DataStatisticsView, StatisticsRefresh } from "../../src/data-statistics-types";
 import type { SkyOverlapComponent, SkyOverlapSource } from "../../src/sky-overlap";
 import type { AssetsRegionCoverageEvidence, AssetsRegionFileEvidence, AssetsRegionLookupSummary, AssetsRegionScanScope, AssetsRegionLookupResponse } from "../../src/assets-region-client";
 import type { WorkspaceDirectory } from "../../src/workspace-directories";
@@ -29,6 +30,7 @@ import type { ProductionPipelineDefinition, ProductionRun, ProductionRunInput } 
 import type { AiProviderInput, AiProviderRecord, McpServerInput, McpServerRecord } from "../../src/system-config";
 import type { DownloadSettings, DownloadSettingsInput } from "../../src/system-config";
 import type { DownloadHealth } from "../../src/download-transport";
+import type { WorkspaceBackupPreview, PublicSelectionRestore } from "../../src/workspace-config-backup";
 
 export interface DownloadSettingsView {
   settings: DownloadSettings;
@@ -310,6 +312,13 @@ async function deleteRequest(url: string): Promise<void> {
   }
 }
 
+function encodedBackupPassword(value: string): string {
+  const bytes = new TextEncoder().encode(value);
+  let binary = "";
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
+}
+
 
 export const workspaceApi = {
   async capabilities(): Promise<WorkspaceCapabilities> {
@@ -318,6 +327,25 @@ export const workspaceApi = {
   async dataAssets(): Promise<DataAssetRecord[]> {
     return (await getJson<{ assets: DataAssetRecord[] }>("/api/data-assets")).assets;
   },
+  async dataStatistics(): Promise<DataStatisticsView> { return getJson("/api/data-statistics"); },
+  async refreshDataStatistics(connectorIds?: string[]): Promise<StatisticsRefresh> {
+    return (await postJson<{ refresh: StatisticsRefresh }>("/api/data-statistics/refresh", connectorIds ? { connectorIds } : {})).refresh;
+  },
+  async exportConfigBackup(password: string, browserPreferences: Record<string, string>): Promise<Blob> {
+    const response = await fetch("/api/config-backup/export", { method: "POST", headers: { "Content-Type": "application/json", "X-Backup-Password": encodedBackupPassword(password) }, body: JSON.stringify({ browserPreferences }) });
+    if (!response.ok) { const payload = await response.json().catch(() => ({})) as { error?: string }; throw new Error(payload.error ?? `Request failed: ${response.status}`); }
+    return response.blob();
+  },
+  async previewConfigBackup(file: File, password: string): Promise<WorkspaceBackupPreview> {
+    const response = await fetch("/api/config-backup/preview", { method: "POST", headers: { "Content-Type": "application/octet-stream", "X-Backup-Password": encodedBackupPassword(password) }, body: await file.arrayBuffer() });
+    if (!response.ok) { const payload = await response.json().catch(() => ({})) as { error?: string }; throw new Error(payload.error ?? `Request failed: ${response.status}`); }
+    return response.json() as Promise<WorkspaceBackupPreview>;
+  },
+  async applyConfigBackup(previewId: string, pathMappings: Record<string, string>): Promise<{ imported: { connectors: number; assets: number; surveys: number }; publicSelection: PublicSelectionRestore; browserPreferences: Record<string, string> }> {
+    return postJson("/api/config-backup/apply", { previewId, pathMappings });
+  },
+  async configBackupPublicSelection(): Promise<PublicSelectionRestore | null> { return (await getJson<{ restore: PublicSelectionRestore | null }>("/api/config-backup/public-selection")).restore; },
+  async retryConfigBackupPublicSelection(): Promise<PublicSelectionRestore> { return (await postJson<{ restore: PublicSelectionRestore }>("/api/config-backup/public-selection/retry", {})).restore; },
   async dataAssetStatuses(): Promise<DataAssetOperationalStatusResponse[]> {
     return (await getJson<{ statuses: DataAssetOperationalStatusResponse[] }>("/api/data-assets/status")).statuses;
   },
@@ -338,6 +366,9 @@ export const workspaceApi = {
   },
   async executeDataAssetLocalScan(id: string): Promise<ConnectorScanRun> {
     return (await postJson<{ run: ConnectorScanRun }>(`/api/data-assets/${encodeURIComponent(id)}/local-scan`, {})).run;
+  },
+  async executeDataAssetWorkspaceScan(id: string, connectorId?: string): Promise<ConnectorScanRun> {
+    return (await postJson<{ run: ConnectorScanRun }>(`/api/data-assets/${encodeURIComponent(id)}/workspace-scan`, connectorId ? { connectorId } : {})).run;
   },
   async executeDataAssetRemoteScan(id: string, input: RemoteCoverageScanInput): Promise<ConnectorScanRun> {
     return (await postJson<{ run: ConnectorScanRun }>(`/api/data-assets/${encodeURIComponent(id)}/remote-scan`, input)).run;
@@ -394,8 +425,8 @@ export const workspaceApi = {
   async connectorRunLogs(connectorId: string, runId: string): Promise<WarehouseTaskLogs> {
     return getJson<WarehouseTaskLogs>(`/api/connectors/${encodeURIComponent(connectorId)}/ingest-runs/${encodeURIComponent(runId)}/logs`);
   },
-  async executeConnectorScan(id: string): Promise<ConnectorScanRun> {
-    return (await postJson<{ run: ConnectorScanRun }>(`/api/connectors/${encodeURIComponent(id)}/scan-runs`, {})).run;
+  async executeConnectorScan(id: string, assetId?: string): Promise<ConnectorScanRun> {
+    return (await postJson<{ run: ConnectorScanRun }>(`/api/connectors/${encodeURIComponent(id)}/scan-runs`, assetId ? { assetId } : {})).run;
   },
   async surveys(): Promise<SurveyCard[]> {
     return (await getJson<{ surveys: SurveyCard[] }>("/api/surveys")).surveys;

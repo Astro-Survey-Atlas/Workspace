@@ -688,7 +688,7 @@ export class AladinExplorer {
       truncated: session.truncated,
       complete: complete && !session.indexing,
       indexing: session.indexing,
-      message: session.indexing ? "坐标索引补建中，已完成的数据点会自动更新" : returned ? undefined : "所选图层在当前天区和视野内没有数据点",
+      message: session.indexing ? "坐标索引生成中，已完成的数据点会自动更新" : returned ? undefined : "所选图层在当前天区和视野内没有数据点",
       assets: this.assetProgress(session, returned ? "ready" : "idle"),
       overlapCount: session.overlapSources.size,
     });

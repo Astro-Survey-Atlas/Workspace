@@ -2,10 +2,11 @@
 
 import { createHash, randomUUID } from "node:crypto";
 import https from "node:https";
+import { Readable } from "node:stream";
 import path from "node:path";
 import net from "node:net";
 
-import { HeadBucketCommand, ListObjectsV2Command, S3Client } from "@aws-sdk/client-s3";
+import { GetObjectCommand, HeadBucketCommand, ListObjectsV2Command, S3Client } from "@aws-sdk/client-s3";
 import OSS from "ali-oss";
 
 import { LocalConnectorRootsPolicy, localConnectorPolicyMessage, type LocalConnectorRootInfo } from "./local-connector-roots.js";
@@ -89,6 +90,7 @@ export interface ConnectorObject {
   key: string;
   size: number;
   lastModified?: string;
+  etag?: string;
 }
 
 const CONNECTOR_KINDS: readonly ConnectorKind[] = ["s3", "local", "jdbc"];
@@ -481,11 +483,17 @@ async function checkS3(record: ConnectorRecord, credentials?: ResolvedConnectorC
  * intentionally continue to use HeadBucket/minimal prefix probes and never call
  * this function.
  */
-export async function listConnectorObjects(
+export async function listConnectorObjects(record: ConnectorRecord, credentials: { accessKeyId: string; secretAccessKey: string; sessionToken?: string }, prefixOverride?: string): Promise<ConnectorObject[]> {
+  const objects: ConnectorObject[] = [];
+  for await (const object of iterateConnectorObjects(record, credentials, prefixOverride)) objects.push(object);
+  return objects;
+}
+
+export async function* iterateConnectorObjects(
   record: ConnectorRecord,
   credentials: { accessKeyId: string; secretAccessKey: string; sessionToken?: string },
   prefixOverride?: string,
-): Promise<ConnectorObject[]> {
+): AsyncGenerator<ConnectorObject> {
   if (record.kind !== "s3") throw new RangeError("Only S3/OSS connectors can list scan objects");
   const endpoint = cleanEndpoint(record.config.endpoint);
   if (!endpoint) throw new RangeError("S3 connector Endpoint is required for an explicit scan");
@@ -509,23 +517,24 @@ export async function listConnectorObjects(
       timeout: 15000,
       retryMax: 1,
     });
-    const objects: ConnectorObject[] = [];
+    let lastKey = "";
     let marker = "";
     for (;;) {
       const result = await client.list({ ...(prefix ? { prefix } : {}), ...(marker ? { marker } : {}), "max-keys": 1000 }) as { objects?: unknown[]; isTruncated?: boolean; nextMarker?: string };
       for (const value of result.objects ?? []) {
         if (!value || typeof value !== "object") continue;
-        const entry = value as { name?: unknown; size?: unknown; lastModified?: unknown };
+        const entry = value as { name?: unknown; size?: unknown; lastModified?: unknown; etag?: unknown };
         const key = typeof entry.name === "string" ? entry.name : "";
         if (!key || key.endsWith("/")) continue;
-        objects.push({ key, size: Number(entry.size ?? 0), ...(entry.lastModified ? { lastModified: String(entry.lastModified) } : {}) });
+        lastKey = key;
+        yield { key, size: Number(entry.size ?? 0), ...(entry.lastModified ? { lastModified: String(entry.lastModified) } : {}), ...(entry.etag ? { etag: String(entry.etag) } : {}) };
       }
       if (!result.isTruncated) break;
-      const next = result.nextMarker || objects.at(-1)?.key;
-      if (!next || next === marker) break;
+      const next = result.nextMarker || lastKey;
+      if (!next || next === marker) throw new Error("OSS listing did not advance its continuation marker");
       marker = next;
     }
-    return objects;
+    return;
   }
   const client = new S3Client({
     endpoint,
@@ -539,19 +548,141 @@ export async function listConnectorObjects(
     },
   });
   try {
-    const objects: ConnectorObject[] = [];
     let token: string | undefined;
     do {
       const result = await client.send(new ListObjectsV2Command({ Bucket: bucket, Prefix: prefix, ContinuationToken: token, MaxKeys: 1000 }));
       for (const entry of result.Contents ?? []) {
         if (!entry.Key || entry.Key.endsWith("/")) continue;
-        objects.push({ key: entry.Key, size: entry.Size ?? 0, ...(entry.LastModified ? { lastModified: entry.LastModified.toISOString() } : {}) });
+        yield { key: entry.Key, size: entry.Size ?? 0, ...(entry.LastModified ? { lastModified: entry.LastModified.toISOString() } : {}), ...(entry.ETag ? { etag: entry.ETag } : {}) };
       }
-      token = result.IsTruncated ? result.NextContinuationToken : undefined;
+      const next = result.IsTruncated ? result.NextContinuationToken : undefined;
+      if (result.IsTruncated && (!next || next === token)) throw new Error("S3 listing did not advance its continuation token");
+      token = next;
     } while (token);
-    return objects;
+    return;
   } finally {
     client.destroy();
+  }
+}
+
+export async function readConnectorObjectRange(
+  record: ConnectorRecord,
+  credentials: { accessKeyId: string; secretAccessKey: string; sessionToken?: string },
+  key: string,
+  start: number,
+  end: number,
+  etag?: string,
+): Promise<{ bytes: Uint8Array; etag?: string; contentRange?: string }> {
+  if (record.kind !== "s3") throw new RangeError("Only S3/OSS connectors can read remote objects");
+  if (!key || !Number.isSafeInteger(start) || !Number.isSafeInteger(end) || start < 0 || end < start) throw new RangeError("Invalid object byte range");
+  const endpoint = cleanEndpoint(record.config.endpoint);
+  const bucket = record.config.bucket ?? "";
+  if (!endpoint || !bucket) throw new RangeError("S3 connector Endpoint and Bucket are required");
+  const range = `bytes=${start}-${end}`;
+  const condition = etag ? { "If-Match": etag } : {};
+  if (isAlibabaOssEndpoint(endpoint)) {
+    let bucketInEndpoint = false;
+    try { bucketInEndpoint = new URL(endpoint).hostname.toLowerCase().startsWith(`${bucket.toLowerCase()}.`); } catch { /* validated by the client */ }
+    const client = new OSS({
+      accessKeyId: credentials.accessKeyId,
+      accessKeySecret: credentials.secretAccessKey,
+      endpoint,
+      bucket,
+      secure: endpoint.startsWith("https:"),
+      region: record.config.region || "oss-cn-hangzhou",
+      cname: bucketInEndpoint,
+      ...(endpoint.startsWith("https:") && usesInternalAlibabaCertificate(endpoint)
+        ? { httpsAgent: new https.Agent({ rejectUnauthorized: false }) }
+        : {}),
+      timeout: 15000,
+      retryMax: 1,
+    });
+    const result = await client.getStream(key, { timeout: 15000, headers: { Range: range, ...condition } });
+    if (result.res.status !== 206 || !result.stream) {
+      result.stream?.destroy?.();
+      throw new Error(`Object store did not honor the requested byte range (HTTP ${result.res.status ?? "unknown"})`);
+    }
+    const chunks: Buffer[] = [];
+    let size = 0;
+    for await (const chunk of result.stream as AsyncIterable<Uint8Array>) {
+      const bytes = Buffer.from(chunk);
+      size += bytes.length;
+      if (size > end - start + 1) throw new Error("Object store returned more bytes than requested");
+      chunks.push(bytes);
+    }
+    return {
+      bytes: Buffer.concat(chunks),
+      ...(result.res.headers?.etag ? { etag: result.res.headers.etag } : {}),
+      ...(result.res.headers?.["content-range"] ? { contentRange: result.res.headers["content-range"] } : {}),
+    };
+  }
+  const client = new S3Client({
+    endpoint,
+    region: record.config.region || "us-east-1",
+    forcePathStyle: true,
+    maxAttempts: 1,
+    credentials,
+  });
+  try {
+    const result = await client.send(new GetObjectCommand({ Bucket: bucket, Key: key, Range: range, ...(etag ? { IfMatch: etag } : {}) }));
+    if (result.$metadata.httpStatusCode !== 206 || !result.ContentRange || !result.Body) {
+      const body = result.Body;
+      if (body && "destroy" in body && typeof body.destroy === "function") body.destroy();
+      throw new Error(`Object store did not honor the requested byte range (HTTP ${result.$metadata.httpStatusCode ?? "unknown"})`);
+    }
+    const bytes = await result.Body.transformToByteArray();
+    if (bytes.byteLength > end - start + 1) throw new Error("Object store returned more bytes than requested");
+    return { bytes, ...(result.ETag ? { etag: result.ETag } : {}), ...(result.ContentRange ? { contentRange: result.ContentRange } : {}) };
+  } finally {
+    client.destroy();
+  }
+}
+
+export async function openConnectorObjectStream(
+  record: ConnectorRecord,
+  credentials: { accessKeyId: string; secretAccessKey: string; sessionToken?: string },
+  key: string,
+  etag?: string,
+): Promise<{ stream: Readable; etag?: string }> {
+  if (record.kind !== "s3") throw new RangeError("Only S3/OSS connectors can read remote objects");
+  const endpoint = cleanEndpoint(record.config.endpoint);
+  const bucket = record.config.bucket ?? "";
+  if (!endpoint || !bucket || !key) throw new RangeError("S3 connector Endpoint, Bucket, and object key are required");
+  if (isAlibabaOssEndpoint(endpoint)) {
+    let bucketInEndpoint = false;
+    try { bucketInEndpoint = new URL(endpoint).hostname.toLowerCase().startsWith(`${bucket.toLowerCase()}.`); } catch { /* validated by client */ }
+    const client = new OSS({
+      accessKeyId: credentials.accessKeyId,
+      accessKeySecret: credentials.secretAccessKey,
+      endpoint,
+      bucket,
+      secure: endpoint.startsWith("https:"),
+      region: record.config.region || "oss-cn-hangzhou",
+      cname: bucketInEndpoint,
+      ...(endpoint.startsWith("https:") && usesInternalAlibabaCertificate(endpoint)
+        ? { httpsAgent: new https.Agent({ rejectUnauthorized: false }) }
+        : {}),
+      timeout: 30000,
+      retryMax: 1,
+    });
+    const result = await client.getStream(key, { timeout: 30000, headers: etag ? { "If-Match": etag } : {} });
+    if (result.res.status !== 200 || !result.stream) {
+      result.stream?.destroy?.();
+      throw new Error(`Unable to stream object (HTTP ${result.res.status ?? "unknown"})`);
+    }
+    return { stream: result.stream as Readable, ...(result.res.headers?.etag ? { etag: result.res.headers.etag } : {}) };
+  }
+  const client = new S3Client({ endpoint, region: record.config.region || "us-east-1", forcePathStyle: true, maxAttempts: 1, credentials });
+  try {
+    const result = await client.send(new GetObjectCommand({ Bucket: bucket, Key: key, ...(etag ? { IfMatch: etag } : {}) }));
+    if (result.$metadata.httpStatusCode !== 200 || !result.Body) throw new Error(`Unable to stream object (HTTP ${result.$metadata.httpStatusCode ?? "unknown"})`);
+    const stream = Readable.from(result.Body as AsyncIterable<Uint8Array>);
+    stream.once("close", () => client.destroy());
+    stream.once("error", () => client.destroy());
+    return { stream, ...(result.ETag ? { etag: result.ETag } : {}) };
+  } catch (error) {
+    client.destroy();
+    throw error;
   }
 }
 

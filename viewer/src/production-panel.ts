@@ -591,6 +591,8 @@ export class ProductionPanel {
       ["区域快照", region?.nside ? `ICRS · NESTED · NSIDE ${region.nside} · ${region.pixels?.length ?? 0} cells` : "--"],
       ["执行编号", run.id],
     ];
+    if (typeof run.summary.scanExecutor === "string") rows.push(["扫描执行器", run.summary.scanExecutor === "workspace" ? "Workspace" : run.summary.scanExecutor === "warehouse" ? "Warehouse" : "仅下载"]);
+    if (Array.isArray(run.summary.scanRuns) && run.summary.scanRuns.length) rows.push(["扫描任务", run.summary.scanRuns.join(" · ")]);
     rows.forEach(([label, value]) => {
       const row = document.createElement("div");
       const term = document.createElement("dt");
@@ -967,7 +969,7 @@ export class ProductionPanel {
     root.append(storageLabel);
     const scanNote = document.createElement("p");
     scanNote.className = "control-note";
-    scanNote.textContent = "下载完成后会注册本地 Connector；在“用户资产”登记并关联该 Connector 后，可单独扫描文件，生成本地覆盖图层。";
+    scanNote.textContent = "默认由 Workspace 登记下载资产并生成 FITS 覆盖与数据点。需要时可选择可选 Warehouse 执行器；也可选择仅下载。";
     root.append(scanNote);
     const files = document.createElement("p");
     files.id = "production-files-summary";
@@ -1646,6 +1648,7 @@ export class ProductionPanel {
       exportFormat: String(draft.exportFormat ?? "json") as "json" | "csv",
       crawlerId: String(draft.crawlerId ?? "builtin-http"),
       concurrency: Number(draft.concurrency ?? 2),
+      scanExecutor: String(draft.scanExecutor ?? "workspace") as "workspace" | "warehouse" | "none",
       ...(draft.storageConnectorId ? { storageConnectorId: String(draft.storageConnectorId) } : {}),
     };
     this.submitLoading = true;
@@ -1669,7 +1672,8 @@ export class ProductionPanel {
   }
 
   private renderCrossmatchFields(root: HTMLElement, pipeline: ProductionPipelineDefinition, draft: Record<string, unknown>): void {
-    const queryable = this.assets.filter((asset) => asset.kind === "catalog" && Boolean(asset.scanSpec?.raColumn && asset.scanSpec?.decColumn && asset.scanSpec?.objectIdColumn));
+    const queryable = this.assets.filter((asset) => asset.kind === "catalog" && asset.scanSpec?.format === "csv"
+      && Boolean(asset.scanSpec.raColumn && asset.scanSpec.decColumn && asset.scanSpec.objectIdColumn));
     const assetControl = (id: string, labelText: string, key: "leftAssetId" | "rightAssetId"): HTMLLabelElement => {
       const label = document.createElement("label");
       label.className = "field-label";
@@ -1699,7 +1703,13 @@ export class ProductionPanel {
     if (parameter.type === "select") {
       const select = document.createElement("select");
       select.className = "field-input";
-      select.replaceChildren(...(parameter.options ?? []).map((option) => new Option(option === "builtin-http" ? "内置 HTTP 爬虫" : option.toUpperCase(), option)));
+      const labels: Record<string, string> = {
+        "builtin-http": "内置 HTTP 爬虫",
+        workspace: "Workspace 扫描",
+        warehouse: "可选 Warehouse 扫描",
+        none: "仅下载",
+      };
+      select.replaceChildren(...(parameter.options ?? []).map((option) => new Option(labels[option] ?? option.toUpperCase(), option)));
       control = select;
     } else {
       const input = document.createElement("input");
@@ -1746,7 +1756,7 @@ export class ProductionPanel {
           pipelineKey: pipeline.key, region, ...(context.files?.length ? { files: context.files } : {}),
           exportFormat: String(draft.exportFormat ?? "json") as "json" | "csv",
           crawlerId: String(draft.crawlerId ?? "builtin-http"), concurrency: Number(draft.concurrency ?? 2),
-          ...(draft.warehouseHandoff === undefined ? {} : { warehouseHandoff: draft.warehouseHandoff === "submit" ? "submit" as const : "none" as const }),
+          scanExecutor: String(draft.scanExecutor ?? "workspace") as "workspace" | "warehouse" | "none",
           ...(draft.storageConnectorId ? { storageConnectorId: String(draft.storageConnectorId) } : {}),
         }
       : {

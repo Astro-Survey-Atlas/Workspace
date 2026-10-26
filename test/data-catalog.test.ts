@@ -148,7 +148,7 @@ test("CSV scan specs reject unknown fields, invalid formats, columns, coordinate
     const registry = await catalogRegistry(paths.statePath);
     const valid = { ...normalizedScanSpec };
     await assert.rejects(() => registry.register(registrationWithScanSpec({ ...valid, extra: true })), /unknown field/);
-    await assert.rejects(() => registry.register(registrationWithScanSpec({ ...valid, format: "fits" })), /format must be csv/);
+    await assert.rejects(() => registry.register(registrationWithScanSpec({ ...valid, format: "fits" })), /FITS scanSpec is supported only for image and cube assets/);
     await assert.rejects(() => registry.register(registrationWithScanSpec({ ...valid, objectIdColumn: "" })), /objectIdColumn is required/);
     await assert.rejects(() => registry.register(registrationWithScanSpec({ ...valid, decColumn: "ra_deg" })), /column names must be distinct/);
     await assert.rejects(() => registry.register(registrationWithScanSpec({ ...valid, coordinateFrame: "FK5" })), /coordinateFrame must be ICRS/);

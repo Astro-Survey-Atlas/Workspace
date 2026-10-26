@@ -54,8 +54,33 @@ export interface MocCoreNestedHealpixInput {
   previewOrder?: number;
 }
 
+export interface MocCoreFitsWcsInput {
+  inputPath: string;
+  layerId: string;
+  coverageRole: CoverageRole;
+  dataOrigin: CoverageDataOrigin;
+  sourceTier: CoverageSourceTier;
+  maxOrder?: number;
+  queryOrder?: number;
+  previewOrder?: number;
+}
+
+export interface MocCoreMergeInput {
+  partialMocs?: readonly Uint8Array[];
+  partialMocPaths?: readonly string[];
+  layerId: string;
+  coverageRole: CoverageRole;
+  dataOrigin: CoverageDataOrigin;
+  sourceTier: CoverageSourceTier;
+  maxOrder?: number;
+  queryOrder?: number;
+  previewOrder?: number;
+}
+
 export interface MocCoreAdapter {
   buildCatalog(input: MocCoreCatalogInput): Promise<MocCoreCatalogResult>;
+  buildFitsWcs?(input: MocCoreFitsWcsInput): Promise<MocCoreCatalogResult>;
+  mergeCatalogs?(input: MocCoreMergeInput): Promise<MocCoreCatalogResult>;
   /** Build an authoritative MOC from already validated NESTED cells. */
   buildNestedHealpix?(input: MocCoreNestedHealpixInput): Promise<MocCoreCatalogResult>;
   buildNestedHealpixFile?(input: Omit<MocCoreNestedHealpixInput, "cells"> & { inputPath: string }): Promise<MocCoreCatalogResult>;
@@ -199,6 +224,94 @@ export class MocCoreCliAdapter implements MocCoreAdapter {
     }
   }
 
+  async buildFitsWcs(input: MocCoreFitsWcsInput): Promise<MocCoreCatalogResult> {
+    const maxOrder = positiveOrder(input.maxOrder, MOC_CORE_DEFAULT_MAX_ORDER, "maxOrder");
+    const queryOrder = positiveOrder(input.queryOrder, MOC_CORE_QUERY_ORDER, "queryOrder");
+    const previewOrder = positiveOrder(input.previewOrder, MOC_CORE_PREVIEW_ORDER, "previewOrder");
+    if (queryOrder !== MOC_CORE_QUERY_ORDER || previewOrder !== MOC_CORE_PREVIEW_ORDER) {
+      throw new RangeError("MOC Core queryOrder is fixed at 8 and previewOrder is fixed at 4");
+    }
+    const work = await mkdtemp(path.join(os.tmpdir(), "astro-atlas-moc-fits-"));
+    const specPath = path.join(work, "spec.json");
+    const outputPath = path.join(work, "build");
+    const layerId = stableLayerId(input.layerId);
+    await writeFile(specPath, JSON.stringify({
+      layerId,
+      mode: "fits-wcs",
+      input: path.resolve(input.inputPath),
+      coverageRole: input.coverageRole,
+      dataOrigin: input.dataOrigin,
+      sourceTier: input.sourceTier,
+      maxOrder,
+      queryOrder,
+      previewOrder,
+      coordinateFrame: "ICRS",
+      ordering: "NESTED",
+      recipe: {},
+    }), "utf8");
+    try {
+      const stdout = await this.#runBuild(specPath, outputPath);
+      return await this.#readBuildResult(stdout, outputPath, layerId, maxOrder, queryOrder, previewOrder);
+    } catch (error) {
+      if (error instanceof MocCoreUnavailableError) throw error;
+      throw new MocCoreUnavailableError(error instanceof Error ? error.message : String(error));
+    } finally {
+      await rm(work, { recursive: true, force: true });
+    }
+  }
+
+  async mergeCatalogs(input: MocCoreMergeInput): Promise<MocCoreCatalogResult> {
+    const maxOrder = positiveOrder(input.maxOrder, MOC_CORE_DEFAULT_MAX_ORDER, "maxOrder");
+    const queryOrder = positiveOrder(input.queryOrder, MOC_CORE_QUERY_ORDER, "queryOrder");
+    const previewOrder = positiveOrder(input.previewOrder, MOC_CORE_PREVIEW_ORDER, "previewOrder");
+    const partialMocs = input.partialMocs ?? [];
+    const partialMocPaths = input.partialMocPaths ?? [];
+    if (queryOrder !== MOC_CORE_QUERY_ORDER || previewOrder !== MOC_CORE_PREVIEW_ORDER
+      || Boolean(partialMocs.length) === Boolean(partialMocPaths.length)) {
+      throw new RangeError("MOC merge requires partial MOCs and fixed order-8/order-4 projections");
+    }
+    const work = await mkdtemp(path.join(os.tmpdir(), "astro-atlas-moc-merge-"));
+    const layerId = stableLayerId(input.layerId);
+    try {
+      const inputPaths: string[] = [...partialMocPaths];
+      for (const [index, bytes] of partialMocs.entries()) {
+        const inputPath = path.join(work, `partial-${index}.moc.fits`);
+        await writeFile(inputPath, bytes);
+        inputPaths.push(inputPath);
+      }
+      const mocPath = path.join(work, `${layerId}.moc.fits`);
+      const [program, ...prefixArgs] = this.#command.match(/(?:[^\s\"]+|\"[^\"]*\")+/g) ?? [];
+      const unquoted = prefixArgs.map((arg) => arg.replaceAll("\"", ""));
+      const merge = await execFileAsync(program!, [...unquoted, "merge", ...inputPaths.flatMap((value) => ["--input", value]), "--output", mocPath, "--max-order", String(maxOrder)], {
+        timeout: this.#timeoutMs,
+        maxBuffer: 2 * 1024 * 1024,
+      });
+      const result = jsonResult(merge.stdout);
+      const query = await this.#projectMoc(mocPath, queryOrder, path.join(work, "query-order8.json"));
+      const preview = await this.#projectMoc(mocPath, previewOrder, path.join(work, "preview-order4.json"));
+      const moc = await readFile(mocPath);
+      return {
+        layerId,
+        maxOrder,
+        queryOrder,
+        previewOrder,
+        queryPixels: pixels(query.pixels, queryOrder, "query"),
+        previewPixels: pixels(preview.pixels, previewOrder, "preview"),
+        ...(typeof result.sha256 === "string" && /^[a-f0-9]{64}$/.test(result.sha256) ? { mocSha256: result.sha256 } : {}),
+        artifacts: {
+          moc,
+          query: Buffer.from(`${JSON.stringify({ schemaVersion: 1, order: queryOrder, ordering: "NESTED", pixels: query.pixels })}\n`),
+          preview: Buffer.from(`${JSON.stringify({ schemaVersion: 1, order: previewOrder, ordering: "NESTED", pixels: preview.pixels })}\n`),
+        },
+      };
+    } catch (error) {
+      if (error instanceof MocCoreUnavailableError) throw error;
+      throw new MocCoreUnavailableError(`MOC Core merge failed: ${error instanceof Error ? error.message.slice(0, 500) : String(error)}`);
+    } finally {
+      await rm(work, { recursive: true, force: true });
+    }
+  }
+
   async buildNestedHealpix(input: MocCoreNestedHealpixInput): Promise<MocCoreCatalogResult> {
     const maxOrder = positiveOrder(input.maxOrder, MOC_CORE_DEFAULT_MAX_ORDER, "maxOrder");
     const queryOrder = positiveOrder(input.queryOrder, MOC_CORE_QUERY_ORDER, "queryOrder");
@@ -292,6 +405,47 @@ export class MocCoreCliAdapter implements MocCoreAdapter {
       const detail = error instanceof Error ? error.message : String(error);
       throw new MocCoreUnavailableError(`MOC Core build failed: ${detail.slice(0, 500)}`);
     }
+  }
+
+  async #projectMoc(mocPath: string, order: number, outputPath: string): Promise<Record<string, unknown>> {
+    const [program, ...prefixArgs] = this.#command.match(/(?:[^\s\"]+|\"[^\"]*\")+/g) ?? [];
+    const unquoted = prefixArgs.map((arg) => arg.replaceAll("\"", ""));
+    await execFileAsync(program!, [...unquoted, "project", "--moc", mocPath, "--order", String(order), "--output", outputPath], {
+      timeout: this.#timeoutMs,
+      maxBuffer: 2 * 1024 * 1024,
+    });
+    return JSON.parse(await readFile(outputPath, "utf8")) as Record<string, unknown>;
+  }
+
+  async #readBuildResult(stdout: string, outputPath: string, layerId: string, maxOrder: number, queryOrder: number, previewOrder: number): Promise<MocCoreCatalogResult> {
+    const result = jsonResult(stdout);
+    const queryPath = path.join(outputPath, "query-order8.json");
+    const previewPath = path.join(outputPath, "preview-order4.json");
+    const query = JSON.parse(await readFile(queryPath, "utf8")) as Record<string, unknown>;
+    const preview = JSON.parse(await readFile(previewPath, "utf8")) as Record<string, unknown>;
+    if (query.order !== queryOrder || query.ordering !== "NESTED" || preview.order !== previewOrder || preview.ordering !== "NESTED") {
+      throw new MocCoreUnavailableError("MOC Core returned projections with an invalid order or ordering");
+    }
+    const readOptional = async (...paths: string[]): Promise<Uint8Array | undefined> => {
+      for (const candidate of paths) {
+        try { return await readFile(candidate); } catch { /* optional build output */ }
+      }
+      return undefined;
+    };
+    const moc = await readOptional(path.join(outputPath, `${layerId}.moc.fits`), path.join(outputPath, "moc.fits"));
+    return {
+      layerId, maxOrder, queryOrder, previewOrder,
+      queryPixels: pixels(query.pixels, queryOrder, "query"),
+      previewPixels: pixels(preview.pixels, previewOrder, "preview"),
+      ...(typeof result.sha256 === "string" && /^[a-f0-9]{64}$/.test(result.sha256) ? { mocSha256: result.sha256 } : {}),
+      artifacts: {
+        ...(moc ? { moc } : {}),
+        query: await readFile(queryPath),
+        preview: await readFile(previewPath),
+        ...(await readOptional(path.join(outputPath, "statistics.json")) ? { statistics: await readFile(path.join(outputPath, "statistics.json")) } : {}),
+        ...(await readOptional(path.join(outputPath, "provenance.json")) ? { provenance: await readFile(path.join(outputPath, "provenance.json")) } : {}),
+      },
+    };
   }
 }
 
