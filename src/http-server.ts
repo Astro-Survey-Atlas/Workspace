@@ -16,7 +16,10 @@ import { McpCatalogQueryClient } from "./catalog-mcp-client.js";
 import { createConnectorCredentialStore, type StoredConnectorCredentials } from "./connector-credentials.js";
 import { ConnectorRegistry, connectorLocationKey, validateConnectorInput, type ConnectorCheckInput, type ConnectorPublicRecord, type ConnectorRecord, type ConnectorRegistrationInput } from "./connectors.js";
 import { ConnectorIngestRunCatalog, publicConnectorIngestRun, type ConnectorIngestRunFilter, type ConnectorIngestRunRecord, type ConnectorIngestRunStatus } from "./connector-history.js";
-import { DataStatisticsModule } from "./data-statistics.js";
+import { WarehouseScanQueue } from "./warehouse-scan-queue.js";
+import { DataStatisticsClient } from "./data-statistics-client.js";
+import { assetLinkedToConnector } from "./data-statistics.js";
+import { currentWarehouseLayerIds, warehouseLayerBelongsToAsset, workspaceLayerIdForAsset } from "./workspace-layer-identity.js";
 import { WorkspaceConfigBackupService } from "./workspace-config-backup.js";
 import { DataCatalogRegistry, type DataAssetAccess, type DataAssetRecord, type DataAssetRegistrationInput } from "./data-catalog.js";
 import { deriveDataAssetOperationalStatus, type DataAssetCoverageEvidence, type DataAssetRunEvidence } from "./data-asset-status.js";
@@ -108,8 +111,7 @@ const connectors = new ConnectorRegistry(metadataStore, localConnectorRoots);
 const connectorCredentials = createConnectorCredentialStore();
 const connectorRuns = new ConnectorIngestRunCatalog(metadataStore);
 const userMocs = new UserMocArtifactStore({ root: userMocRoot });
-const dataStatistics = new DataStatisticsModule({ store: metadataStore, connectors, credentials: connectorCredentials, assets: dataCatalog,
-  roots: localConnectorRoots, workspaceScanRoot: path.join(stateRoot, "workspace-scans"),
+const dataStatistics = new DataStatisticsClient({ root: path.join(stateRoot, "statistics"), workspaceScanRoot: path.join(stateRoot, "workspace-scans"),
   evidenceRoot: process.env.ASTRO_WAREHOUSE_EVIDENCE_MOUNT_PATH ?? "/var/lib/atlas-evidence" });
 const astroObjectIndex = new AstroObjectIndexService({ baseUrl: astroEsUrl });
 const skyDataPoints = new AstroObjectIndexService({ baseUrl: astroEsUrl, objectIndex: SKY_DATA_POINT_INDEX });
@@ -171,7 +173,10 @@ const coverageDownloads = new CoverageDownloadService({
 });
 const derivedRepairs = new DerivedRepairService({ root: path.join(stateRoot, "derived-repairs"), evidenceRoot: process.env.ASTRO_WAREHOUSE_EVIDENCE_MOUNT_PATH ?? "/var/lib/atlas-evidence",
   runs: connectorRuns, assets: dataCatalog, artifacts: userMocs, warehouse: warehouseScans, points: skyDataPoints, downloads: () => coverageDownloads.list() });
-warehouseScans.onCoverageCompleted((assetId, scanRunId) => derivedRepairs.submit(assetId, { mode: "positions", scanRunId }));
+warehouseScans.onCoverageCompleted((assetId, scanRunId) => derivedRepairs.ensurePositions(assetId, scanRunId));
+const warehouseQueue = new WarehouseScanQueue({ enabled: warehouseEnabled, root: path.join(process.env.ASTRO_WAREHOUSE_EVIDENCE_MOUNT_PATH ?? "/var/lib/atlas-evidence", "workspace-batches"),
+  warehouse: warehouseScans, connectors, credentials: connectorCredentials, runs: connectorRuns, roots: localConnectorRoots, artifacts: userMocs,
+  onCompleted: (assetId, scanRunId) => derivedRepairs.ensurePositions(assetId, scanRunId) });
 function assertExecutablePublicSourceId(sourceId: string): void {
   if (sourceId.startsWith("public:") && !isConcretePublicSourceId(sourceId)) {
     throw new RangeError("public sourceId must include survey, release/DR, product, and sourceId or layerId");
@@ -725,8 +730,19 @@ const submitWorkspaceAssetScan = async (request: Request, response: Response): P
   try {
     const body = (request.body && typeof request.body === "object" && !Array.isArray(request.body) ? request.body : {}) as Record<string, unknown>;
     const connectorId = typeof body.connectorId === "string" ? body.connectorId : undefined;
-    const { connectorId: _connectorId, ...input } = body;
-    const run = await workspaceScans.submitAsset(datasetIdFrom(request), input, connectorId, idempotencyKey(request));
+    const { connectorId: _connectorId, executor, ...input } = body;
+    const assetId = datasetIdFrom(request);
+    let run: ConnectorIngestRunRecord;
+    if (executor === "warehouse" || executor === "auto" && warehouseEnabled) {
+      if (Object.keys(input).some(key => key !== "relativePath") || input.relativePath !== undefined && typeof input.relativePath !== "string") throw new RangeError("Only relativePath is supported for an asset scan");
+      const asset = await dataCatalog.get(assetId);
+      const linked = (await connectors.list()).filter(connector => assetLinkedToConnector(asset, connector) && (!connectorId || connector.id === connectorId));
+      if (linked.length !== 1) throw new RangeError("Select exactly one linked Connector for the scan");
+      run = await warehouseQueue.submit(linked[0]!.id, { assetId, relativePath: input.relativePath as string | undefined }, idempotencyKey(request));
+    } else {
+      if (executor !== undefined && executor !== "auto" && executor !== "workspace") throw new RangeError("executor must be auto, workspace or warehouse");
+      run = await workspaceScans.submitAsset(assetId, input, connectorId, idempotencyKey(request));
+    }
     response.status(202).json({ run: publicConnectorIngestRun(run) });
   } catch (error) {
     sendApiError(response, error);
@@ -903,7 +919,8 @@ app.get("/api/connectors/:id/ingest-runs/:runId/logs", async (request: Request, 
     const rawRunId = request.params.runId;
     const runId = typeof rawRunId === "string" ? rawRunId.trim() : "";
     if (!runId) throw new RangeError("runId must be a non-empty string");
-    response.json(await warehouseScans.taskLogs(connectorId, runId));
+    const run = (await connectorRuns.list()).find(run => run.id === runId && run.connectorId === connectorId);
+    response.json(await (run?.executor === "warehouse-batch" ? warehouseQueue : warehouseScans).taskLogs(connectorId, runId));
   } catch (error) {
     sendApiError(response, error);
   }
@@ -936,11 +953,13 @@ app.post("/api/connectors/:id/scan-runs", async (request: Request, response: Res
     const executor = body.executor;
     const { executor: _executor, ...input } = body;
     let run: ConnectorIngestRunRecord;
-    if (executor === "warehouse") {
-      validateConnectorSelfScanBody(input);
-      run = await warehouseScans.submitConnectorScan(datasetIdFrom(request), idempotencyKey(request));
+    if (executor === "warehouse" || executor === "auto" && warehouseEnabled) {
+      const unknown = Object.keys(input).find(key => !["assetId", "relativePath", "maxFiles", "concurrency"].includes(key));
+      if (unknown) throw new RangeError(`Unknown scan input: ${unknown}`);
+      if (input.assetId !== undefined && typeof input.assetId !== "string" || input.relativePath !== undefined && typeof input.relativePath !== "string") throw new RangeError("assetId and relativePath must be strings");
+      run = await warehouseQueue.submit(datasetIdFrom(request), input as { assetId?: string; relativePath?: string; maxFiles?: number; concurrency?: 1 | 2 }, idempotencyKey(request));
     } else {
-      if (executor !== undefined && executor !== "workspace") throw new RangeError("executor must be workspace or warehouse");
+      if (executor !== undefined && executor !== "workspace" && executor !== "auto") throw new RangeError("executor must be auto, workspace or warehouse");
       run = await workspaceScans.submitConnector(datasetIdFrom(request), input, idempotencyKey(request));
     }
     response.status(202).json({ run: publicConnectorIngestRun(run) });
@@ -962,7 +981,9 @@ app.post("/api/connectors/:id/ingest-runs/:runId/retry", async (request: Request
   try {
     const runId = typeof request.params.runId === "string" ? request.params.runId.trim() : "";
     if (!runId) throw new RangeError("runId is required");
-    const run = await workspaceScans.retry(datasetIdFrom(request), runId);
+    const prior = (await connectorRuns.list()).find(run => run.id === runId && run.connectorId === datasetIdFrom(request));
+    if (!prior) throw new RangeError("Scan run not found for this connector");
+    const run = prior.executor === "warehouse-batch" ? await warehouseQueue.retry(runId) : await workspaceScans.retry(datasetIdFrom(request), runId);
     response.status(202).json({ run: publicConnectorIngestRun(run) });
   } catch (error) {
     sendApiError(response, error);
@@ -1611,7 +1632,7 @@ async function overlapSources(context: OverlapSourceContext): Promise<SkyOverlap
   const artifacts = await userMocs.list();
   const runs = await connectorRuns.list();
   const requestedLayers = context.sourceIds?.size ? new Set([
-    ...assets.flatMap((asset) => [asset.id, workspaceLayerIdForAsset(asset.id), `user-${asset.id}`]),
+    ...assets.flatMap((asset) => currentWarehouseLayerIds(asset.id, runs)),
     ...artifacts.filter((artifact) => context.sourceIds!.has(`workspace:moc:${artifact.id}`)).map((artifact) => artifact.layerId),
     ...[...context.sourceIds].filter((id) => id.startsWith("workspace:warehouse:")).map((id) => id.slice("workspace:warehouse:".length)),
   ]) : undefined;
@@ -1656,7 +1677,7 @@ async function overlapSources(context: OverlapSourceContext): Promise<SkyOverlap
         ...(mocSelection?.renderable.availableOrders ?? []),
         ...(legacy.pixels.length || local.pixels.length ? [4, 8] : []),
       ]),
-      layerIds: warehouseLayerIds.filter((id) => [asset.id, workspaceLayerIdForAsset(asset.id), `user-${asset.id}`].includes(id)),
+      layerIds: warehouseLayerIds.filter((id) => warehouseLayerBelongsToAsset(id, asset.id)),
     });
   }));
   const unassignedMocSources = await Promise.all([...artifactSelections.values()]
@@ -1714,7 +1735,7 @@ async function reverseSourcesFromIds(context: OverlapSourceContext): Promise<Sky
       if (!asset) throw new RangeError("Selected Workspace asset is unavailable");
       sources.push({ id, kind: "workspace", label: asset.name, nside: context.nside, pixels: [], assetId: asset.id, surveyId: asset.surveyId,
         releaseId: asset.releaseId, product: asset.product, modality: asset.modalities[0],
-        layerIds: [...owned].filter(layerId => [asset.id, workspaceLayerIdForAsset(asset.id), `user-${asset.id}`].includes(layerId)) });
+        layerIds: [...owned].filter(layerId => warehouseLayerBelongsToAsset(layerId, asset.id)) });
     } else if (context.includeWorkspace && id.startsWith("workspace:moc:")) {
       const artifact = artifacts.find(artifact => `workspace:moc:${artifact.id}` === id);
       if (!artifact || !owned.has(artifact.layerId)) throw new RangeError("Selected Workspace MOC lineage is unavailable");
@@ -1799,7 +1820,7 @@ async function reverseLookupFiles(sources: readonly SkyOverlapSource[], region: 
   }))];
   const privateSources = sources.filter((source) => source.kind === "workspace");
   const sourceForLayer = (id: string): string | undefined => privateSources.find((source) => source.layerIds?.includes(id)
-    || (source.assetId && [source.assetId, workspaceLayerIdForAsset(source.assetId), `user-${source.assetId}`].includes(id)))?.id;
+    || (source.assetId && warehouseLayerBelongsToAsset(id, source.assetId)))?.id;
   const directoryCollector = new WorkspaceDirectoryCollector(sourceForLayer);
   update?.("progress", { stage: "assets", state: layerIds.length ? "running" : "not-selected" });
   update?.("progress", { stage: "workspace", state: privateSources.length ? "running" : "not-selected" });
@@ -2109,10 +2130,6 @@ function nsideOrderForCoverage(nside: number): number {
   return Math.log2(nside);
 }
 
-function workspaceLayerIdForAsset(assetId: string): string {
-  return `workspace-${assetId}`.toLowerCase().replace(/[^a-z0-9-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 180) || "workspace-asset";
-}
-
 function coverageStatus(value: string | undefined): WorkspaceCoverageStatus {
   if (value === "pending" || value === "error" || value === "unavailable") return value;
   return "ready";
@@ -2136,7 +2153,7 @@ function aggregateCoverageStatus(values: readonly WorkspaceCoverageStatus[]): Wo
 }
 
 function warehouseLayerForAsset(layer: WarehouseCoverageLayer, asset: DataAssetRecord): boolean {
-  return layer.layerId === asset.id || layer.layerId === workspaceLayerIdForAsset(asset.id) || layer.layerId === `user-${asset.id}`;
+  return warehouseLayerBelongsToAsset(layer.layerId, asset.id);
 }
 
 function artifactMatchesCoverageFilter(artifact: UserMocArtifact, asset: DataAssetRecord | undefined, survey?: string, release?: string): boolean {
@@ -2187,11 +2204,10 @@ function workspaceWarehouseLayerIds(
 ): string[] {
   const ids = new Set<string>();
   for (const asset of assets) {
-    ids.add(asset.id);
-    ids.add(workspaceLayerIdForAsset(asset.id));
-    ids.add(`user-${asset.id}`);
+    currentWarehouseLayerIds(asset.id, runs).forEach(id => ids.add(id));
   }
-  artifacts.forEach((artifact) => ids.add(artifact.layerId));
+  artifacts.filter(artifact => !assets.some(asset => warehouseLayerBelongsToAsset(artifact.layerId, asset.id)))
+    .forEach((artifact) => ids.add(artifact.layerId));
   runs
     // Only the current Workspace executor has an explicit ownership marker.
     // Older records can be present in the shared metadata store after Assets
@@ -2201,7 +2217,8 @@ function workspaceWarehouseLayerIds(
       && run.executor === "warehouse-scan"
       && (run.taskKind === "user_scan" || run.taskKind === "user_coverage")
       && run.batchId?.startsWith("workspace-")
-      && run.warehouseLayerId?.startsWith("workspace-"))
+      && run.warehouseLayerId?.startsWith("workspace-")
+      && !assets.some(asset => warehouseLayerBelongsToAsset(run.warehouseLayerId!, asset.id)))
     .map((run) => run.warehouseLayerId)
     .filter((layerId): layerId is string => Boolean(layerId))
     .forEach((layerId) => ids.add(layerId));
@@ -2804,6 +2821,7 @@ async function start(): Promise<void> {
   const recoveredWorkspaceScans = await workspaceScans.recoverInterruptedRuns();
   if (recoveredWorkspaceScans) console.info(`Resumed ${recoveredWorkspaceScans} interrupted Workspace scan(s)`);
   warehouseScans.start();
+  await warehouseQueue.initialize();
   if (warehouseEnabled) derivedRepairs.start();
 
   httpServer = app.listen(port, host, () => {
@@ -2819,7 +2837,9 @@ void start().catch(async (error) => {
 
 async function shutdown(): Promise<void> {
   warehouseScans.stop();
+  warehouseQueue.stop();
   derivedRepairs.stop();
+  await dataStatistics.close();
   if (httpServer) await new Promise<void>((resolve) => httpServer!.close(() => resolve()));
   await metadataStore.close();
   process.exit(0);

@@ -21,6 +21,10 @@ export interface ConnectorScanTargetSnapshot {
 /** Public run history DTO. Executor credentials are deliberately excluded. */
 export interface ConnectorIngestRun {
   id: string;
+  logicalRunId?: string;
+  partitionId?: string;
+  parentRunId?: string;
+  batchProgress?: { completed: number; failed: number; total: number; active: number };
   /** Legacy location identity and current immutable location snapshot. */
   locationKey: string;
   connectorId?: string;
@@ -73,6 +77,10 @@ export interface ConnectorIngestRunRecord extends ConnectorIngestRun {
 }
 
 export interface ConnectorIngestRunInput {
+  logicalRunId?: string;
+  partitionId?: string;
+  parentRunId?: string;
+  batchProgress?: { completed: number; failed: number; total: number; active: number };
   connectorId?: string;
   connectorName?: string;
   connectorKind?: ConnectorKind;
@@ -304,6 +312,10 @@ export class ConnectorIngestRunCatalog {
       ...(input.pointCount === undefined ? {} : { pointCount: optionalCount(input.pointCount, "pointCount") }),
       secretName: optionalText(input.secretName, 63),
       idempotencyKeyHash: keyHash,
+      ...(input.logicalRunId ? { logicalRunId: input.logicalRunId } : {}),
+      ...(input.partitionId ? { partitionId: input.partitionId } : {}),
+      ...(input.parentRunId ? { parentRunId: input.parentRunId } : {}),
+      ...(input.batchProgress ? { batchProgress: input.batchProgress } : {}),
       createdAt: now,
       updatedAt: now,
     };
@@ -327,6 +339,7 @@ export class ConnectorIngestRunCatalog {
     }
     const next: ConnectorIngestRunRecord = {
       ...current,
+      ...(patch.batchProgress ? { batchProgress: patch.batchProgress } : {}),
       taskKind: inferAtlasTaskKind({ ...current, ...patch }),
       ...(patch.connectorId === undefined ? {} : { connectorId: optionalText(patch.connectorId, 180) }),
       ...(patch.connectorName === undefined ? {} : { connectorName: optionalText(patch.connectorName, 240) }),

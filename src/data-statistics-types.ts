@@ -9,7 +9,7 @@ export interface StatisticsEntry {
 export interface StatisticsSnapshot {
   id: string;
   slot: string;
-  category: "accessible" | "asset" | "scanned";
+  category: "accessible" | "asset" | "scanned" | "workload";
   connectorId: string;
   assetId?: string;
   runId?: string;
@@ -18,6 +18,8 @@ export interface StatisticsSnapshot {
   state: "complete" | "partial";
   message?: string;
   pointCount?: number;
+  /** Durable receipt for one logical scan/partition; bytes never pass through a float. */
+  workload?: { files: number; knownBytes: string; unknownFiles: number };
 }
 
 export interface StatisticsTotals {
@@ -33,6 +35,15 @@ export interface DataAmount extends StatisticsTotals {
   message?: string;
 }
 
+export interface CumulativeDataAmount {
+  files: number;
+  knownBytes: string;
+  bytes: string | null;
+  unknownFiles: number;
+  state: StatisticsState;
+  updatedAt?: string;
+}
+
 export interface StatisticsRefresh {
   id: string;
   status: "running" | "succeeded" | "partial" | "failed";
@@ -43,6 +54,17 @@ export interface StatisticsRefresh {
   startedAt: string;
   updatedAt: string;
   errors: Array<{ connectorId: string; message: string }>;
+  kind?: "inventory" | "history";
+  connectorIds?: string[];
+  completedConnectorIds?: string[];
+  historyProgress?: Record<string, number>;
+  checkpoint?: {
+    connectorId: string;
+    fingerprint: string;
+    snapshots: StatisticsSnapshot[];
+    continuationToken?: string;
+    processedFiles: number;
+  };
 }
 
 export interface DataStatisticsView {
@@ -50,6 +72,7 @@ export interface DataStatisticsView {
   assetCount: number;
   accessible: DataAmount;
   scanned: DataAmount;
+  cumulativeScanned: CumulativeDataAmount;
   connectors: Array<{
     connectorId: string;
     name: string;

@@ -116,6 +116,15 @@ export interface WarehouseLocalSourceVolume {
   workspaceMountPath: string;
 }
 
+export interface FrozenScanSelection {
+  parentRunId: string;
+  layerId?: string;
+  partitionId: string;
+  inventory: { path: string; sha256: string; fileCount: number };
+  partition: { version: number; scopeId: string; scopeSnapshotSha256: string; expectedPartitionCount: number; partitionId: string;
+    ruleSnapshotSha256: string; rosterReference: { path: string; sha256: string; fileCount: number } };
+}
+
 export interface WarehouseScanServiceOptions {
   enabled: boolean;
   connectors: ConnectorRegistry;
@@ -632,6 +641,7 @@ export interface ScanRequestBuildInput {
   scannerImage: string;
   warehouseSinkCredentials?: WarehouseSinkCredentialBinding;
   localSource?: WarehouseLocalSourceVolume;
+  frozen?: FrozenScanSelection;
 }
 
 /** Build a namespace-local ScanRequest using the Warehouse ScanPlan v2 contract. */
@@ -639,7 +649,9 @@ export function buildWorkspaceScanRequest(value: ScanRequestBuildInput): Record<
   const { connector, asset, input, coverage, taskName: name, batchId, secretName, namespace, warehouseEsUrl, evidenceClaimName, evidenceMountPath, scannerImage, warehouseSinkCredentials, localSource } = value;
   const normalizedCoverage = effectiveCoverage(input, coverage, asset);
   const isLocal = connector.kind === "local";
-  const selection = buildWarehouseScanSelection(connector, asset, input, normalizedCoverage);
+  const selection = value.frozen ? { sourceUri: connectorScanPath(connector, input.path),
+    filters: { includeSuffixes: warehouseIncludeSuffixes(input.allowedSuffixes) } }
+    : buildWarehouseScanSelection(connector, asset, input, normalizedCoverage);
   const sourceUri = selection.sourceUri;
   if (isLocal && !localSource) throw new RangeError("未配置 Warehouse 本地扫描数据卷（localSource）");
   const localLocation = isLocal ? localSourceLocation(sourceUri, localSource!) : undefined;
@@ -663,16 +675,16 @@ export function buildWorkspaceScanRequest(value: ScanRequestBuildInput): Record<
     version: 2,
     scanRunId: batchId,
     layer: {
-      layerId: layerId(asset), surveyId: safeName(surveyId), releaseId: safeName(releaseId), productId: productId(product),
+      layerId: value.frozen?.layerId ?? layerId(asset), surveyId: safeName(surveyId), releaseId: safeName(releaseId), productId: productId(product),
       modality: mode === "fits-wcs" ? "image" : "catalog", coverageRole: role, entrypoint: asset.access?.uri,
     },
-    source: isLocal
-      ? { connector: { type: "local" }, location }
-      : { connector: sourceConnectorPlan(connector), location },
+    source: { ...(isLocal ? { connector: { type: "local" }, location } : { connector: sourceConnectorPlan(connector), location }),
+      ...(value.frozen ? { inventory: value.frozen.inventory } : {}) },
     filters: selection.filters,
     extraction: extractionPlan(asset, input, normalizedCoverage),
     sink: { connector: { type: "elasticsearch", endpoint: warehouse.endpoint, credentialRef: sinkCredentialRef } },
     evidence: { outputPath: `${evidenceMountPath.replace(/\/+$/, "")}/${batchId}` },
+    ...(value.frozen ? { partition: value.frozen.partition } : {}),
   };
   const labels: Record<string, string> = {
     "app.kubernetes.io/managed-by": "asa-workspace",
@@ -865,7 +877,7 @@ export class WarehouseScanService {
     return terminal;
   }
 
-  async submitScan(connectorId: string, input: GenericScanInput, idempotency?: string): Promise<ConnectorIngestRunRecord> {
+  async submitScan(connectorId: string, input: GenericScanInput, idempotency?: string, frozen?: FrozenScanSelection): Promise<ConnectorIngestRunRecord> {
     if (!this.#enabled) throw new DataWarehouseDisabledError();
     if (!this.#client) throw new Error("Warehouse scan submission is only available inside Kubernetes");
     if (!this.#warehouseEsUrl) throw new ConnectorScanPreconditionError("Warehouse Elasticsearch is not configured");
@@ -874,7 +886,8 @@ export class WarehouseScanService {
     const asset = await this.#dataCatalog.get(input.assetId);
     if (asset.origin !== "user") throw new ConnectorScanPreconditionError("Only user assets can start an optional remote scan");
     const coverage = effectiveCoverage(input, input.coverage ? validateCoverageJobSnapshot(input.coverage) : coverageForAsset(asset, connector), asset);
-    const selection = buildWarehouseScanSelection(connector, asset, input, coverage);
+    const selection = frozen ? { sourceUri: connectorScanPath(connector, input.path) }
+      : buildWarehouseScanSelection(connector, asset, input, coverage);
     const stored = connector.kind === "s3"
       ? (async () => {
         const value = connector.credentialRef ? await this.#credentials.get(connector.credentialRef) : undefined;
@@ -891,10 +904,11 @@ export class WarehouseScanService {
     const created = await this.#runs.create(connector.locationKey, {
       connectorId: connector.id, connectorName: connector.name, connectorKind: connector.kind, executor: "warehouse-scan", backend: "warehouse", taskKind: "user_coverage",
       target: { ...connectorScanTarget(connector), uri: sourcePath }, assetIds: [asset.id], assetId: asset.id, assetName: asset.name, jobId: name, batchId, status: "queued", fileCount: 0,
-      sourcePath, esIndex: WAREHOUSE_FILE_INDEX, warehouseLayerId: layerId(asset), secretName,
+      sourcePath, esIndex: WAREHOUSE_FILE_INDEX, warehouseLayerId: frozen?.layerId ?? layerId(asset), secretName,
       evidencePath: `${this.#evidenceMountPath.replace(/\/+$/, "")}/${batchId}`,
       coverage, coverageRole: coverage.coverageRole, maxOrder: coverage.maxOrder, availableOrders: [], precision: "exact" as UserMocPrecision,
       mocStatus: "pending",
+      ...(frozen ? { parentRunId: frozen.parentRunId, logicalRunId: frozen.parentRunId, partitionId: frozen.partitionId } : {}),
     }, idempotency);
     const run = created.run;
     if (!created.created) return run;
@@ -909,15 +923,15 @@ export class WarehouseScanService {
       precision: "exact" as UserMocPrecision,
     };
     try {
-      await this.#artifacts?.createPending(artifactContext);
+      if (!frozen) await this.#artifacts?.createPending(artifactContext);
       // A secret is required for S3 sources and authenticated sinks; local
       // PVC sources with an unauthenticated sink need none at all.
       if (sourceCredentials || this.#warehouseCredentials) {
         await this.#createSecret(secretName, sourceCredentials, sourceCredentials ? sourceConnectorEndpoint(connector) : undefined, batchId, this.#warehouseCredentials);
       }
-       await this.#createRequest({ connector, asset, input, coverage, taskName: name, batchId, secretName });
+       await this.#createRequest({ connector, asset, input, coverage, taskName: name, batchId, secretName }, frozen);
     } catch (error) {
-      await this.#artifacts?.fail(artifactContext, error).catch(() => undefined);
+      if (!frozen) await this.#artifacts?.fail(artifactContext, error).catch(() => undefined);
       await this.#cleanupSecret(secretName);
       return this.#runs.update(run.id, { status: "failed", error: error instanceof Error ? error.message : String(error), completedAt: new Date().toISOString(), mocStatus: "failed" });
     }
@@ -940,6 +954,20 @@ export class WarehouseScanService {
       ...(submission.excludePatterns === undefined ? {} : { excludePatterns: submission.excludePatterns }),
       coverage,
     }, key ?? idempotencyKey(connector, submission, surveyId));
+  }
+
+  async prepareConnectorScan(connectorId: string, assetId?: string, relativePath?: string): Promise<{ connector: ConnectorRecord; asset: DataAssetRecord; input: GenericScanInput; scannerRoot?: string }> {
+    if (!this.#enabled || !this.#client) throw new DataWarehouseDisabledError();
+    const connector = await this.#connectors.get(connectorId); this.#assertScannable(connector);
+    const assets = (await this.#dataCatalog.list()).filter(asset => asset.origin === "user" &&
+      ((asset.connectorIds ?? []).includes(connector.id) || (asset.connectorLocationKeys ?? []).includes(connector.locationKey)) && (!assetId || asset.id === assetId));
+    if (assets.length !== 1) throw new ConnectorScanPreconditionError("Select exactly one linked asset for scanning");
+    const asset = assets[0]!;
+    const coverage = effectiveCoverage({ assetId: asset.id }, coverageForAsset(asset, connector), asset);
+    const input = { assetId: asset.id, coverage, allowedSuffixes: defaultSuffixesForCoverage(coverage),
+      ...(relativePath ?? asset.sourceRelativePath ? { path: relativePath ?? asset.sourceRelativePath } : {}) };
+    const sourcePath = connectorScanPath(connector, input.path);
+    return { connector, asset, input, ...(connector.kind === "local" ? { scannerRoot: localSourceLocation(sourcePath, this.#localSource!).rootPath } : {}) };
   }
 
   async submitConnectorScan(connectorId: string, key?: string): Promise<ConnectorIngestRunRecord> {
@@ -1138,6 +1166,10 @@ export class WarehouseScanService {
       ...(sourceSnapshotSha256 ? { sourceSnapshotSha256 } : {}),
       ...(phase === "SUCCEEDED" && !summaryIdentityError ? { status: "succeeded", completedAt: new Date().toISOString(), error: undefined } : phase === "FAILED" || phase === "INVALID" || summaryIdentityError ? { status: "failed", error: terminalMessage, completedAt: new Date().toISOString(), mocStatus: "failed" as const } : waitingPhase ? { status: "queued", error: undefined } : runningPhase ? { status: "running", error: undefined } : { status: "queued", error: undefined }),
     });
+    if (current.parentRunId) {
+      if (phase === "SUCCEEDED" || terminalFailure) await this.#cleanupSecret(current.secretName);
+      return;
+    }
     const artifactContext = artifactContextForRun(current);
     if (terminalFailure) {
       const artifact = this.#artifacts ? await this.#artifacts.fail(artifactContext, terminalMessage) : undefined;
@@ -1213,10 +1245,11 @@ export class WarehouseScanService {
 
   async #cleanupSecret(name?: string): Promise<void> { if (!name || !this.#client) return; const response = await this.#client.request("DELETE", `/api/v1/namespaces/${encodeURIComponent(this.#namespace)}/secrets/${encodeURIComponent(name)}`); if (!response.ok && response.status !== 404) console.warn(`Unable to remove Workspace scan Secret ${name} (HTTP ${response.status})`); }
 
-  async #createRequest(requestInput: { connector: ConnectorRecord; asset: DataAssetRecord; input: GenericScanInput; coverage: CoverageJobSnapshot; taskName: string; batchId: string; secretName: string }): Promise<void> {
+  async #createRequest(requestInput: { connector: ConnectorRecord; asset: DataAssetRecord; input: GenericScanInput; coverage: CoverageJobSnapshot; taskName: string; batchId: string; secretName: string }, frozen?: FrozenScanSelection): Promise<void> {
     const { secretName } = requestInput;
     const body = buildWorkspaceScanRequest({
       ...requestInput,
+      frozen,
       namespace: this.#namespace,
       warehouseEsUrl: this.#warehouseEsUrl,
       evidenceClaimName: this.#evidenceClaimName,
@@ -1225,6 +1258,9 @@ export class WarehouseScanService {
       ...(this.#warehouseCredentials ? { warehouseSinkCredentials: { secretName, usernameKey: WAREHOUSE_USERNAME_KEY, passwordKey: WAREHOUSE_PASSWORD_KEY } } : {}),
       ...(this.#localSource ? { localSource: this.#localSource } : {}),
     });
+    const spec = body.spec as { plan: { source: Record<string, unknown>; partition?: unknown }; scanner: Record<string, unknown> };
+    spec.scanner.resources = { requests: { cpu: "500m", memory: "512Mi" }, limits: { cpu: "1", memory: "1Gi" } };
+    spec.scanner.headerConcurrency = 4;
     const result = await this.#client!.request("POST", `${WAREHOUSE_SCAN_API}/namespaces/${encodeURIComponent(this.#namespace)}/scanrequests`, body); if (!result.ok) throw new Error(`Unable to create ScanRequest (HTTP ${result.status}): ${result.text.slice(0, 300)}`);
   }
 

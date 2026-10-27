@@ -1,5 +1,6 @@
 import type { ScanPrecision } from "./connector-history.js";
 import { parseElasticsearchEndpoint } from "./es-endpoint.js";
+import { warehouseLayerBelongsToAsset } from "./workspace-layer-identity.js";
 import { regionContainsCell, regionPixelFilter, WorkspaceDirectoryCollector, type WorkspaceDirectory, type WorkspaceFileLocation } from "./workspace-directories.js";
 
 export const WAREHOUSE_LAYER_INDEX = "ast_layer_index_v1";
@@ -29,6 +30,7 @@ export interface WarehouseLayerSnapshot {
   layerMode?: string;
   activeScopeId?: string;
   scopeSnapshotSha256?: string;
+  expectedPartitionCount?: number;
 }
 
 export interface WarehouseCoverageSnapshot {
@@ -164,6 +166,7 @@ function layerFromHit(hit: SearchHit): WarehouseLayerSnapshot | undefined {
     fileCount: number(source.file_count) ?? 0, coverageCount: number(source.coverage_count) ?? 0, errorCount: number(source.error_count) ?? 0,
     errorSummary: text(source.error_summary), updatedAt: text(source.updated_at),
     layerMode: text(source.layer_mode), activeScopeId: text(source.active_scope_id), scopeSnapshotSha256: text(source.scope_snapshot_sha256),
+    expectedPartitionCount: number(source.expected_partition_count),
   };
 }
 
@@ -251,23 +254,27 @@ export class WarehouseIndexService {
       if (!cursor?.length) throw new WarehouseIndexError("Warehouse layer page is missing a stable sort cursor");
       layerSearchAfter = cursor;
     }
-    const layers = layerHits.map(layerFromHit).filter((value): value is WarehouseLayerSnapshot => Boolean(value)
-      && (allowedLayerIds === undefined || allowedLayerIds.has(value!.layerId)) && value!.layerMode !== "CANDIDATE");
+    const layers = await this.#resolvePartitionedLayers(layerHits.map(layerFromHit).filter((value): value is WarehouseLayerSnapshot => Boolean(value)
+      && (allowedLayerIds === undefined || allowedLayerIds.has(value!.layerId)) && value!.layerMode !== "CANDIDATE"));
     const coverages: WarehouseCoverageSnapshot[] = [];
     for (const layer of layers.filter((candidate) => candidate.state === "ACTIVE" && (allowedLayerIds === undefined || allowedLayerIds.has(candidate.layerId)))) {
+      const committed = await this.#committedBindings(layer);
+      if (committed.truncated) { truncated = true; continue; }
       let searchAfter: unknown[] | undefined;
       let loaded = 0;
       while (loaded < this.#maxDocuments) {
         const pageSize = Math.min(10_000, this.#maxDocuments - loaded);
         const response = await this.#search(this.coverageIndex, {
           size: pageSize, track_total_hits: true,
-          query: { bool: { filter: [{ term: { layer_id: layer.layerId } }] } },
+          query: { bool: { filter: [layer.layerMode === "PARTITIONED"
+            ? { terms: { layer_id: [...committed.bindings.keys()] } } : { term: { layer_id: layer.layerId } }] } },
           sort: [{ layer_id: "asc" }, { source_file_id: "asc" }, { healpix_order: "asc" }, { healpix_cell: "asc" }, { coverage_role: "asc" }],
           ...(searchAfter ? { search_after: searchAfter } : {}),
         });
         const hits = response.hits?.hits ?? [];
         if (hits.length > this.#maxDocuments - loaded) { truncated = true; break; }
-        hits.forEach((hit) => { const value = coverageFromHit(hit, layer.layerId); if (value) coverages.push(value); });
+        hits.forEach((hit) => { const value = coverageFromHit(hit, layer.layerId);
+          if (value && committed.bindings.has(value.layerId)) coverages.push({ ...value, layerId: layer.layerId }); });
         loaded += hits.length;
         const responseTotal = total(response);
         const more = responseTotal !== undefined ? responseTotal > loaded : hits.length === pageSize;
@@ -288,9 +295,10 @@ export class WarehouseIndexService {
     try {
       const metadata = await this.#pages(this.layerIndex, input.layerIds === undefined ? { match_all: {} } : { terms: { layer_id: input.layerIds } }, [{ layer_id: "asc" }]);
       if (metadata.truncated) throw new WarehouseIndexError("Warehouse layer selection is incomplete");
-      const catalog = { layers: metadata.hits.map(layerFromHit).filter((layer): layer is WarehouseLayerSnapshot => Boolean(layer) && layer!.layerMode !== "CANDIDATE") };
+      const catalog = { layers: await this.#resolvePartitionedLayers(metadata.hits.map(layerFromHit)
+        .filter((layer): layer is WarehouseLayerSnapshot => Boolean(layer) && layer!.layerMode !== "CANDIDATE")) };
       const selected = catalog.layers.filter((layer) => {
-        const assetMatch = !input.assetIds?.length || input.assetIds.some((assetId) => layer.layerId === assetId || layer.layerId === `workspace-${assetId}` || layer.layerId === `user-${assetId}`);
+        const assetMatch = !input.assetIds?.length || input.assetIds.some((assetId) => warehouseLayerBelongsToAsset(layer.layerId, assetId));
         // An explicit empty layerIds list means "no owned layers". This is
         // used by Workspace when Warehouse is reachable but has no local task
         // lineage; treating [] as "all" would leak Assets-owned layers.
@@ -412,8 +420,9 @@ export class WarehouseIndexService {
     if (!this.configured || !input.layerIds.length) return { files, truncated, notes };
     const allowed = new Set(input.layerIds);
     const layerHits = await this.#search(this.layerIndex, { size: 1000, query: { terms: { layer_id: [...allowed] } } });
-    const layers = (layerHits.hits?.hits ?? []).map(layerFromHit).filter((layer): layer is WarehouseLayerSnapshot => Boolean(layer)
-      && allowed.has(layer!.layerId) && layer!.state === "ACTIVE" && layer!.layerMode !== "CANDIDATE");
+    const layers = (await this.#resolvePartitionedLayers((layerHits.hits?.hits ?? []).map(layerFromHit)
+      .filter((layer): layer is WarehouseLayerSnapshot => Boolean(layer) && allowed.has(layer!.layerId) && layer!.layerMode !== "CANDIDATE")))
+      .filter(layer => layer.state === "ACTIVE");
     const selected = new Set(input.cells);
     const maximumFiles = Math.min(this.#maxDocuments, 50_000);
     const maximumCellMatches = 2_000_000;
@@ -515,8 +524,9 @@ export class WarehouseIndexService {
     if (!this.configured || !input.layerIds.length) return { directories: [], truncated, notes: [] };
     const allowed = new Set(input.layerIds);
     const layerHits = await this.#search(this.layerIndex, { size: 1000, query: { terms: { layer_id: [...allowed] } } });
-    const layers = (layerHits.hits?.hits ?? []).map(layerFromHit).filter((layer): layer is WarehouseLayerSnapshot => Boolean(layer)
-      && allowed.has(layer!.layerId) && layer!.state === "ACTIVE" && layer!.layerMode !== "CANDIDATE");
+    const layers = (await this.#resolvePartitionedLayers((layerHits.hits?.hits ?? []).map(layerFromHit)
+      .filter((layer): layer is WarehouseLayerSnapshot => Boolean(layer) && allowed.has(layer!.layerId) && layer!.layerMode !== "CANDIDATE")))
+      .filter(layer => layer.state === "ACTIVE");
     const selected = new Set(input.cells);
     for (const layer of layers) {
       const committed = await this.#committedBindings(layer);
@@ -612,13 +622,32 @@ export class WarehouseIndexService {
     return { directories, truncated, notes: [...notes] };
   }
 
-  async #committedBindings(layer: WarehouseLayerSnapshot): Promise<{ bindings: Map<string, ScanBinding>; truncated: boolean; notes: string[] }> {
+  async #resolvePartitionedLayers(layers: WarehouseLayerSnapshot[]): Promise<WarehouseLayerSnapshot[]> {
+    return Promise.all(layers.map(async layer => {
+      if (layer.layerMode !== "PARTITIONED" || layer.expectedPartitionCount === undefined) return layer;
+      const committed = await this.#committedBindings(layer);
+      if (committed.truncated || layer.expectedPartitionCount < 1 || committed.candidates.length !== layer.expectedPartitionCount) {
+        return { ...layer, state: "UPDATING" as const };
+      }
+      const candidates = committed.candidates;
+      const orders = candidates.flatMap(candidate => candidate.maxOrder === undefined ? candidate.availableOrders : [candidate.maxOrder]);
+      return { ...layer, state: "ACTIVE" as const,
+        fileCount: candidates.reduce((sum, candidate) => sum + candidate.fileCount, 0),
+        coverageCount: candidates.reduce((sum, candidate) => sum + candidate.coverageCount, 0),
+        errorCount: candidates.reduce((sum, candidate) => sum + candidate.errorCount, 0),
+        availableOrders: [...new Set(candidates.flatMap(candidate => candidate.availableOrders))].sort((a, b) => a - b),
+        maxOrder: orders.length ? Math.max(...orders) : layer.maxOrder,
+        updatedAt: candidates.map(candidate => candidate.updatedAt ?? "").sort().at(-1) || layer.updatedAt };
+    }));
+  }
+
+  async #committedBindings(layer: WarehouseLayerSnapshot): Promise<{ bindings: Map<string, ScanBinding>; truncated: boolean; notes: string[]; candidates: WarehouseLayerSnapshot[] }> {
     const bindings = new Map<string, ScanBinding>();
     if (layer.layerMode !== "PARTITIONED") {
       bindings.set(layer.layerId, { scanRunId: layer.scanRunId, observation: false });
-      return { bindings, truncated: false, notes: [] };
+      return { bindings, truncated: false, notes: [], candidates: [layer] };
     }
-    if (!layer.activeScopeId || !layer.scopeSnapshotSha256) return { bindings, truncated: true, notes: [`${layer.layerId}: missing committed scan scope`] };
+    if (!layer.activeScopeId || !layer.scopeSnapshotSha256) return { bindings, truncated: true, notes: [`${layer.layerId}: missing committed scan scope`], candidates: [] };
     const members = await this.#pages(process.env.ASTRO_WAREHOUSE_PARTITION_INDEX ?? "ast_partition_index_v1", {
       bool: { filter: [{ term: { layer_id: layer.layerId } }, { term: { scope_id: layer.activeScopeId } }, { term: { state: "ACTIVE" } }] },
     }, [{ partition_id: "asc" }]);
@@ -630,12 +659,18 @@ export class WarehouseIndexService {
         || member.scope_snapshot_sha256 !== layer.scopeSnapshotSha256 || !candidate) { truncated = true; continue; }
       bindings.set(candidate, { scanRunId: text(member.active_scan_run_id), observation: true });
     }
+    const candidates: WarehouseLayerSnapshot[] = [];
     if (bindings.size) {
       const pointed = await this.#search(this.layerIndex, { size: bindings.size, query: { terms: { layer_id: [...bindings.keys()] } } });
       const active = new Set((pointed.hits?.hits ?? []).flatMap(hit => hit._source?.state === "ACTIVE" ? [text(hit._source.layer_id) ?? hit._id!] : []));
       for (const id of bindings.keys()) if (!active.has(id)) { bindings.delete(id); truncated = true; }
+      for (const hit of pointed.hits?.hits ?? []) {
+        const candidate = layerFromHit(hit);
+        if (candidate && bindings.has(candidate.layerId) && candidate.state === "ACTIVE") candidates.push(candidate);
+      }
     }
-    return { bindings, truncated, notes: [] };
+    if (layer.expectedPartitionCount !== undefined && bindings.size !== layer.expectedPartitionCount) truncated = true;
+    return { bindings, truncated, notes: [], candidates };
   }
 
   async #pages(index: string, query: unknown, sort: unknown[]): Promise<{ hits: SearchHit[]; truncated: boolean }> {

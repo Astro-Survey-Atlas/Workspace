@@ -8,6 +8,39 @@ function esResponse(value: unknown, status = 200): Response {
   return new Response(JSON.stringify(value), { status, headers: { "content-type": "application/json" } });
 }
 
+test("real PARTITIONED markers publish complete batches and allow file reverse lookup", async () => {
+  const layerId = "workspace-csst-batch-12345678-1234-1234-1234-123456789012", snapshot = "a".repeat(64);
+  let complete = false;
+  const service = new WarehouseIndexService({ url: "https://warehouse.example", fetchImpl: async (input, init) => {
+    const index = String(input).split("/").at(-2)!, body = JSON.parse(String(init?.body));
+    if (index === "ast_layer_index_v1") return esResponse({ hits: { hits: body.query.terms.layer_id[0] === layerId
+      ? [{ _source: { layer_id: layerId, state: "PARTITIONED", layer_mode: "PARTITIONED", active_scope_id: "scope",
+        expected_partition_count: 2, scope_snapshot_sha256: snapshot, survey_id: "csst", release_id: "local", product_id: "image" } }]
+      : body.query.terms.layer_id.map((id: string) => ({ _source: { layer_id: id, state: "ACTIVE", layer_mode: "CANDIDATE",
+        survey_id: "csst", release_id: "local", product_id: "image", file_count: 2000, coverage_count: 4000, available_orders: [8] } })) } });
+    if (index === "ast_partition_index_v1") return esResponse({ hits: { hits: (complete ? [0, 1] : [0]).map(i => ({ _source: {
+      layer_id: layerId, scope_id: "scope", scope_snapshot_sha256: snapshot, state: "ACTIVE", partition_id: `s${i}`,
+      active_layer_id: `candidate-${i}`, active_scan_run_id: `run-${i}`,
+    } })) } });
+    if (index === "ast_coverage_index_v1") return esResponse({ hits: { total: 1, hits: [{ _source: {
+      layer_id: "candidate-0", source_file_id: "file", healpix_order: 8, healpix_cell: 512, precision: "estimated",
+    } }] } });
+    assert.equal(index, "ast_file_observation_index_v1");
+    return esResponse({ hits: { hits: [{ _source: { file_id: "file", layer_id: "candidate-0", scan_run_id: "run-0", source_uri: "/data/csst/image.fits" } }] } });
+  } });
+  const partial = await service.coverage({ nside: 16, assetIds: ["csst"], layerIds: [layerId] });
+  assert.equal(partial.layers[0]?.status, "pending");
+  assert.deepEqual(partial.pixels, []);
+  complete = true;
+  const ready = await service.coverage({ nside: 16, assetIds: ["csst"], layerIds: [layerId] });
+  assert.equal(ready.layers[0]?.state, "ACTIVE");
+  assert.equal(ready.layers[0]?.fileCount, 4000);
+  assert.deepEqual(ready.pixels, [2]);
+  const reverse = await service.reverseFiles({ layerIds: [layerId], order: 4, cells: [2] });
+  assert.equal(reverse.truncated, false);
+  assert.equal(reverse.files[0]?.sourceUri, "/data/csst/image.fits");
+});
+
 test("private directories follow committed partition pointers and candidate observations", async () => {
   const snapshot = "a".repeat(64);
   const service = new WarehouseIndexService({ url: "https://warehouse.example", fetchImpl: async (input, init) => {

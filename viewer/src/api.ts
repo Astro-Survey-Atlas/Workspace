@@ -368,7 +368,7 @@ export const workspaceApi = {
     return (await postJson<{ run: ConnectorScanRun }>(`/api/data-assets/${encodeURIComponent(id)}/local-scan`, {})).run;
   },
   async executeDataAssetWorkspaceScan(id: string, connectorId?: string): Promise<ConnectorScanRun> {
-    return (await postJson<{ run: ConnectorScanRun }>(`/api/data-assets/${encodeURIComponent(id)}/workspace-scan`, connectorId ? { connectorId } : {})).run;
+    return (await postJson<{ run: ConnectorScanRun }>(`/api/data-assets/${encodeURIComponent(id)}/workspace-scan`, { executor: "auto", ...(connectorId ? { connectorId } : {}) })).run;
   },
   async executeDataAssetRemoteScan(id: string, input: RemoteCoverageScanInput): Promise<ConnectorScanRun> {
     return (await postJson<{ run: ConnectorScanRun }>(`/api/data-assets/${encodeURIComponent(id)}/remote-scan`, input)).run;
@@ -425,8 +425,11 @@ export const workspaceApi = {
   async connectorRunLogs(connectorId: string, runId: string): Promise<WarehouseTaskLogs> {
     return getJson<WarehouseTaskLogs>(`/api/connectors/${encodeURIComponent(connectorId)}/ingest-runs/${encodeURIComponent(runId)}/logs`);
   },
-  async executeConnectorScan(id: string, assetId?: string): Promise<ConnectorScanRun> {
-    return (await postJson<{ run: ConnectorScanRun }>(`/api/connectors/${encodeURIComponent(id)}/scan-runs`, assetId ? { assetId } : {})).run;
+  async executeConnectorScan(id: string, assetId?: string, executor: "auto" | "workspace" | "warehouse" = "auto"): Promise<ConnectorScanRun> {
+    return (await postJson<{ run: ConnectorScanRun }>(`/api/connectors/${encodeURIComponent(id)}/scan-runs`, { executor, ...(assetId ? { assetId } : {}) })).run;
+  },
+  async retryConnectorScan(connectorId: string, runId: string): Promise<ConnectorScanRun> {
+    return (await postJson<{ run: ConnectorScanRun }>(`/api/connectors/${encodeURIComponent(connectorId)}/ingest-runs/${encodeURIComponent(runId)}/retry`, {})).run;
   },
   async surveys(): Promise<SurveyCard[]> {
     return (await getJson<{ surveys: SurveyCard[] }>("/api/surveys")).surveys;

@@ -1,6 +1,6 @@
 import { mkdir } from "node:fs/promises";
 import path from "node:path";
-import { DatabaseSync, type StatementSync } from "node:sqlite";
+import { backup, DatabaseSync, type StatementSync } from "node:sqlite";
 
 import type { ConnectorIngestRunFilter, ConnectorIngestRunRecord } from "../connector-history.js";
 import type { StatisticsEntry, StatisticsSnapshot, StatisticsTotals } from "../data-statistics-types.js";
@@ -132,12 +132,16 @@ class SqliteTransaction implements MetadataTransaction {
 
   async statisticsTotals(snapshotIds: string[]): Promise<StatisticsTotals> {
     if (!snapshotIds.length) return { files: 0, knownBytes: 0, unknownFiles: 0 };
-    const row = this.database.prepare(`SELECT COUNT(*) files, COALESCE(SUM(size_bytes),0) known_bytes,
+    // Entries are already unique by (snapshot_id, file_key). A single snapshot
+    // needs no window sort over hundreds of thousands of immutable identities.
+    const row = (snapshotIds.length === 1 ? this.database.prepare(`SELECT COUNT(*) files, COALESCE(SUM(size_bytes),0) known_bytes,
+      COALESCE(SUM(CASE WHEN size_bytes IS NULL THEN 1 ELSE 0 END),0) unknown_files
+      FROM statistics_entries WHERE snapshot_id=?`) : this.database.prepare(`SELECT COUNT(*) files, COALESCE(SUM(size_bytes),0) known_bytes,
       COALESCE(SUM(CASE WHEN size_bytes IS NULL THEN 1 ELSE 0 END),0) unknown_files FROM (
       SELECT size_bytes, ROW_NUMBER() OVER(PARTITION BY file_key ORDER BY s.updated_at DESC,s.id DESC) rank
       FROM statistics_entries e JOIN statistics_snapshots s ON s.id=e.snapshot_id
       WHERE snapshot_id IN (${snapshotIds.map(() => "?").join(",")})
-    ) WHERE rank=1`).get(...snapshotIds) as SqliteRow;
+    ) WHERE rank=1`)).get(...snapshotIds) as SqliteRow;
     return { files: Number(row.files), knownBytes: Number(row.known_bytes), unknownFiles: Number(row.unknown_files) };
   }
 
@@ -251,7 +255,19 @@ export class SqliteMetadataStore implements MetadataStore {
   private database?: DatabaseSync;
   private queue: Promise<void> = Promise.resolve();
 
-  constructor(readonly filename: string) {}
+  constructor(readonly filename: string, readonly options: { cacheSizeKiB?: number } = {}) {}
+
+  /** Export committed pages while excluding writes on this connection. */
+  async exportDatabase(filename: string): Promise<void> {
+    await this.serialized(async () => { await backup(this.requireDatabase(), filename); });
+  }
+
+  /** Call only when the independent statistics worker starts, before any writes. */
+  async removeUnpublishedStatisticsEntries(): Promise<void> {
+    await this.serialized(async () => {
+      this.requireDatabase().exec("DELETE FROM statistics_entries WHERE snapshot_id NOT IN (SELECT id FROM statistics_snapshots)");
+    });
+  }
 
   async initialize(): Promise<void> {
     await this.serialized(async () => {
@@ -260,6 +276,10 @@ export class SqliteMetadataStore implements MetadataStore {
       const database = new DatabaseSync(this.filename);
       try {
         database.exec("PRAGMA journal_mode = DELETE; PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000;");
+        if (this.options.cacheSizeKiB !== undefined) {
+          if (!Number.isSafeInteger(this.options.cacheSizeKiB) || this.options.cacheSizeKiB < 1) throw new RangeError("Invalid SQLite cache size");
+          database.exec(`PRAGMA cache_size = -${this.options.cacheSizeKiB};`);
+        }
         database.exec(`CREATE TABLE IF NOT EXISTS schema_migrations (
           version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL
         ) STRICT;

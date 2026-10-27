@@ -1,15 +1,25 @@
 # Workspace handoff
 
-Updated: 2026-10-15, Asia/Shanghai.
+Updated: 2026-10-26, Asia/Shanghai.
 
 ## Current work
 
-The current request adds Connector and asset size statistics plus an encrypted
-configuration backup/import flow. Its implementation and validation are in the
-October 15 section below. It is in the local worktree and has not been deployed.
-Statistics refresh is manual; do not enumerate production Connector roots or
-start scans while validating it. Preserve successful coverage, downloads,
-resource limits, and the substantial existing worktree changes.
+The current request implements trustworthy capacity statistics and a bounded,
+durable Scanner Job queue before considering Flink. The October 15 statistics
+and encrypted configuration backup are deployed to dev. The October 26 work is
+also deployed and verified on dev at Helm revision 104, image
+`0.0.1-dev-20261026-parallel-scan-r9`; see
+`docs/scanner-capacity-validation-20261026.md` for the evidence and deployment
+receipt. Preserve the substantial uncommitted changes in both active repositories.
+
+The user authorized metadata inventory refresh and two bounded CSST runs of
+4,000 files each, with concurrency 1 and 2, on a separate validation asset.
+Do not submit a full CSST coverage scan. Original successful CSST evidence has
+356,112 files and 63,779,659,200,000 source bytes; it is not transferred bytes.
+Independent logical runs accumulate again, while retries of one partition do
+not. A 3 PB cumulative goal is supported numerically, not a measured throughput
+or a claim that 3 PB has already been scanned. Keep at most two Scanner Jobs,
+each requesting 500m CPU / 512 MiB and limited to 1 CPU / 1 GiB.
 
 Assets public data, evidence and releases are outside this task. Private files,
 coordinates, repair inventories and receipts remain in Workspace. The sibling
@@ -28,6 +38,24 @@ error cleanup, and the v0.0.1 release are complete and documented below. They
 are not instructions to start another repair or deployment for those datasets.
 
 ## Implementation
+
+- Statistics run in a worker using a local SQLite database and consistent
+  sequential snapshots on shared storage. Do not restore direct random SQLite
+  I/O or SQLite backup writes on NFS: both caused health failures during dev
+  verification. Historical evidence is streamed and validates run/layer/snapshot
+  identity; metadata inventory refresh checkpoints each page and exposes partial
+  progress without inventing zero totals.
+- Warehouse batches freeze checksummed private NDJSON inventories, at most
+  2,000 files per shard, and an external roster. Restart adoption and failed
+  shard retry reuse these immutable files. Each new logical batch owns a distinct
+  Warehouse layer; only a complete successful batch replaces the asset's current
+  Warehouse coverage. The merged private MOC keeps the canonical asset identity.
+  This fixes Warehouse rejecting an independent rescan as a different immutable
+  partition scope. Older successful whole-layer scans remain usable.
+- Completed image shards automatically consume retained header companions for
+  positions; no second science-source download or manually submitted repair is
+  needed. Flink remains disabled. Workspace's own executor remains available
+  when Warehouse is disabled or explicitly bypassed.
 
 - `warehouse-evidence-stream.ts` streams individual file/coverage rows with
   bounded 1 MiB input chunks. MOC import validates identities and actual NESTED orders,
@@ -174,6 +202,40 @@ Use `curl --noproxy '*'` for this local endpoint. Helm release is `asa` in
 `asa-workspace`; retain existing values on upgrade. Workspace memory limit is
 1 GiB; local ES request/limit is 1/2 GiB with 512 MiB heap. Do not change these
 as part of data repair.
+
+### Current Dev deployment (October 26)
+
+Release `asa`, namespace `asa-workspace`, revision **104** is deployed. Pod
+`asa-workspace-dd64c7d48-fswhp` is ready with zero restarts. Image tag is
+`0.0.1-dev-20261026-parallel-scan-r9`, image digest
+`sha256:f99fc96f6bafcf5e2707902a1a9f3a617634f13171825b3421f0bdafd4070871`.
+The image overlays compiled artifacts onto the previously validated runtime;
+dependencies are unchanged. Workspace still requests 100m CPU / 128 MiB and
+is limited to 1 CPU / 1 GiB. Warehouse Operator revision 21 and Scanner use
+`0.2.0-20261026-inventory-shards-r1`; Flink remains disabled.
+
+The final Workspace gate passed: 382 tests, 378 passed, four optional checks
+skipped, zero failures, plus types, server/viewer/CLI builds and Helm checks.
+Final dev API/browser checks passed after rollout: coverage ACTIVE, merged MOC
+ready, exactly 4,000 validation-asset points with `indexing=false`, all four
+automatic header tasks successful, two successful shard rows, logs available,
+asset/Connector size displayed, and no browser page errors. The two authorized
+4,000-file runs are complete; do not submit another run to repeat acceptance.
+
+Recovered current source capacity is 356,118 files / 63,787,066,372,800 bytes,
+including CSST's 356,112 files / 63,779,659,200,000 bytes. Global current capacity
+is partial because another linked asset has not been scanned. Cumulative
+successful capacity is complete at 364,118 logical files / 65,219,795,029,440
+bytes (65.22 TB). Independent rescans count again; retries do not.
+
+Accessible metadata inventory is still running as
+`32498ebe-ddd4-41d5-9366-da475771a252`. It resumed the same saved task after the
+final rollout, with 216,121 processed files, 1/5 Connectors completed and no
+listing errors at 10:21 UTC. At that point 210,121 accessible files / 19.53 TB
+were confirmed; this is a partial subtotal, not the final source total. Inspect
+`/api/data-statistics` for live progress. Do not start a duplicate refresh or
+infer coverage scans from the metadata listing. Private deployment, API and
+browser receipts are recorded in the validation document.
 
 The full CSST replay is complete; do not submit another coverage scan. Original
 CSST/HST ScanRequest spec/status were compared exactly before history cleanup

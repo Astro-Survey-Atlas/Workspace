@@ -508,7 +508,7 @@ export class UserMocArtifactStore {
     return cloneArtifact(artifact);
   }
 
-  async importEvidence(directoryPath: string, context: UserMocArtifactContext, mocCore?: MocCoreAdapter): Promise<UserMocArtifact> {
+  async importEvidence(directoryPath: string, context: UserMocArtifactContext, mocCore?: MocCoreAdapter, sources?: Array<{ directory: string; layerId: string; scanRunId: string; coverageLayerId: string; sha256: string }>): Promise<UserMocArtifact> {
     const directory = path.resolve(directoryPath);
     const layerId = safePart(context.layerId, "layerId");
     const scanRunId = safePart(context.scanRunId, "scanRunId");
@@ -531,19 +531,23 @@ export class UserMocArtifactStore {
         if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("MOC evidence JSON must be an object");
         return parsed as Record<string, unknown>;
       };
-      if (!names.includes("normalized-scan.json")) throw new Error("Warehouse evidence is missing normalized-scan.json");
+      if (!sources && !names.includes("normalized-scan.json")) throw new Error("Warehouse evidence is missing normalized-scan.json");
       const expectedLayerId = safePart(context.evidenceLayerId ?? context.layerId, "layerId");
       const cellOrdersSet = new Set<number>();
       let evidencePrecision: UserMocPrecision = context.precision ?? "exact";
       const rawPath = path.join(work, "cells.rows");
       const spool = await open(rawPath, "w");
       let pending = "";
-      let normalized: Record<string, unknown>;
+      let normalized: Record<string, unknown> = {};
       try {
-        normalized = await streamWarehouseEvidence(path.join(directory, "normalized-scan.json"), (kind, row) => {
+        const selected = sources ?? [{ directory, layerId: expectedLayerId, scanRunId: context.evidenceScanRunId ?? context.scanRunId,
+          coverageLayerId: expectedLayerId, sha256: context.sourceSnapshotSha256 }];
+        const allOrders = new Set<number>();
+        for (const source of selected) {
+        const metadata = await streamWarehouseEvidence(path.join(source.directory, "normalized-scan.json"), (kind, row) => {
           if (kind !== "coverage") return;
           const rowLayerId = row.layer_id ?? row.layerId;
-          if (rowLayerId !== undefined && (typeof rowLayerId !== "string" || safePart(rowLayerId, "coverage layer id") !== expectedLayerId)) throw new Error("Warehouse coverage entry belongs to another layer");
+          if (rowLayerId !== undefined && (typeof rowLayerId !== "string" || safePart(rowLayerId, "coverage layer id") !== source.coverageLayerId)) throw new Error("Warehouse coverage entry belongs to another layer");
           if ((row.coordinate_frame ?? row.coordinateFrame) !== "ICRS") throw new Error("Warehouse coverage entry must use ICRS");
           if ((row.nesting ?? row.ordering) !== "NESTED") throw new Error("Warehouse coverage entry must use NESTED ordering");
           const order = Number(row.healpix_order ?? row.order);
@@ -557,6 +561,14 @@ export class UserMocArtifactStore {
           }
           pending += `${order},${ipix}\n`;
         }, async () => { if (pending) { await spool.write(pending); pending = ""; } });
+        if (sources && (metadata.phase !== "COMPLETED" || metadata.layerId !== source.layerId || metadata.scanRunId !== source.scanRunId
+          || source.sha256 && (metadata.sourceSnapshot as { sha256?: string } | undefined)?.sha256 !== source.sha256)) throw new Error("Partition evidence identity mismatch");
+        for (const order of (metadata.sourceSnapshot as { availableOrders?: number[] } | undefined)?.availableOrders ?? []) allOrders.add(order);
+        normalized = metadata;
+        }
+        if (sources) normalized = { phase: "COMPLETED", layerId: expectedLayerId, scanRunId: context.evidenceScanRunId ?? context.scanRunId,
+          sourceSnapshot: { sha256: context.sourceSnapshotSha256, availableOrders: [...allOrders] } };
+
       } finally { await spool.close(); }
       const cellsPath = path.join(work, "cells.csv");
       const sorted = path.join(work, "cells.sorted");

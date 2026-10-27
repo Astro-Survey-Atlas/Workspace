@@ -155,6 +155,12 @@ export class DerivedRepairService {
     for (const task of failed) await rm(path.join(this.#options.root, `${task.id}.json`), { force: true });
     return failed.map((task) => task.id);
   }
+  /** Automatic completion callbacks may run again after a Workspace restart. */
+  async ensurePositions(assetId: string, scanRunId: string): Promise<DerivedRepair> {
+    const existing = (await this.list()).find(task => task.assetId === assetId && task.scanRunId === scanRunId
+      && task.mode === "positions" && task.maxFiles === undefined);
+    return existing ?? this.submit(assetId, { mode: "positions", scanRunId });
+  }
   async submit(assetId: string, input: unknown): Promise<DerivedRepair> {
     if (!input || typeof input !== "object" || Array.isArray(input)) throw new RangeError("Repair input is required");
     const body = input as Record<string, unknown>;

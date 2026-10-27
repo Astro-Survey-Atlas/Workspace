@@ -494,11 +494,29 @@ export async function* iterateConnectorObjects(
   credentials: { accessKeyId: string; secretAccessKey: string; sessionToken?: string },
   prefixOverride?: string,
 ): AsyncGenerator<ConnectorObject> {
+  for await (const page of iterateConnectorObjectPages(record, credentials, prefixOverride)) yield* page.objects;
+}
+
+/** Expired/invalid opaque listing cursors require a fresh unpublished inventory. */
+export function isExpiredListingCursor(error: unknown): boolean {
+  if (!error || typeof error !== "object") return false;
+  const value = error as { name?: string; code?: string; message?: string };
+  return /InvalidToken|InvalidContinuationToken|ExpiredToken|InvalidMarker/.test(`${value.name} ${value.code}`)
+    || /(?:continuation.?token|marker).*(?:expired|invalid)|(?:expired|invalid).*(?:continuation.?token|marker)/i.test(value.message ?? "");
+}
+
+export async function* iterateConnectorObjectPages(
+  record: ConnectorRecord,
+  credentials: { accessKeyId: string; secretAccessKey: string; sessionToken?: string },
+  prefixOverride?: string,
+  continuationToken?: string,
+): AsyncGenerator<{ objects: ConnectorObject[]; continuationToken?: string }> {
   if (record.kind !== "s3") throw new RangeError("Only S3/OSS connectors can list scan objects");
   const endpoint = cleanEndpoint(record.config.endpoint);
   if (!endpoint) throw new RangeError("S3 connector Endpoint is required for an explicit scan");
   const bucket = record.config.bucket ?? "";
-  const prefix = cleanSegment(prefixOverride ?? record.config.prefix ?? "");
+  const selectedPrefix = prefixOverride ?? record.config.prefix ?? "";
+  const prefix = cleanSegment(selectedPrefix) + (selectedPrefix.endsWith("/") ? "/" : "");
   if (!bucket) throw new RangeError("S3 connector Bucket is required for an explicit scan");
   if (isAlibabaOssEndpoint(endpoint)) {
     let bucketInEndpoint = false;
@@ -518,20 +536,22 @@ export async function* iterateConnectorObjects(
       retryMax: 1,
     });
     let lastKey = "";
-    let marker = "";
+    let marker = continuationToken ?? "";
     for (;;) {
       const result = await client.list({ ...(prefix ? { prefix } : {}), ...(marker ? { marker } : {}), "max-keys": 1000 }) as { objects?: unknown[]; isTruncated?: boolean; nextMarker?: string };
+      const objects: ConnectorObject[] = [];
       for (const value of result.objects ?? []) {
         if (!value || typeof value !== "object") continue;
         const entry = value as { name?: unknown; size?: unknown; lastModified?: unknown; etag?: unknown };
         const key = typeof entry.name === "string" ? entry.name : "";
         if (!key || key.endsWith("/")) continue;
         lastKey = key;
-        yield { key, size: Number(entry.size ?? 0), ...(entry.lastModified ? { lastModified: String(entry.lastModified) } : {}), ...(entry.etag ? { etag: String(entry.etag) } : {}) };
+        objects.push({ key, size: Number(entry.size ?? 0), ...(entry.lastModified ? { lastModified: String(entry.lastModified) } : {}), ...(entry.etag ? { etag: String(entry.etag) } : {}) });
       }
-      if (!result.isTruncated) break;
-      const next = result.nextMarker || lastKey;
-      if (!next || next === marker) throw new Error("OSS listing did not advance its continuation marker");
+      const next = result.isTruncated ? result.nextMarker || lastKey : undefined;
+      if (result.isTruncated && (!next || next === marker)) throw new Error("OSS listing did not advance its continuation marker");
+      yield { objects, continuationToken: next };
+      if (!next) break;
       marker = next;
     }
     return;
@@ -548,15 +568,17 @@ export async function* iterateConnectorObjects(
     },
   });
   try {
-    let token: string | undefined;
+    let token = continuationToken;
     do {
       const result = await client.send(new ListObjectsV2Command({ Bucket: bucket, Prefix: prefix, ContinuationToken: token, MaxKeys: 1000 }));
+      const objects: ConnectorObject[] = [];
       for (const entry of result.Contents ?? []) {
         if (!entry.Key || entry.Key.endsWith("/")) continue;
-        yield { key: entry.Key, size: entry.Size ?? 0, ...(entry.LastModified ? { lastModified: entry.LastModified.toISOString() } : {}), ...(entry.ETag ? { etag: entry.ETag } : {}) };
+        objects.push({ key: entry.Key, size: entry.Size ?? 0, ...(entry.LastModified ? { lastModified: entry.LastModified.toISOString() } : {}), ...(entry.ETag ? { etag: entry.ETag } : {}) });
       }
       const next = result.IsTruncated ? result.NextContinuationToken : undefined;
       if (result.IsTruncated && (!next || next === token)) throw new Error("S3 listing did not advance its continuation token");
+      yield { objects, continuationToken: next };
       token = next;
     } while (token);
     return;

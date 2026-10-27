@@ -1,3 +1,4 @@
+import { formatDataBytes, formatDataFiles } from "./data-amount";
 import type { ConnectorPublicRecord } from "../../src/connectors";
 import type { DataAssetAccess, DataAssetKind, DataAssetLineage, DataAssetProjectState, DataAssetRecord, DataAssetRegistrationInput, DataAssetSource } from "../../src/data-catalog";
 import type { TagDefinition } from "../../src/tags";
@@ -24,14 +25,6 @@ const PROJECT_LABELS: Record<DataAssetProjectState, string> = {
   planned: "计划中",
 };
 
-function amountBytes(amount: DataAmount | undefined): string {
-  if (!amount || amount.bytes === null) return amount?.state === "partial" ? "部分统计" : amount?.state === "unsupported" ? "不支持" : "未统计";
-  if (amount.bytes < 1024) return `${amount.bytes} B`;
-  const units = ["KiB", "MiB", "GiB", "TiB"];
-  let value = amount.bytes / 1024, unit = 0;
-  while (value >= 1024 && unit < units.length - 1) { value /= 1024; unit++; }
-  return `${value.toFixed(value >= 100 ? 0 : value >= 10 ? 1 : 2)} ${units[unit]}`;
-}
 
 function projectStatesLabel(asset: DataAssetRecord): string {
   const states = asset.projectStates?.length ? asset.projectStates : [asset.projectState];
@@ -270,7 +263,7 @@ export class DataCatalogPanel {
       product.textContent = `${asset.product} · ${this.#tagText((asset.tags ?? asset.modalities).slice(0, 3)) || "未标注 Tag"}`;
       const sizes = document.createElement("small");
       sizes.className = "catalog-row-statistics";
-      sizes.textContent = `资产 ${amountBytes(statistics?.size)} · Connector ${amountBytes(statistics?.connectorTotal)}`;
+      sizes.textContent = `资产 ${formatDataBytes(statistics?.size)} · Connector ${formatDataBytes(statistics?.connectorTotal)}`;
       identity.append(name, product, sizes);
       const survey = document.createElement("span");
       survey.className = "catalog-row-survey";
@@ -309,8 +302,8 @@ export class DataCatalogPanel {
     const statistics = this.#statistics?.assets.find(entry => entry.assetId === asset.id);
     const basic = this.#detailEditing === "basic" ? this.#basicEditor(asset) : this.#rows([
       ["资产 ID", asset.id], ["来源", "用户登记"], ["巡天 / 发布", `${this.#surveyName(this.#effectiveSurveyId(asset))} / ${this.#effectiveReleaseId(asset) ?? "未设置"}`],
-      ["产品 / 类型", `${asset.product} / ${asset.kind}`], ["资产大小", `${statistics?.size.files.toLocaleString() ?? "--"} 个文件 · ${amountBytes(statistics?.size)}`],
-      ["关联 Connector 总大小", `${statistics?.connectorTotal.files.toLocaleString() ?? "--"} 个文件 · ${amountBytes(statistics?.connectorTotal)}`],
+      ["产品 / 类型", `${asset.product} / ${asset.kind}`], ["资产大小", `${statistics ? formatDataFiles(statistics.size) : "文件数尚未统计"} · ${formatDataBytes(statistics?.size)}`],
+      ["关联 Connector 总大小", `${statistics ? formatDataFiles(statistics.connectorTotal) : "文件数尚未统计"} · ${formatDataBytes(statistics?.connectorTotal)}`],
       ["Tag", this.#tagText(asset.tags ?? asset.modalities) || "未标注"], ["使用阶段", projectStatesLabel(asset)],
       ...(projectStatesLabel(asset).includes("已掌握") ? [["已掌握说明", "已获得数据或访问权，但尚未证明建立空间覆盖；请扫描或删除旧记录。"] as [string, string]] : []),
     ]);

@@ -836,12 +836,12 @@ test("connector actions and unified scan history expose only supported execution
   const iconTops = await inspector.locator(".connector-icon-actions button").evaluateAll((buttons) => buttons.map((button) => button.getBoundingClientRect().top));
   expect(new Set(iconTops.map((top) => Math.round(top))).size).toBe(1);
 
-  const execute = inspector.getByRole("button", { name: "执行 Workspace 扫描" });
+  const execute = inspector.getByRole("button", { name: "执行扫描" });
   await expect(execute).toBeEnabled();
   await expect(execute).toHaveClass(/primary-command/);
   await execute.click();
   await expect(page.locator("#workspace-notification-deck .workspace-notification").filter({ hasText: "Workspace 扫描已提交" })).toBeVisible();
-  expect(submittedBody).toEqual({});
+  expect(submittedBody).toEqual({ executor: "auto" });
 
   await page.getByRole("tab", { name: "扫描记录" }).click();
   await expect(page.locator("#connector-history-view")).toBeVisible();
@@ -905,16 +905,37 @@ test("connector actions and unified scan history expose only supported execution
   const connectorTabUnderline = await page.locator("#connector-list-tab").evaluate((button) => getComputedStyle(button, "::after").backgroundColor);
   expect(connectorTabUnderline).not.toBe("rgb(66, 212, 198)");
   await page.locator("#connector-list .connector-row", { hasText: "Local mounted catalog" }).click();
-  await expect(inspector.getByRole("button", { name: "执行 Workspace 扫描" })).toBeDisabled();
+  await expect(inspector.getByRole("button", { name: "执行扫描" })).toBeDisabled();
   await expect(inspector).toContainText("请先登记并关联一个支持 CSV 或 FITS 的用户资产");
   await page.locator("#connector-list .connector-row", { hasText: "JDBC science database" }).click();
-  await expect(inspector.getByRole("button", { name: "执行 Workspace 扫描" })).toBeDisabled();
+  await expect(inspector.getByRole("button", { name: "执行扫描" })).toBeDisabled();
   await expect(inspector).toContainText("JDBC 扫描执行器尚未接入");
 
   warehouseEnabled = false;
   await page.locator('[data-mode="catalog"]').click();
   await page.locator('[data-mode="connectors"]').click();
   await page.locator("#connector-list .connector-row", { hasText: "S3 science archive" }).click();
-  await expect(inspector.getByRole("button", { name: "执行 Workspace 扫描" })).toBeEnabled();
-  await expect(inspector).toContainText("使用 Workspace 扫描已关联资产并生成覆盖与数据点");
+  await expect(inspector.getByRole("button", { name: "执行扫描" })).toBeEnabled();
+  await expect(inspector).toContainText("在 Workspace 本地扫描并生成覆盖与数据点");
+});
+
+test("Connector statistics show source capacity, cumulative PB and unknown counts clearly", async ({ page }) => {
+  const unknown = { files: 0, knownBytes: 0, bytes: null, unknownFiles: 0, state: "unknown" };
+  const scanned = { files: 356112, knownBytes: 63779659200000, bytes: 63779659200000, unknownFiles: 0, state: "complete" };
+  await page.route("**/api/data-statistics", route => route.fulfill({ json: {
+    connectorCount: 1, assetCount: 1, accessible: unknown, scanned,
+    cumulativeScanned: { ...scanned, files: 17000000, knownBytes: "3000000000000000", bytes: "3000000000000000" },
+    connectors: [{ connectorId: "csst", name: "CSST statistics fixture", kind: "s3", assetCount: 1, accessible: unknown, scanned }], assets: [],
+  } }));
+  await page.goto("/");
+  await expect(page.locator("#service-status")).toHaveText("SERVICE ONLINE", { timeout: 30000 });
+  await page.locator('[data-mode="connectors"]').click();
+  await page.getByRole("tab", { name: "数据统计" }).click();
+  const metrics = page.locator("#connector-statistics-summary");
+  await expect(metrics).toContainText("可访问数据总量");
+  await expect(metrics).toContainText("文件数尚未统计");
+  await expect(metrics).toContainText("63.78 TB");
+  await expect(metrics).toContainText("356,112 个文件");
+  await expect(metrics).toContainText("3.00 PB");
+  await expect(metrics).not.toContainText(/\b0 个文件/);
 });
