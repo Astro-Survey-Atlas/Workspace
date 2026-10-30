@@ -1,6 +1,6 @@
 import { expect, test, type Page } from "@playwright/test";
 import { PNG } from "pngjs";
-import { Healpix } from "healpixjs";
+import { Healpix, Pointing } from "healpixjs";
 
 const apiRoot = process.env.ASTRO_E2E_API ?? "http://astro.workspace.dev.72602.space:32080";
 const baselinePackageIds = ["public-legacy-surveys-footprints", "public-sdss-footprints", "public-hst-footprints"];
@@ -230,7 +230,7 @@ async function catalogMarkerPixelCount(page: Page): Promise<number> {
       const red = pixels[index]!;
       const green = pixels[index + 1]!;
       const blue = pixels[index + 2]!;
-      if (red >= 180 && green >= 145 && blue <= 145 && red - blue >= 70) count += 1;
+      if (Math.max(red, green, blue) > 100 && Math.max(red, green, blue) - Math.min(red, green, blue) > 35) count += 1;
     }
     return count;
   });
@@ -1064,12 +1064,11 @@ test("sphere selection enters Aladin with an exact region snapshot", async ({ pa
     await page.route("**/api/sky/points/query", async (route) => {
       const body = route.request().postDataJSON() as typeof objectRequests[number];
       objectRequests.push(body);
-      const vector = new Healpix(body.region?.nside ?? 16).pix2vec(body.region?.pixels?.[0] ?? 0);
-      const centerRa = (Math.atan2(vector.y, vector.x) * 180 / Math.PI + 360) % 360;
-      const centerDec = Math.asin(vector.z) * 180 / Math.PI;
-      const bbox = body.bbox ?? { raMin: centerRa, raMax: centerRa, decMin: centerDec, decMax: centerDec };
-      const ra = ((Number(bbox.raMin ?? 0) + Number(bbox.raMax ?? 0)) / 2) % 360;
-      const dec = (Number(bbox.decMin ?? 0) + Number(bbox.decMax ?? 0)) / 2;
+      const center = await page.locator("#aladin-explorer").evaluate((element) => ({
+        raDeg: Number((element as HTMLElement).dataset.centerRaDeg),
+        decDeg: Number((element as HTMLElement).dataset.centerDecDeg),
+      }));
+      if (!Number.isFinite(center.raDeg) || !Number.isFinite(center.decDeg)) throw new Error("Aladin camera center is unavailable for point fixture");
       await route.fulfill({
         status: 200,
         contentType: "application/json",
@@ -1078,8 +1077,8 @@ test("sphere selection enters Aladin with an exact region snapshot", async ({ pa
           index: "astro_object_index_v1",
           objects: [{
             object_id: "e2e-aladin-object",
-            ra_deg: ra,
-            dec_deg: dec,
+            ra_deg: center.raDeg,
+            dec_deg: center.decDeg,
             survey: "cosmos-custom",
             release: "cosmos-custom-v1",
             product: "COSMOS",
@@ -1215,7 +1214,7 @@ test("sphere selection enters Aladin with an exact region snapshot", async ({ pa
   await expect(aladin).toHaveAttribute("data-scene-kind", "aladin");
   await expect(aladin).toHaveAttribute("data-nside", "16");
   await expect(aladin).toHaveAttribute("data-pixels", selectedPixels!);
-  await expect(aladin).toHaveAttribute("data-initial-fov-deg");
+  await expect(aladin).toHaveAttribute("data-initial-fov-deg", "0.5000");
   await expect(aladin).toHaveAttribute("data-image-survey-id", "2mass");
   await expect(aladin).toHaveAttribute("data-grid-color", "#ff6b8d");
   await page.locator("#scene-background-settings").click();
@@ -1242,27 +1241,15 @@ test("sphere selection enters Aladin with an exact region snapshot", async ({ pa
   expect(objectRequests.every((request) => request.surveyIds === undefined && request.releaseIds === undefined)).toBe(true);
   await expect(page.locator("#object-status")).toContainText("DATA POINTS");
   await expect.poll(() => catalogMarkerPixelCount(page), { timeout: 10_000 }).toBeGreaterThan(0);
-  const catalogCanvas = page.locator(".aladin-catalogCanvas").last();
-  const marker = await catalogCanvas.evaluate((element) => {
-    const canvas = element as HTMLCanvasElement;
-    const context = canvas.getContext("2d");
-    if (!context) return null;
-    const pixels = context.getImageData(0, 0, canvas.width, canvas.height).data;
-    for (let index = 0; index < pixels.length; index += 4) {
-      const alpha = pixels[index + 3]!;
-      const red = pixels[index]!;
-      const green = pixels[index + 1]!;
-      const blue = pixels[index + 2]!;
-      if (alpha > 150 && Math.max(red, green, blue) - Math.min(red, green, blue) > 35) {
-        return { x: (index / 4) % canvas.width, y: Math.floor(index / 4 / canvas.width) };
-      }
-    }
-    return null;
-  });
-  expect(marker).not.toBeNull();
-  const box = await catalogCanvas.boundingBox();
-  expect(box).not.toBeNull();
-  await page.mouse.click(box!.x + marker!.x, box!.y + marker!.y);
+  const catalogCanvas = page.locator(".aladin-catalogCanvas").first();
+  await expect(catalogCanvas).toBeVisible();
+  const catalogCanvasBounds = await catalogCanvas.boundingBox();
+  expect(catalogCanvasBounds).not.toBeNull();
+  await page.screenshot({ path: testInfo.outputPath("aladin-point-before-click.png") });
+  await page.mouse.click(
+    catalogCanvasBounds!.x + catalogCanvasBounds!.width / 2,
+    catalogCanvasBounds!.y + catalogCanvasBounds!.height / 2,
+  );
   await expect(page.locator("#inspector-panel")).toHaveClass(/aladin-object-selected/);
   await expect(page.locator("#inspector-content")).toContainText("e2e-aladin-object");
   await expect(page.locator("#inspector-content")).toContainText("e2e-second-survey-object");
@@ -1283,7 +1270,7 @@ test("sphere selection enters Aladin with an exact region snapshot", async ({ pa
   await radius.press("Tab");
   await expect.poll(() => inspectionRequests.length).toBe(3);
   await expect(page.locator("#inspector-content")).toContainText("该位置附近没有匹配的已索引星表对象。");
-  await expect(page.locator("#inspector-content")).toContainText("坐标索引补建中");
+  await expect(page.locator("#inspector-content")).toContainText("坐标索引生成中");
   await expect(page.locator(".aladin-inspector-record")).toHaveCount(0);
   inspectionMode = "error";
   await radius.fill("4");
@@ -1291,10 +1278,25 @@ test("sphere selection enters Aladin with an exact region snapshot", async ({ pa
   await expect.poll(() => inspectionRequests.length).toBe(4);
   await expect(page.locator(".aladin-inspector-status")).toContainText("查询失败：fixture unavailable");
   await expect(page.locator(".aladin-inspector-results")).toBeEmpty();
+  const fullscreenToggle = page.locator("#aladin-fullscreen");
+  await fullscreenToggle.click();
+  await expect(page.locator("#scene-stage")).toHaveAttribute("data-fullscreen", "true");
+  const inspectorPanel = page.locator("#inspector-panel");
+  await expect(inspectorPanel).toBeVisible();
+  await expect.poll(() => inspectorPanel.evaluate((element) => element.parentElement?.id)).toBe("scene-stage");
+  const fullscreenInspector = await inspectorPanel.boundingBox();
+  expect(fullscreenInspector).not.toBeNull();
+  expect(fullscreenInspector!.x).toBeGreaterThan(1_000);
+  expect(fullscreenInspector!.x + fullscreenInspector!.width).toBeLessThanOrEqual(1_440);
+  await page.screenshot({ path: testInfo.outputPath("aladin-fullscreen-inspector.png") });
+  await fullscreenToggle.click();
+  await expect(page.locator("#scene-stage")).toHaveAttribute("data-fullscreen", "false");
+  await expect.poll(() => inspectorPanel.evaluate((element) => element.parentElement?.classList.contains("workspace-shell"))).toBe(true);
   await page.setViewportSize({ width: 390, height: 844 });
   await page.locator("#inspector-close").click();
   const drawerToggle = page.locator("#aladin-asset-drawer-toggle");
   if (await drawerToggle.getAttribute("aria-expanded") === "false") await drawerToggle.click();
+  await expect(drawerToggle).toHaveAttribute("aria-expanded", "true");
   await expect(page.locator("#aladin-cockpit-rail")).toBeVisible();
   const openedToggle = await drawerToggle.boundingBox();
   expect(openedToggle).not.toBeNull();
@@ -1302,10 +1304,15 @@ test("sphere selection enters Aladin with an exact region snapshot", async ({ pa
   expect(openedToggle!.x + openedToggle!.width).toBeLessThanOrEqual(390);
   await page.screenshot({ path: testInfo.outputPath("aladin-mobile-deck.png") });
   await drawerToggle.click();
+  await expect(drawerToggle).toHaveAttribute("aria-expanded", "false");
+  await expect(page.locator("#aladin-asset-nav")).toBeHidden();
   const closedToggle = await drawerToggle.boundingBox();
   expect(closedToggle).not.toBeNull();
   expect(closedToggle!.x).toBeGreaterThanOrEqual(0);
   expect(closedToggle!.x + closedToggle!.width).toBeLessThanOrEqual(390);
+  await drawerToggle.click();
+  await expect(drawerToggle).toHaveAttribute("aria-expanded", "true");
+  await expect(page.locator("#aladin-asset-nav")).toBeVisible();
   await page.setViewportSize({ width: 1440, height: 900 });
   await page.locator("#aladin-fullscreen").click();
   await expect(page.locator("#scene-stage")).toHaveAttribute("data-fullscreen", "true");
@@ -1430,6 +1437,69 @@ test("Aladin queries the current RA/Dec viewport for lightweight objects", async
   await layerCheckbox.check();
   await expect(page.locator("#aladin-explorer")).toHaveAttribute("data-object-returned", "2000");
   await expect(page.locator("#aladin-asset-nav .aladin-asset-button").first()).toBeVisible();
+});
+
+test("Aladin switches to a per-layer density field at wide fields of view", async ({ page }, testInfo) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  const densityRequests: Array<{ layers: Array<{ id: string; scopes: Array<{ assetId: string; sourceId?: string }> }> }> = [];
+  await openFresh(page, async () => {
+    await page.route("**/api/sky/points/query", async (route) => {
+      const input = route.request().postDataJSON();
+      const vector = new Healpix(input.region?.nside ?? 16).pix2vec(input.region?.pixels?.[0] ?? 0);
+      const centerRa = (Math.atan2(vector.y, vector.x) * 180 / Math.PI + 360) % 360;
+      const centerDec = Math.asin(vector.z) * 180 / Math.PI;
+      const bbox = input.bbox ?? { raMin: centerRa, raMax: centerRa, decMin: centerDec, decMax: centerDec };
+      await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({
+        status: "ready", index: "astro_object_index_v1", total: 1, limit: 2_000,
+        objects: [{ object_id: "density-mode-anchor", ra_deg: (bbox.raMin + bbox.raMax) / 2,
+          dec_deg: (bbox.decMin + bbox.decMax) / 2, survey: "fixture", release: "fixture-v1",
+          product: "catalog", modality: "catalog", asset_id: input.layerScopes?.[0]?.assetId ?? "fixture-asset" }],
+      }) });
+    });
+    await page.route("**/api/sky/points/density", async (route) => {
+      const input = route.request().postDataJSON() as {
+        region: { nside: number; pixels: number[] };
+        boxes: Array<{ raMin: number; raMax: number; decMin: number; decMax: number }>;
+        layers: Array<{ id: string; scopes: Array<{ assetId: string; sourceId?: string }> }>;
+        targetNside: number;
+      };
+      densityRequests.push(input);
+      const layers = input.layers.map((layer, index) => ({ id: layer.id, count: layer.scopes.length ? index + 2 : 0 }));
+      const contributingLayers = layers.filter((layer) => layer.count > 0);
+      const total = contributingLayers.reduce((sum, layer) => sum + layer.count, 0);
+      const box = input.boxes[0]!;
+      const pixel = new Healpix(input.targetNside).ang2pix(new Pointing(null, false,
+        ((90 - (box.decMin + box.decMax) / 2) * Math.PI) / 180,
+        (((box.raMin + box.raMax) / 2) * Math.PI) / 180));
+      await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({
+        status: "ready", index: "astro_object_index_v1", coordinateFrame: "ICRS", ordering: "NESTED",
+        nside: input.targetNside, total, layers,
+        cells: [{ pixel, count: total, layers: contributingLayers }], truncated: false, indexing: false,
+      }) });
+    });
+  });
+  const canvas = page.locator("#scene-canvas");
+  await waitForVisibleAssetCoverage(page);
+  const point = await findCanvasPoint(page, (state) => state.covered && state.selectable && state.assetIds.length > 0, { requireAsset: true });
+  await canvas.click({ button: "right", position: point });
+  await page.locator("#coverage-enter-flat").click();
+  const aladin = page.locator("#aladin-explorer");
+  await expect(aladin).toHaveAttribute("data-initial-fov-deg", "0.5000");
+  const bounds = await aladin.boundingBox();
+  expect(bounds).not.toBeNull();
+  await page.mouse.move(bounds!.x + bounds!.width / 2, bounds!.y + bounds!.height / 2);
+  await page.mouse.wheel(0, 900);
+  await expect.poll(async () => Number(await aladin.getAttribute("data-fov-deg")), { timeout: 5_000 }).toBeGreaterThan(0.75);
+  await expect.poll(() => densityRequests.length, { timeout: 15_000 }).toBeGreaterThan(0);
+  await expect(aladin).toHaveAttribute("data-display-mode", "density");
+  await expect(page.locator("#object-status")).toContainText("CELLS");
+  expect(densityRequests[0]?.layers.some((layer) => layer.scopes.length > 0)).toBe(true);
+  await page.screenshot({ path: testInfo.outputPath("aladin-density-field.png") });
+  await page.mouse.move(bounds!.x + bounds!.width / 2 + 2, bounds!.y + bounds!.height / 2 + 2);
+  await page.mouse.move(bounds!.x + bounds!.width / 2, bounds!.y + bounds!.height / 2);
+  await expect(page.locator("#aladin-density-hover")).toBeVisible();
+  await expect(page.locator("#aladin-density-hover")).toContainText("数据点");
+  await expect(page.locator("#aladin-density-hover li")).toHaveCount(densityRequests[0]!.layers.filter((layer) => layer.scopes.length > 0).length);
 });
 
 test("Aladin updates an unchanged viewport during indexing and stops with empty scopes", async ({ page }) => {

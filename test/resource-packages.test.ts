@@ -12,6 +12,8 @@ import yazl from "yazl";
 import { ResourceCatalogUnavailableError, ResourcePackageManager, resourcePackageSurveyRecords, type ResourcePackageJob } from "../src/resource-packages.js";
 import type { SurveyFootprintManifest } from "../src/survey-footprints.js";
 
+import { nativeMocFits } from "./helpers/native-moc-fits.js";
+
 const now = "2026-07-24T00:00:00.000Z";
 
 function fitsMoc(): Buffer {
@@ -48,10 +50,10 @@ interface PackageFixture {
   releases: string[];
 }
 
-async function createPackage(directory: string, id: string, surveyId: string, options: { unsafeSymlink?: boolean; missingFile?: string; footprintSurveyId?: string; version?: string; releases?: string[]; reviewedPreview?: boolean; previewOrdering?: string; previewLayerId?: string; layerId?: string; nside?: number; quality?: "moc" | "official_overview"; includeHealpix?: boolean; layerMaxOrder?: number; sidecarPrecision?: "exact" | "estimated" | "unknown"; sidecarCompleteness?: "complete" | "incomplete" | "unknown"; omitEligibleLayerAtOrder8?: boolean; invalidHealpixManifestPath?: boolean; tamperHealpixHash?: boolean; extraHealpixPath?: boolean; healpixOrder4?: Record<string, unknown>; healpixOrder8?: Record<string, unknown> } = {}): Promise<PackageFixture> {
+async function createPackage(directory: string, id: string, surveyId: string, options: { mocBytes?: Buffer; unsafeSymlink?: boolean; missingFile?: string; footprintSurveyId?: string; version?: string; releases?: string[]; reviewedPreview?: boolean; previewOrdering?: string; previewLayerId?: string; layerId?: string; nside?: number; quality?: "moc" | "official_overview"; includeHealpix?: boolean; layerMaxOrder?: number; sidecarPrecision?: "exact" | "estimated" | "unknown"; sidecarCompleteness?: "complete" | "incomplete" | "unknown"; omitEligibleLayerAtOrder8?: boolean; invalidHealpixManifestPath?: boolean; tamperHealpixHash?: boolean; extraHealpixPath?: boolean; healpixOrder4?: Record<string, unknown>; healpixOrder8?: Record<string, unknown> } = {}): Promise<PackageFixture> {
   const version = options.version ?? "3.0.0";
   const releases = options.releases ?? ["release-a", "release-b"];
-  const mocBytes = fitsMoc();
+  const mocBytes = options.mocBytes ?? fitsMoc();
   const layerId = options.layerId ?? `${surveyId}-coverage`;
   const footprints = manifestFor(options.footprintSurveyId ?? surveyId, releases, options.nside, options.quality);
   const preview = options.reviewedPreview ? { schemaVersion: 1, coordinateFrame: "ICRS", ordering: options.previewOrdering ?? "NESTED", generatedAt: now, footprints: footprints.footprints.map(f => ({ surveyId: f.surveyId, releaseId: f.releaseId, product: f.product, layerId: options.previewLayerId ?? layerId, nside: f.nside, pixels: f.pixels })) } : footprints;
@@ -350,6 +352,47 @@ test("public survey metadata stays a read-only package projection", async () => 
   } finally {
     await rm(paths.directory, { recursive: true, force: true });
   }
+});
+
+test("overlap projections expose intermediate and coarser orders up to the native MOC precision", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "resource-package-overlap-orders-"));
+  try {
+    const pkg = await createPackage(directory, "public-intermediate", "intermediate", { releases: ["release-a"], layerMaxOrder: 6, reviewedPreview: true });
+    const manager = new ResourcePackageManager({ catalogUrl: await writeCatalog(directory, [pkg]), root: path.join(directory, "packages"), statePath: path.join(directory, "state.json") });
+    await manager.initialize();
+    const job = await waitForJob(manager, manager.install(pkg.id));
+    assert.equal(job.status, "completed", job.error);
+    await manager.activate(pkg.id);
+    const footprint = (await manager.activeFootprints()).footprints[0]!;
+    assert.deepEqual(await manager.footprintOrders(footprint), [0, 1, 2, 3, 4, 5, 6]);
+    assert.deepEqual(await manager.footprintPixels(footprint, 3), [0]);
+    await assert.rejects(() => manager.footprintPixels(footprint, 7), /cannot be refined/);
+    const previewOnly = { ...footprint, layerId: "preview-only" };
+    assert.deepEqual(await manager.footprintOrders(previewOnly), [0, 1, 2, 3, 4]);
+    assert.deepEqual(await manager.footprintPixels(previewOnly, 2), [0]);
+    await assert.rejects(() => manager.footprintPixels(previewOnly, 5), /cannot be refined/);
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
+test("installed public MOCs supply real high-order boundaries beyond their preview", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "resource-package-high-orders-"));
+  try {
+    const pkg = await createPackage(directory, "public-high", "high", { releases: ["release-a"], layerMaxOrder: 11, reviewedPreview: true,
+      mocBytes: nativeMocFits([{ order: 11, pixel: 16384 }, { order: 11, pixel: 16392 }]) });
+    const manager = new ResourcePackageManager({ catalogUrl: await writeCatalog(directory, [pkg]), root: path.join(directory, "packages"), statePath: path.join(directory, "state.json") });
+    await manager.initialize();
+    const job = await waitForJob(manager, manager.install(pkg.id));
+    assert.equal(job.status, "completed", job.error);
+    await manager.activate(pkg.id);
+    const footprint = (await manager.activeFootprints()).footprints[0]!;
+    assert.equal((await manager.footprintOrders(footprint)).at(-1), 11);
+    assert.deepEqual(await manager.footprintPixels(footprint, 10), [4096, 4098]);
+    await assert.rejects(() => manager.footprintRanges(footprint, 12), /cannot be refined/);
+    const artifact = await manager.mocArtifact(pkg.id, footprint.layerId!);
+    const tampered = await readFile(artifact.filePath); tampered[tampered.length - 1] = 1;
+    await writeFile(artifact.filePath, tampered);
+    await assert.rejects(() => manager.footprintRanges(footprint, 10), /SHA-256 does not match/);
+  } finally { await rm(directory, { recursive: true, force: true }); }
 });
 
 test("Assets survey metadata exposes pending releases without making them loadable", async () => {

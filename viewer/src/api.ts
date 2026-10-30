@@ -44,6 +44,8 @@ import type {
   AstroCellsQueryResult,
   ObjectRegionQueryInput,
   AstroObjectQueryResult,
+  AstroPointDensityQueryInput,
+  AstroPointDensityResult,
   SkyPointInspectionInput,
   SkyPointInspectionResult,
 } from "../../src/astro-object-index";
@@ -164,6 +166,8 @@ export interface SkyOverlapResponse {
   pixels: number[];
   components: SkyOverlapComponent[];
   sources?: SkyOverlapSource[];
+  availableOrders?: number[];
+  coverageOrder?: number;
 }
 
 export interface CoverageDownloadFile {
@@ -516,6 +520,12 @@ export const workspaceApi = {
   async skyPointsQuery(input: ObjectRegionQueryInput, signal?: AbortSignal): Promise<AstroObjectQueryResult> {
     return postJson<AstroObjectQueryResult>("/api/sky/points/query", input, signal);
   },
+  async skyPointDensity(input: AstroPointDensityQueryInput, signal?: AbortSignal): Promise<AstroPointDensityResult & { indexing: boolean }> {
+    return postJson<AstroPointDensityResult & { indexing: boolean }>("/api/sky/points/density", input, signal);
+  },
+  async skyPointAnchor(input: ObjectRegionQueryInput, signal?: AbortSignal): Promise<{ status: string; message?: string; point: { objectId: string; raDeg: number; decDeg: number } | null; indexing: boolean }> {
+    return postJson("/api/sky/points/anchor", input, signal);
+  },
   async skyPointInspect(input: SkyPointInspectionInput, signal?: AbortSignal): Promise<SkyPointInspectionResult> {
     return postJson<SkyPointInspectionResult>("/api/sky/points/inspect", input, signal);
   },
@@ -535,8 +545,8 @@ export const workspaceApi = {
     if (input.release) parameters.set("release", input.release);
     return getJson<WorkspaceAssetCoverageResponse>(`/api/sky/coverage?${parameters}`);
   },
-  async skyOverlap(input: { sourceIds?: string[]; surveyIds?: string[]; assetIds?: string[]; nside?: number; includePublic?: boolean; includeWorkspace?: boolean }): Promise<SkyOverlapResponse> {
-    return postJson<SkyOverlapResponse>("/api/sky/overlap", input);
+  async skyOverlap(input: { sourceIds?: string[]; surveyIds?: string[]; assetIds?: string[]; nside?: number; includePublic?: boolean; includeWorkspace?: boolean }, signal?: AbortSignal): Promise<SkyOverlapResponse> {
+    return postJson<SkyOverlapResponse>("/api/sky/overlap", input, signal);
   },
   async skyOverlapDetails(input: { componentId: string; sourceIds: string[]; nside: number }): Promise<Record<string, unknown>> {
     return postJson<Record<string, unknown>>("/api/sky/overlap/details", input);

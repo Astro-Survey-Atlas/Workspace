@@ -5,6 +5,7 @@ import type { TagDefinition } from "../../src/tags";
 import type { SurveyCard, SurveyRecord } from "../../src/survey-registry";
 import type { DataAmount, DataStatisticsView } from "../../src/data-statistics-types";
 import { workspaceApi, type LocalCsvInspection } from "./api";
+import { showContextMenu, type ContextMenuAction } from "./context-menu";
 import { notifyWorkspace } from "./notifications";
 
 function byId<T extends HTMLElement>(id: string): T {
@@ -62,6 +63,12 @@ export class DataCatalogPanel {
     this.#onConnectorSelected = onConnectorSelected;
     this.#onNewConnector = onNewConnector;
     this.#onAssetChanged = onAssetChanged;
+    byId("inspector-content").addEventListener("contextmenu", (event) => {
+      if (!this.#active) return;
+      if ((event.target as HTMLElement).closest("input,textarea,select,[contenteditable='true']")) return;
+      const asset = this.#assets.find((candidate) => candidate.id === this.#selectedId);
+      if (asset) showContextMenu(event, this.#contextMenuActions(asset));
+    });
     byId<HTMLInputElement>("catalog-search").addEventListener("input", () => this.#render());
     byId<HTMLSelectElement>("catalog-kind-filter").addEventListener("change", () => this.#render());
     byId<HTMLSelectElement>("catalog-project-filter").addEventListener("change", () => this.#render());
@@ -104,6 +111,18 @@ export class DataCatalogPanel {
 
   startNew(surveyId?: string): void {
     void this.refreshSurveys().then(() => this.#startNew(surveyId)).catch(this.#onError);
+  }
+
+  editAsset(assetId: string, section: Exclude<DetailSection, null>): void {
+    if (!this.#assets.some((candidate) => candidate.id === assetId)) return;
+    this.#selectedId = assetId;
+    this.#detailEditing = section;
+    this.#render();
+  }
+
+  removeAsset(assetId: string): Promise<void> {
+    const asset = this.#assets.find((candidate) => candidate.id === assetId);
+    return asset ? this.#remove(asset) : Promise.resolve();
   }
 
   async refreshSurveys(): Promise<void> {
@@ -248,12 +267,19 @@ export class DataCatalogPanel {
       const row = document.createElement("button");
       row.type = "button";
       row.className = "catalog-row";
+      row.dataset.assetId = asset.id;
       row.classList.toggle("selected", asset.id === this.#selectedId);
       row.addEventListener("click", () => {
         this.#selectedId = asset.id;
         this.#detailEditing = null;
         this.#render();
         if (window.innerWidth <= 1040) byId("inspector-panel").classList.add("mobile-open");
+      });
+      row.addEventListener("contextmenu", (event) => {
+        this.#selectedId = asset.id;
+        this.#detailEditing = null;
+        this.#render();
+        showContextMenu(event, this.#contextMenuActions(asset));
       });
       const identity = document.createElement("span");
       const name = document.createElement("strong");
@@ -324,6 +350,16 @@ export class DataCatalogPanel {
     actions.append(remove);
     sections.push(actions);
     content.replaceChildren(heading, note, ...sections);
+  }
+
+  #contextMenuActions(asset: DataAssetRecord): ContextMenuAction[] {
+    return [
+      { label: "编辑基本信息", run: () => this.editAsset(asset.id, "basic") },
+      { label: "编辑公开来源", run: () => this.editAsset(asset.id, "sources") },
+      { label: "编辑 Connector 关联", run: () => this.editAsset(asset.id, "access") },
+      { label: "编辑数据血缘", run: () => this.editAsset(asset.id, "lineage") },
+      { label: "删除数据资产", title: "删除该用户资产记录", run: () => { void this.removeAsset(asset.id).catch((error) => notifyWorkspace("用户资产删除失败", error instanceof Error ? error.message : String(error), { tone: "error" })); } },
+    ];
   }
 
   #renderSurveyOptions(): void {

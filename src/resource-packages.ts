@@ -7,6 +7,8 @@ import { pipeline } from "node:stream/promises";
 import yauzl from "yauzl";
 
 import { MocCoreCliAdapter } from "./moc-core-adapter.js";
+import { expandHealpixRanges, healpixRangesForPixels, MAX_OVERLAP_ORDER, type HealpixRange } from "./healpix-ranges.js";
+import { nativeMocHealpixRanges } from "./native-moc-ranges.js";
 import { COVERAGE_ROLES, DATA_ORIGINS, SOURCE_TIERS } from "./assets-core.js";
 import { normalizeSurveyFootprintManifest, type SurveyFootprintManifest } from "./survey-footprints.js";
 import type { ReleaseKind, SurveyModality, SurveyRecord, SurveyRelease } from "./survey-registry.js";
@@ -1173,6 +1175,7 @@ export class ResourcePackageManager {
   }
 
   readonly #nativeProjectionCache = new Map<string, Promise<number[]>>();
+  readonly #nativeRangeCache = new Map<string, Promise<HealpixRange[]>>();
   readonly #projectionCore = new MocCoreCliAdapter();
 
   async #nativeLayer(footprint: SurveyFootprintManifest["footprints"][number]) {
@@ -1188,17 +1191,21 @@ export class ResourcePackageManager {
   async footprintOrders(footprint: SurveyFootprintManifest["footprints"][number]): Promise<number[]> {
     const native = await this.#nativeLayer(footprint);
     const previewOrder = Math.log2(footprint.nside);
-    // Order 8 is the shared Assets query contract. Missing authority metadata
-    // deliberately keeps legacy packages at their actual preview precision.
-    return native && (native.layer.maxOrder ?? -1) >= 8 ? [...new Set([previewOrder, 8])] : [previewOrder];
+    const maximum = Math.min(MAX_OVERLAP_ORDER, native?.layer.maxOrder ?? previewOrder);
+    return Array.from({ length: maximum + 1 }, (_, order) => order);
   }
 
   async footprintPixels(footprint: SurveyFootprintManifest["footprints"][number], order: number): Promise<number[]> {
-    if (order === Math.log2(footprint.nside)) return footprint.pixels;
-    const native = await this.#nativeLayer(footprint);
-    if (!native || !(await this.footprintOrders(footprint)).includes(order)) {
+    if (!(await this.footprintOrders(footprint)).includes(order)) {
       throw new RangeError(`Layer ${footprint.layerId ?? footprint.product} does not support order ${order}; preview cannot be refined`);
     }
+    const previewOrder = Math.log2(footprint.nside);
+    if (order === previewOrder) return footprint.pixels;
+    if (order < previewOrder) {
+      return [...new Set(footprint.pixels.map(pixel => Math.floor(pixel / 4 ** (previewOrder - order))))].sort((a, b) => a - b);
+    }
+    if (order > 8) return expandHealpixRanges(await this.footprintRanges(footprint, order), 32_768);
+    const native = (await this.#nativeLayer(footprint))!;
     const artifact = await this.mocArtifact(native.record.id, native.layer.layerId);
     const key = `${artifact.sha256}:${order}`;
     let projection = this.#nativeProjectionCache.get(key);
@@ -1209,6 +1216,23 @@ export class ResourcePackageManager {
       projection.catch(() => this.#nativeProjectionCache.delete(key));
     }
     return [...await projection];
+  }
+
+  /** Read native geometry as intervals without expanding a whole high-order sky. */
+  async footprintRanges(footprint: SurveyFootprintManifest["footprints"][number], order: number): Promise<HealpixRange[]> {
+    if (!(await this.footprintOrders(footprint)).includes(order)) throw new RangeError(`Layer ${footprint.layerId ?? footprint.product} does not support order ${order}; preview cannot be refined`);
+    if (order <= Math.log2(footprint.nside)) return healpixRangesForPixels(await this.footprintPixels(footprint, order));
+    const native = (await this.#nativeLayer(footprint))!;
+    const artifact = await this.mocArtifact(native.record.id, native.layer.layerId);
+    const key = `${artifact.sha256}:${order}`;
+    let projection = this.#nativeRangeCache.get(key);
+    if (!projection) {
+      if (this.#nativeRangeCache.size >= 16) this.#nativeRangeCache.clear();
+      projection = readFile(artifact.filePath).then(bytes => nativeMocHealpixRanges(bytes, order));
+      this.#nativeRangeCache.set(key, projection);
+      projection.catch(() => this.#nativeRangeCache.delete(key));
+    }
+    return (await projection).map(range => ({ ...range }));
   }
 
   /** List the native FITS MOCs declared by one installed, verified package. */

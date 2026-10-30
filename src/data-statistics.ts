@@ -191,10 +191,22 @@ export class DataStatisticsModule {
 
   async refresh(connectorIds?: string[], kind: "inventory" | "history" = "inventory"): Promise<StatisticsRefresh> {
     await this.initialize();
-    if (this.busy) return structuredClone(this.#job!);
     const connectors = await this.#options.connectors.list();
     if (connectorIds && connectorIds.some(id => !connectors.some(connector => connector.id === id))) throw new RangeError("Unknown Connector in statistics refresh");
     const selected = connectors.filter(connector => connector.status !== "disabled" && connector.kind !== "jdbc" && (!connectorIds || connectorIds.includes(connector.id)));
+    if (this.busy) {
+      const job = this.#job!;
+      const known = new Set(job.connectorIds ?? []);
+      const additions = selected.filter(connector => !known.has(connector.id)).map(connector => connector.id);
+      if (additions.length && this.busy) {
+        job.connectorIds = [...known, ...additions];
+        job.totalConnectors = job.connectorIds.length;
+        await this.#saveJob(true);
+        const pending = additions.filter(id => !job.completedConnectorIds?.includes(id));
+        if (!this.busy && pending.length) return this.refresh(pending, kind);
+      }
+      if (this.busy) return structuredClone(job);
+    }
     this.#job = { id: randomUUID(), kind, connectorIds: selected.map(connector => connector.id), completedConnectorIds: [],
       status: "running", phase: "汇总已有成功扫描", processedFiles: 0, completedConnectors: 0,
       totalConnectors: selected.length, errors: [], startedAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
@@ -230,26 +242,45 @@ export class DataStatisticsModule {
 
   async #runRefresh(connectors: ConnectorRecord[]): Promise<void> {
     const assets = await this.#options.assets.list();
-    // Historical results never wait behind an expensive source enumeration.
-    for (const connector of connectors) {
-      this.#job!.phase = `汇总已有成功扫描：${connector.name}`;
-      await this.#saveJob();
-      await this.#backfill(connector, assets.filter(asset => assetLinkedToConnector(asset, connector)));
-    }
-    for (const connector of connectors) {
-      if (this.#job!.completedConnectorIds?.includes(connector.id)) continue;
-      if (this.#job!.kind !== "history") {
-        this.#job!.phase = `列举元数据：${connector.name}`;
+    const processed = new Set<string>();
+    let pending = connectors;
+    while (pending.length) {
+      const current = pending.filter(connector => !processed.has(connector.id));
+      if (!current.length) break;
+      // Historical results never wait behind an expensive source enumeration.
+      for (const connector of current) {
+        processed.add(connector.id);
+        this.#job!.phase = `汇总已有成功扫描：${connector.name}`;
         await this.#saveJob();
-        try { await this.#refreshConnector(connector, assets.filter(asset => assetLinkedToConnector(asset, connector))); }
-        catch {
-          this.#job!.errors.push({ connectorId: connector.id, message: "来源元数据读取失败；上次完整统计和本轮进度已保留。" });
-        }
+        await this.#backfill(connector, assets.filter(asset => assetLinkedToConnector(asset, connector)));
       }
-      this.#job!.completedConnectorIds ??= [];
-      this.#job!.completedConnectorIds.push(connector.id);
-      this.#job!.completedConnectors = this.#job!.completedConnectorIds.length;
-      await this.#saveJob();
+      for (const connector of current) {
+        if (!this.#job!.completedConnectorIds?.includes(connector.id) && this.#job!.kind !== "history") {
+          this.#job!.phase = `列举元数据：${connector.name}`;
+          await this.#saveJob();
+          try { await this.#refreshConnector(connector, assets.filter(asset => assetLinkedToConnector(asset, connector))); }
+          catch {
+            this.#job!.errors.push({ connectorId: connector.id, message: "来源元数据读取失败；上次完整统计和本轮进度已保留。" });
+          }
+        }
+        this.#job!.completedConnectorIds ??= [];
+        if (!this.#job!.completedConnectorIds.includes(connector.id)) this.#job!.completedConnectorIds.push(connector.id);
+        this.#job!.completedConnectors = this.#job!.completedConnectorIds.length;
+        await this.#saveJob();
+      }
+      const remaining = (this.#job!.connectorIds ?? []).filter(id => !processed.has(id));
+      if (!remaining.length) break;
+      const latest = await this.#options.connectors.list();
+      pending = latest.filter(connector => remaining.includes(connector.id));
+      if (!pending.length) {
+        const completedIds = this.#job!.completedConnectorIds ??= [];
+        for (const connectorId of remaining) {
+          this.#job!.errors.push({ connectorId, message: "Connector 已不存在；该来源未能统计。" });
+          completedIds.push(connectorId);
+        }
+        this.#job!.completedConnectors = completedIds.length;
+        await this.#saveJob();
+      }
     }
     this.#job!.status = this.#job!.errors.length ? "partial" : "succeeded";
     this.#job!.phase = this.#job!.errors.length ? "部分来源统计失败，已有统计已保留" : "统计完成";

@@ -862,6 +862,7 @@ export class SurveyLayerViewer {
   setOverlapCells(nside: number, pixels: readonly number[]): void {
     if (!Number.isInteger(nside) || nside < 1) return;
     this.#overlapNside = nside;
+    this.#canvas.dataset.overlapOrder = String(Math.log2(nside));
     this.#overlapPixels = [...new Set(pixels)].filter((pixel) => Number.isSafeInteger(pixel) && pixel >= 0).sort((left, right) => left - right);
     if (this.#overlapMode) this.#rebuildVisible(true);
   }
@@ -892,6 +893,31 @@ export class SurveyLayerViewer {
     }
     this.#rebuildOverlapLabels();
     this.#requestRender();
+  }
+
+  focusOverlapComponent(componentId: string): void {
+    const component = this.#overlapComponents.find(candidate => candidate.id === componentId);
+    if (!component || !this.#overlapMode) return;
+    const nside = 2 ** component.order;
+    const direction = this.#pixelDirectionAt(nside, component.cells);
+    let angularRadius = 0;
+    for (const pixel of component.cells) {
+      for (const corner of sphericalCellBoundary(nside, pixel, 1)) {
+        angularRadius = Math.max(angularRadius, direction.angleTo(corner));
+      }
+    }
+    const halfFov = Math.atan(Math.tan(THREE.MathUtils.degToRad(this.#camera.fov) / 2) * Math.min(1, this.#camera.aspect));
+    const radius = this.#outerRadius;
+    // Fit both axes to the cell boundaries; use a globe view for regions
+    // spanning a hemisphere instead of placing the camera inside the sphere.
+    const globeView = angularRadius >= Math.PI / 2;
+    const distance = globeView ? radius * 1.15 / Math.sin(halfFov)
+      : radius + Math.max(0.04, 1.2 * (Math.sin(angularRadius) / Math.tan(halfFov) + 1 - Math.cos(angularRadius)));
+    this.#startCameraTransition(
+      direction.clone().multiplyScalar(distance),
+      direction.clone().multiplyScalar(globeView ? 0 : 1),
+      720,
+    );
   }
 
   setVisibleAssets(assetIds: Iterable<string>): void {

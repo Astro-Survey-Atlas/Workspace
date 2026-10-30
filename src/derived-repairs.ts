@@ -36,6 +36,7 @@ export interface HeaderPoint extends Record<string, unknown> {
   file_id: string; source_uri: string; file_name: string; hdu_index: number; ra_deg: number; dec_deg: number;
   position_role?: string; footprint_bounds?: number[][];
   moc_header?: Record<string, unknown>;
+  header_scope?: string; selected_hdu_index?: number;
 }
 export async function convertPositionHeaders(records: unknown[]): Promise<Record<string, unknown>[]> {
   if (!records.length) return [];
@@ -64,6 +65,7 @@ export function pointDocument(point: HeaderPoint, asset: { id: string; surveyId?
     product: asset.product ?? "image", modality: point.position_role === "image_center" ? "image" : "pointing", asset_id: asset.id,
     source_file_id: point.file_id, scan_run_id: run.id, attributes: Object.fromEntries(Object.entries({ source_uri: point.source_uri, file_name: point.file_name,
       hdu_index: point.hdu_index, position_role: point.position_role, position_method: point.position_method, coordinate_frame: "ICRS",
+      header_scope: point.header_scope, selected_hdu_index: point.selected_hdu_index,
       header: point.header, primary_header: point.primary_header, source_snapshot_sha256: run.sourceSnapshotSha256, source_id: sourceId }).filter(([, value]) => value !== undefined).map(([key, value]) => [key, String(value)])) };
 }
 

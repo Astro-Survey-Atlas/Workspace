@@ -9,6 +9,7 @@ import {
   ProductionStateError,
   type ProductionRun,
   type ProductionSourceResolver,
+  type RegionSnapshot,
 } from "../src/production.js";
 
 const region = {
@@ -123,6 +124,23 @@ test("production step logs persist across a service restart", async () => {
   } finally {
     await rm(directory, { recursive: true, force: true, maxRetries: 20, retryDelay: 20 });
   }
+});
+
+test("production preserves a high-order overlap snapshot through submission and restart", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "astro-production-high-region-"));
+  try {
+    const service = createService(directory, { sourceResolver: fixtureResolver });
+    const highRegion = { ...region, nside: 8192, pixels: [700_000_001] };
+    const submitted = await service.submit({ pipelineKey: "overlap-download@1", region: highRegion });
+    await waitForStatus(service, submitted.id, ["awaiting-approval"]);
+    const reloaded = await createService(directory).getRun(submitted.id);
+    const snapshot = reloaded.input.region as RegionSnapshot;
+    assert.equal(snapshot.nside, 8192);
+    assert.deepEqual(snapshot.pixels, [700_000_001]);
+    await service.cancel(submitted.id);
+    await assert.rejects(() => service.submit({ pipelineKey: "object-crossmatch@1", region: highRegion,
+      leftAssetId: "left", rightAssetId: "right" }), /O8/);
+  } finally { await rm(directory, { recursive: true, force: true, maxRetries: 20, retryDelay: 20 }); }
 });
 
 test("failed production nodes retain errors and retry creates a distinct run", async () => {

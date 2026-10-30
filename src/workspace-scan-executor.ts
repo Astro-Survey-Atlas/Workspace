@@ -469,7 +469,9 @@ export class WorkspaceScanExecutor {
       });
     }
     await this.#flushFitsHeaders(task, run, asset, partialMocs);
-    if (!partialMocs.length) throw new Error("No usable coverage geometry was found in the selected source files");
+    if (!partialMocs.length) throw new Error(task.errors.length
+      ? task.errors.slice(0, 20).map(entry => entry.message).join("; ").slice(0, 2000)
+      : "No usable coverage geometry was found in the selected source files");
     await this.#options.runs.update(run.id, { phase: "coverage" });
     await this.#options.runs.update(run.id, { phase: "indexing" });
     const moc = await this.#optionsMocMerge(partialMocs, asset, run.id);

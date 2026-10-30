@@ -1,7 +1,7 @@
 import { ChevronLeft, ChevronRight, createIcons, Download, Globe2, GripVertical, Info, Layers3, Maximize2, MessageSquare, Minimize2, Moon, Play, Plus, RefreshCw, RotateCcw, Send, Settings2, SlidersHorizontal, Sun, Undo2, X, Image, Telescope, ScanLine, Database, CircleHelp, ListChecks, Box, Radio, FileJson2 } from "lucide";
 import { mergePublicPages, workspaceManifestCsv } from "./overlap-manifest.js";
 import { coverageLocator, coverageSourceGroups, setupCoverageLocatorTooltip } from "./coverage-inspector.js";
-import type { SkyOverlapSource } from "../../src/sky-overlap.js";
+import { commonOverlapOrders, type SkyOverlapSource } from "../../src/sky-overlap.js";
 import type { SkyPointInspectionResult } from "../../src/astro-object-index.js";
 import type { SkyReverseLookupResponse } from "./api.js";
 import type { AssetsRegionLookupResponse, AssetsRegionSpatialUnit } from "../../src/assets-region-client";
@@ -252,16 +252,13 @@ function inspectorValue(value: unknown): string {
   }
 }
 
-function inspectorRows(title: string, rows: Array<[string, string]>, actions: HTMLButtonElement[] = []): void {
+function inspectorRows(title: string, rows: Array<[string, string]>, actions: HTMLButtonElement[] = [], retainedControl?: HTMLElement): void {
   const empty = byId("inspector-empty");
   const content = byId("inspector-content");
   content.className = "inspector-content";
-  empty.hidden = false;
-  content.hidden = true;
-  content.replaceChildren();
-  if (!title) return;
-  empty.hidden = true;
-  content.hidden = false;
+  empty.hidden = Boolean(title);
+  content.hidden = !title;
+  if (!title) { content.replaceChildren(); return; }
   const heading = document.createElement("h2");
   heading.textContent = title;
   const list = document.createElement("dl");
@@ -277,7 +274,13 @@ function inspectorRows(title: string, rows: Array<[string, string]>, actions: HT
   const actionBar = document.createElement("div");
   actionBar.className = "inspector-actions";
   actionBar.append(...actions);
-  content.replaceChildren(heading, list, ...(actions.length ? [actionBar] : []));
+  if (retainedControl?.parentElement === content) {
+    // Leave a range input attached while lookup progress refreshes its panel.
+    // Replacing it during a native pointer drag loses the browser interaction.
+    for (const child of [...content.childNodes]) if (child !== retainedControl) child.remove();
+    content.insertBefore(heading, retainedControl);
+    content.append(list, ...(actions.length ? [actionBar] : []));
+  } else content.replaceChildren(heading, list, ...(actions.length ? [actionBar] : []));
 }
 
 function renderProductionInspector(view: ProductionInspectorView | null): void {
@@ -400,8 +403,19 @@ let layerViewer: SurveyLayerViewer | null = null;
 let overlapResponse: SkyOverlapResponse | null = null;
 let overlapModeActive = false;
 let activeOverlapComponentId: string | null = null;
+let overlapOrder: number | null = null;
+let overlapAvailableOrders: number[] = [];
+let overlapOrderSources: SkyOverlapSource[] = [];
 let overlapRequestGeneration = 0;
 let overlapInspectionGeneration = 0;
+let overlapController: AbortController | null = null;
+let overlapOrderTimer: ReturnType<typeof setTimeout> | null = null;
+let pendingOverlapOrder: number | null = null;
+let overlapOrderDragging = false;
+let overlapOrderStatus = "";
+let overlapGranularityElement: HTMLElement | null = null;
+let overlapSelectionKey = "";
+let overlapSelectionRefreshQueued = false;
 let aladinExplorer: AladinExplorer | null = null;
 let aladinSnapshot: AladinExplorerSnapshot | null = null;
 let latestAladinStatus: AladinExplorerStatus | null = null;
@@ -411,6 +425,7 @@ let aladinEntryGeneration = 0;
 let aladinEntryAbort: AbortController | null = null;
 let aladinPointInspectionGeneration = 0;
 let aladinPointInspectionAbort: AbortController | null = null;
+let aladinInspectorPlaceholder: Comment | null = null;
 let mode: ViewMode = "layers";
 let astroOverview: AstroOverviewResponse | null = null;
 const workspaceCellSummaries = new Map<string, AstroSpatialSummary>();
@@ -831,6 +846,23 @@ function setAladinAssetDrawer(open: boolean): void {
   renderAladinAssetDrawerState();
 }
 
+function syncAladinFullscreenInspector(): void {
+  const stage = byId("scene-stage");
+  const panel = byId("inspector-panel");
+  const selected = panel.classList.contains("aladin-object-selected");
+  const shouldDock = aladinFullscreen && selected;
+  if (shouldDock && panel.parentElement !== stage) {
+    aladinInspectorPlaceholder = document.createComment("inspector-panel-origin");
+    panel.before(aladinInspectorPlaceholder);
+    stage.append(panel);
+  } else if (!shouldDock && panel.parentElement === stage) {
+    if (aladinInspectorPlaceholder?.parentNode) aladinInspectorPlaceholder.replaceWith(panel);
+    else document.querySelector(".workspace-shell")?.append(panel);
+    aladinInspectorPlaceholder = null;
+  }
+  panel.classList.toggle("aladin-fullscreen-drawer", shouldDock);
+}
+
 function pushAladinToast(message: string, tone: "info" | "success" | "error" = "info"): void {
   notifyWorkspace(message, "Aladin 对象探索", { tone: tone === "error" ? "error" : tone === "success" ? "success" : "info" });
 }
@@ -886,7 +918,7 @@ function selectionPublicReleaseIds(selection: SurveyLayerSelection): string[] {
   return [...new Set(selection.artifacts.map((artifact) => artifact.releaseId))].sort();
 }
 
-type SkyRegionMenu = { clientX: number; clientY: number; nside: number; pixels: number[]; surveyIds: string[]; releaseIds?: string[]; assetIds: string[]; componentId?: string; sourceIds?: string[] };
+type SkyRegionMenu = { clientX: number; clientY: number; nside: number; pixels: number[]; surveyIds: string[]; releaseIds?: string[]; assetIds: string[]; componentId?: string; sourceIds?: string[]; center?: { raDeg: number; decDeg: number } };
 
 function sameSkyPixels(nside: number, pixels: readonly number[], selection: SurveyLayerSelection | null): boolean {
   if (!selection || selection.nside !== nside) return false;
@@ -959,6 +991,36 @@ function renderAladinFullscreenState(): void {
   button.append(icon);
   createIcons({ icons: { Maximize2, Minimize2 }, attrs: { "aria-hidden": "true" } });
   stage.dataset.fullscreen = String(aladinFullscreen);
+  syncAladinFullscreenInspector();
+}
+
+function renderAladinDensityHover(detail: { pixel: number; nside: number; total: number; layers: Array<{ id: string; label: string; color: string; count: number }> } | null): void {
+  const panel = byId("aladin-density-hover");
+  if (!detail) {
+    panel.hidden = true;
+    panel.replaceChildren();
+    return;
+  }
+  const heading = document.createElement("header");
+  const cell = document.createElement("strong");
+  cell.textContent = `NSIDE ${detail.nside} · Pixel ${detail.pixel}`;
+  const total = document.createElement("output");
+  total.textContent = `${formatInteger(detail.total)} 个数据点`;
+  heading.append(cell, total);
+  const layers = document.createElement("ul");
+  detail.layers.filter((layer) => layer.count > 0).forEach((layer) => {
+    const row = document.createElement("li");
+    const swatch = document.createElement("i");
+    swatch.style.setProperty("--density-layer-color", layer.color);
+    const label = document.createElement("span");
+    label.textContent = layer.label;
+    const count = document.createElement("output");
+    count.textContent = formatInteger(layer.count);
+    row.append(swatch, label, count);
+    layers.append(row);
+  });
+  panel.replaceChildren(heading, layers);
+  panel.hidden = false;
 }
 
 async function toggleAladinFullscreen(): Promise<void> {
@@ -986,14 +1048,21 @@ function renderAladinStatus(status: AladinExplorerStatus): void {
   host.dataset.indexing = String(Boolean(status.indexing));
   host.dataset.objectComplete = String(status.complete ?? (status.phase === "ready" || status.phase === "empty" || status.phase === "error"));
   byId("render-status").textContent = "ALADIN LITE";
-  byId("object-status").textContent = status.phase === "loading"
-    ? `${formatInteger(status.returned)} / ${formatInteger(status.total)} DATA POINTS · LOADING`
-    : status.phase === "empty"
-      ? selectionEmpty ? "NO DATA POINT INDEX" : "NO DATA POINTS IN VIEW"
-      : `${formatInteger(status.returned)} / ${formatInteger(status.total)} DATA POINTS`;
+  const densityMode = status.displayMode === "density";
+  host.dataset.displayMode = densityMode ? "density" : "points";
+  byId("object-status").textContent = densityMode
+    ? status.phase === "loading" ? "DENSITY FIELD · LOADING"
+      : `${formatInteger(status.total)} DATA POINTS · ${formatInteger(status.densityCells ?? status.returned)} CELLS`
+    : status.phase === "loading"
+      ? `${formatInteger(status.returned)} / ${formatInteger(status.total)} DATA POINTS · LOADING`
+      : status.phase === "empty"
+        ? selectionEmpty ? "NO DATA POINT INDEX" : "NO DATA POINTS IN VIEW"
+        : `${formatInteger(status.returned)} / ${formatInteger(status.total)} DATA POINTS`;
   byId("layer-selection-count").textContent = `${formatInteger(status.returned)} DATA POINTS`;
   const loadedSummary = byId<HTMLOutputElement>("aladin-loaded-summary");
-  loadedSummary.textContent = `${formatInteger(status.returned)} / ${formatInteger(status.total)} DATA POINTS${status.indexing ? " · 索引生成中" : ""}`;
+  loadedSummary.textContent = densityMode
+    ? `${formatInteger(status.total)} DATA POINTS · ${formatInteger(status.densityCells ?? status.returned)} DENSITY CELLS${status.indexing ? " · 索引生成中" : ""}`
+    : `${formatInteger(status.returned)} / ${formatInteger(status.total)} DATA POINTS${status.indexing ? " · 索引生成中" : ""}`;
   byId("aladin-cache-state").textContent = status.indexing ? "自动更新中" : status.assets?.some((asset) => asset.cacheState === "cached") ? "CACHE RETAINED" : status.phase === "loading" ? "FETCHING NEW SKY" : "CACHE READY";
   if (aladinSnapshot) renderAladinAssetNavigation(aladinSnapshot.assetTargets, aladinExplorer?.getActiveAssetId() ?? null);
   syncAladinView();
@@ -1027,11 +1096,8 @@ async function enterAladinExplorer(menu: SkyRegionMenu): Promise<void> {
   ];
   if (generation !== aladinEntryGeneration || profileAbort.signal.aborted) return;
   notifyWorkspace("正在进入区域探索", `${candidates.length} 个继承图层`, { tone: "info" });
-  const fallbackCenter = aladinCenterForRegion(menu.nside, pixels);
-  const selectedRadius = sameSkyPixels(menu.nside, pixels, selectedLayerRegion)
-    ? selectedLayerRegion!.angularRadiusDeg
-    : 1.5;
-  const initialFovDeg = Math.max(4, Math.min(180, selectedRadius * 2.6));
+  const fallbackCenter = menu.center ?? aladinCenterForRegion(menu.nside, pixels);
+  const initialFovDeg = 0.5;
   const targets: AladinAssetTarget[] = candidates.map((entry) => {
     const layer = displayLayerFor({ assetId: entry.id, key: entry.id });
     return { assetId: entry.id, scopes: entry.scopes, coverageOnly: entry.scopes.length === 0,
@@ -1114,11 +1180,13 @@ async function enterAladinExplorer(menu: SkyRegionMenu): Promise<void> {
         byId("inspector-panel").classList.remove("aladin-object-selected", "mobile-open");
         delete byId("inspector-panel").dataset.objectId;
         inspectorRows("", []);
+        syncAladinFullscreenInspector();
       }
     },
     onStatus: renderAladinStatus,
     onAssetChange: (assetId) => renderAladinAssetNavigation(targets, assetId),
     onViewChange: () => syncAladinView(),
+    onDensityHover: renderAladinDensityHover,
   });
   renderAladinFullscreenState();
   syncAladinView();
@@ -1132,6 +1200,12 @@ async function enterAladinExplorer(menu: SkyRegionMenu): Promise<void> {
 async function leaveAladinExplorer(): Promise<void> {
   if (!aladinExplorer && !aladinSnapshot && !aladinEntryAbort) return;
   clearAladinPointInspection();
+  const inspector = byId("inspector-panel");
+  inspector.classList.remove("aladin-object-selected", "mobile-open");
+  delete inspector.dataset.objectId;
+  inspectorRows("", []);
+  renderAladinDensityHover(null);
+  syncAladinFullscreenInspector();
   cancelAladinEntry();
   const stage = byId("scene-stage");
   if (document.fullscreenElement === stage) await document.exitFullscreen().catch(() => undefined);
@@ -1225,6 +1299,17 @@ function setActiveButtons(selector: string, predicate: (button: HTMLButtonElemen
 }
 
 function renderLayerState(state: SurveyLayerState): void {
+  if (overlapModeActive && overlapSelectionKeyForState(state) !== overlapSelectionKey && !overlapSelectionRefreshQueued) {
+    cancelOverlapRequest();
+    clearOverlapOrderTimer();
+    overlapSelectionRefreshQueued = true;
+    queueMicrotask(() => {
+      overlapSelectionRefreshQueued = false;
+      if (overlapModeActive && layerViewer && overlapSelectionKeyForState(layerViewer.state) !== overlapSelectionKey) {
+        void enterSkyOverlapMode(null);
+      }
+    });
+  }
   canvas.dataset.cameraDistance = state.cameraDistance.toFixed(6);
   canvas.dataset.cameraPosition = state.cameraPosition.map((value) => value.toFixed(6)).join(",");
   canvas.dataset.outerRadius = state.outerRadius.toFixed(6);
@@ -1298,21 +1383,134 @@ function overlapInspector(
   const previousFocusId = document.activeElement instanceof HTMLElement
     ? document.activeElement.dataset.overlapComponentId
     : undefined;
+  const sliderFocused = document.activeElement === overlapGranularityElement?.querySelector("input");
   const previousScrollLeft = previousNavigator?.scrollLeft ?? 0;
-  inspectorRows(title, rows, actions);
+  const granularity = overlapModeActive ? overlapGranularityControl() : undefined;
+  inspectorRows(title, rows, actions, granularity);
   content.className = "inspector-content coverage-inspector-content";
   byId("inspector-kicker").textContent = "REGION SELECTION";
   const heading = content.querySelector("h2");
   if (!heading) return;
+  if (granularity && heading.nextElementSibling !== granularity) heading.after(granularity);
+  const header = granularity ?? heading;
   const navigator = overlapComponentNavigator(components, activeOverlapComponentId);
   if (navigator) {
-    heading.after(navigator);
+    header.after(navigator);
     navigator.after(coverageSourceGroups(sources, coverageSourceDisplay));
     navigator.scrollLeft = previousScrollLeft;
     if (previousFocusId) {
       navigator.querySelector<HTMLButtonElement>(`[data-overlap-component-id="${CSS.escape(previousFocusId)}"]`)?.focus({ preventScroll: true });
     }
-  } else heading.after(coverageSourceGroups(sources, coverageSourceDisplay));
+  } else header.after(coverageSourceGroups(sources, coverageSourceDisplay));
+  if (sliderFocused) overlapGranularityElement?.querySelector("input")?.focus({ preventScroll: true });
+}
+
+function overlapGranularityControl(): HTMLElement {
+  if (overlapGranularityElement) {
+    syncOverlapGranularityControl();
+    return overlapGranularityElement;
+  }
+  const control = document.createElement("div");
+  control.className = "overlap-granularity-control";
+  const label = document.createElement("label");
+  label.htmlFor = "overlap-healpix-order";
+  label.textContent = "重合层级";
+  const value = document.createElement("output");
+  value.className = "overlap-granularity-value";
+  value.setAttribute("for", "overlap-healpix-order");
+  const heading = document.createElement("div");
+  heading.className = "overlap-granularity-heading";
+  heading.append(label, value);
+  const slider = document.createElement("input");
+  slider.type = "range"; slider.id = "overlap-healpix-order"; slider.step = "1";
+  slider.setAttribute("aria-label", "重合区域 HEALPix 粒度");
+  slider.setAttribute("aria-describedby", "overlap-healpix-note overlap-healpix-status");
+  const limits = document.createElement("div");
+  limits.className = "overlap-granularity-limits";
+  limits.append(document.createElement("span"), document.createElement("span"));
+  const note = document.createElement("small");
+  note.id = "overlap-healpix-note"; note.className = "overlap-granularity-note";
+  const status = document.createElement("small");
+  status.id = "overlap-healpix-status"; status.className = "overlap-granularity-status";
+  status.setAttribute("role", "status"); status.setAttribute("aria-live", "polite");
+  slider.addEventListener("pointerdown", () => {
+    overlapOrderDragging = true;
+    pendingOverlapOrder = Number(slider.value);
+    cancelOverlapRequest();
+    clearOverlapOrderTimer();
+  });
+  slider.addEventListener("input", () => {
+    pendingOverlapOrder = Number(slider.value);
+    cancelOverlapRequest();
+    clearOverlapOrderTimer();
+    overlapOrderStatus = overlapResponse ? `正在调整层级；当前显示 O${overlapResponse.order}。` : "";
+    syncOverlapGranularityControl();
+    if (!overlapOrderDragging) overlapOrderTimer = setTimeout(commitOverlapOrder, 250);
+  });
+  window.addEventListener("pointerup", () => {
+    if (!overlapOrderDragging) return;
+    overlapOrderDragging = false;
+    commitOverlapOrder();
+  });
+  slider.addEventListener("pointercancel", () => {
+    overlapOrderDragging = false; pendingOverlapOrder = null;
+    clearOverlapOrderTimer();
+    overlapOrder = overlapResponse?.order ?? overlapOrder;
+    overlapOrderStatus = "";
+    syncOverlapGranularityControl();
+  });
+  control.append(heading, slider, limits, note, status);
+  overlapGranularityElement = control;
+  syncOverlapGranularityControl();
+  return control;
+}
+
+function syncOverlapGranularityControl(): void {
+  const control = overlapGranularityElement;
+  if (!control) return;
+  const slider = control.querySelector("input")!;
+  const minimum = overlapAvailableOrders[0] ?? 0, maximum = overlapAvailableOrders.at(-1) ?? 4;
+  const order = Math.max(minimum, Math.min(maximum, pendingOverlapOrder ?? overlapOrder ?? overlapResponse?.order ?? 4));
+  slider.min = String(minimum); slider.max = String(maximum); slider.value = String(order);
+  slider.disabled = !overlapAvailableOrders.length || minimum === maximum;
+  slider.setAttribute("aria-valuetext", `O${order} · NSIDE ${2 ** order}`);
+  control.querySelector("output")!.textContent = `O${order} · NSIDE ${2 ** order}`;
+  const limits = control.querySelectorAll(".overlap-granularity-limits span");
+  limits[0]!.textContent = `O${minimum} · 粗`;
+  limits[1]!.textContent = `O${maximum} · 细`;
+  const limited = overlapOrderSources.filter(source => commonOverlapOrders([source]).at(-1) === maximum);
+  const names = limited.map(source => source.label || coverageSourceCaption(source));
+  const note = control.querySelector<HTMLElement>(".overlap-granularity-note")!;
+  note.textContent = overlapAvailableOrders.length
+    ? `所选来源共同支持 O${minimum}–O${maximum}${names.length && maximum < 13 ? `，上限受 ${names.slice(0, 2).join("、")}${names.length > 2 ? ` 等 ${names.length} 个来源` : ""} 限制` : ""}。`
+    : overlapResponse ? "所选来源暂无共同支持的 HEALPix 层级。" : "正在读取所选来源支持的层级…";
+  note.title = names.join("\n");
+  const status = control.querySelector<HTMLElement>(".overlap-granularity-status")!;
+  status.textContent = overlapOrderStatus;
+  status.hidden = !overlapOrderStatus;
+}
+
+function clearOverlapOrderTimer(): void {
+  if (overlapOrderTimer !== null) clearTimeout(overlapOrderTimer);
+  overlapOrderTimer = null;
+}
+
+function cancelOverlapRequest(): void {
+  overlapController?.abort(); overlapController = null;
+  overlapRequestGeneration += 1;
+}
+
+function commitOverlapOrder(): void {
+  clearOverlapOrderTimer();
+  const order = pendingOverlapOrder;
+  pendingOverlapOrder = null;
+  if (order === null || !overlapModeActive) return;
+  if (order === overlapResponse?.order) {
+    overlapOrder = order; overlapOrderStatus = "";
+    syncOverlapGranularityControl();
+    return;
+  }
+  void enterSkyOverlapMode(order);
 }
 
 function overlapComponentNavigator(
@@ -1333,7 +1531,7 @@ function overlapComponentNavigator(
     button.setAttribute("aria-pressed", String(component.id === activeId));
     button.title = `${component.id} · ${formatInteger(component.cells.length)} 个 HEALPix 单元${component.areaDeg2 ? ` · ${component.areaDeg2.toFixed(2)} deg²` : ""}`;
     button.setAttribute("aria-label", `选择重合区域 ${component.id}，${formatInteger(component.cells.length)} 个 HEALPix 单元`);
-    button.addEventListener("click", () => renderOverlapComponent(component));
+    button.addEventListener("click", () => renderOverlapComponent(component, true));
     list.append(button);
   }
   return list;
@@ -1407,17 +1605,25 @@ function overlapSourceIdsForState(state: SurveyLayerState): string[] {
   return [...ids].sort();
 }
 
-function renderOverlapComponent(component: SurveyLayerOverlapComponent): void {
+function overlapSelectionKeyForState(state: SurveyLayerState): string {
+  return JSON.stringify([overlapSourceIdsForState(state), [...state.visibleSurveyIds].sort(), [...state.visibleAssetIds].sort(), [...state.visibleWorkspaceLayerKeys].sort()]);
+}
+
+function renderOverlapComponent(component: SurveyLayerOverlapComponent, focus = false): void {
   if (window.innerWidth <= 1040) byId("inspector-panel").classList.add("mobile-open");
   const selected = overlapResponse?.components.find((candidate) => candidate.id === component.id) ?? component;
   activeOverlapComponentId = selected.id;
   const generation = ++overlapInspectionGeneration;
-  const modeGeneration = overlapRequestGeneration;
+  const geometry = overlapResponse;
   layerViewer?.setActiveOverlapComponent(selected.id);
+  if (focus) layerViewer?.focusOverlapComponent(selected.id);
   const sourceIds = selected.sourceIds ?? overlapResponse?.sourceIds ?? [];
   const nside = overlapResponse?.nside ?? 16;
-  const current = () => overlapModeActive && generation === overlapInspectionGeneration && modeGeneration === overlapRequestGeneration;
+  const current = () => overlapModeActive && generation === overlapInspectionGeneration && geometry === overlapResponse;
   const baseRows: Array<[string, string]> = [["区块", selected.id], ["HEALPix", `O${Math.log2(nside)} · ${formatInteger(selected.cells.length)} cells`]];
+  if (overlapResponse?.coverageOrder !== undefined && overlapResponse.coverageOrder < Math.log2(nside)) {
+    baseRows.push(["覆盖边界", `O${overlapResponse.coverageOrder} · 当前为细分选择网格`]);
+  }
   let lookup: SkyReverseLookupResponse = { files: [], unavailable: [], warnings: [], sources: (overlapResponse?.sources ?? []).filter(source => sourceIds.includes(source.id)), workspaceDirectories: [] };
   const displaySources = () => overlapSourcesForInspector(sourceIds, [
     ...(overlapResponse?.sources ?? []), ...(lookup.sources ?? []),
@@ -1504,11 +1710,11 @@ function renderOverlapComponent(component: SurveyLayerOverlapComponent): void {
         if (!current()) return;
         render();
         const text = format === "json" ? JSON.stringify({ schemaVersion: 1, coordinateFrame: "ICRS", ordering: "NESTED",
-          componentId: selected.id, order: Math.log2(nside), cells: selected.cells, public: lookup.assetsResult,
+          componentId: selected.id, order: Math.log2(nside), coverageOrder: overlapResponse?.coverageOrder ?? Math.log2(nside), cells: selected.cells, public: lookup.assetsResult,
           workspaceDirectories: lookup.workspaceDirectories ?? [], directoriesTruncated: lookup.directoriesTruncated ?? false,
           unavailable: lookup.unavailable, warnings: lookup.warnings }, null, 2)
           : workspaceManifestCsv(lookup.assetsResult, lookup.workspaceDirectories ?? [], lookup.directoriesTruncated ?? false,
-            { componentId: selected.id, order: Math.log2(nside), cells: selected.cells, unavailable: lookup.unavailable, warnings: lookup.warnings });
+            { componentId: selected.id, order: Math.log2(nside), coverageOrder: overlapResponse?.coverageOrder ?? Math.log2(nside), cells: selected.cells, unavailable: lookup.unavailable, warnings: lookup.warnings });
         const url = URL.createObjectURL(new Blob([format === "csv" ? "\uFEFF" : "", text], { type: format === "json" ? "application/json" : "text/csv;charset=utf-8" }));
         const anchor = document.createElement("a"); anchor.href = url; anchor.download = `overlap-${selected.id}.${format}`; anchor.click(); URL.revokeObjectURL(url);
       } catch (error) { notifyWorkspace("清单导出失败", error instanceof Error ? error.message : String(error), { tone: "warning" }); }
@@ -1644,18 +1850,33 @@ function renderOverlapComponent(component: SurveyLayerOverlapComponent): void {
     .catch((error) => { if (current()) overlapInspector(`重合区块 ${selected.id}`, displaySources(), [...baseRows, ["反查失败", error instanceof Error ? error.message : String(error)]], [], overlapResponse?.components ?? []); });
 }
 
-async function enterSkyOverlapMode(): Promise<void> {
+async function enterSkyOverlapMode(order: number | null = overlapOrder): Promise<void> {
   if (!layerViewer || mode !== "layers") return;
-  const requestGeneration = ++overlapRequestGeneration;
+  clearOverlapOrderTimer();
+  pendingOverlapOrder = null;
+  overlapOrderDragging = false;
+  cancelOverlapRequest();
+  overlapOrder = order;
+  const requestGeneration = overlapRequestGeneration;
+  const controller = new AbortController();
+  overlapController = controller;
+  const retained = overlapResponse;
+  const state = layerViewer.state;
+  overlapSelectionKey = overlapSelectionKeyForState(state);
   overlapModeActive = true;
-  overlapResponse = null;
-  activeOverlapComponentId = null;
+  if (!retained) {
+    activeOverlapComponentId = null;
+    layerViewer.setOverlapCells(layerViewer.state.nside, []);
+    layerViewer.setOverlapComponents([]);
+  }
   layerViewer.setOverlapMode(true);
   canvas.dataset.overlapMode = "true";
   byId("scene-mode-value").textContent = "G · OVERLAP";
   byId("scene-badge").textContent = "天区重合";
-  overlapInspector("G · 天区重合", [], [["状态", "正在计算重合区域…"]]);
-  const progress = byId("inspector-content").querySelector("dd");
+  overlapOrderStatus = `正在计算${order === null ? "" : ` O${order}`}…${retained ? ` 当前显示 O${retained.order}。` : ""}`;
+  if (!retained) overlapInspector("G · 天区重合", [], [["状态", "正在计算重合区域…"]]);
+  syncOverlapGranularityControl();
+  const progress = !retained ? byId("inspector-content").querySelector("dd") : null;
   if (progress) {
     progress.className = "coverage-lookup-progress";
     progress.setAttribute("role", "status");
@@ -1667,33 +1888,41 @@ async function enterSkyOverlapMode(): Promise<void> {
     progress.prepend(spinner);
   }
   try {
-    const state = layerViewer.state;
     const sourceIds = overlapSourceIdsForState(state);
     const result = await workspaceApi.skyOverlap({
-      // The server chooses the highest common real coverage order, independently
-      // of the globe's lightweight overview NSIDE.
+      ...(order === null ? {} : { nside: 2 ** order }),
       ...(sourceIds.length
         ? { sourceIds }
         : {
             surveyIds: state.visibleSurveyIds.filter((surveyId) => surveyId !== "__unassigned__"),
             assetIds: state.visibleAssetIds,
           }),
-      includePublic: true,
-      includeWorkspace: true,
-    });
-    if (!overlapModeActive || requestGeneration !== overlapRequestGeneration) return;
+      includePublic: state.visibleSurveyIds.some(id => id !== "__unassigned__"),
+      includeWorkspace: Boolean(state.visibleAssetIds.length || state.visibleWorkspaceLayerKeys.length || state.visibleSurveyIds.includes("__unassigned__")),
+    }, controller.signal);
+    if (!overlapModeActive || controller.signal.aborted || requestGeneration !== overlapRequestGeneration) return;
+    overlapController = null;
     overlapResponse = result;
+    overlapOrder = result.order;
+    overlapOrderStatus = "";
+    overlapOrderSources = result.sources ?? [];
+    overlapAvailableOrders = result.availableOrders ?? commonOverlapOrders(overlapOrderSources);
+    if (!overlapAvailableOrders.length && !result.sources?.length) overlapAvailableOrders = [result.order];
     layerViewer.setOverlapCells(result.nside, result.pixels);
     layerViewer.setOverlapComponents(result.components);
-    const initialComponent = result.components.find(component => component.id === "C01") ?? result.components[0];
+    const initialComponent = result.components.find(component => component.id === activeOverlapComponentId)
+      ?? result.components.find(component => component.id === "C01") ?? result.components[0];
     if (initialComponent) renderOverlapComponent(initialComponent);
     else renderOverlapSummary(result);
     if (result.status === "empty") notifyWorkspace("当前可见来源没有共同覆盖", "请选择至少两个已建立覆盖的来源后重试。", { tone: "info" });
   } catch (error) {
-    if (requestGeneration !== overlapRequestGeneration) return;
-    overlapModeActive = false;
-    layerViewer.setOverlapMode(false);
-    canvas.dataset.overlapMode = "false";
+    if (controller.signal.aborted || requestGeneration !== overlapRequestGeneration) return;
+    overlapController = null;
+    overlapOrderStatus = `${error instanceof Error ? error.message : String(error)}${retained ? ` 当前保留 O${retained.order} 的结果。` : ""}`;
+    if (retained) {
+      syncOverlapGranularityControl();
+      return;
+    }
     const retry = document.createElement("button");
     retry.type = "button";
     retry.className = "command-button secondary";
@@ -1706,9 +1935,17 @@ async function enterSkyOverlapMode(): Promise<void> {
 
 function exitSkyOverlapMode(): void {
   if (!overlapModeActive) return;
-  overlapRequestGeneration += 1;
+  cancelOverlapRequest();
+  clearOverlapOrderTimer();
+  pendingOverlapOrder = null;
+  overlapOrderDragging = false;
+  overlapOrderStatus = "";
+  overlapSelectionKey = "";
   overlapModeActive = false;
   activeOverlapComponentId = null;
+  overlapOrder = null;
+  overlapAvailableOrders = [];
+  overlapOrderSources = [];
   overlapResponse = null;
   layerLayoutMode = "layers";
   layerViewer?.setOverlapMode(false);
@@ -2096,6 +2333,7 @@ function renderAladinPointInspector(point: SurveyObjectPoint): void {
   });
   content.replaceChildren(heading, selected, controls, status, results);
   queryAladinPoint(point, Number(input.value), status, results);
+  syncAladinFullscreenInspector();
 }
 
 function renderSurveyInspection(inspection: SurveyLayerInspection | null): void {
@@ -3188,7 +3426,7 @@ function renderAssetsReleaseDetail(
 
 function applyLayerPreferences(): void {
   applyLayerOrder();
-  layerViewer?.setLayoutMode(layerLayoutMode);
+  layerViewer?.setLayoutMode(overlapModeActive ? "overlap" : layerLayoutMode);
   layerViewer?.setVisibleSurveys(new Set([...visibleSurveyIds, ...(unassignedWorkspaceVisible ? ["__unassigned__"] : [])]));
   layerViewer?.setVisibleAssets(visibleAssetIds);
   layerViewer?.setVisibleWorkspaceLayerKeys(visibleWorkspaceLayerKeys);
@@ -3567,6 +3805,12 @@ function renderLayerAssetDetails(asset: DataAssetRecord): void {
   const operational = coverageStatusesByAsset.get(asset.id);
   const coverageState = operational?.coverage ?? (layer?.coverageStatus === "pending" || layer?.status === "pending" ? "pending" : layer?.coverageStatus === "ready" && layer.pixels.length ? "ready" : layer?.coverageStatus === "error" ? "failed" : layer?.coverageStatus === "unavailable" ? "unavailable" : "not_started");
   const actions: HTMLButtonElement[] = [];
+  if ((operational?.dataPointCount ?? 0) > 0 && layer?.pixels.length) {
+    actions.push(actionButton("查看数据点", () => {
+      void enterAladinExplorer({ clientX: 0, clientY: 0, nside: layer.nside ?? 16, pixels: [...layer.pixels],
+        surveyIds: [], assetIds: [asset.id], center: operational?.dataPointAnchor }).catch(showFatal);
+    }));
+  }
   const linkedConnectors = linkedWorkspaceConnectors(asset);
   const supportsWorkspaceScan = scan?.format === "csv" || scan?.format === "fits" || asset.kind === "image" || asset.kind === "cube";
   const workspaceScanAvailable = workspaceCapabilities?.localScan?.enabled !== false && workspaceCapabilities?.localScan?.configured !== false;
@@ -3624,13 +3868,13 @@ function renderLayerAssetDetails(asset: DataAssetRecord): void {
   const coverage = coverageState === "pending"
     ? "处理中"
     : coverageState === "ready"
-      ? layer?.pixels.length ? `${formatInteger(layer.pixels.length)} 个 HEALPix 单元 · ${formatInteger(layer.objectCount ?? 0)} 个对象` : "已建立，但覆盖为空"
+      ? layer?.pixels.length ? `${formatInteger(layer.pixels.length)} 个 HEALPix 单元 · ${formatInteger(operational?.dataPointCount ?? layer.objectCount ?? 0)} 个数据点` : "已建立，但覆盖为空"
       : coverageState === "empty" ? "已完成但为空"
         : coverageState === "failed" ? operational?.message ?? layer?.message ?? "扫描失败"
           : coverageState === "unavailable" ? operational?.message ?? "空间索引不可用"
             : "未开始";
   const nextAction = operational?.nextAction ? (NEXT_ACTION_LABELS[operational.nextAction] ?? operational.nextAction) : "--";
-  const statusLabels: Record<string, string> = { queued: "排队中", running: "扫描中", succeeded: "已生成", failed: "失败", partial: "部分完成", not_indexed: "尚未生成" };
+  const statusLabels: Record<string, string> = { queued: "排队中", running: "生成中", succeeded: "已生成", failed: operational?.dataPointCount ? "已有数据，扫描未完成" : "失败", partial: "部分完成", not_indexed: "尚未生成", error: "查询失败", unavailable: "索引不可用" };
   const phaseLabels: Record<string, string> = { staging: "准备文件", reading: "读取文件", coverage: "生成覆盖", indexing: "写入索引", complete: "完成" };
   const projectState = asset.projectState === "acquired"
     ? "已掌握（已登记访问权，不代表已有空间覆盖）"
@@ -3640,7 +3884,7 @@ function renderLayerAssetDetails(asset: DataAssetRecord): void {
     ["数据类型", asset.kind],
     ["使用阶段", projectState],
     ["覆盖状态", `${COVERAGE_STATE_LABELS[coverageState] ?? coverageState}${coverage && coverage !== COVERAGE_STATE_LABELS[coverageState] ? ` · ${coverage}` : ""}`],
-    ["数据点", `${formatInteger(operational?.dataPointCount ?? 0)} · ${statusLabels[operational?.dataPointStatus ?? "not_indexed"] ?? operational?.dataPointStatus ?? "尚未生成"}`],
+    ["数据点", `${operational?.dataPointCount === undefined ? "—" : formatInteger(operational.dataPointCount)} · ${statusLabels[operational?.dataPointStatus ?? "not_indexed"] ?? operational?.dataPointStatus ?? "尚未生成"}`],
     ...(operational?.scanProgress ? [["扫描进度", `${phaseLabels[operational.scanProgress.phase ?? ""] ?? "处理中"} · ${formatInteger(operational.scanProgress.processedFiles)} / ${formatInteger(operational.scanProgress.fileCount)} 文件 · ${operational.scanProgress.failedFiles} 项失败`] as [string, string]] : []),
     ...(operational?.dataPointProgress && !operational.scanProgress ? [["扫描进度", `${formatInteger(operational.dataPointProgress.processedFiles)} / ${formatInteger(operational.dataPointProgress.fileCount)} 文件 · ${operational.dataPointProgress.errors} 项问题`] as [string, string]] : []),
     ["目录对象查询", operational?.objects === "queryable" ? "可查询" : operational?.objects === "unavailable" ? "索引不可用" : "尚未建立对象索引"],
@@ -4215,8 +4459,15 @@ document.addEventListener("pointerdown", (event) => {
 });
 byId<HTMLButtonElement>("controls-toggle").addEventListener("click", () => controlsPanel.classList.toggle("mobile-open"));
 byId<HTMLButtonElement>("inspector-close").addEventListener("click", () => {
-  if (byId("inspector-panel").classList.contains("aladin-object-selected")) clearAladinPointInspection();
-  byId("inspector-panel").classList.remove("mobile-open");
+  const panel = byId("inspector-panel");
+  if (panel.classList.contains("aladin-object-selected")) {
+    clearAladinPointInspection();
+    panel.classList.remove("aladin-object-selected");
+    delete panel.dataset.objectId;
+    inspectorRows("", []);
+  }
+  panel.classList.remove("mobile-open");
+  syncAladinFullscreenInspector();
 });
 window.addEventListener("astro:navigate", (event) => {
   const detail = (event as CustomEvent<{ mode?: ViewMode; productionContext?: ProductionContext; productionPipeline?: string; showDownloadGuide?: boolean }>).detail;

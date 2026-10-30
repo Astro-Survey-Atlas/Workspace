@@ -8,6 +8,7 @@ import type { AstroObjectIndexService, AstroObjectRecord } from "./astro-object-
 import type { LocalConnectorRootsPolicy } from "./local-connector-roots.js";
 import type { CoverageDownloadFile, CoverageDownloadJob, CoverageDownloadService } from "./coverage-downloads.js";
 import type { RegionDownloadConfirmation } from "./region-download-plan.js";
+import { MAX_OVERLAP_ORDER } from "./healpix-ranges.js";
 import {
   resolveSourceInventory, computeInventoryDigest, validateRelativePath,
   type ResolveSourceInventoryOptions, type SourceFileInventory, type SourceInventoryFile, type SourceUnit, type SourceUnitResolution,
@@ -287,8 +288,8 @@ function finiteNumber(value: unknown, name: string, minimum: number, maximum: nu
 }
 
 function validNside(value: unknown): number {
-  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 1 || value > 256 || (value & (value - 1)) !== 0) {
-    throw new RangeError("region.nside must be a power of two between 1 and 256");
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 1 || value > 2 ** MAX_OVERLAP_ORDER || (value & (value - 1)) !== 0) {
+    throw new RangeError(`region.nside must be a power of two between 1 and ${2 ** MAX_OVERLAP_ORDER}`);
   }
   return value;
 }
@@ -629,6 +630,7 @@ export class ProductionService {
       // run and pause at a human approval gate before any transfer.
       if (!hasLegacyFiles && !confirmedInventory && !reuse) initialStatus = "resolving";
     } else {
+      if (region.nside > 256) throw new RangeError("对象交叉匹配目前支持至 O8，请选择较粗的天区。");
       if (!input.leftAssetId || !input.rightAssetId) throw new RangeError("object-crossmatch requires two assets");
       const leftAssetId = text(input.leftAssetId, "leftAssetId");
       const rightAssetId = text(input.rightAssetId, "rightAssetId");

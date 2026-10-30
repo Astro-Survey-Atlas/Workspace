@@ -1,5 +1,6 @@
 import type { PublicResourcePackage, ResourceCatalogStatus, ResourcePackageJob, ResourcePackageLoad } from "../../src/resource-packages";
 import { workspaceApi } from "./api";
+import { showContextMenu, type ContextMenuAction } from "./context-menu";
 import { notifyWorkspace } from "./notifications";
 
 function byId<T extends HTMLElement>(id: string): T {
@@ -76,6 +77,12 @@ export class ResourcePackagePanel {
     this.#onSelected = onSelected;
     this.#onError = onError;
     this.#onSyncRequested = onSyncRequested;
+    byId("inspector-content").addEventListener("contextmenu", (event) => {
+      if (!this.#active) return;
+      if ((event.target as HTMLElement).closest("input,textarea,select,[contenteditable='true']")) return;
+      const record = this.selectedRecord();
+      if (record) showContextMenu(event, this.#contextMenuActions(record));
+    });
     byId<HTMLInputElement>("resource-package-search").addEventListener("input", (event) => {
       this.#search = (event.currentTarget as HTMLInputElement).value.trim().toLocaleLowerCase();
       this.#render();
@@ -136,6 +143,30 @@ export class ResourcePackagePanel {
 
   selectedRecord(): PublicResourcePackage | undefined {
     return this.#records.find((record) => record.id === this.#selectedId);
+  }
+
+  async downloadPackage(packageId: string): Promise<void> {
+    const record = this.#records.find((candidate) => candidate.id === packageId);
+    if (!record) throw new Error(`Unknown resource package: ${packageId}`);
+    this.#selectedId = packageId;
+    if (!this.#draftReleases.get(packageId)?.size) this.setDraftReleases(packageId, this.#catalogReleaseIds(record));
+    await this.#downloadSelected([record]);
+  }
+
+  async applyPackage(packageId: string): Promise<void> {
+    const record = this.#records.find((candidate) => candidate.id === packageId);
+    if (!record) throw new Error(`Unknown resource package: ${packageId}`);
+    if (!record.installedVersion) throw new Error("请先下载该公开资源");
+    if (record.status === "update_available") throw new Error("请先下载该资源的更新版本");
+    const draft = this.#draftReleases.get(packageId);
+    const releaseIds = draft?.size ? [...draft]
+      : record.activeReleaseIds.length ? [...record.activeReleaseIds] : this.#catalogReleaseIds(record);
+    const loads: ResourcePackageLoad[] = [...this.#baselineReleases]
+      .filter(([id]) => id !== packageId)
+      .map(([id, ids]) => ({ packageId: id, releaseIds: [...ids] }));
+    if (releaseIds.length) loads.push({ packageId, releaseIds });
+    this.#selectedId = packageId;
+    await this.#apply(loads);
   }
 
   setDraftReleases(packageId: string, releaseIds: Iterable<string>): void {
@@ -303,6 +334,10 @@ export class ResourcePackagePanel {
         }
         this.#showSelected();
       };
+      row.addEventListener("contextmenu", (event) => {
+        selectRow();
+        showContextMenu(event, this.#contextMenuActions(record));
+      });
       row.addEventListener("click", (event) => {
         if ((event.target as HTMLElement).closest("input")) return;
         selectRow();
@@ -421,6 +456,23 @@ export class ResourcePackagePanel {
     });
   }
 
+  #contextMenuActions(record: PublicResourcePackage): ContextMenuAction[] {
+    const releaseIds = this.#catalogReleaseIds(record);
+    const job = this.#jobs.get(record.id);
+    const busy = this.#busy || job?.status === "queued" || job?.status === "running";
+    return [
+      { label: "下载资源", disabled: busy || !releaseIds.length || Boolean(record.installedVersion && record.status !== "update_available"),
+        title: !releaseIds.length ? "当前目录没有可下载版本" : record.installedVersion && record.status !== "update_available" ? "资源已下载" : "仅下载当前资源包，不应用到天球",
+        run: () => { void this.downloadPackage(record.id).catch(this.#onError); } },
+      { label: "应用到天球", disabled: busy || !record.installedVersion || record.status === "update_available" || !releaseIds.length,
+        title: record.status === "update_available" ? "请先下载更新版本" : !record.installedVersion ? "请先下载该资源" : !releaseIds.length ? "当前没有可应用版本" : "保留其他已应用资源，只应用当前资源包",
+        run: () => { void this.applyPackage(record.id).catch(this.#onError); } },
+      { label: "卸载资源", disabled: busy || !record.installedVersion,
+        title: record.installedVersion ? "移除天球覆盖并卸载服务器上的资源文件" : "资源尚未下载",
+        run: () => { void this.remove(record.id).catch(this.#onError); } },
+    ];
+  }
+
   #jobLabel(job: ResourcePackageJob): string {
     if (job.status === "failed") return "下载失败";
     if (job.phase === "queued") return "等待下载";
@@ -435,8 +487,9 @@ export class ResourcePackagePanel {
       || (this.#draftReleases.has(record.id) && !record.installedVersion));
   }
 
-  async #downloadSelected(): Promise<void> {
-    const queue = this.#downloadQueue();
+  async #downloadSelected(queueOverride?: PublicResourcePackage[]): Promise<void> {
+    const queue = queueOverride ?? this.#downloadQueue();
+    if (this.#busy) return;
     if (!queue.length) return;
     this.#busy = true;
     this.#render();
@@ -502,17 +555,16 @@ export class ResourcePackagePanel {
     }
   }
 
-  async #apply(): Promise<void> {
-    if (this.#downloadQueue().length) throw new Error("仍有公开覆盖资源尚未下载");
-    const loads: ResourcePackageLoad[] = [...this.#draftReleases].filter(([, releaseIds]) => releaseIds.size).map(([packageId, releaseIds]) => ({
-      packageId,
-      releaseIds: [...releaseIds],
+  async #apply(loads?: ResourcePackageLoad[]): Promise<void> {
+    if (!loads && this.#downloadQueue().length) throw new Error("仍有公开覆盖资源尚未下载");
+    const selectedLoads = loads ?? [...this.#draftReleases].filter(([, releaseIds]) => releaseIds.size).map(([packageId, releaseIds]) => ({
+      packageId, releaseIds: [...releaseIds],
     }));
     this.#busy = true;
     this.#render();
     const before = this.#records;
     try {
-      this.#records = await workspaceApi.setActiveResourcePackages(loads);
+      this.#records = await workspaceApi.setActiveResourcePackages(selectedLoads);
       this.#baselineReleases = this.#releaseMapFromRecords();
       this.#draftReleases = this.#cloneReleaseMap(this.#baselineReleases);
       await this.#onApplied(before, this.#records);

@@ -26,11 +26,16 @@ def image_position(record):
         return None
     if "TABLE" in str(header.get("XTENSION", "")).upper():
         return None
-    width, height = int(header.get("NAXIS1", 0)), int(header.get("NAXIS2", 0))
-    if int(header.get("NAXIS", 0)) < 2 or width <= 0 or height <= 0:
+    if int(header.get("NAXIS", 0)) < 2:
         return None
     wcs = WCS(header).celestial
     if not wcs.has_celestial:
+        return None
+    shape = wcs.pixel_shape
+    if shape is None or len(shape) != 2:
+        return None
+    width, height = int(shape[0]), int(shape[1])
+    if width <= 0 or height <= 0:
         return None
     center_pixel = ((width - 1) / 2, (height - 1) / 2)
     center = wcs.pixel_to_world(*center_pixel).icrs
@@ -38,7 +43,7 @@ def image_position(record):
     edge = [i / samples for i in range(samples + 1)]
     x = [t * (width - 1) for t in edge] + [width - 1] * samples + [(1 - t) * (width - 1) for t in edge] + [0] * samples
     y = [0] * (samples + 1) + [t * (height - 1) for t in edge[1:]] + [height - 1] * (samples + 1) + [(1 - t) * (height - 1) for t in edge[1:]]
-    boundary = SkyCoord(*wcs.pixel_to_world_values(x, y), unit="deg", frame="icrs")
+    boundary = wcs.pixel_to_world(x, y).icrs
     ras = boundary.ra.deg
     decs = boundary.dec.deg
     angular_steps = boundary[:-1].separation(boundary[1:]).deg
@@ -118,8 +123,13 @@ if len(sys.argv) > 1 and sys.argv[1] == "--contains":
         record = json.loads(line)
         try:
             header, _ = header_for(record)
-            pixel = WCS(header).celestial.world_to_pixel(SkyCoord(record["query_ra"] * u.deg, record["query_dec"] * u.deg, frame="icrs"))
-            emit({"id": record["id"], "contains": bool(-0.5 <= pixel[0] <= int(header["NAXIS1"]) - 0.5 and -0.5 <= pixel[1] <= int(header["NAXIS2"]) - 0.5)})
+            wcs = WCS(header).celestial
+            shape = wcs.pixel_shape
+            if shape is None or len(shape) != 2:
+                emit({"id": record["id"], "contains": False})
+                continue
+            pixel = wcs.world_to_pixel(SkyCoord(record["query_ra"] * u.deg, record["query_dec"] * u.deg, frame="icrs"))
+            emit({"id": record["id"], "contains": bool(-0.5 <= pixel[0] <= int(shape[0]) - 0.5 and -0.5 <= pixel[1] <= int(shape[1]) - 0.5)})
         except Exception:
             emit({"id": record["id"], "contains": False})
 else:

@@ -193,11 +193,11 @@ spec:
                   endpoint.pathname = `${endpoint.pathname.replace(/\/+$/, "")}/_cluster/health`;
                   endpoint.search = "wait_for_status=yellow&timeout=1s";
                   Promise.all([
-                    fetch("http://127.0.0.1:3000/healthz", { headers: { Host: process.env.ASTRO_PROBE_HOST ?? "127.0.0.1" }, signal: AbortSignal.timeout(1500) }),
-                    fetch(endpoint, { headers, signal: AbortSignal.timeout(1500) }),
+                    fetch("http://127.0.0.1:3000/healthz", { headers: { Host: process.env.ASTRO_PROBE_HOST ?? "127.0.0.1" }, signal: AbortSignal.timeout(5000) }),
+                    fetch(endpoint, { headers, signal: AbortSignal.timeout(5000) }),
                   ]).then(([app, search]) => process.exit(app.ok && search.ok ? 0 : 1)).catch(() => process.exit(1));
             periodSeconds: 5
-            timeoutSeconds: 5
+            timeoutSeconds: 10
             failureThreshold: 6
           livenessProbe:
             httpGet:
@@ -208,7 +208,7 @@ spec:
                   value: {{ include "asa-workspace.fullname" . | quote }}
             initialDelaySeconds: 10
             periodSeconds: 10
-            timeoutSeconds: 5
+            timeoutSeconds: 10
             failureThreshold: 6
           resources: {{ toYaml .Values.resources | nindent 12 }}
           securityContext: {{ toYaml .Values.containerSecurityContext | nindent 12 }}

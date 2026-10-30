@@ -148,8 +148,8 @@ function normalizeSelection(value: RegionDownloadSelection): RegionDownloadSelec
     return layerId.trim();
   });
   if (new Set(layerIds).size !== layerIds.length) throw new RegionDownloadPlanError("Layer ids must be unique", 400);
-  if (!Number.isInteger(value.order) || value.order < 0 || value.order > 8) {
-    throw new RegionDownloadPlanError("HEALPix order must be between 0 and 8", 400);
+  if (!Number.isInteger(value.order) || value.order < 0 || value.order > 13) {
+    throw new RegionDownloadPlanError("HEALPix order must be between 0 and 13", 400);
   }
   if (!Array.isArray(value.cells) || value.cells.length === 0 || value.cells.length > MAX_REGION_CELLS) {
     throw new RegionDownloadPlanError(`Select between 1 and ${MAX_REGION_CELLS} HEALPix cells`, 400);

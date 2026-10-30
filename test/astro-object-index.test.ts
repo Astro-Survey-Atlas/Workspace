@@ -16,6 +16,7 @@ import {
   nestedDescendantRange,
   nestedDescendantRanges,
   normalizeNestedRanges,
+  type AstroPointDensityQueryInput,
   type ObjectRegionQueryInput,
 } from "../src/astro-object-index.js";
 import type { LocalScanDocument } from "../src/local-scan.js";
@@ -40,6 +41,26 @@ async function withServer(
     await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
   }
 }
+
+test("point preview aggregates real indexed positions even when coverage facts have not been published", async () => {
+  await withServer(async (request, response) => {
+    assert.equal(decodeURIComponent(request.url!), "/astro_object_index_v1,astro_data_point_index_v1/_search?ignore_unavailable=true");
+    const body = JSON.parse(await requestBody(request));
+    assert.deepEqual(body.query.bool.filter, [{ term: { asset_id: "cosmos" } }, { term: { healpix_order: 8 } }]);
+    assert.equal(body.size, 0, "coverage must aggregate, never download the full catalog");
+    assert.equal(body.aggs.point_cells.terms.script.params.factor, 256);
+    response.setHeader("Content-Type", "application/json");
+    response.end(JSON.stringify({ hits: { total: { value: 1720500, relation: "eq" } },
+      aggregations: { point_cells: { sum_other_doc_count: 0, buckets: [{ key: 1640, doc_count: 1720500 }] } } }));
+  }, async baseUrl => {
+    const index = new AstroObjectIndexService({ baseUrl });
+    const result = await index.queryPointCoverage({ assetId: "cosmos", nside: 16 }, [ASTRO_OBJECT_INDEX, "astro_data_point_index_v1"]);
+    assert.equal(result.status, "ready");
+    assert.equal(result.total, 1720500);
+    assert.deepEqual(result.pixels, [1640]);
+    assert.equal(result.truncated, false);
+  });
+});
 
 function objectDocument(id: string, survey = "survey-a"): LocalScanDocument {
   return {
@@ -552,6 +573,21 @@ test("bulk rejects Elasticsearch item errors", async () => {
   });
 });
 
+test("a transient index write retries the same stable IDs before advancing scan progress", async () => {
+  const bodies: string[] = [];
+  await withServer(async (request, response) => {
+    bodies.push(await requestBody(request));
+    response.setHeader("Content-Type", "application/json");
+    if (bodies.length === 1) { response.statusCode = 503; response.end(JSON.stringify({ error: "temporarily overloaded" })); return; }
+    response.end(JSON.stringify({ errors: false, items: [{ index: { status: 200 } }] }));
+  }, async baseUrl => {
+    const service = new AstroObjectIndexService({ baseUrl });
+    assert.deepEqual(await service.bulk([objectDocument("retry")]), { objectCount: 1, coverageCount: 0 });
+    assert.equal(bodies.length, 2);
+    assert.equal(bodies[0], bodies[1], "ambiguous writes are idempotent, including their provenance");
+  });
+});
+
 test("unconfigured service reports query unavailable and bulk configuration error", async () => {
   const service = new AstroObjectIndexService({ baseUrl: "" });
   const result = await service.queryObjects(validQuery());
@@ -597,4 +633,59 @@ test("data point scopes use asset AND concrete source, while empty selection sta
     assert.match(JSON.stringify(bodies[0]), /attributes.source_id/); assert.match(JSON.stringify(bodies[0]), /healpix_pixel/);
     assert.match(JSON.stringify(bodies[1]), /match_none/); assert.match(JSON.stringify(bodies[1]), /ra_deg/);
   });
+});
+
+test("point density lowers its target NSIDE and retries when aggregation buckets are truncated", async () => {
+  const bodies: Record<string, unknown>[] = [];
+  await withServer(async (request, response) => {
+    const body = JSON.parse(await requestBody(request)) as Record<string, unknown>;
+    bodies.push(body);
+    response.setHeader("Content-Type", "application/json");
+    const incomplete = bodies.length === 1;
+    response.end(JSON.stringify({
+      hits: { total: { value: 7, relation: "eq" } },
+      aggregations: {
+        by_cell: { sum_other_doc_count: incomplete ? 1 : 0, buckets: incomplete ? [] : [{ key: 0, doc_count: 7 }] },
+        by_layer: { buckets: {
+          catalog: { by_cell: { sum_other_doc_count: 0, buckets: [{ key: 0, doc_count: 7 }] } },
+        } },
+      },
+    }));
+  }, async (baseUrl) => {
+    const result = await new AstroObjectIndexService({ baseUrl }).queryPointDensity({
+      region: { nside: 16, pixels: [1], coordinateFrame: "ICRS", ordering: "NESTED" },
+      boxes: [{ raMin: 10, raMax: 20, decMin: -5, decMax: 5 }],
+      layers: [{ id: "catalog", scopes: [{ assetId: "asset-a" }] }],
+      targetNside: 16,
+    }, [ASTRO_OBJECT_INDEX, "astro_data_point_index_v1"]);
+
+    assert.equal(result.status, "ready");
+    assert.equal(result.nside, 8);
+    assert.equal(result.total, 7);
+    assert.deepEqual(result.cells, [{ pixel: 0, count: 7, layers: [{ id: "catalog", count: 7 }] }]);
+    assert.deepEqual(result.layers, [{ id: "catalog", count: 7 }]);
+  });
+
+  assert.equal(bodies.length, 2);
+  const firstAggs = bodies[0]!.aggs as Record<string, Record<string, unknown>>;
+  const secondAggs = bodies[1]!.aggs as Record<string, Record<string, unknown>>;
+  assert.equal((((firstAggs.by_cell!.terms as Record<string, unknown>).script as Record<string, unknown>).params as Record<string, unknown>).childCount, 256);
+  assert.equal((((secondAggs.by_cell!.terms as Record<string, unknown>).script as Record<string, unknown>).params as Record<string, unknown>).childCount, 1_024);
+  assert.equal(bodies[0]!.size, 0);
+});
+
+test("point density reports unavailable without Elasticsearch and validates explicit layers", async () => {
+  const input: AstroPointDensityQueryInput = {
+    region: { nside: 16, pixels: [1], coordinateFrame: "ICRS", ordering: "NESTED" },
+    boxes: [{ raMin: 10, raMax: 20, decMin: -5, decMax: 5 }],
+    layers: [{ id: "catalog", scopes: [{ assetId: "asset-a" }] }],
+    targetNside: 16,
+  };
+  const unavailable = await new AstroObjectIndexService({ baseUrl: "" }).queryPointDensity(input);
+  assert.equal(unavailable.status, "unavailable");
+  assert.deepEqual(unavailable.cells, []);
+  await assert.rejects(() => new AstroObjectIndexService({ baseUrl: "http://127.0.0.1:1" }).queryPointDensity({
+    ...input,
+    layers: [{ id: "", scopes: [] }],
+  }), /unique non-empty id/);
 });

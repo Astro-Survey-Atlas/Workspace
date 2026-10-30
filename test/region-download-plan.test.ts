@@ -264,6 +264,24 @@ test("a region-only preview returns explicit first-page identities and warns whe
   assert.ok(preview.notes.some((note) => /More native units/.test(note)));
 });
 
+test("high-order overlap selections keep their real order and cells in download previews", async () => {
+  const selection = { ...baseSelection, order: 13, cells: [700_000_001] };
+  const requests: AssetsRegionLookupRequest[] = [];
+  const service = new RegionDownloadPlanService({
+    client: client(async request => {
+      requests.push(request);
+      return response(request, [unit({ order: 13, nside: 8192, matchingCells: selection.cells, accessUris: [{ uri: "https://example.test/high.fits" }] })]);
+    }),
+    sourceResolveOptions: { fetchImpl: sourceMetadataFetch() },
+  });
+  const preview = await service.preview(selection);
+  assert.equal(preview.selection.order, 13);
+  assert.deepEqual(preview.selection.cells, selection.cells);
+  assert.equal(requests[0]!.order, 13);
+  assert.deepEqual(requests[0]!.cells, selection.cells);
+  await assert.rejects(() => service.preview({ ...selection, order: 14 }), /between 0 and 13/);
+});
+
 test("confirm accepts the explicit selection returned by a truncated region-only preview", async () => {
   const candidate = unit({ accessUris: [{ uri: "https://example.test/first-page.fits" }] });
   const service = new RegionDownloadPlanService({

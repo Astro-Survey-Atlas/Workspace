@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { deriveDataAssetOperationalStatus, type DataAssetStatusInput } from "../src/data-asset-status.js";
+import { deriveDataAssetOperationalStatus, latestAssetScan, type DataAssetStatusInput } from "../src/data-asset-status.js";
 
 const baseAsset = {
   id: "asset-cosmos",
@@ -20,6 +20,15 @@ function status(overrides: Partial<DataAssetStatusInput> = {}) {
     ...overrides,
   });
 }
+
+test("a newer successful partition cannot hide its failed logical batch", () => {
+  const parent = { id: "parent", assetId: baseAsset.id, status: "failed", createdAt: "2026-10-28", updatedAt: "2026-10-28" };
+  const child = { id: "child", assetId: baseAsset.id, parentRunId: parent.id, status: "succeeded", createdAt: "2026-10-29", updatedAt: "2026-10-29" };
+  assert.equal(latestAssetScan([child, parent], baseAsset.id), parent);
+  const replacement = { ...parent, id: "replacement", createdAt: "2026-10-30", updatedAt: "2026-10-30" };
+  assert.equal(latestAssetScan([{ ...parent, updatedAt: "2026-10-31" }, replacement, child], baseAsset.id), replacement,
+    "updating historical metadata must not make an old scan the latest logical scan");
+});
 
 test("an ACTIVE Warehouse layer stays usable when its derived MOC import failed", () => {
   const result = status({ coverage: { status: "ready", activeCoverage: true, pixels: [123], latestMocStatus: "failed", objectStatus: "ready", objectCount: 0 }, latestRun: { status: "succeeded", taskKind: "user_coverage" } });

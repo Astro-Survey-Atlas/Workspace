@@ -5065,6 +5065,15 @@ html[data-theme="light"] .scene-tool:disabled kbd { border-color: var(--border);
 .overlap-component-button:hover,
 .overlap-component-button:focus-visible { border-color: var(--asa-indigo); color: var(--text-strong); background: var(--row-hover); outline: none; }
 .overlap-component-button[aria-pressed="true"] { border-color: var(--asa-indigo); color: var(--on-accent); background: var(--asa-indigo); }
+.overlap-granularity-control { display: grid; gap: 6px; min-width: 0; margin: 10px 0; padding: 10px; border: 1px solid var(--border); border-radius: 4px; background: var(--row); }
+.overlap-granularity-heading { display: flex; align-items: center; justify-content: space-between; gap: 10px; color: var(--text-soft); font-size: 11px; }
+.overlap-granularity-value { color: var(--text-strong); font: 11px var(--font-mono); white-space: nowrap; }
+.overlap-granularity-control input[type="range"] { display: block; width: 100%; min-width: 0; height: 24px; margin: 0; accent-color: var(--asa-indigo); cursor: pointer; }
+.overlap-granularity-control input:focus-visible { outline: 2px solid var(--asa-indigo); outline-offset: 2px; border-radius: 2px; }
+.overlap-granularity-control input:disabled { cursor: default; opacity: 0.5; }
+.overlap-granularity-limits { display: flex; justify-content: space-between; color: var(--muted); font: 10px var(--font-mono); }
+.overlap-granularity-note { color: var(--muted); font-size: 10px; line-height: 1.5; overflow-wrap: anywhere; }
+.overlap-granularity-status { color: var(--text-soft); font-size: 10px; line-height: 1.5; overflow-wrap: anywhere; }
 
 @media (max-width: 1040px) {
   .catalog-inspector-content {
@@ -7333,6 +7342,7 @@ html[data-theme="light"] .coverage-context-menu {
 .aladin-deck .aladin-drawer-tab {
   position: absolute;
   top: 46px;
+  left: auto;
   right: -24px;
   display: grid;
   width: 24px;
@@ -8153,3 +8163,135 @@ html[data-theme] .production-dag-node[data-status="idle"] small {
 .download-file-progress > small { color: var(--muted); overflow-wrap: anywhere; font-size: 10px; }
 .download-file-progress > progress { width: 100%; height: 5px; accent-color: var(--asa-indigo); }
 .download-file-progress > .download-transfer-error { color: var(--amber); }
+
+.workspace-context-menu {
+  position: fixed;
+  z-index: 1300;
+  display: grid;
+  width: max-content;
+  min-width: 190px;
+  max-width: calc(100vw - 16px);
+  padding: 4px;
+  border: 1px solid var(--border-strong);
+  border-radius: 4px;
+  background: var(--surface-raised);
+  box-shadow: 0 10px 28px var(--shadow);
+}
+.workspace-context-menu button {
+  min-height: 34px;
+  padding: 7px 10px;
+  border: 0;
+  border-radius: 2px;
+  color: var(--text-soft);
+  background: transparent;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.workspace-context-menu button:hover:not(:disabled),
+.workspace-context-menu button:focus-visible { color: var(--text-strong); background: var(--surface-inset); outline: none; }
+.workspace-context-menu button:disabled { color: var(--muted); cursor: not-allowed; }
+
+.aladin-density-hover {
+  position: absolute;
+  z-index: 8;
+  right: 12px;
+  bottom: 40px;
+  display: grid;
+  gap: 7px;
+  width: min(278px, calc(100% - 24px));
+  max-height: min(36vh, 300px);
+  overflow: auto;
+  padding: 9px 10px;
+  border: 1px solid var(--border-strong);
+  border-radius: 3px;
+  color: var(--text);
+  background: var(--surface-raised);
+  box-shadow: 0 10px 26px var(--shadow);
+  pointer-events: none;
+}
+.aladin-density-hover[hidden] { display: none; }
+.aladin-density-hover > header {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+}
+.aladin-density-hover > header strong {
+  min-width: 0;
+  color: var(--text-strong);
+  font: 10px var(--font-mono);
+  overflow-wrap: anywhere;
+}
+.aladin-density-hover > header output {
+  color: var(--asa-magenta-strong);
+  font-size: 11px;
+  font-weight: 650;
+  text-align: right;
+}
+.aladin-density-hover ul {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+  max-height: 160px;
+  overflow: auto;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.aladin-density-hover li {
+  display: grid;
+  grid-template-columns: 8px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  color: var(--text-soft);
+  font-size: 10px;
+}
+.aladin-density-hover li i {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--density-layer-color, var(--asa-indigo));
+}
+.aladin-density-hover li span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.aladin-density-hover li output {
+  color: var(--text-strong);
+  font: 10px var(--font-mono);
+}
+
+.scene-stage:fullscreen .inspector-panel.aladin-fullscreen-drawer {
+  position: absolute;
+  z-index: 20;
+  top: 54px;
+  right: 0;
+  bottom: 0;
+  display: block;
+  width: min(360px, calc(100vw - 16px));
+  max-width: none;
+  max-height: calc(100% - 54px);
+  min-height: 0;
+  overflow: auto;
+  padding: 14px;
+  border-left: 1px solid var(--border-strong);
+  background: var(--surface);
+  box-shadow: -12px 0 32px var(--shadow);
+  pointer-events: auto;
+}
+.scene-stage:fullscreen .inspector-panel.aladin-fullscreen-drawer .inspector-close {
+  display: grid;
+}
+.scene-stage:fullscreen .inspector-panel.aladin-fullscreen-drawer .inspector-heading {
+  position: sticky;
+  z-index: 1;
+  top: 0;
+  margin: 0 -14px 10px;
+  padding: 14px;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface);
+}
+.aladin-controls .aladin-deck .aladin-drawer-tab { left: auto; }

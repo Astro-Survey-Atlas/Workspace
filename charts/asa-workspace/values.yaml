@@ -145,7 +145,7 @@ dataWarehouse:
       - ReadWriteMany
     size: 5Gi
     mountPath: /var/lib/atlas-evidence
-  scannerImage: astro-atlas-scanner:0.2.0
+  scannerImage: astro-atlas-scanner:0.2.0-20261029-fits-wcs-r2
 
 env: []
 resources:
@@ -154,7 +154,7 @@ resources:
     memory: 128Mi
   limits:
     cpu: "1"
-    memory: 1Gi
+    memory: 2Gi
 
 postgresql:
   enabled: false

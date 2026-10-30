@@ -162,6 +162,21 @@ test("persists a validated FITS MOC and serves its fixed-order projections", asy
   }
 });
 
+test("native overlap projections retain O10 gaps hidden by the O8 query sidecar", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "astro-user-moc-high-overlap-"));
+  try {
+    const store = new UserMocArtifactStore({ root });
+    const moc = mocWithRows([4n * 4n ** 10n + 300n, 4n * 4n ** 10n + 302n]);
+    const artifact = await store.persist({ layerId: "high", maxOrder: 10, queryOrder: 8, previewOrder: 4,
+      queryPixels: [18], previewPixels: [0], artifacts: { moc } }, context({ layerId: "high", availableOrders: [10] }));
+    assert.deepEqual(await store.projectionRanges(artifact.layerId, artifact.scanRunId, 10), [{ start: 300, end: 301 }, { start: 302, end: 303 }]);
+    assert.deepEqual(await store.projectionRanges(artifact.layerId, artifact.scanRunId, 11), []);
+    const file = await store.filePath(artifact.layerId, artifact.scanRunId, "moc.fits");
+    await writeFile(file.filePath, Buffer.alloc(moc.length));
+    await assert.rejects(() => store.projectionRanges(artifact.layerId, artifact.scanRunId, 10), /integrity check failed/);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
 test("does not mark an artifact ready when MOC Core emits invalid FITS", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "astro-user-mocs-invalid-"));
   try {

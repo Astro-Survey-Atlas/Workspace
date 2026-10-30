@@ -71,7 +71,7 @@ test("bounded S3 queue freezes pages, resumes after restart, and retries only fa
   };
   const options = { root: path.join(root, "batches"), enabled: true, warehouse, connectors, credentials, runs, roots,
     artifacts: { importEvidence: async () => { merges++; return { id: "moc-batch", status: "ready", availableOrders: [8], precision: "estimated" } as UserMocArtifact; } },
-    onCompleted: async (_asset: string, runId: string) => { positions.push(runId); } };
+    onCompleted: async (_asset: string, runId: string) => { if (!positions.includes(runId)) positions.push(runId); } };
   let queue = new WarehouseScanQueue(options);
   t.after(async () => { queue.stop(); await new Promise<void>(resolve => server.close(() => resolve())); await store.close(); await rm(root, { recursive: true, force: true }); });
   const parent = await queue.submit(connector.id, {}, "one-logical-batch");
@@ -82,9 +82,16 @@ test("bounded S3 queue freezes pages, resumes after restart, and retries only fa
   assert.deepEqual(state.shards.map((shard: { fileCount: number }) => shard.fileCount), [2000, 2000, 1]);
   await runs.update(submitted[0]!.id, { status: "succeeded" }); await runs.update(submitted[1]!.id, { status: "failed", error: "source unavailable" });
   await queue.tick(); assert.equal(submitted.length, 3);
+  assert.deepEqual(positions, [submitted[0]!.id], "successful shard positions must be available before the whole batch finishes");
   await runs.update(submitted[2]!.id, { status: "succeeded" }); await queue.tick();
   assert.equal((await parentRun()).status, "failed");
-  queue.stop(); queue = new WarehouseScanQueue(options); await queue.initialize();
+  queue.stop();
+  const failedStatePath = path.join(options.root, parent.id, "batch.json");
+  const failedState = JSON.parse(await readFile(failedStatePath, "utf8"));
+  failedState.shards[0].positionsSubmitted = false;
+  await writeFile(failedStatePath, JSON.stringify(failedState));
+  queue = new WarehouseScanQueue(options); await queue.initialize();
+  await waitUntil(async () => JSON.parse(await readFile(failedStatePath, "utf8")).shards[0].positionsSubmitted);
   await waitUntil(async () => (await parentRun()).status === "failed");
   await queue.retry(parent.id);
   await waitUntil(async () => submitted.length === 4);
@@ -106,8 +113,27 @@ test("bounded S3 queue freezes pages, resumes after restart, and retries only fa
   await waitUntil(async () => submitted.length === 6);
   assert.notEqual(rescan.warehouseLayerId, firstLayer, "an independent run must not mutate an immutable Warehouse scope");
   assert.deepEqual(currentWarehouseLayerIds(asset.id, await runs.list()), [firstLayer], "keep the previous complete layer during replacement");
+  // Historical versions made a transient parent metadata error terminal.
+  // Restart must adopt its frozen selection without replacing successful work.
+  queue.stop();
+  await runs.update(rescan.id, { status: "failed", error: "database is locked" });
+  const rescanStatePath = path.join(options.root, rescan.id, "batch.json");
+  const rescanState = JSON.parse(await readFile(rescanStatePath, "utf8"));
+  rescanState.phase = "failed";
+  await writeFile(rescanStatePath, JSON.stringify(rescanState));
+  queue = new WarehouseScanQueue(options); await queue.initialize();
+  await waitUntil(async () => (await runs.list()).find(run => run.id === rescan.id)!.status === "running");
+  assert.equal(submitted.length, 6, "metadata recovery adopts existing Scanner Jobs");
   await runs.update(submitted[4]!.id, { status: "succeeded" });
   await runs.update(submitted[5]!.id, { status: "succeeded" });
+  const update = runs.update.bind(runs);
+  let locked = true;
+  runs.update = async (id, changes) => {
+    if (id === rescan.id && locked) { locked = false; throw Object.assign(new Error("database is locked"), { code: "SQLITE_BUSY" }); }
+    return update(id, changes);
+  };
+  await queue.tick();
+  assert.notEqual((await runs.list()).find(run => run.id === rescan.id)!.status, "failed", "temporary metadata contention must not terminate the batch");
   await queue.tick();
   await waitUntil(async () => submitted.length === 7);
   assert.deepEqual(currentWarehouseLayerIds(asset.id, await runs.list()), [firstLayer], "a successful child cannot publish a partial batch");

@@ -26,7 +26,7 @@ function mocHeader(cards: Buffer[]): Buffer {
   return Buffer.concat([bytes, Buffer.alloc(Math.ceil(bytes.length / FITS_BLOCK_BYTES) * FITS_BLOCK_BYTES - bytes.length, 32)]);
 }
 
-function testMocFits(): Buffer {
+function testMocFits(order = 8, pixel = 256): Buffer {
   const primary = mocHeader([mocCard("SIMPLE", "T"), mocCard("BITPIX", 8), mocCard("NAXIS", 0), mocCard("EXTEND", "T")]);
   const extension = mocHeader([
     mocCard("XTENSION", "BINTABLE"), mocCard("BITPIX", 8), mocCard("NAXIS", 2), mocCard("NAXIS1", 8), mocCard("NAXIS2", 1),
@@ -34,7 +34,7 @@ function testMocFits(): Buffer {
     mocCard("ORDERING", "NUNIQ"), mocCard("COORDSYS", "C"), mocCard("MOCVERS", "2.0"), mocCard("MOCDIM", "SPACE"), mocCard("THEAP", 0),
   ]);
   const rows = Buffer.alloc(8);
-  rows.writeBigInt64BE(4n * (4n ** 8n) + 256n, 0);
+  rows.writeBigInt64BE(4n * (4n ** BigInt(order)) + BigInt(pixel), 0);
   return Buffer.concat([primary, extension, rows, Buffer.alloc(FITS_BLOCK_BYTES - rows.length)]);
 }
 
@@ -119,6 +119,8 @@ test("HTTP local CSV scan writes object and coverage documents and serves a mult
   const documents: StoredDocument[] = [];
   const searchBodies: Record<string, unknown>[] = [];
   const coverageSearchBodies: Record<string, unknown>[] = [];
+  const pointSearchBodies: Record<string, unknown>[] = [];
+  const pointDensitySearchBodies: Record<string, unknown>[] = [];
   let apiProcess: ChildProcess | undefined;
   let apiLogs = "";
   let warehouseRequestCount = 0;
@@ -156,8 +158,16 @@ test("HTTP local CSV scan writes object and coverage documents and serves a mult
     precision: "exact",
     coverageRole: "object_presence",
   });
+  const coarseArtifact = await seededArtifactStore.persist({
+    layerId: "workspace-http-coarse-moc", maxOrder: 4, queryOrder: 8, previewOrder: 4,
+    queryPixels: [], previewPixels: [1], artifacts: { moc: testMocFits(4, 1) },
+  }, { layerId: "workspace-http-coarse-moc", scanRunId: "coarse-run-001", availableOrders: [4], maxOrder: 4, precision: "estimated" });
+  const highArtifacts = await Promise.all([4096, 4096].map((pixel, index) => seededArtifactStore.persist({
+    layerId: `workspace-http-high-moc-${index}`, maxOrder: 10, queryOrder: 8, previewOrder: 4,
+    queryPixels: [256], previewPixels: [1], artifacts: { moc: testMocFits(10, pixel) },
+  }, { layerId: `workspace-http-high-moc-${index}`, scanRunId: "high-run-001", availableOrders: [10], maxOrder: 10, precision: "exact" })));
   const esServer = createServer(async (request, response) => {
-    const pathname = request.url ?? "";
+    const pathname = new URL(request.url ?? "/", "http://localhost").pathname;
     const body = await bodyText(request);
     response.setHeader("Content-Type", "application/json");
     if (ownEsUnavailable && request.method === "POST" && pathname.endsWith("/_search")) {
@@ -183,15 +193,19 @@ test("HTTP local CSV scan writes object and coverage documents and serves a mult
       response.end(JSON.stringify({ errors: false, items }));
       return;
     }
-    if (request.method === "POST" && pathname === "/astro_object_index_v1/_search") {
+    const objectIndices = decodeURIComponent(pathname).match(/^\/([^/]+)\/_search$/)?.[1]?.split(",");
+    if (request.method === "POST" && objectIndices?.some(index => index === "astro_object_index_v1" || index === "astro_data_point_index_v1")) {
       const query = JSON.parse(body) as Record<string, unknown>;
-      searchBodies.push(query);
+      if (objectIndices.length === 1 && !query.aggs) searchBodies.push(query);
+      if (objectIndices.length > 1 && !query.aggs) pointSearchBodies.push(query);
       const bool = (query.query as { bool?: { filter?: unknown[] } } | undefined)?.bool;
       const filters = bool?.filter ?? [];
       const surveys = filters.flatMap((filter) => termValues(filter, "survey") ?? []);
+      const assets = JSON.stringify(filters).match(/"asset_id":"([^"]+)"/g)?.map(term => term.split('"')[3]!) ?? [];
       const dec = filters.map((filter) => rangeBounds(filter, "dec_deg")).find(Boolean);
       const hits = documents
-        .filter((document) => document.index === "astro_object_index_v1")
+        .filter((document) => objectIndices.includes(document.index))
+        .filter((document) => !assets.length || assets.includes(String(document.source.asset_id)))
         .filter((document) => !surveys.length || surveys.includes(String(document.source.survey)))
         .filter((document) => !dec || (Number(document.source.dec_deg) >= dec.gte && Number(document.source.dec_deg) <= dec.lte))
         .map((document) => ({
@@ -199,7 +213,31 @@ test("HTTP local CSV scan writes object and coverage documents and serves a mult
           _source: document.source,
           sort: [document.source.ra_deg, document.source.dec_deg, document.id],
         }));
-      response.end(JSON.stringify({ hits: { total: { value: hits.length, relation: "eq" }, hits } }));
+      if (query.aggs) {
+        const aggregations = query.aggs as Record<string, unknown>;
+        if ("by_cell" in aggregations && "by_layer" in aggregations) {
+          pointDensitySearchBodies.push(query);
+          const layerFilters = ((aggregations.by_layer as { filters: { filters: Record<string, unknown> } }).filters.filters);
+          response.end(JSON.stringify({
+            hits: { total: { value: 7, relation: "eq" }, hits: [] },
+            aggregations: {
+              by_cell: { sum_other_doc_count: 0, buckets: [{ key: 1, doc_count: 7 }] },
+              by_layer: { buckets: Object.fromEntries(Object.keys(layerFilters).map((layerId) => [layerId, {
+                by_cell: { sum_other_doc_count: 0, buckets: [{ key: 1, doc_count: 7 }] },
+              }])) },
+            },
+          }));
+          return;
+        }
+        const factor = (query.aggs as { point_cells: { terms: { script: { params: { factor: number } } } } }).point_cells.terms.script.params.factor;
+        const cells = new Map<number, number>();
+        for (const hit of hits) {
+          const pixel = Math.floor(Number(hit._source.healpix_pixel) / factor);
+          cells.set(pixel, (cells.get(pixel) ?? 0) + 1);
+        }
+        response.end(JSON.stringify({ hits: { total: { value: hits.length, relation: "eq" }, hits: [] },
+          aggregations: { point_cells: { sum_other_doc_count: 0, buckets: [...cells].map(([key, doc_count]) => ({ key, doc_count })) } } }));
+      } else response.end(JSON.stringify({ hits: { total: { value: hits.length, relation: "eq" }, hits } }));
       return;
     }
     if (request.method === "POST" && pathname === `/${ASTRO_FILE_INDEX}/_search`) {
@@ -342,6 +380,32 @@ test("HTTP local CSV scan writes object and coverage documents and serves a mult
     assert.ok(listedSeed);
     assert.equal(listedSeed.status, "ready");
     assert.ok(listedSeed.files.some((file) => file.name === "moc.fits"));
+    const overlapAtOrder6 = await apiJson<{ order: number; nside: number; availableOrders: number[]; sources: Array<{ id: string; nside: number; pixels: number[] }> }>(baseUrl, "/api/sky/overlap", {
+      method: "POST",
+      body: JSON.stringify({ sourceIds: [`workspace:moc:${seededArtifact.id}`], includePublic: false, nside: 64 }),
+    });
+    assert.equal(overlapAtOrder6.order, 6);
+    assert.equal(overlapAtOrder6.nside, 64);
+    assert.deepEqual(overlapAtOrder6.availableOrders, [0, 1, 2, 3, 4, 5, 6, 7, 8]);
+    assert.deepEqual(overlapAtOrder6.sources.map(source => ({ id: source.id, nside: source.nside, pixels: source.pixels })), [
+      { id: `workspace:moc:${seededArtifact.id}`, nside: 64, pixels: [16] },
+    ]);
+    const unsupportedOverlap = await fetch(`${baseUrl}/api/sky/overlap`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ sourceIds: [`workspace:moc:${seededArtifact.id}`, `workspace:moc:${coarseArtifact.id}`], includePublic: false, nside: 64 }),
+    });
+    assert.equal(unsupportedOverlap.status, 400);
+    assert.match(await unsupportedOverlap.text(), /O4.*O6/);
+    const highOverlap = await apiJson<{ order: number; coverageOrder: number; availableOrders: number[]; pixels: number[]; components: Array<{ cells: number[] }> }>(baseUrl, "/api/sky/overlap", {
+      method: "POST", body: JSON.stringify({ sourceIds: highArtifacts.map(artifact => `workspace:moc:${artifact.id}`), includePublic: false, nside: 1024 }),
+    });
+    assert.equal(highOverlap.order, 10);
+    assert.equal(highOverlap.coverageOrder, 10);
+    assert.equal(highOverlap.availableOrders.at(-1), 10);
+    assert.deepEqual(highOverlap.pixels, [4096]);
+    assert.deepEqual(highOverlap.components[0]!.cells, [4096]);
+    assert.equal(coarseArtifact.files.some(file => file.name === "query-order8.json"), false);
     const mocResponse = await fetch(`${baseUrl}/api/user-mocs/${encodeURIComponent(seededArtifact.layerId)}/${encodeURIComponent(seededArtifact.scanRunId)}/moc.fits`);
     assert.equal(mocResponse.status, 200);
     assert.equal(mocResponse.headers.get("content-type"), "application/fits");
@@ -454,6 +518,9 @@ test("HTTP local CSV scan writes object and coverage documents and serves a mult
     assert.equal(completed?.status, "succeeded", completed?.error);
     assert.equal(completed?.fileCount, 1);
     assert.equal(completed?.documentCount, 2);
+    const pointStatuses = await apiJson<{ statuses: Array<{ assetId: string; dataPointCount?: number }> }>(baseUrl, "/api/data-assets/status");
+    assert.equal(pointStatuses.statuses.find(status => status.assetId === assetResponse.asset.id)?.dataPointCount, 2,
+      "catalog rows queryable in Aladin must also be counted on the coverage card");
 
     const deleteHistory = await fetch(`${baseUrl}/api/connectors/${encodeURIComponent(connectorId)}/ingest-runs/${encodeURIComponent(submitted.run.id)}`, { method: "DELETE" });
     assert.equal(deleteHistory.status, 405);
@@ -470,6 +537,15 @@ test("HTTP local CSV scan writes object and coverage documents and serves a mult
     assert.equal(objectDocuments.every((document) => document.source.survey === "euclid"), true);
     assert.equal(objectDocuments.every((document) => document.source.release === "euclid-q1"), true);
     assert.equal(coverageDocuments.every((document) => document.source.release === "euclid-q1"), true);
+    const coarsePixel = Number(coverageDocuments[0]!.source.healpix_pixel);
+    const searchesBeforeFineLookup = coverageSearchBodies.length;
+    const fineLookup = await apiJson<{ workspaceDirectories: Array<{ sourceId: string }>; warnings: string[] }>(baseUrl, "/api/sky/reverse-lookup", {
+      method: "POST", body: JSON.stringify({ sourceIds: [`workspace:asset:${assetResponse.asset.id}`], includePublic: false,
+        nside: 1024, pixels: [coarsePixel * 16] }),
+    });
+    assert.equal(coverageSearchBodies.length, searchesBeforeFineLookup + 1);
+    assert.match(JSON.stringify(coverageSearchBodies.at(-1)), /"healpix_order":8/);
+    assert.equal(fineLookup.warnings.some(warning => warning.includes("coverage nside")), false);
 
     const secondAssetResponse = await apiJson<{ asset: { id: string } }>(baseUrl, "/api/data-assets", {
       method: "POST",
@@ -558,6 +634,27 @@ test("HTTP local CSV scan writes object and coverage documents and serves a mult
         projectStates: ["deliverable"],
       }),
     });
+    // A CSV can commit object rows before its coverage/MOC publication fails.
+    // Those real rows must still create an entry region and remain queryable.
+    documents.push({ id: "partial-catalog-row", index: "astro_object_index_v1", source: {
+      ...objectDocuments[0]!.source, object_id: "partial-row", asset_id: thirdAssetResponse.asset.id,
+      survey: "other-survey", release: "other-release",
+    } });
+    const partialCoverage = await apiJson<{ layers: Array<{ assetId?: string; pixels: number[]; preview?: boolean; objectCount?: number; mocStatus?: string }> }>(baseUrl,
+      `/api/sky/coverage?nside=16&assetIds=${thirdAssetResponse.asset.id}`);
+    const partialLayer = partialCoverage.layers.find(layer => layer.assetId === thirdAssetResponse.asset.id)!;
+    assert.deepEqual(partialLayer.pixels, [Math.floor(Number(objectDocuments[0]!.source.healpix_pixel) / 256)]);
+    assert.equal(partialLayer.preview, true);
+    assert.equal(partialLayer.objectCount, 1);
+    assert.notEqual(partialLayer.mocStatus, "ready", "a point preview cannot claim complete scientific coverage");
+    const partialPoints = await apiJson<{ total: number; objects: Array<{ object_id: string }> }>(baseUrl, "/api/sky/points/query", {
+      method: "POST", body: JSON.stringify({ region: { nside: 16, pixels: partialLayer.pixels, coordinateFrame: "ICRS", ordering: "NESTED" }, layerScopes: [{ assetId: thirdAssetResponse.asset.id }], limit: 10 }),
+    });
+    assert.equal(partialPoints.total, 1);
+    assert.equal(partialPoints.objects[0]?.object_id, "partial-row");
+    const partialStatuses = await apiJson<{ statuses: Array<{ assetId: string; dataPointCount?: number }> }>(baseUrl, "/api/data-assets/status");
+    assert.equal(partialStatuses.statuses.find(status => status.assetId === thirdAssetResponse.asset.id)?.dataPointCount, 1);
+    documents.splice(documents.findIndex(document => document.id === "partial-catalog-row"), 1);
     const artifactStore = new UserMocArtifactStore({ root: path.join(stateRoot, "user-mocs") });
     await artifactStore.createPending({
       layerId: `workspace-${thirdAssetResponse.asset.id}`,
@@ -604,6 +701,52 @@ test("HTTP local CSV scan writes object and coverage documents and serves a mult
     assert.deepEqual(firstLayer.pixels, [...new Set(coverageDocuments.map((document) => Math.floor(Number(document.source.healpix_pixel) / 256)))].sort((left, right) => left - right));
     assert.equal(firstLayer.objectCount, coverageDocuments.reduce((sum, document) => sum + Number(document.source.objectCount), 0));
     assert.equal(coverageSearchBodies.length - searchesBeforeAssetCoverage, 2);
+
+    const pointDensity = await apiJson<{
+      status: string;
+      nside: number;
+      total: number;
+      cells: Array<{ pixel: number; count: number; layers: Array<{ id: string; count: number }> }>;
+      layers: Array<{ id: string; count: number }>;
+      indexing: boolean;
+    }>(baseUrl, "/api/sky/points/density", {
+      method: "POST",
+      body: JSON.stringify({
+        region: { nside: 1, pixels: Array.from({ length: 12 }, (_, pixel) => pixel), coordinateFrame: "ICRS", ordering: "NESTED" },
+        boxes: [{ raMin: 0, raMax: 360, decMin: -90, decMax: 90 }],
+        layers: [{ id: "local-catalog", scopes: [{ assetId: assetResponse.asset.id }] }],
+        targetNside: 16,
+      }),
+    });
+    assert.equal(pointDensity.status, "ready");
+    assert.equal(pointDensity.nside, 16);
+    assert.equal(pointDensity.total, 7);
+    assert.deepEqual(pointDensity.cells, [{ pixel: 1, count: 7, layers: [{ id: "local-catalog", count: 7 }] }]);
+    assert.deepEqual(pointDensity.layers, [{ id: "local-catalog", count: 7 }]);
+    assert.equal(pointDensity.indexing, false);
+    assert.equal(pointDensitySearchBodies.length, 1);
+    assert.match(JSON.stringify(pointDensitySearchBodies[0]), new RegExp(assetResponse.asset.id));
+
+    const anchor = await apiJson<{
+      status: string;
+      point: { objectId: string; raDeg: number; decDeg: number } | null;
+      indexing: boolean;
+    }>(baseUrl, "/api/sky/points/anchor", {
+      method: "POST",
+      body: JSON.stringify({
+        region: { nside: 1, pixels: Array.from({ length: 12 }, (_, pixel) => pixel), coordinateFrame: "ICRS", ordering: "NESTED" },
+        layerScopes: [{ assetId: assetResponse.asset.id }],
+      }),
+    });
+    assert.equal(anchor.status, "ready");
+    assert.equal(anchor.point?.objectId, "euclid-1");
+    assert.equal(anchor.point?.raDeg, Number(objectDocuments[0]!.source.ra_deg));
+    assert.equal(anchor.point?.decDeg, Number(objectDocuments[0]!.source.dec_deg));
+    assert.equal(anchor.indexing, false);
+    const anchorQuery = pointSearchBodies.at(-1)!;
+    assert.equal(anchorQuery.size, 1);
+    assert.equal(anchorQuery.track_total_hits, false);
+    assert.equal((anchorQuery._source as string[]).includes("attributes"), false);
 
     const density = await apiJson<{
       status: string;

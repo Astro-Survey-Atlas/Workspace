@@ -208,6 +208,15 @@ test("package rows expose release details in the inspector", async ({ page }) =>
   const remoteRow = page.locator('[data-resource-group="remote"] .resource-package-row').first();
   await remoteRow.waitFor({ state: "visible" });
   const rowHeading = await remoteRow.locator("strong").first().textContent();
+  await remoteRow.click({ button: "right" });
+  const resourceMenu = page.getByRole("menu", { name: "对象操作" });
+  await expect(resourceMenu).toBeVisible();
+  await expect(page.locator('#resource-package-list [data-selected="true"]')).toContainText(rowHeading ?? "");
+  await expect(resourceMenu.getByRole("menuitem", { name: "下载资源" })).toBeEnabled();
+  await expect(resourceMenu.getByRole("menuitem", { name: "应用到天球" })).toBeDisabled();
+  await expect(resourceMenu.getByRole("menuitem", { name: "卸载资源" })).toBeDisabled();
+  await page.keyboard.press("Escape");
+  await expect(resourceMenu).toHaveCount(0);
   await remoteRow.locator(".resource-package-version").click();
   await expect(page.locator("#inspector-content h2")).toHaveText(rowHeading ?? "");
   const releaseCards = page.locator("#inspector-content .resource-release-choice");
@@ -356,10 +365,21 @@ test("user assets remain reachable from the workspace navigation", async ({ page
 
   if (assets.length > 0) {
     const first = page.locator("#catalog-asset-list .catalog-row").first();
-    await first.click();
+    await first.click({ button: "right" });
     await expect(page.locator("#inspector-kicker")).toHaveText("DATA ASSET DETAIL");
      await expect(page.locator("#inspector-content h2")).toHaveText(assets[0]!.name);
      await expect(page.locator("#catalog-stage")).toBeVisible();
+     const assetMenu = page.getByRole("menu", { name: "对象操作" });
+     await expect(assetMenu).toBeVisible();
+     for (const label of ["编辑基本信息", "编辑公开来源", "编辑 Connector 关联", "编辑数据血缘", "删除数据资产"]) {
+       await expect(assetMenu.getByRole("menuitem", { name: label })).toBeEnabled();
+     }
+     await assetMenu.getByRole("menuitem", { name: "编辑公开来源" }).click();
+     await expect(page.locator("#inspector-content .source-detail-editor")).toBeVisible();
+     await page.locator("#inspector-content .source-detail-editor [data-cancel]").click();
+     await page.locator("#inspector-content").click({ button: "right", position: { x: 120, y: 30 } });
+     await expect(page.getByRole("menu", { name: "对象操作" })).toBeVisible();
+     await page.keyboard.press("Escape");
      await expect(page.locator("#inspector-content")).toContainText("公开来源");
      await expect(page.locator("#inspector-content.catalog-inspector-content")).toBeVisible();
      await expect(page.locator(".catalog-inspector-section-heading .text-button")).toHaveCount(4);
@@ -812,6 +832,16 @@ test("connector actions and unified scan history expose only supported execution
     runs.unshift(run);
     await route.fulfill({ status: 202, json: { run } });
   });
+  await page.route("**/api/connectors/connector-s3-fixture/check", async (route) => {
+    const connector = { ...connectors[0]!, lastCheck: { status: "ok", checkedAt: now, summary: "连接正常" } };
+    await route.fulfill({ json: { connector, check: connector.lastCheck } });
+  });
+  await page.route("**/api/connectors/connector-local-fixture", async (route) => {
+    if (route.request().method() !== "DELETE") { await route.fallback(); return; }
+    const index = connectors.findIndex((connector) => connector.id === "connector-local-fixture");
+    if (index >= 0) connectors.splice(index, 1);
+    await route.fulfill({ status: 204 });
+  });
   await page.route("**/api/connectors/connector-s3-fixture/ingest-runs/run-warehouse/logs", async (route) => {
     await route.fulfill({ json: {
       runId: "run-warehouse", status: "available", text: "scanner started\ncoverage extraction complete\n",
@@ -839,7 +869,19 @@ test("connector actions and unified scan history expose only supported execution
   const execute = inspector.getByRole("button", { name: "执行扫描" });
   await expect(execute).toBeEnabled();
   await expect(execute).toHaveClass(/primary-command/);
-  await execute.click();
+  const selectedConnector = page.locator("#connector-list .connector-row", { hasText: "S3 science archive" });
+  await selectedConnector.click({ button: "right" });
+  const connectorMenu = page.getByRole("menu", { name: "对象操作" });
+  await expect(connectorMenu.getByRole("menuitem", { name: "执行扫描" })).toBeEnabled();
+  await expect(connectorMenu.getByRole("menuitem", { name: "删除 Connector" })).toBeEnabled();
+  await connectorMenu.getByRole("menuitem", { name: "测试连接" }).click();
+  await expect(page.locator("#workspace-notification-deck .workspace-notification").filter({ hasText: "Connector 连接检测完成" })).toBeVisible();
+  await selectedConnector.click({ button: "right" });
+  await page.getByRole("menu", { name: "对象操作" }).getByRole("menuitem", { name: "编辑配置" }).click();
+  await expect(inspector.locator(".connector-inline-editor")).toBeVisible();
+  await inspector.locator(".connector-inline-editor [data-cancel]").click();
+  await selectedConnector.click({ button: "right" });
+  await page.getByRole("menu", { name: "对象操作" }).getByRole("menuitem", { name: "执行扫描" }).click();
   await expect(page.locator("#workspace-notification-deck .workspace-notification").filter({ hasText: "Workspace 扫描已提交" })).toBeVisible();
   expect(submittedBody).toEqual({ executor: "auto" });
 
@@ -917,6 +959,10 @@ test("connector actions and unified scan history expose only supported execution
   await page.locator("#connector-list .connector-row", { hasText: "S3 science archive" }).click();
   await expect(inspector.getByRole("button", { name: "执行扫描" })).toBeEnabled();
   await expect(inspector).toContainText("在 Workspace 本地扫描并生成覆盖与数据点");
+  await page.locator("#connector-list .connector-row", { hasText: "Local mounted catalog" }).click({ button: "right" });
+  await page.getByRole("menu", { name: "对象操作" }).getByRole("menuitem", { name: "删除 Connector" }).click();
+  await expect(page.locator("#workspace-notification-deck .workspace-notification").filter({ hasText: "Connector 已删除" })).toBeVisible();
+  await expect(page.locator("#connector-list")).not.toContainText("Local mounted catalog");
 });
 
 test("Connector statistics show source capacity, cumulative PB and unknown counts clearly", async ({ page }) => {

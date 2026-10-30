@@ -9,6 +9,8 @@ import path from "node:path";
 
 import type { CoverageDataOrigin, CoverageSourceTier } from "./assets-core.js";
 import type { MocCoreAdapter, MocCoreCatalogResult } from "./moc-core-adapter.js";
+import { MAX_OVERLAP_ORDER, type HealpixRange } from "./healpix-ranges.js";
+import { nativeMocHealpixRanges } from "./native-moc-ranges.js";
 
 export const USER_MOC_STATUS = ["pending", "ready", "failed", "unavailable"] as const;
 export type UserMocStatus = typeof USER_MOC_STATUS[number];
@@ -766,6 +768,17 @@ export class UserMocArtifactStore {
       ? sourcePixels
       : [...new Set(sourcePixels.map((pixel) => Math.floor(pixel / 4 ** (sourceOrder - targetOrder))))].sort((left, right) => left - right);
     return { order: targetOrder, pixels: projected };
+  }
+
+  /** Native MOCs retain details above the persisted O8 query projection. */
+  async projectionRanges(layerId: string, scanRunId: string, targetOrder: number): Promise<HealpixRange[]> {
+    if (!Number.isInteger(targetOrder) || targetOrder < 0 || targetOrder > MAX_OVERLAP_ORDER) throw new RangeError("Unsupported overlap order");
+    const artifact = await this.get(layerId, scanRunId);
+    if (artifact.status !== "ready" || !artifact.availableOrders.length || Math.max(...artifact.availableOrders) < targetOrder) return [];
+    const file = artifact.files.find(entry => entry.name === "moc.fits");
+    if (!file) throw new Error("Native MOC artifact is unavailable");
+    const bytes = await this.#readVerifiedFile(path.join(this.#directory(artifact.layerId, artifact.scanRunId), file.name), file);
+    return nativeMocHealpixRanges(bytes, targetOrder);
   }
 
   #directory(layerId: string, scanRunId: string): string { return path.join(this.#root, layerId, scanRunId); }

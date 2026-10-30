@@ -153,6 +153,29 @@ test("SQLite statistics totals deduplicate files across selected snapshots", asy
   assert.deepEqual(await store.statisticsTotals([]), { files: 0, knownBytes: 0, unknownFiles: 0 });
 });
 
+test("SQLite yields while waiting for another writer and invokes the transaction only once", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "astro-sqlite-contention-"));
+  const filename = path.join(directory, "workspace.sqlite");
+  const store = new SqliteMetadataStore(filename);
+  await store.initialize();
+  const writer = new DatabaseSync(filename);
+  let release: ReturnType<typeof setTimeout> | undefined;
+  try {
+    writer.exec("BEGIN IMMEDIATE");
+    release = setTimeout(() => { writer.exec("ROLLBACK"); release = undefined; }, 150);
+    let calls = 0;
+    await store.transaction(async tx => { calls++; await tx.putConnector(connector()); });
+    assert.equal(calls, 1, "lock recovery must not replay callbacks with side effects");
+    assert.equal((await store.getConnector("connector-one"))?.name, "Survey connector");
+    writer.exec("BEGIN EXCLUSIVE");
+    release = setTimeout(() => { writer.exec("ROLLBACK"); release = undefined; }, 150);
+    assert.equal((await store.listConnectors()).length, 1, "metadata reads must also wait for a short commit lock");
+  } finally {
+    if (release) { clearTimeout(release); writer.exec("ROLLBACK"); }
+    writer.close(); await store.close(); await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test("SQLite v2 migration retains legacy connector ingest runs", async () => {
   const directory = await mkdtemp(path.join(os.tmpdir(), "astro-metadata-sqlite-v1-"));
   const filename = path.join(directory, "workspace.sqlite");

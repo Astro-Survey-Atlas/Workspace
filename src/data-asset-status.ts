@@ -1,5 +1,11 @@
 import type { DataAssetRecord, DataConnectorKind } from "./data-catalog.js";
 
+/** Partition completion belongs to its parent scan, not to a separate asset scan. */
+export function latestAssetScan<T extends { id: string; assetId?: string; assetIds?: readonly string[]; parentRunId?: string; createdAt: string }>(runs: readonly T[], assetId: string): T | undefined {
+  return runs.filter(run => !run.parentRunId && (run.assetId === assetId || run.assetIds?.includes(assetId)))
+    .sort((a, b) => `${b.createdAt}\u0000${b.id}`.localeCompare(`${a.createdAt}\u0000${a.id}`))[0];
+}
+
 /** Operational state is derived from evidence and execution history. It is not
  * persisted on the asset because an asset can outlive an index, connector, or
  * scan executor. */
@@ -38,6 +44,7 @@ export interface DataAssetOperationalStatus {
   objects: DataAssetObjectState;
   nextAction: DataAssetNextAction;
   dataPointCount?: number;
+  dataPointAnchor?: { raDeg: number; decDeg: number };
   dataPointStatus?: string;
   dataPointProgress?: { processedFiles: number; fileCount: number; errors: number };
   scanProgress?: { status: string; executor?: string; phase?: string; processedFiles: number; fileCount: number; failedFiles: number };

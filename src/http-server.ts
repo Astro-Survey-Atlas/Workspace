@@ -11,7 +11,7 @@ import type { NextFunction, Request, Response } from "express";
 import { AgentService } from "./agent.js";
 import { AstroIndexService, ASTRO_FILE_INDEX, ASTRO_OVERVIEW_NSIDE, type AstroCoverageLayer, type AstroSkyQueryInput } from "./astro-index.js";
 import { DerivedRepairService, imagePointsContainingCoordinate, SKY_DATA_POINT_INDEX } from "./derived-repairs.js";
-import { angularSeparationArcsec, AstroObjectIndexService, coordinateInHealpixRegion, coordinateSearchBbox, type AstroCellsQueryInput, type AstroObjectRecord, type ObjectRegionQueryInput, type SkyDataPointScope } from "./astro-object-index.js";
+import { angularSeparationArcsec, AstroObjectIndexService, coordinateInHealpixRegion, coordinateSearchBbox, type AstroCellsQueryInput, type AstroObjectRecord, type AstroPointDensityQueryInput, type ObjectRegionQueryInput, type SkyDataPointScope } from "./astro-object-index.js";
 import { McpCatalogQueryClient } from "./catalog-mcp-client.js";
 import { createConnectorCredentialStore, type StoredConnectorCredentials } from "./connector-credentials.js";
 import { ConnectorRegistry, connectorLocationKey, validateConnectorInput, type ConnectorCheckInput, type ConnectorPublicRecord, type ConnectorRecord, type ConnectorRegistrationInput } from "./connectors.js";
@@ -22,7 +22,7 @@ import { assetLinkedToConnector } from "./data-statistics.js";
 import { currentWarehouseLayerIds, warehouseLayerBelongsToAsset, workspaceLayerIdForAsset } from "./workspace-layer-identity.js";
 import { WorkspaceConfigBackupService } from "./workspace-config-backup.js";
 import { DataCatalogRegistry, type DataAssetAccess, type DataAssetRecord, type DataAssetRegistrationInput } from "./data-catalog.js";
-import { deriveDataAssetOperationalStatus, type DataAssetCoverageEvidence, type DataAssetRunEvidence } from "./data-asset-status.js";
+import { deriveDataAssetOperationalStatus, latestAssetScan, type DataAssetCoverageEvidence, type DataAssetRunEvidence } from "./data-asset-status.js";
 import { ConnectorScanCapabilityError, ConnectorScanPreconditionError, DataWarehouseDisabledError, dataWarehouseEnabled, validateConnectorSelfScanBody } from "./warehouse-scan.js";
 import { createAstroMcpServer } from "./mcp.js";
 import { ResourceCatalogSyncError, ResourceCatalogUnavailableError, ResourcePackageManager, resourcePackageSurveyRecords, type ResourcePackageLoad } from "./resource-packages.js";
@@ -41,7 +41,8 @@ import { WorkspaceScanExecutor, workspaceScanEnabled } from "./workspace-scan-ex
 import { UserMocArtifactStore, type UserMocArtifact } from "./user-moc-artifacts.js";
 import { WarehouseIndexService, type WarehouseCoverageLayer } from "./warehouse-index.js";
 import { WarehouseScanService } from "./warehouse-scan.js";
-import { commonOverlapNside, calculateSkyOverlap, privateOverlapOrders, type SkyOverlapSource } from "./sky-overlap.js";
+import { commonOverlapNside, commonOverlapOrders, calculateSkyOverlap, privateOverlapOrders, type SkyOverlapSource } from "./sky-overlap.js";
+import { expandHealpixRanges, healpixRangeContains, healpixRangesForPixels, MAX_OVERLAP_ORDER, unionHealpixRanges } from "./healpix-ranges.js";
 import { CoverageDownloadService, parseCoverageDownloadSubmissionOptions, type CoverageDownloadFile } from "./coverage-downloads.js";
 import { RegionDownloadPlanService } from "./region-download-plan.js";
 import { createRegionDownloadPreviewHandler } from "./region-download-http.js";
@@ -635,12 +636,9 @@ app.get("/api/data-assets/status", async (_request: Request, response: Response)
         ]),
       ].filter((connector): connector is typeof connectorRecords[number] => Boolean(connector));
       const uniqueLinked = [...new Map(linked.map((connector) => [connector.id, connector])).values()];
-      const latestRun = [...runs]
-        .filter((run) => run.assetId === asset.id || run.assetIds?.includes(asset.id))
-        .sort((left, right) => `${right.updatedAt ?? right.createdAt}\u0000${right.id}`.localeCompare(`${left.updatedAt ?? left.createdAt}\u0000${left.id}`))[0];
-      const latestWorkspaceRun = [...runs]
-        .filter((run) => (run.assetId === asset.id || run.assetIds?.includes(asset.id)) && run.executor === "workspace")
-        .sort((left, right) => `${right.updatedAt ?? right.createdAt}\u0000${right.id}`.localeCompare(`${left.updatedAt ?? left.createdAt}\u0000${left.id}`))[0];
+      const latestRun = latestAssetScan(runs, asset.id);
+      const latestWorkspaceRun = latestAssetScan(runs.filter(run => run.executor === "workspace"), asset.id);
+      const pointQuery = await astroObjectIndex.queryObjects({ bbox: { raMin: 0, raMax: 360, decMin: -90, decMax: 90 }, layerScopes: [{ assetId: asset.id }], limit: 1, includeAttributes: false }, [astroObjectIndex.objectIndex, SKY_DATA_POINT_INDEX]);
       let coverage: DataAssetCoverageEvidence | undefined;
       try {
         const [legacy, local] = await Promise.all([
@@ -661,12 +659,12 @@ app.get("/api/data-assets/status", async (_request: Request, response: Response)
             ...(warehouseLayer ? [coverageStatus(warehouseLayer.status)] : warehouse.status === "error" ? ["error" as const] : []),
             ...(mocLayer ? [coverageStatus(mocLayer.status)] : []),
           ]),
-          objectStatus: local.status,
+          objectStatus: pointQuery.status,
           activeCoverage: warehouseLayer?.state === "ACTIVE" || mocLayer?.mocStatus === "ready",
           latestMocStatus: mocLayer?.latestMocStatus,
           pixels: [...new Set([...legacy.pixels, ...local.pixels, ...(warehouseLayer?.pixels ?? []), ...(mocLayer?.pixels ?? [])])],
-          objectCount: local.facts.reduce((sum, fact) => sum + fact.objectCount, 0),
-          message: [legacy.message, local.message, warehouseLayer?.message, mocLayer?.message].filter(Boolean).join("; ") || undefined,
+          objectCount: pointQuery.total,
+          message: [legacy.message, local.message, warehouseLayer?.message, mocLayer?.message, pointQuery.message].filter(Boolean).join("; ") || undefined,
         };
       } catch (error) {
         coverage = { status: "unavailable", pixels: [], message: error instanceof Error ? error.message : String(error) };
@@ -680,13 +678,13 @@ app.get("/api/data-assets/status", async (_request: Request, response: Response)
         localScanConfigured: workspaceScanningEnabled && astroObjectIndex.configured,
         warehouseConfigured: warehouseEnabled && warehouseIndex.configured,
       });
-      const pointQuery = await skyDataPoints.queryObjects({ bbox: { raMin: 0, raMax: 360, decMin: -90, decMax: 90 }, layerScopes: [{ assetId: asset.id }], limit: 1, includeAttributes: false });
       const repair = repairs.find((task) => task.assetId === asset.id && task.mode !== "moc" && !task.maxFiles);
       return {
         ...derived,
         assetName: asset.name,
-        dataPointCount: pointQuery.status === "ready" ? pointQuery.total : 0,
-        dataPointStatus: latestWorkspaceRun?.status ?? repair?.status ?? (pointQuery.total > 0 ? "succeeded" : "not_indexed"),
+        ...(pointQuery.status === "ready" ? { dataPointCount: pointQuery.total } : {}),
+        ...(pointQuery.objects[0] ? { dataPointAnchor: { raDeg: pointQuery.objects[0].ra_deg, decDeg: pointQuery.objects[0].dec_deg } } : {}),
+        dataPointStatus: pointQuery.status !== "ready" ? pointQuery.status : latestWorkspaceRun?.status ?? repair?.status ?? (pointQuery.total > 0 ? "succeeded" : "not_indexed"),
         ...(latestWorkspaceRun?.fileCount !== undefined ? {
           dataPointProgress: {
             processedFiles: latestWorkspaceRun.processedFiles ?? 0,
@@ -1452,6 +1450,25 @@ app.post("/api/sky/points/query", async (request: Request, response: Response) =
     response.json({ ...result, indexing: await derivedRepairs.isIndexing(input.layerScopes) });
   } catch (error) { sendApiError(response, error); }
 });
+app.post("/api/sky/points/density", async (request: Request, response: Response) => {
+  try {
+    const input = request.body as AstroPointDensityQueryInput;
+    if (!input || !Array.isArray(input.layers)) throw new RangeError("Point density requires explicit layers");
+    const result = await astroObjectIndex.queryPointDensity(input, [astroObjectIndex.objectIndex, SKY_DATA_POINT_INDEX]);
+    const layerScopes = input.layers.flatMap(layer => layer.scopes ?? []);
+    response.json({ ...result, indexing: layerScopes.length ? await derivedRepairs.isIndexing(layerScopes) : false });
+  } catch (error) { sendApiError(response, error); }
+});
+app.post("/api/sky/points/anchor", async (request: Request, response: Response) => {
+  try {
+    const input = request.body as ObjectRegionQueryInput;
+    if (!input.region || !Array.isArray(input.layerScopes)) throw new RangeError("Point anchor requires an entry region and explicit layer scopes");
+    const result = await astroObjectIndex.queryObjects({ ...input, limit: 1, includeAttributes: false, trackTotalHits: false }, [astroObjectIndex.objectIndex, SKY_DATA_POINT_INDEX]);
+    response.json({ status: result.status, message: result.message,
+      point: result.objects[0] ? { objectId: result.objects[0].object_id, raDeg: result.objects[0].ra_deg, decDeg: result.objects[0].dec_deg } : null,
+      indexing: await derivedRepairs.isIndexing(input.layerScopes) });
+  } catch (error) { sendApiError(response, error); }
+});
 app.post("/api/sky/points/inspect", async (request: Request, response: Response) => {
   try {
     const body = request.body as Record<string, unknown> | null;
@@ -1612,8 +1629,10 @@ async function overlapSources(context: OverlapSourceContext): Promise<SkyOverlap
         };
         if (!overlapSourceMatches(source, context)) continue;
         source.availableOrders = await resourcePackages.footprintOrders(footprint);
-        source.pixels = source.availableOrders.includes(Math.log2(context.nside))
-          ? await resourcePackages.footprintPixels(footprint, Math.log2(context.nside)) : [];
+        if (source.availableOrders.includes(Math.log2(context.nside))) {
+          source.ranges = await resourcePackages.footprintRanges(footprint, Math.log2(context.nside));
+          source.pixels = [];
+        } else source.pixels = [];
         source.nside = context.nside;
         accept(source);
     }
@@ -1650,15 +1669,12 @@ async function overlapSources(context: OverlapSourceContext): Promise<SkyOverlap
       context.nside <= 256
         ? astroIndex.coverage({ nside: context.nside, assetIds: [asset.id] })
         : Promise.resolve({ status: "unavailable" as const, index: ASTRO_FILE_INDEX, nside: context.nside, pixels: [], byAsset: [], message: "legacy coverage supports NSIDE up to 16" }),
-      astroObjectIndex.queryCoverageFacts({ nside: context.nside, assetIds: [asset.id] }),
+      astroObjectIndex.queryCoverageFacts({ nside: Math.min(context.nside, 256), assetIds: [asset.id] }),
     ]);
-    const pixels = new Set<number>([...legacy.pixels, ...local.pixels]);
+    const pixels = new Set<number>(context.nside <= 256 ? [...legacy.pixels, ...local.pixels] : []);
     warehouse.layers.filter((layer) => warehouseLayerForAsset(layer, asset)).forEach((layer) => layer.pixels.forEach((pixel) => pixels.add(pixel)));
     const mocSelection = [...artifactSelections.values()].find(({ latest }) => latest.layerId === workspaceLayerIdForAsset(asset.id) || latest.layerId === asset.id || latest.layerId === `user-${asset.id}`);
-    if (mocSelection) {
-      const projection = await userMocs.projection(mocSelection.renderable.layerId, mocSelection.renderable.scanRunId, Math.log2(context.nside)).catch(() => ({ order: Math.log2(context.nside), pixels: [] }));
-      projection.pixels.forEach((pixel) => pixels.add(pixel));
-    }
+    const mocRanges = mocSelection ? await userMocs.projectionRanges(mocSelection.renderable.layerId, mocSelection.renderable.scanRunId, Math.log2(context.nside)) : [];
     const access = [asset.access, ...(asset.accesses ?? [])].find((entry) => entry.connector !== "metadata");
     accept({
       id: overlapSourceIdForAsset(asset.id),
@@ -1666,6 +1682,7 @@ async function overlapSources(context: OverlapSourceContext): Promise<SkyOverlap
       kind: "workspace",
       nside: context.nside,
       pixels: [...pixels],
+      ranges: unionHealpixRanges([...healpixRangesForPixels([...pixels]), ...mocRanges]),
       surveyId: asset.surveyId,
       releaseId: asset.releaseId,
       assetId: asset.id,
@@ -1684,13 +1701,14 @@ async function overlapSources(context: OverlapSourceContext): Promise<SkyOverlap
     .filter(({ latest }) => !assets.some((asset) => [asset.id, workspaceLayerIdForAsset(asset.id), `user-${asset.id}`].includes(latest.layerId)))
     .filter(({ latest }) => !context.sourceIds?.size || context.sourceIds.has(`workspace:moc:${latest.id}`))
     .map(async ({ latest, renderable }) => {
-      const projection = await userMocs.projection(renderable.layerId, renderable.scanRunId, Math.log2(context.nside)).catch(() => ({ order: Math.log2(context.nside), pixels: [] }));
+      const ranges = await userMocs.projectionRanges(renderable.layerId, renderable.scanRunId, Math.log2(context.nside));
       return {
         id: `workspace:moc:${latest.id}`,
         label: latest.layerId,
         kind: "workspace" as const,
         nside: context.nside,
-        pixels: projection.pixels,
+        pixels: [],
+        ranges,
         product: latest.layerId,
         availableOrders: privateOverlapOrders(renderable.availableOrders),
         layerIds: [latest.layerId],
@@ -1751,7 +1769,7 @@ async function reverseSourcesFromIds(context: OverlapSourceContext): Promise<Sky
 
 function overlapContext(body: SkyOverlapRequest): OverlapSourceContext {
   const nside = Number(body.nside ?? ASTRO_OVERVIEW_NSIDE);
-  nsideOrderForCoverage(nside);
+  overlapNsideOrder(nside);
   const toSet = (value: unknown, name: string, maximumLength = 160): ReadonlySet<string> | undefined => {
     const values = stringArrayInput(value, name, 256, maximumLength);
     return values === undefined ? undefined : new Set(values);
@@ -1866,7 +1884,11 @@ async function reverseLookupFiles(sources: readonly SkyOverlapSource[], region: 
         })(),
         (async () => {
           if (!assetIds.length) return;
-          const facts = await astroObjectIndex.queryCoverageFacts({ assetIds, nside: 2 ** region.order, cells: region.cells, preserveSources: true });
+          // The local search index has O8 buckets. Query parent buckets while
+          // retaining native facts, then filter against the actual fine region.
+          const queryOrder = Math.min(8, region.order);
+          const queryCells = [...new Set(region.cells.map(pixel => Math.floor(pixel / 4 ** (region.order - queryOrder))))];
+          const facts = await astroObjectIndex.queryCoverageFacts({ assetIds, nside: 2 ** queryOrder, cells: queryCells, preserveSources: true });
           if (facts.message) warnings.push(facts.message);
           directoriesTruncated ||= facts.status === "error" || Boolean(facts.message?.includes("limit"));
           const selectedCells = new Set(region.cells);
@@ -1901,8 +1923,26 @@ async function reverseLookupFiles(sources: readonly SkyOverlapSource[], region: 
         truncated: assetsResult.truncated, expiresAt: assetsResult.expiresAt } } : {}) };
 }
 
+function overlapNsideOrder(nside: number): number {
+  if (!Number.isInteger(nside) || nside < 1 || (nside & (nside - 1)) !== 0 || nside > 2 ** MAX_OVERLAP_ORDER) {
+    throw new RangeError(`nside must be a power of two between 1 and ${2 ** MAX_OVERLAP_ORDER}`);
+  }
+  return Math.log2(nside);
+}
+
+function sourceContainsPixel(source: SkyOverlapSource, pixel: number): boolean {
+  return source.ranges ? healpixRangeContains(source.ranges, pixel) : source.pixels.includes(pixel);
+}
+
+/** Native intervals stay on the server; source identities suffice for inspection. */
+function overlapSourceViews(sources: readonly SkyOverlapSource[]): SkyOverlapSource[] {
+  return sources.map(({ ranges, ...source }) => ({ ...source, pixels: ranges
+    ? ranges.reduce((sum, range) => sum + range.end - range.start, 0) <= 4096 ? expandHealpixRanges(ranges, 4096) : []
+    : source.pixels }));
+}
+
 function reverseRegionInput(nside: number, pixels: number[], body: { cursor?: unknown; querySnapshotId?: unknown; pageSize?: unknown }): ReverseLookupRegion {
-  const order = nsideOrderForCoverage(nside);
+  const order = overlapNsideOrder(nside);
   const cells = overlapPixelsInput(pixels);
   if (cells.some((cell) => cell >= 12 * nside ** 2)) throw new RangeError("Invalid HEALPix cell for this order");
   if (cells.length * 41252.96124941927 / (12 * nside ** 2) > 100) throw new RangeError("Region exceeds 100 deg²; select a smaller region");
@@ -1918,16 +1958,23 @@ app.post("/api/sky/overlap", async (request: Request, response: Response) => {
   try {
     const body = (request.body ?? {}) as SkyOverlapRequest;
     let context = overlapContext(body);
+    const requestedNside = body.nside === undefined ? undefined : context.nside;
+    // Discover source authority cheaply at O4, then intersect native intervals
+    // at the requested shared order. Never refine an O4 intersection mask.
+    context = { ...context, nside: Math.min(context.nside, ASTRO_OVERVIEW_NSIDE) };
     let sources = await overlapSources(context);
-    if (body.nside === undefined) {
-      const nside = commonOverlapNside(sources, context.nside);
-      if (nside !== context.nside) {
-        context = { ...context, nside };
-        sources = await overlapSources(context);
-      }
+    const commonNside = commonOverlapNside(sources, context.nside);
+    const availableOrders = commonOverlapOrders(sources);
+    const nside = requestedNside ?? Math.min(ASTRO_OVERVIEW_NSIDE, commonNside);
+    if (requestedNside !== undefined && sources.length && !availableOrders.includes(Math.log2(requestedNside))) {
+      throw new RangeError(`所选来源共同支持的最高层级为 O${availableOrders.at(-1) ?? "--"}，无法使用 O${Math.log2(requestedNside)}；请降低层级或调整所选来源。`);
+    }
+    if (nside !== context.nside) {
+      context = { ...context, nside };
+      sources = await overlapSources(context);
     }
     const result = calculateSkyOverlap(sources, context.nside);
-    response.json({ ...result, sources });
+    response.json({ ...result, coverageOrder: result.order, availableOrders, sources: overlapSourceViews(sources) });
   } catch (error) {
     sendApiError(response, error);
   }
@@ -1959,8 +2006,8 @@ app.post("/api/sky/overlap/details", async (request: Request, response: Response
     const component = componentId ? overlap.components.find((candidate) => candidate.id === componentId) : undefined;
     if (componentId && !component) throw new Error(`Overlap component not found: ${componentId}`);
     const pixels = component?.cells ?? (body.pixels === undefined ? overlap.pixels : overlapPixelsInput(body.pixels));
-    const selectedSources = sources.filter((source) => pixels.some((pixel) => source.pixels.includes(pixel)));
-    stream.complete({ component: component ?? null, pixels, sources: selectedSources, ...(await reverseLookupFiles(selectedSources, reverseRegionInput(context.nside, pixels, body), stream.enabled ? stream.update : undefined)) });
+    const selectedSources = sources.filter((source) => pixels.some((pixel) => sourceContainsPixel(source, pixel)));
+    stream.complete({ component: component ?? null, pixels, sources: overlapSourceViews(selectedSources), ...(await reverseLookupFiles(selectedSources, reverseRegionInput(context.nside, pixels, body), stream.enabled ? stream.update : undefined)) });
   } catch (error) {
     sendApiError(response, error);
   }
@@ -1991,8 +2038,8 @@ app.post("/api/sky/reverse-lookup", async (request: Request, response: Response)
       pixels = component.cells;
     }
     if (!pixels?.length) throw new RangeError("pixels or componentId is required");
-    const selectedSources = sources.filter((source) => pixels!.some((pixel) => source.pixels.includes(pixel)));
-    stream.complete({ pixels, sources: selectedSources, ...(await reverseLookupFiles(selectedSources, reverseRegionInput(context.nside, pixels, body), stream.enabled ? stream.update : undefined)) });
+    const selectedSources = sources.filter((source) => pixels!.some((pixel) => sourceContainsPixel(source, pixel)));
+    stream.complete({ pixels, sources: overlapSourceViews(selectedSources), ...(await reverseLookupFiles(selectedSources, reverseRegionInput(context.nside, pixels, body), stream.enabled ? stream.update : undefined)) });
   } catch (error) {
     sendApiError(response, error);
   }
@@ -2365,18 +2412,22 @@ app.get("/api/sky/coverage", async (request: Request, response: Response) => {
           : undefined;
         const officialReady = mocLayer?.mocStatus === "ready" || warehouseLayer?.state === "ACTIVE";
         const preview = officialReady ? undefined : await warehouseScans.coveragePreview(asset.id, nside);
+        const pointPreview = !officialReady && nside <= 256
+          ? await astroObjectIndex.queryPointCoverage({ assetId: asset.id, nside }, [astroObjectIndex.objectIndex, SKY_DATA_POINT_INDEX]) : undefined;
         const pixels = new Set<number>(legacy.pixels);
         local.pixels.forEach((pixel) => pixels.add(pixel));
         warehouseLayer?.pixels.forEach((pixel) => pixels.add(pixel));
         mocLayer?.pixels.forEach((pixel) => pixels.add(pixel));
         preview?.pixels.forEach((pixel) => pixels.add(pixel));
-        const objectCount = local.facts.reduce((sum, fact) => sum + fact.objectCount, 0);
+        pointPreview?.pixels.forEach((pixel) => pixels.add(pixel));
+        const hasPointPreview = Boolean(pointPreview?.pixels.length);
+        const objectCount = hasPointPreview ? pointPreview!.total : local.facts.reduce((sum, fact) => sum + fact.objectCount, 0);
         const status = aggregateCoverageStatus([
           coverageStatus(legacy.status),
           coverageStatus(local.status),
           ...(warehouseLayer ? [coverageStatus(warehouseLayer.status)] : warehouse.status === "error" ? ["error" as const] : []),
           ...(mocLayer ? [coverageStatus(mocLayer.status)] : []),
-          ...(preview ? ["pending" as const] : []),
+          ...(preview || hasPointPreview ? ["pending" as const] : []),
         ]);
         const message = [
           legacy.status === "error" ? legacy.message : undefined,
@@ -2384,6 +2435,8 @@ app.get("/api/sky/coverage", async (request: Request, response: Response) => {
           warehouseLayer?.message,
           mocLayer?.message,
           preview ? "扫描中/临时覆盖" : undefined,
+          hasPointPreview ? "已索引数据点区域预览；完整扫描覆盖尚未发布" : undefined,
+          pointPreview?.message,
         ].filter(Boolean).join("; ") || undefined;
         const breakdown = {
           key: asset.id,
@@ -2413,11 +2466,11 @@ app.get("/api/sky/coverage", async (request: Request, response: Response) => {
           nativeOrders: warehouseLayer?.nativeOrders ?? mocLayer?.availableOrders,
           availableOrders: warehouseLayer?.availableOrders ?? mocLayer?.availableOrders,
           maxOrder: warehouseLayer?.maxOrder ?? mocLayer?.maxOrder,
-          precision: warehouseLayer?.precision ?? mocLayer?.precision ?? preview?.precision,
+          precision: warehouseLayer?.precision ?? mocLayer?.precision ?? preview?.precision ?? (hasPointPreview ? "estimated" as const : undefined),
           state: warehouseLayer?.state,
           mocStatus: mocLayer?.mocStatus,
           artifactId: mocLayer?.artifactId,
-          ...(preview ? { preview: true } : {}),
+          ...(preview || hasPointPreview ? { preview: true } : {}),
         } satisfies AstroCoverageLayer;
         statuses.push(status);
         if (message) messages.push(message);
@@ -2504,7 +2557,9 @@ app.get("/api/sky/coverage", async (request: Request, response: Response) => {
       const existing = layersByKey.get(key);
       if (existing?.mocStatus === "ready" || existing?.state === "ACTIVE") continue;
       const preview = await warehouseScans.coveragePreview(asset.id, nside);
-      if (!preview) continue;
+      const pointPreview = nside <= 256
+        ? await astroObjectIndex.queryPointCoverage({ assetId: asset.id, nside }, [astroObjectIndex.objectIndex, SKY_DATA_POINT_INDEX]) : undefined;
+      if (!preview && !pointPreview?.pixels.length) continue;
       const previewLayer: AstroCoverageLayer = {
         key,
         layerId: existing?.layerId ?? workspaceLayerIdForAsset(asset.id),
@@ -2513,13 +2568,14 @@ app.get("/api/sky/coverage", async (request: Request, response: Response) => {
         assetName: asset.name,
         surveyId: asset.surveyId,
         releaseId: asset.releaseId,
-        pixels: preview.pixels,
+        pixels: [...new Set([...(preview?.pixels ?? []), ...(pointPreview?.pixels ?? [])])].sort((a, b) => a - b),
+        ...(pointPreview?.status === "ready" ? { objectCount: pointPreview.total } : {}),
         byAsset: [{ key: asset.id, label: asset.name, files: 0, bytes: 0 }],
         status: "pending",
         source: "asset",
-        message: "扫描中/临时覆盖",
+        message: pointPreview?.pixels.length ? "已索引数据点区域预览；完整扫描覆盖尚未发布" : "扫描中/临时覆盖",
         nside,
-        precision: preview.precision,
+        precision: preview?.precision ?? "estimated",
         preview: true,
       };
       layersByKey.set(key, existing ? mergeCoverageLayers(existing, previewLayer, key) : previewLayer);

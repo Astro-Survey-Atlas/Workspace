@@ -56,8 +56,40 @@ export interface ObjectRegionQueryInput {
   limit?: number;
   /** Skip the potentially large flattened attributes map for point-only views. */
   includeAttributes?: boolean;
+  trackTotalHits?: boolean;
   searchAfter?: unknown[];
   cursor?: unknown[];
+}
+
+export interface AstroPointDensityLayerInput {
+  id: string;
+  scopes: SkyDataPointScope[];
+}
+
+export interface AstroPointDensityQueryInput {
+  region: ObjectRegionSelectionInput;
+  boxes: readonly { raMin: number; raMax: number; decMin: number; decMax: number }[];
+  layers: readonly AstroPointDensityLayerInput[];
+  targetNside: number;
+}
+
+export interface AstroPointDensityCell {
+  pixel: number;
+  count: number;
+  layers: Array<{ id: string; count: number }>;
+}
+
+export interface AstroPointDensityResult {
+  status: AstroObjectQueryStatus;
+  index: string;
+  coordinateFrame: typeof ASTRO_HEALPIX_COORDINATE_FRAME;
+  ordering: typeof ASTRO_HEALPIX_ORDERING;
+  nside: number;
+  total: number;
+  layers: Array<{ id: string; count: number }>;
+  cells: AstroPointDensityCell[];
+  truncated: false;
+  message?: string;
 }
 
 export interface AstroObjectRecord {
@@ -190,6 +222,17 @@ export interface AstroCoverageFactQueryResult {
   message?: string;
 }
 
+/** Occupied cells from real positions, for a preview while full coverage is incomplete. */
+export interface AstroPointCoverageResult {
+  status: AstroObjectQueryStatus;
+  index: string;
+  nside: number;
+  pixels: number[];
+  total: number;
+  truncated: boolean;
+  message?: string;
+}
+
 export interface AstroCellsQueryInput {
   parentNside?: number;
   parentPixels?: readonly number[];
@@ -261,6 +304,8 @@ const COVERAGE_AGGREGATION_SIZE = 10_000;
 const MAX_BULK_DOCUMENTS = 500;
 const MAX_BULK_BYTES = 2 * 1024 * 1024;
 const DEFAULT_TIMEOUT_MS = 2_500;
+const MAX_POINT_DENSITY_LAYERS = 64;
+const MAX_POINT_DENSITY_BUCKETS = 32_768;
 
 const OBJECT_SOURCE_FIELDS = [
   "object_id",
@@ -307,6 +352,8 @@ interface ElasticsearchSearchHit {
 }
 
 interface ElasticsearchSearchResponse {
+  timed_out?: boolean;
+  _shards?: unknown;
   hits?: {
     total?: unknown;
     hits?: unknown;
@@ -608,6 +655,7 @@ interface NormalizedObjectRegionQuery {
   assetIds?: string[];
   limit: number;
   includeAttributes: boolean;
+  trackTotalHits: boolean;
   searchAfter?: unknown[];
 }
 
@@ -683,6 +731,7 @@ function validateQueryInput(input: ObjectRegionQueryInput): NormalizedObjectRegi
     assetIds: validateFilterValues(input.assetIds, "assetIds"),
     limit: rawLimit,
     includeAttributes: input.includeAttributes !== false,
+    trackTotalHits: input.trackTotalHits !== false,
     ...(searchAfter === undefined ? {} : { searchAfter }),
   };
 }
@@ -859,12 +908,78 @@ function queryBody(input: NormalizedObjectRegionQuery): Record<string, unknown> 
   if (visibility) filters.push(visibility);
 
   return {
-    track_total_hits: true,
+    track_total_hits: input.trackTotalHits,
     size: input.limit,
     _source: [...(input.includeAttributes ? OBJECT_SOURCE_FIELDS : OBJECT_POINT_SOURCE_FIELDS)],
     query: { bool: { filter: filters } },
     sort: [...objectSort(input)],
     ...(input.searchAfter === undefined ? {} : { search_after: input.searchAfter }),
+  };
+}
+
+function validatePointDensityInput(input: AstroPointDensityQueryInput): {
+  region: NonNullable<NormalizedObjectRegionQuery["region"]>;
+  boxes: NonNullable<NormalizedObjectRegionQuery["bbox"]>[];
+  layers: AstroPointDensityLayerInput[];
+  targetNside: number;
+} {
+  if (!isRecord(input)) throw new TypeError("point density query input is required");
+  const region = normalizeRegion(input.region, ASTRO_HEALPIX_COORDINATE_FRAME, ASTRO_HEALPIX_ORDERING);
+  if (!Array.isArray(input.boxes) || !input.boxes.length || input.boxes.length > 2) throw new RangeError("point density requires one or two viewport boxes");
+  const boxes = input.boxes.map((box, index) => {
+    if (!isRecord(box)) throw new TypeError(`boxes[${index}] must be an object`);
+    const raMin = validateCoordinate(box.raMin, `boxes[${index}].raMin`, 0, 360);
+    const raMax = validateCoordinate(box.raMax, `boxes[${index}].raMax`, 0, 360);
+    const decMin = validateCoordinate(box.decMin, `boxes[${index}].decMin`, -90, 90);
+    const decMax = validateCoordinate(box.decMax, `boxes[${index}].decMax`, -90, 90);
+    if (decMin > decMax) throw new RangeError(`boxes[${index}].decMin must be no greater than decMax`);
+    return { raMin, raMax, decMin, decMax };
+  });
+  if (!Array.isArray(input.layers) || input.layers.length > MAX_POINT_DENSITY_LAYERS) {
+    throw new RangeError(`point density supports at most ${MAX_POINT_DENSITY_LAYERS} layers`);
+  }
+  const ids = new Set<string>();
+  const layers = input.layers.map((layer, index) => {
+    if (!isRecord(layer) || typeof layer.id !== "string" || !layer.id.trim() || ids.has(layer.id)) {
+      throw new RangeError(`layers[${index}] requires a unique non-empty id`);
+    }
+    ids.add(layer.id);
+    return { id: layer.id, scopes: validateLayerScopes(layer.scopes) };
+  });
+  if (!Number.isSafeInteger(input.targetNside) || input.targetNside < 1 || input.targetNside > ASTRO_OBJECT_NATIVE_NSIDE
+      || (input.targetNside & (input.targetNside - 1)) !== 0) {
+    throw new RangeError(`targetNside must be a power of two between 1 and ${ASTRO_OBJECT_NATIVE_NSIDE}`);
+  }
+  return { region: region!, boxes, layers, targetNside: input.targetNside };
+}
+
+function pointDensityQueryBody(input: ReturnType<typeof validatePointDensityInput>, targetNside: number): Record<string, unknown> {
+  const viewportFilters = input.boxes.map(box => ({ bool: { filter: [rangeFilter(box),
+    { range: { dec_deg: { gte: box.decMin, lte: box.decMax } } }] } }));
+  const filters: unknown[] = [
+    healpixFilterFromRanges(input.region.nativeRanges),
+    { term: { healpix_order: ASTRO_OBJECT_NATIVE_ORDER } },
+    { bool: { should: viewportFilters, minimum_should_match: 1 } },
+  ];
+  const childCount = (ASTRO_OBJECT_NATIVE_NSIDE / targetNside) ** 2;
+  const bucketSize = Math.max(12, Math.min(4_096, Math.floor(MAX_POINT_DENSITY_BUCKETS / Math.max(1, input.layers.length))));
+  return {
+    size: 0,
+    track_total_hits: true,
+    query: { bool: { filter: [...filters, scopedLayerFilter(input.layers.flatMap(layer => layer.scopes))] } },
+    aggs: {
+      by_cell: { terms: {
+        script: { source: "Math.floor(doc['healpix_pixel'].value / params.childCount)", params: { childCount } },
+        size: 4_096,
+      } },
+      by_layer: {
+        filters: { filters: Object.fromEntries(input.layers.map(layer => [layer.id, scopedLayerFilter(layer.scopes)])) },
+        aggs: { by_cell: { terms: {
+          script: { source: "Math.floor(doc['healpix_pixel'].value / params.childCount)", params: { childCount } },
+          size: bucketSize,
+        } } },
+      },
+    },
   };
 }
 
@@ -1323,9 +1438,7 @@ export class AstroObjectIndexService {
     let bytes = 0;
     const flush = async (): Promise<void> => {
       if (!lines.length) return;
-      const response = await this.#requestJson("/_bulk", lines.join(""), "application/x-ndjson") as Record<string, unknown>;
-      const error = bulkResponseError(response);
-      if (error) throw error;
+      await this.#writeBulk(lines.join(""));
       lines = [];
       count = 0;
       bytes = 0;
@@ -1396,9 +1509,7 @@ export class AstroObjectIndexService {
 
     const flush = async (): Promise<void> => {
       if (!lines.length) return;
-      const response = await this.#requestJson("/_bulk", lines.join(""), "application/x-ndjson");
-      const error = bulkResponseError(response);
-      if (error) throw error;
+      await this.#writeBulk(lines.join(""));
       lines = [];
       documentCount = 0;
       bytes = 0;
@@ -1536,6 +1647,113 @@ export class AstroObjectIndexService {
     }
   }
 
+  async queryPointCoverage(input: { assetId: string; nside: number }, readIndices: readonly string[] = [this.#objectIndex]): Promise<AstroPointCoverageResult> {
+    validateCoverageInput({ nside: input.nside });
+    if (!input.assetId.trim()) throw new RangeError("Point coverage requires an assetId");
+    const index = readIndices.map(value => normalizeIndex(value, "readIndex", this.#objectIndex)).join(",");
+    const empty = { index, nside: input.nside, pixels: [], total: 0, truncated: false };
+    if (!this.configured) return { ...empty, status: "unavailable", message: "ASTRO_ES_URL is not configured" };
+    try {
+      const response = await this.#requestJson(`/${encodeURIComponent(index)}/_search?ignore_unavailable=true`, JSON.stringify({
+        size: 0, track_total_hits: true,
+        query: { bool: { filter: [{ term: { asset_id: input.assetId } }, { term: { healpix_order: ASTRO_OBJECT_NATIVE_ORDER } }] } },
+        aggs: { point_cells: { terms: {
+          script: { source: "doc['healpix_pixel'].value / params.factor", params: { factor: (ASTRO_OBJECT_NATIVE_NSIDE / input.nside) ** 2 } },
+          size: Math.min(10_000, 12 * input.nside ** 2),
+        } } },
+      }), "application/json") as ElasticsearchSearchResponse;
+      if (response.timed_out || (isRecord(response._shards) && Number(response._shards.failed) > 0)) throw new Error("Point coverage query did not complete");
+      const cells = isRecord(response.aggregations) && isRecord(response.aggregations.point_cells) ? response.aggregations.point_cells : undefined;
+      if (!cells || !Array.isArray(cells.buckets)) throw new Error("Point coverage aggregation is missing");
+      const pixels = cells.buckets.map(bucket => isRecord(bucket) ? Number(bucket.key) : NaN)
+        .filter(pixel => Number.isSafeInteger(pixel) && pixel >= 0 && pixel < 12 * input.nside ** 2).sort((a, b) => a - b);
+      const truncated = Number(cells.sum_other_doc_count) > 0;
+      return { index, nside: input.nside, pixels, total: totalFromHits(response.hits?.total), status: "ready", truncated,
+        ...(truncated ? { message: "数据点预览仅显示部分已索引区域" } : {}) };
+    } catch (error) {
+      return { ...empty, status: error instanceof ElasticsearchUnavailableError ? "unavailable" : "error", message: error instanceof Error ? error.message : String(error) };
+    }
+  }
+
+  async queryPointDensity(input: AstroPointDensityQueryInput, readIndices: readonly string[] = [this.#objectIndex]): Promise<AstroPointDensityResult> {
+    const normalized = validatePointDensityInput(input);
+    const index = readIndices.map(value => normalizeIndex(value, "readIndex", this.#objectIndex)).join(",");
+    let nside = normalized.targetNside;
+    const empty = (status: AstroObjectQueryStatus, message?: string): AstroPointDensityResult => ({
+      status, index, coordinateFrame: ASTRO_HEALPIX_COORDINATE_FRAME, ordering: ASTRO_HEALPIX_ORDERING,
+      nside, total: 0, layers: normalized.layers.map(layer => ({ id: layer.id, count: 0 })), cells: [], truncated: false,
+      ...(message ? { message } : {}),
+    });
+    if (!this.configured) return empty("unavailable", "ASTRO_ES_URL is not configured");
+    if (!normalized.layers.some(layer => layer.scopes.length)) return empty("ready");
+
+    try {
+      const encodedIndex = encodeURIComponent(index);
+      for (let attempt = 0; attempt <= ASTRO_OBJECT_NATIVE_ORDER; attempt += 1) {
+        const response = await this.#requestJson(
+          `/${encodedIndex}/_search?ignore_unavailable=true`,
+          JSON.stringify(pointDensityQueryBody(normalized, nside)),
+          "application/json",
+        ) as ElasticsearchSearchResponse;
+        if (response.timed_out || (isRecord(response._shards) && Number(response._shards.failed) > 0)) {
+          throw new Error("Point density aggregation did not complete");
+        }
+        if (!isRecord(response.aggregations)) throw new Error("Point density aggregation is missing");
+        const allCells = response.aggregations.by_cell;
+        const byLayer = response.aggregations.by_layer;
+        if (!isRecord(allCells) || !Array.isArray(allCells.buckets) || !isRecord(byLayer) || !isRecord(byLayer.buckets)) {
+          throw new Error("Point density buckets are missing");
+        }
+        let incomplete = Number(allCells.sum_other_doc_count) > 0;
+        for (const layer of normalized.layers) {
+          const result = byLayer.buckets[layer.id];
+          if (!isRecord(result) || !isRecord(result.by_cell) || !Array.isArray(result.by_cell.buckets)) {
+            throw new Error(`Point density buckets are missing for layer ${layer.id}`);
+          }
+          incomplete ||= Number(result.by_cell.sum_other_doc_count) > 0;
+        }
+        if (incomplete) {
+          if (nside <= 1) throw new Error("Point density exceeds the aggregation bucket budget at NSIDE 1");
+          nside /= 2;
+          continue;
+        }
+
+        const cells = new Map<number, AstroPointDensityCell>();
+        for (const bucket of allCells.buckets) {
+          if (!isRecord(bucket)) continue;
+          const pixel = Number(bucket.key);
+          if (!Number.isSafeInteger(pixel) || pixel < 0 || pixel >= 12 * nside ** 2) continue;
+          cells.set(pixel, { pixel, count: Number(bucket.doc_count) || 0, layers: [] });
+        }
+        const layerBuckets = byLayer.buckets as Record<string, unknown>;
+        const layerCounts = normalized.layers.map(layer => {
+          const result = layerBuckets[layer.id] as Record<string, unknown>;
+          const byCell = result.by_cell as Record<string, unknown>;
+          const buckets = byCell.buckets as unknown[];
+          let count = 0;
+          for (const bucket of buckets) {
+            if (!isRecord(bucket)) continue;
+            const pixel = Number(bucket.key);
+            const layerCount = Number(bucket.doc_count) || 0;
+            count += layerCount;
+            const cell = cells.get(pixel);
+            if (cell && layerCount > 0) cell.layers.push({ id: layer.id, count: layerCount });
+          }
+          return { id: layer.id, count };
+        });
+        return {
+          status: "ready", index, coordinateFrame: ASTRO_HEALPIX_COORDINATE_FRAME, ordering: ASTRO_HEALPIX_ORDERING,
+          nside, total: totalFromHits(response.hits?.total), layers: layerCounts,
+          cells: [...cells.values()].sort((left, right) => left.pixel - right.pixel), truncated: false,
+        };
+      }
+      throw new Error("Point density could not fit within the aggregation bucket budget");
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      return empty(error instanceof ElasticsearchUnavailableError ? "unavailable" : "error", message);
+    }
+  }
+
   async queryObjects(input: ObjectRegionQueryInput, readIndices?: readonly string[]): Promise<AstroObjectQueryResult> {
     const normalized = validateQueryInput(input);
     if (!this.configured) {
@@ -1564,6 +1782,23 @@ export class AstroObjectIndexService {
         error instanceof ElasticsearchUnavailableError ? "unavailable" : "error",
         { message },
       );
+    }
+  }
+
+  async #writeBulk(body: string): Promise<void> {
+    for (let attempt = 0; ; attempt++) {
+      try {
+        const response = await this.#requestJson("/_bulk", body, "application/x-ndjson");
+        const error = bulkResponseError(response);
+        if (error) throw error;
+        return;
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        if (attempt >= 3 || !/HTTP (?:408|429|502|503|504)\b|timed out|fetch failed|ECONNRESET|ETIMEDOUT/i.test(message)) throw error;
+        // Every write uses stable index IDs. Repeating an ambiguously committed
+        // batch preserves its rows and only advances the caller after success.
+        await new Promise(resolve => setTimeout(resolve, 500 * 2 ** attempt));
+      }
     }
   }
 

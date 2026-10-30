@@ -13,7 +13,7 @@ export function mergePublicPages(current: AssetsRegionLookupResponse, next: Asse
 }
 
 export function workspaceManifestCsv(publicResult: AssetsRegionLookupResponse | undefined, directories: readonly WorkspaceDirectory[], directoriesTruncated: boolean,
-  context?: { componentId?: string; order?: number; cells?: readonly number[]; unavailable?: unknown[]; warnings?: string[] }): string {
+  context?: { componentId?: string; order?: number; coverageOrder?: number; cells?: readonly number[]; unavailable?: unknown[]; warnings?: string[] }): string {
   const header = ["item_kind", "survey_id", "release_id", "product", "modality", "layer_id", "unit_kind", "unit_id", "order", "precision", "access_uri", "access_uris", "directory_uri", "matching_cells", "query_snapshot_id", "details"];
   const rows: unknown[][] = [];
   for (const unit of publicResult?.spatialUnits ?? []) rows.push(["spatial-unit", unit.surveyId, unit.releaseId, unit.product, unit.modality, unit.layerId, unit.unitKind, unit.unitId,

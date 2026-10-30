@@ -1,6 +1,7 @@
 import { expect, test, type Page, type Route } from "@playwright/test";
 import { createServer, type ServerResponse } from "node:http";
 import { readFile } from "node:fs/promises";
+import { Healpix } from "healpixjs";
 import type { SkyOverlapSource } from "../../src/sky-overlap.js";
 
 const fileName = "SYNTHETIC_EUC_MER_BGSUB-MOSAIC-CFIS-U_TILE102157301-CFF8C7_20241024T172119.513029Z_00.00.fits";
@@ -41,10 +42,10 @@ function publicResult(pixel: number, page = 1, empty = false) {
     page: { pageSize: 1, shown: empty ? 0 : 1, omitted: 0, hasMore: !empty && page === 1, ...(page === 1 ? { nextCursor: "synthetic-page-2" } : {}) } };
 }
 
-type Mock = { pixel: number; lookupRequests: Array<Record<string, unknown>>; unmatched: string[]; empty?: boolean; fail?: boolean; overlapDelayMs?: number; noOverlap?: boolean };
+type Mock = { pixel: number; overlapRequests: Array<Record<string, unknown>>; lookupRequests: Array<Record<string, unknown>>; unmatched: string[]; empty?: boolean; fail?: boolean; overlapFail?: boolean; overlapDelayMs?: number; overlapGate?: Promise<void>; noOverlap?: boolean; secondComponent?: boolean; maximumOrder?: number };
 
 async function installMock(page: Page, options: Partial<Mock> = {}): Promise<Mock> {
-  const mock: Mock = { pixel: 0, lookupRequests: [], unmatched: [], ...options };
+  const mock: Mock = { pixel: 0, overlapRequests: [], lookupRequests: [], unmatched: [], ...options };
   const fulfill = (route: Route, body: unknown, status = 200) => route.fulfill({ status, contentType: "application/json", body: JSON.stringify(body) });
   await page.route("**/api/**", async route => {
     const request = route.request(), path = new URL(request.url()).pathname;
@@ -71,11 +72,25 @@ async function installMock(page: Page, options: Partial<Mock> = {}): Promise<Moc
       if (path === "/api/sky/coverage") return fulfill(route, { status: "ready", nside: 16, pixels: [], layers: [], byAsset: [] });
     }
     if (request.method() === "POST" && path === "/api/sky/overlap") {
+      const input = request.postDataJSON() as Record<string, unknown>;
+      mock.overlapRequests.push(input);
+      if (mock.overlapGate) await mock.overlapGate;
       if (mock.overlapDelayMs) await new Promise(resolve => setTimeout(resolve, mock.overlapDelayMs));
-      if (mock.noOverlap) return fulfill(route, { status: "empty", order: 4, nside: 16, pixels: [], sourceIds: sources.map(s => s.id), sources, components: [] });
-      return fulfill(route, { status: "ready", order: 4, nside: 16,
-      sourceIds: [...sources, outsideSource].map(s => s.id), sources: [...sources, sources[3], outsideSource], pixels: [mock.pixel],
-      components: [{ id: "C01", order: 4, nside: 16, cells: [mock.pixel], sourceIds: sources.map(s => s.id), areaDeg2: 13.4, bounds: { raMin: 0, raMax: 360, decMin: -90, decMax: 90 } }] });
+      if (mock.overlapFail) return fulfill(route, { error: "Synthetic overlap display budget exceeded" }, 400);
+      const nside = Number(input.nside ?? 16), order = Math.log2(nside);
+      const coverageOrder = Math.min(order, mock.maximumOrder ?? 8), coverageNside = 2 ** coverageOrder;
+      const pixel = coverageNside >= 16 ? mock.pixel * (coverageNside / 16) ** 2 : Math.floor(mock.pixel / (16 / coverageNside) ** 2);
+      const factor = (nside / coverageNside) ** 2;
+      const components = [pixel, ...(mock.secondComponent ? [(pixel + 6 * coverageNside ** 2) % (12 * coverageNside ** 2)] : [])]
+        .map((cell, index) => ({ id: `C0${index + 1}`, order, nside, cells: Array.from({ length: factor }, (_, child) => cell * factor + child), sourceIds: sources.map(s => s.id),
+          areaDeg2: 41252.96124941927 / (12 * coverageNside ** 2), bounds: { raMin: 0, raMax: 360, decMin: -90, decMax: 90 } }));
+      const availableOrders = Array.from({ length: (mock.maximumOrder ?? 8) + 1 }, (_, order) => order);
+      const responseSources = [...sources, sources[3]!, outsideSource].map(s => ({ ...s, nside: coverageNside, pixels: [pixel],
+        availableOrders: s.id === "public:legacy-source" ? availableOrders : Array.from({ length: Math.max(8, mock.maximumOrder ?? 8) + 1 }, (_, order) => order) }));
+      if (mock.noOverlap) return fulfill(route, { status: "empty", order, nside, coverageOrder, availableOrders, pixels: [], sourceIds: sources.map(s => s.id), sources: responseSources, components: [] });
+      return fulfill(route, { status: "ready", order, nside, coverageOrder, availableOrders,
+        sourceIds: [...sources, outsideSource].map(s => s.id), sources: responseSources,
+        pixels: components.flatMap(component => component.cells), components });
     }
     if (request.method() === "POST" && path === "/api/sky/reverse-lookup") {
       const input = request.postDataJSON() as Record<string, unknown>;
@@ -113,6 +128,14 @@ async function openOverlap(page: Page, mock: Mock, theme = "dark", width = 1440,
 async function inspectComponent(page: Page, _point: { x: number; y: number }) {
   await expect(page.locator("#inspector-content h2")).toHaveText("重合区块 C01");
   await expect(page.locator('[data-overlap-component-id="C01"]')).toHaveAttribute("aria-pressed", "true");
+}
+
+async function setOverlapOrder(page: Page, order: number) {
+  const slider = page.getByRole("slider", { name: "重合区域 HEALPix 粒度" });
+  await slider.focus();
+  await slider.press("Home");
+  for (let step = 0; step < order; step += 1) await slider.press("ArrowRight");
+  return slider;
 }
 
 test("G coverage sources preserve survey, release and distinct source identities", async ({ page }) => {
@@ -298,6 +321,177 @@ test("slow overlap shows pending state and automatically selects C01", async ({ 
   await expect.poll(() => mock.lookupRequests.length).toBe(1);
 });
 
+test("overlap HEALPix granularity recomputes geometry and reverse lookup at the selected order", async ({ page }) => {
+  const mock = await installMock(page);
+  await openOverlap(page, mock);
+  const granularity = page.getByRole("slider", { name: "重合区域 HEALPix 粒度" });
+  await expect(granularity).toBeVisible();
+  await setOverlapOrder(page, 6);
+  await expect.poll(() => mock.overlapRequests.at(-1)?.nside).toBe(64);
+  await expect(page.locator("#inspector-content")).toContainText("O6");
+  await expect.poll(() => mock.lookupRequests.at(-1)?.nside).toBe(64);
+  expect(mock.lookupRequests.at(-1)?.pixels).toEqual([mock.pixel * 16]);
+  await setOverlapOrder(page, 3);
+  await expect.poll(() => mock.overlapRequests.at(-1)?.nside).toBe(8);
+  await expect(page.locator("#inspector-content")).toContainText("O3");
+  await expect.poll(() => mock.lookupRequests.at(-1)?.nside).toBe(8);
+  await granularity.press("End");
+  await expect.poll(() => mock.overlapRequests.at(-1)?.nside).toBe(256);
+  await expect(page.locator("#inspector-content")).toContainText("O8");
+});
+
+test("overlap slider supports the actual high precision order of selected surveys", async ({ page }, testInfo) => {
+  const mock = await installMock(page, { maximumOrder: 10 });
+  await openOverlap(page, mock);
+  const slider = page.getByRole("slider", { name: "重合区域 HEALPix 粒度" });
+  await expect(slider).toBeVisible();
+  await expect(slider).toHaveAttribute("max", "10");
+  await slider.press("End");
+  await expect.poll(() => mock.overlapRequests.at(-1)?.nside).toBe(1024);
+  await expect.poll(() => mock.lookupRequests.at(-1)?.nside).toBe(1024);
+  await expect(slider).toHaveAttribute("aria-valuetext", "O10 · NSIDE 1024");
+  await page.locator('[data-overlap-component-id="C01"]').click();
+  await expect.poll(async () => Number(await page.locator("#scene-canvas").getAttribute("data-camera-distance"))).toBeLessThan(1.1);
+  await page.screenshot({ path: testInfo.outputPath("overlap-o10-slider-focused.png") });
+});
+
+test("dragging the overlap slider previews locally and submits only the released order", async ({ page }) => {
+  const mock = await installMock(page);
+  await openOverlap(page, mock);
+  const slider = page.getByRole("slider", { name: "重合区域 HEALPix 粒度" });
+  const box = (await slider.boundingBox())!;
+  const y = box.y + box.height / 2;
+  const x = (order: number) => box.x + 8 + (box.width - 16) * order / 8;
+  const requests = mock.overlapRequests.length;
+  await page.mouse.move(x(4), y);
+  await page.mouse.down();
+  await page.mouse.move(x(7), y, { steps: 4 });
+  await page.mouse.move(x(6), y, { steps: 3 });
+  await expect(slider).toHaveValue("6");
+  await expect(slider).toHaveAttribute("aria-valuetext", "O6 · NSIDE 64");
+  await page.waitForTimeout(350);
+  expect(mock.overlapRequests.length).toBe(requests);
+  await expect(page.locator(".overlap-granularity-status")).toContainText("当前显示 O4");
+  await page.mouse.up();
+  await expect.poll(() => mock.overlapRequests.length).toBe(requests + 1);
+  expect(mock.overlapRequests.at(-1)?.nside).toBe(64);
+  await expect.poll(() => mock.lookupRequests.at(-1)?.nside).toBe(64);
+});
+
+test("changing visible surveys refreshes the slider limits and drops the previous request", async ({ page }) => {
+  const mock = await installMock(page, { maximumOrder: 10 });
+  await openOverlap(page, mock);
+  const slider = page.getByRole("slider", { name: "重合区域 HEALPix 粒度" });
+  await expect(slider).toHaveAttribute("max", "10");
+  let release = () => {};
+  mock.overlapGate = new Promise<void>(resolve => { release = resolve; });
+  await slider.press("End");
+  await expect.poll(() => mock.overlapRequests.at(-1)?.nside).toBe(1024);
+  mock.overlapGate = undefined; mock.maximumOrder = 4;
+  await page.getByRole("checkbox", { name: "显示 Euclid", exact: true }).check();
+  await expect(slider).toHaveAttribute("max", "4");
+  await expect(slider).toHaveValue("4");
+  await expect(page.locator("#scene-canvas")).toHaveAttribute("data-layout-mode", "overlap");
+  const request = mock.overlapRequests.at(-1)!;
+  expect(request.nside).toBeUndefined();
+  expect((request.sourceIds as string[]).some(id => id.includes("euclid"))).toBe(true);
+  release();
+  mock.maximumOrder = 11;
+  await page.getByRole("checkbox", { name: "显示 DESI", exact: true }).uncheck();
+  await expect(slider).toHaveAttribute("max", "11");
+  await expect(slider).toHaveValue("4");
+  expect(mock.lookupRequests.some(request => request.nside === 1024)).toBe(false);
+});
+
+test("loading and failed order changes preserve the successful geometry, camera and export", async ({ page }) => {
+  const mock = await installMock(page);
+  await openOverlap(page, mock);
+  const canvas = page.locator("#scene-canvas");
+  const camera = await canvas.getAttribute("data-camera-position");
+  mock.overlapDelayMs = 1000; mock.overlapFail = true;
+  await setOverlapOrder(page, 7);
+  await expect.poll(() => mock.overlapRequests.at(-1)?.nside).toBe(128);
+  await expect(page.locator(".overlap-granularity-status")).toContainText("当前显示 O4");
+  await expect(canvas).toHaveAttribute("data-overlap-order", "4");
+  await expect(page.locator('[data-overlap-component-id="C01"]')).toHaveAttribute("aria-pressed", "true");
+  await expect(page.locator(".overlap-granularity-status")).toContainText("当前保留 O4 的结果");
+  await expect(canvas).toHaveAttribute("data-overlap-mode", "true");
+  await expect(canvas).toHaveAttribute("data-overlap-order", "4");
+  await expect(canvas).toHaveAttribute("data-camera-position", camera!);
+  const download = page.waitForEvent("download");
+  await page.getByRole("button", { name: "导出 JSON", exact: true }).click();
+  const manifest = JSON.parse(await readFile((await (await download).path())!, "utf8"));
+  expect(manifest.order).toBe(4);
+  mock.overlapDelayMs = 0; mock.overlapFail = false;
+  await setOverlapOrder(page, 6);
+  await expect(canvas).toHaveAttribute("data-overlap-order", "6");
+  await expect(page.getByRole("slider")).toBeFocused();
+});
+
+test("clicking an overlap component moves the sky camera to that region", async ({ page }) => {
+  const mock = await installMock(page, { secondComponent: true, maximumOrder: 4 });
+  await openOverlap(page, mock);
+  const canvas = page.locator("#scene-canvas");
+  const before = await canvas.getAttribute("data-camera-position");
+  await page.locator('[data-overlap-component-id="C02"]').click();
+  await expect(page.locator('[data-overlap-component-id="C02"]')).toHaveAttribute("aria-pressed", "true");
+  await expect.poll(() => canvas.getAttribute("data-camera-position"), { timeout: 3000 }).not.toBe(before);
+  const direction = new Healpix(16).getBoundaries((mock.pixel + 6 * 16 ** 2) % (12 * 16 ** 2))
+    .reduce((sum, point) => [sum[0]! - point.y, sum[1]! + point.z, sum[2]! - point.x], [0, 0, 0]);
+  const length = Math.hypot(...direction);
+  await expect.poll(async () => {
+    const camera = (await canvas.getAttribute("data-camera-position"))!.split(",").map(Number);
+    const radius = Math.hypot(...camera);
+    return camera.reduce((dot, value, i) => dot + value * direction[i]! / (radius * length), 0);
+  }, { timeout: 3000 }).toBeGreaterThan(0.999);
+  const second = await canvas.getAttribute("data-camera-position");
+  await page.locator('[data-overlap-component-id="C01"]').click();
+  await expect.poll(() => canvas.getAttribute("data-camera-position"), { timeout: 3000 }).not.toBe(second);
+});
+
+test("the slider respects a selected coarse source and exports the actual order", async ({ page }, testInfo) => {
+  const mock = await installMock(page, { maximumOrder: 4 });
+  await openOverlap(page, mock);
+  const granularity = page.getByRole("slider", { name: "重合区域 HEALPix 粒度" });
+  await expect(granularity).toHaveAttribute("min", "0");
+  await expect(granularity).toHaveAttribute("max", "4");
+  await expect(page.locator(".overlap-granularity-note")).toContainText("所选来源共同支持 O0–O4");
+  await expect(page.locator(".overlap-granularity-note")).toContainText("Legacy DR9 view");
+  await setOverlapOrder(page, 3);
+  await expect.poll(() => mock.lookupRequests.at(-1)?.nside).toBe(8);
+  await granularity.press("End");
+  await expect.poll(() => mock.lookupRequests.at(-1)?.nside).toBe(16);
+  expect(mock.overlapRequests.some(request => Number(request.nside) > 16)).toBe(false);
+  const download = page.waitForEvent("download");
+  await page.getByRole("button", { name: "导出 JSON", exact: true }).click();
+  const file = await download;
+  const manifest = JSON.parse(await readFile((await file.path())!, "utf8"));
+  expect(manifest.order).toBe(4);
+  expect(manifest.coverageOrder).toBe(4);
+  const canvas = page.locator("#scene-canvas");
+  const before = await canvas.getAttribute("data-camera-position");
+  await page.locator('[data-overlap-component-id="C01"]').click();
+  await expect.poll(() => canvas.getAttribute("data-camera-position")).not.toBe(before);
+  await page.screenshot({ path: testInfo.outputPath("overlap-order-slider-focused.png") });
+});
+
+test("a delayed overlap resolution cannot overwrite a newer selection", async ({ page }) => {
+  const mock = await installMock(page);
+  await openOverlap(page, mock);
+  const granularity = page.getByRole("slider", { name: "重合区域 HEALPix 粒度" });
+  let release = () => {};
+  mock.overlapGate = new Promise<void>(resolve => { release = resolve; });
+  await setOverlapOrder(page, 6);
+  await expect.poll(() => mock.overlapRequests.at(-1)?.nside).toBe(64);
+  mock.overlapGate = undefined;
+  await granularity.press("ArrowRight");
+  release();
+  await expect(page.locator("#scene-canvas")).toHaveAttribute("data-overlap-order", "7");
+  await expect(granularity).toHaveValue("7");
+  await expect(page.locator("#inspector-content")).toContainText("O7");
+  expect(mock.lookupRequests.some(request => request.nside === 64)).toBe(false);
+});
+
 test("empty overlap stays unselected and late responses cannot restore an exited mode", async ({ page }) => {
   const mock = await installMock(page, { noOverlap: true });
   await openOverlap(page, mock);
@@ -344,6 +538,7 @@ test("download settings preserve edits during heartbeat refresh and show route f
   await page.locator('[data-settings-tab="downloads"]').click();
   await page.locator("#download-proxy-enabled").check();
   await page.locator("#download-proxy-url").fill("http://10.15.49.212:7890");
+  await page.locator(".download-proxy-auth summary").click();
   await page.locator("#download-proxy-username").fill("fixture-user");
   await page.locator("#download-proxy-password").fill("fixture-password");
   await page.locator("#download-proxy-test").click();

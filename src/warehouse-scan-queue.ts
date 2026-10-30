@@ -29,6 +29,7 @@ interface Options {
 }
 const sha = (value: string): string => createHash("sha256").update(value).digest("hex");
 const fingerprint = (connector: ConnectorRecord, input: GenericScanInput): string => sha(JSON.stringify([connector.config, input]));
+const metadataLocked = (error: unknown): boolean => /\bSQLITE_(?:BUSY|LOCKED)\b|database (?:is )?(?:locked|busy)/i.test(error instanceof Error ? `${"code" in error ? error.code : ""} ${error.message}` : String(error));
 export const SCANNER_JOB_CONCURRENCY = 2;
 export const SCANNER_SHARD_FILES = 2000;
 
@@ -114,8 +115,16 @@ export class WarehouseScanQueue {
       let slots = Math.max(0, SCANNER_JOB_CONCURRENCY - runs.filter(run => run.backend === "warehouse" && run.executor !== "warehouse-batch"
         && ["queued", "running"].includes(run.status)).length);
       for (const batch of this.#batches.values()) {
-        if (!["discovering", "scanning", "finalizing"].includes(batch.phase)) continue;
         try {
+          // Retained successful evidence is useful even when another shard or
+          // the parent's metadata write failed. The callback is idempotent.
+          await this.#submitPositions(batch, runs);
+          const parent = runs.find(run => run.id === batch.runId);
+          if (batch.phase === "failed" && parent?.error && metadataLocked(parent.error)) {
+            batch.phase = batch.roster ? "scanning" : "discovering";
+            await this.#save(batch);
+          }
+          if (!["discovering", "scanning", "finalizing"].includes(batch.phase)) continue;
           if (batch.phase === "discovering") await this.#discover(batch);
           let failed = 0, completed = 0, active = 0, processedFiles = 0, documents = 0;
           let batchSlots = Math.max(0, (batch.concurrency ?? 2) - runs.filter(run => run.parentRunId === batch.runId && ["queued", "running"].includes(run.status)).length);
@@ -138,7 +147,7 @@ export class WarehouseScanQueue {
             else if (run?.status === "failed") failed++;
             else if (run) active++;
           }
-          await this.options.runs.update(batch.runId, { status: "running", fileCount: batch.fileCount, processedFiles, documentCount: documents,
+          await this.options.runs.update(batch.runId, { status: "running", error: "", fileCount: batch.fileCount, processedFiles, documentCount: documents,
             batchProgress: { completed, failed, total: batch.shards.length, active } });
           if (completed === batch.shards.length) {
             runs = await this.options.runs.list(); batch.phase = "finalizing"; await this.#save(batch);
@@ -147,12 +156,34 @@ export class WarehouseScanQueue {
             throw new Error(`${failed} 个分片失败；已完成分片已保留，可重试未完成分片。`);
           }
         } catch (error) {
+          if (metadataLocked(error)) {
+            console.warn("Scan batch will retry metadata contention", batch.runId);
+            continue;
+          }
           batch.phase = "failed"; await this.#save(batch);
           await this.options.runs.update(batch.runId, { status: "failed", error: error instanceof Error ? error.message : "Batch scan failed", completedAt: new Date().toISOString() });
         }
       }
     } catch (error) { console.error("Scan queue unavailable", error instanceof Error ? error.message : "unknown"); }
     finally { this.#ticking = false; }
+  }
+
+  async #submitPositions(batch: Batch, runs: ConnectorIngestRunRecord[]): Promise<void> {
+    for (const shard of batch.shards) {
+      if (shard.positionsSubmitted || !shard.runId) continue;
+      const child = runs.find(run => run.id === shard.runId);
+      if (child?.status !== "succeeded" || child.coverage?.mode !== "fits-wcs") continue;
+      try {
+        await this.options.onCompleted(batch.assetId, child.id);
+        shard.positionsSubmitted = true;
+        await this.#save(batch);
+      } catch (error) {
+        // A derived index outage must not discard a successful scientific scan
+        // or prevent remaining immutable partitions from being submitted.
+        shard.positionsSubmitted = false;
+        console.warn("Shard positions will retry", child.id, error instanceof Error ? error.message : String(error));
+      }
+    }
   }
 
   async #save(batch: Batch): Promise<void> {
@@ -255,11 +286,7 @@ export class WarehouseScanQueue {
         availableOrders: artifact.availableOrders, precision: artifact.precision });
       batch.merged = true; await this.#save(batch);
     }
-    for (const [index, child] of children.entries()) {
-      const shard = batch.shards[index]!;
-      if (child.coverage?.mode !== "fits-wcs" || shard.positionsSubmitted) continue;
-      await this.options.onCompleted(batch.assetId, child.id); shard.positionsSubmitted = true; await this.#save(batch);
-    }
+    await this.#submitPositions(batch, runs);
     await this.options.runs.update(batch.runId, { status: "succeeded", error: "", completedAt: new Date().toISOString() });
   }
 }

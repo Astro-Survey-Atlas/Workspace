@@ -1,10 +1,33 @@
 # Workspace handoff
 
-Updated: 2026-10-26, Asia/Shanghai.
+Updated: 2026-10-30, Asia/Shanghai.
 
 ## Current work
 
-The current request implements trustworthy capacity statistics and a bounded,
+The latest Aladin performance and fullscreen Inspector changes are deployed to
+Dev at Helm revision **114**, image
+`0.0.1-dev-20261030-aladin-density-r1`. See the final deployment section for
+the live verification details.
+
+The coverage overlap order slider and C0x camera navigation shipped to Dev at
+Helm revision **109**, image `0.0.1-dev-20261029-overlap-slider-r1`, and remain
+included in the latest deployment. Preserve all existing staged and uncommitted
+work.
+
+The subsequent scan-visibility fixes are deployed to Dev at Helm revision
+**111**, image `0.0.1-dev-20261029-visible-points-r2`. COSMOS now counts its
+1,720,500 real catalog rows and exposes their occupied cells as a temporary
+preview. **查看数据点** opens Aladin at an actual indexed coordinate. Successful
+Warehouse shards immediately generate positions from retained companions;
+the interrupted CSST deep v2 and Euclid batches have resumed their existing
+frozen manifests, with at most two Scanner Jobs. See
+`docs/workspace-visible-points-20261029.md` and the final deployment section.
+
+The earlier read-only audit remains in `docs/workspace-scan-status-20261029.md`.
+It is a historical baseline, not the current running/point state. Inventory
+growth still does not imply new published coverage or bytes actually read.
+
+The preceding request implements trustworthy capacity statistics and a bounded,
 durable Scanner Job queue before considering Flink. The October 15 statistics
 and encrypted configuration backup are deployed to dev. The October 26 work is
 also deployed and verified on dev at Helm revision 104, image
@@ -200,8 +223,8 @@ is separate from the header extraction measurement.
 Dev URL: `http://astro.workspace.dev.72602.space:32080`.
 Use `curl --noproxy '*'` for this local endpoint. Helm release is `asa` in
 `asa-workspace`; retain existing values on upgrade. Workspace memory limit is
-1 GiB; local ES request/limit is 1/2 GiB with 512 MiB heap. Do not change these
-as part of data repair.
+2 GiB; local ES request/limit is 1/2 GiB with 512 MiB heap. Keep ES sizing
+unchanged during data repair.
 
 ### Current Dev deployment (October 26)
 
@@ -524,3 +547,209 @@ for deployment verification.
 The registry endpoint timed out through the configured local HTTP proxy; the
 same endpoint responded directly, so only the image push bypassed proxy
 variables. The Dev site is available at `http://astro.workspace.dev.72602.space:32080`.
+
+## Dev connector scan continuation (October 28)
+
+Workspace is deployed at Helm revision **108** with image
+`0.0.1-dev-20261028-statistics-queue-r1`. The Workspace Pod is Ready with zero
+restarts and a 2 GiB memory limit. Leave Elasticsearch sizing unchanged; it was
+near its 2 GiB limit during observation, without OOM or circuit-breaker logs.
+
+Inventory refresh `ec424a2e-f122-4ba2-b978-85c1662c7967` is running across 12
+Connectors. At 08:47 UTC it had completed 4/12 Connectors and processed
+1,129,168 objects; the current deep-v1 listing checkpoint had 128,242 objects.
+Global accessible capacity was partial at 1,523,685 files / 180,751,703,589,527
+bytes. This is inventory, not scanned data. Current scanned remained partial at
+661,182 files / 118,424,028,772,800 bytes (last published 05:24 UTC); cumulative
+scanned remained partial at 707,182 logical files / 146,767,937,745,832 bytes
+(last published 07:32 UTC). Do not report either accessible inventory or
+in-progress shards as completed scan totals.
+
+Deep-v2 batch `ingest-e9da7d49-f9fb-475b-9706-72ac1e8fe316` covers 164,304 FITS
+files in 83 immutable shards. At 08:44 UTC, 16 shards had succeeded, 2 were
+active and 2 had failed, with 32,000 files processed. The two failures logged
+Elasticsearch request timeouts during layer finalization, not a source-format
+error. Keep at most two Scanner Jobs. Let the roster finish; after the parent
+batch becomes failed, retry its failed shards through the batch retry path so
+successful shards and frozen inventories are preserved. The current scanned
+total publishes the new batch only after all shards succeed.
+
+COSMOS CSV scan `ingest-1ad4d83e-0424-4384-96bf-b29f33f430ec` is still running
+for one 109 MB file; its task reports zero completed files and the private MOC
+scratch file was about 12 MB. Do not submit it again. MaNGA ssy2 already had a
+53-shard attempt that failed on explicit RA/DEC WCS requirements, object-store
+Range support and gzip FITS limitations. MaNGA DRP also has WCS/header failures,
+including files with more than 64 HDUs. Euclid has many WCS/header failures;
+LOFAR HEALPix projection is unsupported. HSC/Legacy Survey inventory prefixes
+include HDF5, Arrow and Parquet data, which the current scientific scanner does
+not process. Do not count these metadata listings as scanned content.
+
+Workspace logs showed intermittent `database is locked` errors at 07:53, 08:02,
+08:21 and 08:38 UTC. These are distinct from the deep-v2 Elasticsearch timeouts;
+root cause is not established. No lock was observed in one intervening 10-minute
+window. Continue monitoring rather than treating the lock as resolved.
+
+## Overlap order slider and C0x navigation (October 29)
+
+The coverage Inspector now has an Assets-style HEALPix slider. It previews
+changes during pointer/touch dragging, submits the released order, and
+debounces keyboard changes by 250 ms. The range follows the selected sources'
+real shared precision, from O0 through at most O13. Initial/source-selection
+queries use O4 or the highest supported lower order. Changing visible surveys
+refreshes the range and cancels the previous selection's request.
+
+Overlap uses verified public/package and private native FITS MOC intervals.
+Survey products are unioned before surveys are intersected, and cells are
+expanded only after intersection. High-resolution native boundaries survive;
+the former coarse-mask subdivision design was removed. Queries above O8 have
+a 32,768-cell budget and preserve the last successful result on errors. Other
+orders also have bounded output. Original MOCs and scientific indexes remain
+unchanged. Before this deployment, a read-only Dev query showed an O4 limit
+from DESI DR1 bright-program redrock and two Legacy DR9 overviews. Native MOC
+reading now exposes O6 for the DESI source; the Legacy overviews still limit
+the complete source selection to O4.
+
+Clicking an Inspector C0x button animates and frames its region using spherical
+cell boundaries. Automatic initial C01 selection preserves the camera view.
+Superseded geometry responses cannot replace a newer selection; the displayed
+geometry and its inspection/export stay usable during loading and failures.
+Large component bounds no longer overflow the argument stack; a 40,000-cell
+regression covers that failure. High-order reverse lookup queries the existing
+O8 local buckets and filters the returned native facts against the fine region.
+Public download previews and immutable download region snapshots accept O13;
+object crossmatching retains its existing O8 index limit.
+
+Both reported symptoms and the missing slider/high-order support were
+reproduced before the fixes. `npm run verify` passed: 394 tests, 390 passed,
+four optional checks skipped, zero failures, plus types, all builds and Helm
+checks. The 18-case coverage/settings browser run and six final focused slider,
+source-selection and navigation checks passed (19 distinct browser scenarios). Offline projection
+of the existing Assets Euclid ERO VIS and Gaia DR3 MOCs at O10 returned 3,925
+overlap cells in 17 complete components. See
+`docs/workspace-overlap-grid-verification-20261028.md` for evidence.
+
+The user subsequently requested Dev deployment. Helm release `asa` in namespace
+`asa-workspace` is now deployed at revision **109**, image
+`crpi-wixjy6gci86ms14e.cn-hongkong.personal.cr.aliyuncs.com/ay-dev/asa-workspace:0.0.1-dev-20261029-overlap-slider-r1`.
+The running Pod reports image digest
+`sha256:f823da406381c3abc3e3d18c25030967e63e98b5c1af826d084d135af61d2d8f`.
+The image overlays the rebuilt server, Viewer and CLI on the verified revision
+108 runtime. `helm upgrade --reuse-values --wait --rollback-on-failure`
+changed only the Workspace image; server-side rendering confirmed the same
+resources, credentials and configuration. Workspace, downloader and
+Elasticsearch are Ready, the search-init hook succeeded, and all PVCs are Bound.
+`/healthz` returns `ok` / `0.0.1`.
+
+All six focused browser regressions passed against the deployed frontend using
+API fixtures. Read-only real API checks verified O3/O4 queries, rejection of O5
+for the Legacy O4 selection, and native O10 overlap between DESI EDR spectra and
+Euclid ERO VIS: **78 cells in one component**. Deployed HTML, JavaScript and CSS
+match the local build byte for byte. The real Dev browser also passed O4 → O3
+→ O4 slider changes and C02 camera navigation with no page errors, after
+waiting for initial private coverage to load and selecting the three public
+surveys. Deployment evidence is stored under
+`/tmp/workspace-overlap-dev-20261029-tta29s1y`.
+
+Changes remain uncommitted and the staging index is preserved. No new scan,
+scan retry, inventory refresh, download, public release or index rebuild was
+submitted during the UI work or deployment.
+
+## Dev scan status audit (October 29, read-only)
+
+Around 10:25 Asia/Shanghai, accessible inventory grew to 1,903,122 files and
+219,702,175,490,700 known source bytes, still partial. Inventory refresh is
+running at 7/12 Connectors. Published scans remain 661,182 files /
+118,424,028,772,800 source bytes; cumulative logical workload remains 725,182
+files / 149,991,880,432,552 source bytes. There are zero active Scanner Jobs or
+queued/running Connector runs. Inventory growth does not mean point extraction
+is continuing.
+
+Six of 18 assets have ready coverage and published point records: CSST W1
+356,112, CSST deep v1 246,456, CSST wide v2 58,608, validation asset 4,000,
+downloaded Euclid Q1 five, HST two. Six assets are inventory-only registrations.
+MaNGA, LOFAR, Euclid shared-data and COSMOS have failed scientific scans.
+
+CSST deep v2 parent `ingest-e9da7d49-f9fb-475b-9706-72ac1e8fe316` failed with
+`database is locked`. Its durable manifest has 83 shards, 21 submitted and 62
+unsubmitted. Latest child per partition shows 19 successes / 38,000 files and
+two failures; the parent's 17-success/two-active counter is stale. Euclid's
+failed batch similarly has nine successful partitions / 18,000 files, 39
+failed and two unsubmitted. Neither submitted point extraction. Preserve the
+immutable rosters and successful shards for any later authorized recovery.
+
+Read-only point queries found a status inconsistency: COSMOS has 1,720,500
+queryable object-index records while its card reports zero data points. The
+status route counts only the sky-point index, while the actual query reads
+both object and sky-point indices. Its scan failed generating coverage, so
+these records are not evidence of a successful completed scan. The actual
+point query returns nonzero counts for seven assets, zero for 11.
+
+See `docs/workspace-scan-status-20261029.md` for source-specific errors and
+evidence. This audit submitted no new scans, retries, refreshes, repairs,
+downloads or deployments; it made no runtime/code changes.
+
+
+## October 29: visible data points and durable shard recovery
+
+Deployed Dev revision **111**, image
+`0.0.1-dev-20261029-visible-points-r2`. Pod
+`asa-workspace-5bd474bfb4-vnmjn` is Ready, zero restarts; image ID
+`sha256:d2fa37618e59a7b86b975df3b0e7c920bb7953f86132215ff2df9b215ad41425`.
+The manifest comparison confirmed an image-only update, with existing storage
+and Secrets retained. At most two Scanner Jobs remain active, each requesting
+500m CPU / 512Mi and limited to 1 CPU / 1Gi.
+
+The real catalog/image point union now drives card counts and queryability.
+An unavailable query is not displayed as a fabricated zero. Actual indexed
+positions provide a bounded occupied-cell preview when complete scientific
+coverage is unavailable; no complete MOC or success status is fabricated.
+**查看数据点** opens Aladin at a real indexed coordinate and inherits only the
+chosen asset's explicit scope. Logical parent scans remain authoritative over
+partition success.
+
+The two lock-interrupted batches resume their existing frozen manifests:
+CSST deep v2 `ingest-e9da7d49-f9fb-475b-9706-72ac1e8fe316`, and Euclid
+`ingest-37cf1ed7-f94f-4660-a843-dffaf0db6594`. Successful retained companions
+now submit point indexing immediately, including from failed parents. This
+does not resubmit any full CSST scan or republish partial replacement MOCs.
+Transient queue metadata failures, SQLite boundary/read locks and stable-ID
+Elasticsearch bulk retries have regressions; transaction callbacks never replay.
+
+Final live audit: 18/18 point queries reachable, **9 assets with points**,
+9 without. COSMOS has **1,720,500**, CSST deep v2 **3,977**, and Euclid
+shared-data **626** at this snapshot. The latter two remain indexing; all
+previously queryable assets retain their counts. CSST and Euclid parents are
+running and preserve failed partitions. Remaining metadata-only roots and
+MaNGA/ssy2/LOFAR format failures remain explicit limitations.
+
+`npm run verify`: **394 passed, 4 skipped**. Six overlap slider/camera browser
+regressions passed. Actual Dev browser tests rendered **1,000 COSMOS catalog
+positions** and **110 CSST deep v2 image positions** in their initial viewports;
+both canvases contained markers and had no page errors. Browser validation
+used a service port-forward due to the test browser's external proxy route;
+the public Dev API was verified directly.
+
+Evidence: `/tmp/workspace-points-dev-20261029-npsob8qq/`, including deployment
+receipt, final run/repair/point snapshots, real browser receipts and screenshots.
+See `docs/workspace-visible-points-20261029.md`. The preceding read-only audit
+is historical. Statistics are reconciling successful history after restart;
+source inventory growth remains separate from scientific scans and points.
+
+## Aladin performance and fullscreen Inspector (October 30)
+
+Deployed Dev at Helm revision **114**, image
+`0.0.1-dev-20261030-aladin-density-r1`, digest
+`sha256:c1a5909762c53157074ac058e37529b6b4b12bd06cbd50097c5bf0370d16dd43`.
+Pod `asa-workspace-7489f5f95-hb9xs` is Ready with zero restarts, and `/healthz`
+is healthy. Deployed HTML, JavaScript and CSS hashes match the local build.
+
+Aladin now opens at 0.5-degree FOV. Above 0.75 degrees it uses per-layer
+HEALPix density rendering; standard zoomed-in points use Aladin circle markers.
+The layer drawer can be collapsed and reopened. Selecting a point while
+fullscreen opens its Inspector docked on the right.
+
+`npm run build`, `npm run verify:types`, and `npm run verify:chart` passed in
+the deployment build worktree. Focused service tests passed 21/21. Inspector
+and density browser regressions passed against deployed Dev. Live COSMOS checks
+returned 1,720,500 queryable positions; a bounded density query returned
+264,912 points across two NSIDE 32 cells with `indexing=false`.

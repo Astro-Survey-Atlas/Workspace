@@ -6,6 +6,7 @@ import { createIcons, Pencil, Play, ScrollText, SearchCheck, Trash2 } from "luci
 
 import { workspaceApi, type ConnectorScanRun, type WarehouseTaskLogs, type WorkspaceCapabilities } from "./api";
 import type { DataAmount, DataStatisticsView } from "../../src/data-statistics-types";
+import { showContextMenu, type ContextMenuAction } from "./context-menu";
 import { notifyWorkspace } from "./notifications";
 
 export interface ConnectorMetrics {
@@ -58,6 +59,7 @@ export class ConnectorPanel {
   #runLogState: { runId: string; loading: boolean; value?: WarehouseTaskLogs; error?: string } | undefined;
   #runLogRequest = 0;
   #editingId: string | null = null;
+  #checkingConnectorId: string | null = null;
   #view: ConnectorView = "list";
   #active = false;
   #runPollTimer: ReturnType<typeof setTimeout> | undefined;
@@ -87,6 +89,10 @@ export class ConnectorPanel {
         this.#view = button.dataset.connectorView as ConnectorView;
         this.#render();
         if (this.#view === "statistics") void this.#loadStatistics();
+        else if (this.#statisticsPollTimer) {
+          clearTimeout(this.#statisticsPollTimer);
+          this.#statisticsPollTimer = undefined;
+        }
       });
     });
     byId<HTMLButtonElement>("connector-statistics-refresh").addEventListener("click", () => void this.#refreshStatistics());
@@ -106,6 +112,12 @@ export class ConnectorPanel {
     byId<HTMLButtonElement>("connector-run-logs-dialog-dismiss").addEventListener("click", () => logDialog.close());
     logDialog.addEventListener("click", (event) => {
       if (event.target === logDialog) logDialog.close();
+    });
+    byId("inspector-content").addEventListener("contextmenu", (event) => {
+      if (!this.#active) return;
+      if ((event.target as HTMLElement).closest("input,textarea,select,[contenteditable='true']")) return;
+      const record = this.#records.find((candidate) => candidate.id === this.#selectedId);
+      if (record) showContextMenu(event, this.#contextMenuActions(record));
     });
   }
 
@@ -136,6 +148,7 @@ export class ConnectorPanel {
     }
     this.#resetRegistrationForm();
     this.#render();
+    if (this.#view === "statistics") void this.#loadStatistics();
   }
 
   async refresh(): Promise<void> {
@@ -148,6 +161,44 @@ export class ConnectorPanel {
     this.#editingId = null;
     this.#view = "list";
     if (this.#active) this.#render();
+  }
+
+  async testConnector(recordId: string): Promise<void> {
+    if (!this.#records.some((record) => record.id === recordId)) throw new Error(`Unknown Connector: ${recordId}`);
+    this.#selectedId = recordId;
+    this.#editingId = null;
+    this.#view = "list";
+    this.#render();
+    await this.#checkSelected();
+  }
+
+  editConnector(recordId: string): void {
+    if (!this.#records.some((record) => record.id === recordId)) return;
+    this.#selectedId = recordId;
+    this.#editingId = recordId;
+    this.#view = "list";
+    this.#render();
+  }
+
+  async removeConnector(recordId: string): Promise<void> {
+    if (!this.#records.some((record) => record.id === recordId)) throw new Error(`Unknown Connector: ${recordId}`);
+    this.#selectedId = recordId;
+    this.#editingId = null;
+    this.#view = "list";
+    this.#render();
+    await this.#remove();
+  }
+
+  executeScan(recordId: string): void {
+    const record = this.#records.find((candidate) => candidate.id === recordId);
+    if (!record) return;
+    const reason = this.#scanUnavailableReason(record);
+    if (reason) { notifyWorkspace("Connector 暂不可扫描", reason, { tone: "warning" }); return; }
+    this.#selectedId = recordId;
+    this.#editingId = null;
+    this.#view = "list";
+    this.#render();
+    void this.#executeScan(record, undefined, "auto");
   }
 
   deactivate(): void {
@@ -213,8 +264,13 @@ export class ConnectorPanel {
       const row = document.createElement("button");
       row.type = "button";
       row.className = "connector-row";
+      row.dataset.connectorId = record.id;
       row.classList.toggle("selected", record.id === this.#selectedId);
-      row.addEventListener("click", () => { this.#selectedId = record.id; this.#editingId = null; this.#render(); if (window.innerWidth <= 1040) byId("inspector-panel").classList.add("mobile-open"); });
+      row.addEventListener("click", () => { this.select(record.id); if (window.innerWidth <= 1040) byId("inspector-panel").classList.add("mobile-open"); });
+      row.addEventListener("contextmenu", (event) => {
+        this.select(record.id);
+        showContextMenu(event, this.#contextMenuActions(record));
+      });
       const identity = document.createElement("span");
       const name = document.createElement("strong"); name.textContent = record.name;
       const note = document.createElement("small"); note.textContent = record.description;
@@ -234,9 +290,11 @@ export class ConnectorPanel {
   async #loadStatistics(): Promise<void> {
     if (!this.#active || this.#view !== "statistics") return;
     try {
-      this.#statistics = await workspaceApi.dataStatistics();
+      const [statistics, runs] = await Promise.all([workspaceApi.dataStatistics(), workspaceApi.connectorIngestRuns()]);
+      this.#statistics = statistics;
+      this.#runs = runs;
       this.#renderStatistics();
-      if (this.#statistics.refresh?.status === "running") this.#scheduleStatisticsPoll();
+      if (this.#statistics.refresh?.status === "running" || runs.some((run) => run.status === "queued" || run.status === "running")) this.#scheduleStatisticsPoll();
     } catch (error) { this.#onError(error); }
   }
 
@@ -253,7 +311,7 @@ export class ConnectorPanel {
 
   #scheduleStatisticsPoll(): void {
     if (this.#statisticsPollTimer) clearTimeout(this.#statisticsPollTimer);
-    this.#statisticsPollTimer = setTimeout(() => { this.#statisticsPollTimer = undefined; void this.#loadStatistics(); }, 1800);
+    this.#statisticsPollTimer = setTimeout(() => { this.#statisticsPollTimer = undefined; void this.#loadStatistics(); }, 10_000);
   }
 
   #renderStatistics(): void {
@@ -487,7 +545,7 @@ export class ConnectorPanel {
     const actions = document.createElement("div"); actions.className = "connector-icon-actions";
     const checkButton = this.#iconButton("检测连接", "search-check", () => void this.#checkSelected(checkButton));
     const editButton = this.#iconButton("编辑配置", "pencil", () => { this.#editingId = record.id; this.#renderDetail(); });
-    const deleteButton = this.#iconButton("删除 Connector", "trash-2", () => void this.#remove().catch((error) => notifyWorkspace("Connector 删除失败", error instanceof Error ? error.message : String(error), { tone: "error" })), "danger");
+    const deleteButton = this.#iconButton("删除 Connector", "trash-2", () => void this.removeConnector(record.id).catch((error) => notifyWorkspace("Connector 删除失败", error instanceof Error ? error.message : String(error), { tone: "error" })), "danger");
     actions.append(checkButton, editButton, deleteButton);
     header.append(heading, actions);
     const pathValue = document.createElement("code"); pathValue.className = "connector-detail-path"; pathValue.textContent = connectorLocation(record);
@@ -574,8 +632,20 @@ export class ConnectorPanel {
     return section;
   }
 
-  async #executeScan(record: ConnectorPublicRecord, button: HTMLButtonElement, executor: "auto" | "workspace" | "warehouse"): Promise<void> {
-    button.disabled = true;
+  #contextMenuActions(record: ConnectorPublicRecord): ContextMenuAction[] {
+    const unavailable = this.#scanUnavailableReason(record);
+    return [
+      { label: "执行扫描", disabled: Boolean(unavailable), title: unavailable ?? "按当前配置扫描关联资产",
+        run: () => this.executeScan(record.id) },
+      { label: "测试连接", disabled: this.#checkingConnectorId === record.id, title: "验证 Connector 端点、路径和已保存凭据",
+        run: () => { void this.testConnector(record.id); } },
+      { label: "编辑配置", title: "修改 Connector 名称、路径和凭据", run: () => this.editConnector(record.id) },
+      { label: "删除 Connector", title: "删除此 Connector 及其本地引用", run: () => this.removeConnector(record.id) },
+    ];
+  }
+
+  async #executeScan(record: ConnectorPublicRecord, button: HTMLButtonElement | undefined, executor: "auto" | "workspace" | "warehouse"): Promise<void> {
+    if (button) button.disabled = true;
     notifyWorkspace("正在提交 Workspace 扫描", `${record.name} · 使用已保存的 Connector 配置`, { tone: "info" });
     try {
       const submitted = await workspaceApi.executeConnectorScan(record.id, undefined, executor);
@@ -584,7 +654,7 @@ export class ConnectorPanel {
       this.#updateMetrics(this.#runs);
       notifyWorkspace("Workspace 扫描已提交", `${record.name} · ${submitted.assetName ?? submitted.assetId ?? "用户资产"}`, { tone: "success" });
     } catch (error) {
-      button.disabled = false;
+      if (button) button.disabled = false;
       notifyWorkspace("覆盖扫描任务提交失败", error instanceof Error ? error.message : String(error), { tone: "error" });
     }
   }
@@ -631,10 +701,11 @@ export class ConnectorPanel {
     notifyWorkspace("Connector 修改已保存", updated.name, { tone: "success" });
   }
 
-  async #checkSelected(button: HTMLButtonElement): Promise<void> {
+  async #checkSelected(button?: HTMLButtonElement): Promise<void> {
     const id = this.#selectedId;
     if (!id) return;
-    button.disabled = true; button.setAttribute("aria-label", "正在检测连接"); button.title = "正在检测连接";
+    this.#checkingConnectorId = id;
+    if (button) { button.disabled = true; button.setAttribute("aria-label", "正在检测连接"); button.title = "正在检测连接"; }
     notifyWorkspace("正在检测 Connector", this.#records.find((record) => record.id === id)?.name ?? id, { tone: "info" });
     try {
       const result = await workspaceApi.checkConnector(id);
@@ -644,8 +715,10 @@ export class ConnectorPanel {
       this.#render();
       notifyWorkspace("Connector 连接检测完成", result.check.summary, { tone: result.check.status === "ok" ? "success" : "warning" });
     } catch (error) {
-      button.disabled = false; button.setAttribute("aria-label", "重新检测连接"); button.title = "重新检测连接";
+      if (button) { button.disabled = false; button.setAttribute("aria-label", "重新检测连接"); button.title = "重新检测连接"; }
       notifyWorkspace("Connector 连接检测失败", error instanceof Error ? error.message : String(error), { tone: "error" });
+    } finally {
+      this.#checkingConnectorId = null;
     }
   }
 

@@ -275,7 +275,7 @@ export class SqliteMetadataStore implements MetadataStore {
       if (this.filename !== ":memory:") await mkdir(path.dirname(this.filename), { recursive: true });
       const database = new DatabaseSync(this.filename);
       try {
-        database.exec("PRAGMA journal_mode = DELETE; PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000;");
+        database.exec("PRAGMA journal_mode = DELETE; PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 100;");
         if (this.options.cacheSizeKiB !== undefined) {
           if (!Number.isSafeInteger(this.options.cacheSizeKiB) || this.options.cacheSizeKiB < 1) throw new RangeError("Invalid SQLite cache size");
           database.exec(`PRAGMA cache_size = -${this.options.cacheSizeKiB};`);
@@ -287,7 +287,7 @@ export class SqliteMetadataStore implements MetadataStore {
           name TEXT PRIMARY KEY, value TEXT NOT NULL, imported_at TEXT NOT NULL
         ) STRICT;`);
         for (const migration of MIGRATIONS) {
-          database.exec("BEGIN IMMEDIATE");
+          await this.transactionBoundary(database, "BEGIN IMMEDIATE");
           try {
             const applied = database.prepare("SELECT 1 FROM schema_migrations WHERE version = ?").get(migration.version);
             if (!applied) {
@@ -295,7 +295,7 @@ export class SqliteMetadataStore implements MetadataStore {
               database.prepare("INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)")
                 .run(migration.version, new Date().toISOString());
             }
-            database.exec("COMMIT");
+            await this.transactionBoundary(database, "COMMIT");
           } catch (error) {
             database.exec("ROLLBACK");
             throw error;
@@ -312,16 +312,33 @@ export class SqliteMetadataStore implements MetadataStore {
   async transaction<T>(operation: (transaction: MetadataTransaction) => Promise<T>): Promise<T> {
     return this.serialized(async () => {
       const database = this.requireDatabase();
-      database.exec("BEGIN IMMEDIATE");
+      await this.transactionBoundary(database, "BEGIN IMMEDIATE");
       try {
         const result = await operation(new SqliteTransaction(database));
-        database.exec("COMMIT");
+        await this.transactionBoundary(database, "COMMIT");
         return result;
       } catch (error) {
-        database.exec("ROLLBACK");
+        try { database.exec("ROLLBACK"); } catch { /* Preserve the transaction's original error. */ }
         throw error;
       }
     });
+  }
+
+  private async transactionBoundary(database: DatabaseSync, statement: "BEGIN IMMEDIATE" | "COMMIT"): Promise<void> {
+    await this.retryLocked(() => database.exec(statement));
+  }
+
+  private async retryLocked<T>(operation: () => T | Promise<T>): Promise<T> {
+    const deadline = Date.now() + 5000;
+    for (let attempt = 0; ; attempt++) {
+      try { return await operation(); }
+      catch (error) {
+        if (!(error instanceof Error) || !/database (?:is )?(?:locked|busy)/i.test(error.message) || Date.now() >= deadline) throw error;
+        // Yield so readers/writers on other connections can finish. Retry only
+        // the boundary, never a transaction callback with external effects.
+        await new Promise(resolve => setTimeout(resolve, Math.min(25 * 2 ** attempt, 250)));
+      }
+    }
   }
 
   async close(): Promise<void> {
@@ -357,7 +374,7 @@ export class SqliteMetadataStore implements MetadataStore {
   setImportMarker = (name: string, value: string) => this.transaction((transaction) => transaction.setImportMarker(name, value));
 
   private async read<T>(operation: (transaction: MetadataTransaction) => Promise<T>): Promise<T> {
-    return this.serialized(() => operation(new SqliteTransaction(this.requireDatabase())));
+    return this.serialized(() => this.retryLocked(() => operation(new SqliteTransaction(this.requireDatabase()))));
   }
 
   private requireDatabase(): DatabaseSync {

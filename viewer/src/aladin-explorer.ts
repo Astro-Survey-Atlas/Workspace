@@ -1,6 +1,7 @@
 import A from "aladin-lite";
+import { Healpix, Pointing } from "healpixjs";
 
-import type { AstroObjectRecord, ObjectRegionQueryInput, SkyDataPointScope } from "../../src/astro-object-index";
+import type { AstroObjectRecord, AstroPointDensityLayerInput, AstroPointDensityResult, ObjectRegionQueryInput, SkyDataPointScope } from "../../src/astro-object-index";
 import { workspaceApi } from "./api";
 import { clampDec, normalizeRa } from "./coordinates";
 import type { SurveyObjectPoint } from "./survey-layer-viewer";
@@ -49,6 +50,8 @@ export interface AladinExplorerStatus {
   assets?: AladinAssetProgress[];
   overlapCount?: number;
   indexing?: boolean;
+  displayMode?: "points" | "density";
+  densityCells?: number;
 }
 
 export interface AladinAssetProgress {
@@ -73,6 +76,7 @@ export interface AladinExplorerCallbacks {
   onStatus: (status: AladinExplorerStatus) => void;
   onViewChange?: (view: AladinExplorerView) => void;
   onAssetChange?: (assetId: string | null) => void;
+  onDensityHover?: (detail: { pixel: number; nside: number; total: number; layers: Array<{ id: string; label: string; color: string; count: number }> } | null) => void;
   initialRecords?: ReadonlyMap<string, { records: AstroObjectRecord[]; total: number; truncated?: boolean }>;
 }
 
@@ -85,6 +89,9 @@ interface ViewportSession {
   catalogs: any[];
   catalogsByLayer: Map<string, any>;
   overlapCatalog: any | null;
+  densityCatalogs: Map<string, any>;
+  densityNside: number;
+  densityCells: Map<number, AstroPointDensityResult["cells"][number]>;
   overlapSources: Map<string, any>;
   overlapBuckets: Map<string, AstroObjectRecord[]>;
   catalogColors: Set<string>;
@@ -103,15 +110,15 @@ interface ActiveRequest {
   jobs: QueryRect[];
 }
 
-type PointShape = "circle" | "square" | "diamond" | "triangle" | "plus";
-
-const QUERY_LIMIT = 1000;
+const QUERY_LIMIT = 2000;
+const POINT_RENDER_BATCH_SIZE = 500;
 const QUERY_DEBOUNCE_MS = 200;
 const INDEX_REFRESH_MS = 10_000;
+const DENSITY_FOV_THRESHOLD = 0.75;
+const DENSITY_TARGET_CELL_PX = 80;
 const MIN_FOV_DEG = 0.05;
 const MAX_FOV_DEG = 180;
 const MAX_VIEWPORT_SESSIONS = 3;
-const MAX_SESSION_RECORDS = 50_000;
 
 function finiteNumber(value: unknown, fallback: number): number {
   return typeof value === "number" && Number.isFinite(value) ? value : fallback;
@@ -122,7 +129,40 @@ function fovWidth(fov: unknown, fallback: number): number {
   return Math.max(MIN_FOV_DEG, finiteNumber(fov, fallback));
 }
 
-function viewportBoxes(view: AladinExplorerView, host: HTMLElement): QueryRect[] {
+function viewportBoxes(view: AladinExplorerView, host: HTMLElement, aladin?: any): QueryRect[] {
+  if (typeof aladin?.pix2world === "function") {
+    const width = host.clientWidth;
+    const height = host.clientHeight;
+    const ratios = [[0, 0], [0.25, 0], [0.5, 0], [0.75, 0], [1, 0], [1, 0.25], [1, 0.5], [1, 0.75],
+      [1, 1], [0.75, 1], [0.5, 1], [0.25, 1], [0, 1], [0, 0.75], [0, 0.5], [0, 0.25], [0.5, 0.5]] as const;
+    const samples: Array<[number, number]> = [];
+    for (const [xRatio, yRatio] of ratios) {
+      try {
+        const point = aladin.pix2world(width * xRatio, height * yRatio);
+        if (Array.isArray(point) && Number.isFinite(point[0]) && Number.isFinite(point[1])) {
+          samples.push([normalizeRa(point[0]), clampDec(point[1])]);
+        }
+      } catch { /* Use the camera-derived bounds below. */ }
+    }
+    if (samples.length >= 5) {
+      const ras = samples.map(([ra]) => ra).sort((a, b) => a - b);
+      let largestGap = -1;
+      let gapIndex = 0;
+      for (let index = 0; index < ras.length; index += 1) {
+        const next = (index + 1) % ras.length;
+        const gap = next === 0 ? ras[0]! + 360 - ras[index]! : ras[next]! - ras[index]!;
+        if (gap > largestGap) { largestGap = gap; gapIndex = index; }
+      }
+      const raMin = ras[(gapIndex + 1) % ras.length]!;
+      const raMax = ras[gapIndex]!;
+      const decs = samples.map(([, dec]) => dec);
+      const padding = Math.max(0.005, (Math.max(...decs) - Math.min(...decs)) * 0.015);
+      const decMin = Math.max(-90, Math.min(...decs) - padding);
+      const decMax = Math.min(90, Math.max(...decs) + padding);
+      if (raMin <= raMax) return [{ raMin, raMax, decMin, decMax }];
+      return [{ raMin: 0, raMax, decMin, decMax }, { raMin, raMax: 360, decMin, decMax }];
+    }
+  }
   const aspect = Math.max(0.25, host.clientWidth / Math.max(1, host.clientHeight));
   const horizontalFov = view.fovDeg;
   const verticalFov = horizontalFov / aspect;
@@ -158,61 +198,6 @@ function sourceScreenPoint(source: any): { x: number; y: number } | null {
   const x = source?.x ?? source?.screenX ?? source?.viewX;
   const y = source?.y ?? source?.screenY ?? source?.viewY;
   return Number.isFinite(x) && Number.isFinite(y) ? { x, y } : null;
-}
-
-function pointShapeFor(key: string): PointShape {
-  const shapes: PointShape[] = ["circle", "diamond", "square", "triangle", "plus"];
-  let hash = 2166136261;
-  for (let index = 0; index < key.length; index += 1) {
-    hash ^= key.charCodeAt(index);
-    hash = Math.imul(hash, 16777619);
-  }
-  return shapes[(hash >>> 0) % shapes.length]!;
-}
-
-function createPointMarker(color: string, shape: PointShape, configuredSize = 6): HTMLCanvasElement {
-  const size = Math.max(8, Math.round(configuredSize + 3));
-  const marker = document.createElement("canvas");
-  marker.width = size;
-  marker.height = size;
-  const context = marker.getContext("2d")!;
-  const center = size / 2;
-  const radius = Math.max(2, center - 1);
-  context.fillStyle = color;
-  context.strokeStyle = color;
-  context.lineWidth = Math.max(1.25, size / 6);
-  context.beginPath();
-  if (shape === "square") {
-    context.rect(1, 1, size - 2, size - 2);
-  } else if (shape === "diamond") {
-    context.moveTo(center, 0.5);
-    context.lineTo(size - 0.5, center);
-    context.lineTo(center, size - 0.5);
-    context.lineTo(0.5, center);
-    context.closePath();
-  } else if (shape === "triangle") {
-    context.moveTo(center, 0.5);
-    context.lineTo(size - 0.5, size - 0.5);
-    context.lineTo(0.5, size - 0.5);
-    context.closePath();
-  } else if (shape === "plus") {
-    context.moveTo(center, 1);
-    context.lineTo(center, size - 1);
-    context.moveTo(1, center);
-    context.lineTo(size - 1, center);
-  } else {
-    context.arc(center, center, radius, 0, Math.PI * 2);
-  }
-  if (shape === "plus") context.stroke();
-  else context.fill();
-  return marker;
-}
-
-function drawPointMarker(source: any, context: CanvasRenderingContext2D, marker: HTMLCanvasElement): void {
-  const point = sourceScreenPoint(source);
-  if (!point) return;
-  context.globalAlpha = 1;
-  context.drawImage(marker, point.x - marker.width / 2, point.y - marker.height / 2);
 }
 
 function overlapBucketKey(record: AstroObjectRecord): string {
@@ -291,6 +276,11 @@ export class AladinExplorer {
   private pendingViewExpiresAt = 0;
   private activeAssetId: string | null;
   private lastObjectClickAt = 0;
+  private initialViewport = true;
+  private autoAnchorAttempted = false;
+  private autoAnchorController: AbortController | null = null;
+  private densityModeActive = false;
+  private lastDensityHoverKey: string | null = null;
 
   constructor(host: HTMLElement, snapshot: AladinExplorerSnapshot, callbacks: AladinExplorerCallbacks) {
     this.host = host;
@@ -378,6 +368,15 @@ export class AladinExplorer {
   private bindEvents(): void {
     const onViewChange = (): void => {
       if (Date.now() >= this.pendingViewExpiresAt) this.pendingView = null;
+      if (!this.pendingView) {
+        const current = this.getCurrentView();
+        const sameCenter = Math.abs(((current.raDeg - this.snapshot.centerRaDeg + 540) % 360) - 180) < 0.001
+          && Math.abs(current.decDeg - this.snapshot.centerDecDeg) < 0.001;
+        if (!sameCenter || Math.abs(current.fovDeg - this.snapshot.initialFovDeg) >= 0.001) {
+          this.initialViewport = false;
+          this.cancelAutoAnchor();
+        }
+      }
       this.scheduleQuery(QUERY_DEBOUNCE_MS);
       window.setTimeout(() => {
         if (!this.disposed) this.callbacks.onViewChange?.(this.getCurrentView());
@@ -387,6 +386,10 @@ export class AladinExplorer {
     this.aladin.on?.("zoomChanged", onViewChange);
     this.aladin.on?.("viewChanged", onViewChange);
     this.aladin.on?.("objectClicked", (source: any) => {
+      if (source?.data?.kind === "density") {
+        this.emitDensityHover(source);
+        return;
+      }
       const record = source?.data?.record as AstroObjectRecord | undefined;
       if (record) {
         this.lastObjectClickAt = Date.now();
@@ -400,12 +403,50 @@ export class AladinExplorer {
         } : undefined));
       }
     });
+    this.aladin.on?.("objectHovered", (source: any) => this.emitDensityHover(source?.data?.kind === "density" ? source : null));
+    this.aladin.on?.("footprintHovered", (source: any) => this.emitDensityHover(source?.data?.kind === "density" ? source : null));
+    this.aladin.on?.("mouseMove", (position: { ra?: number | null; dec?: number | null }) => this.emitDensityAt(position));
     this.aladin.on?.("click", (event: any) => {
       if (!event?.isDragging && Date.now() - this.lastObjectClickAt > 350) {
         delete this.host.dataset.objectSelected;
         this.callbacks.onObject(null);
       }
     });
+  }
+
+  private emitDensityHover(source: any): void {
+    if (!source?.data || source.data.kind !== "density") {
+      if (this.lastDensityHoverKey !== null) {
+        this.lastDensityHoverKey = null;
+        this.callbacks.onDensityHover?.(null);
+      }
+      return;
+    }
+    const data = source.data;
+    const key = `${Number(data.nside)}:${Number(data.pixel)}`;
+    if (this.lastDensityHoverKey === key) return;
+    this.lastDensityHoverKey = key;
+    const layers = Array.isArray(data.layers) ? data.layers.map((entry: { id: string; count: number }) => {
+      const target = this.assetTargets.get(entry.id);
+      return { id: entry.id, label: target?.label ?? entry.id, color: target?.color ?? "#ffffff", count: Number(entry.count) || 0 };
+    }) : [];
+    this.callbacks.onDensityHover?.({ pixel: Number(data.pixel), nside: Number(data.nside), total: Number(data.total) || 0, layers });
+  }
+
+  private emitDensityAt(position: { ra?: number | null; dec?: number | null }): void {
+    const session = this.activeSession;
+    if (!this.densityModeActive || !session || !Number.isFinite(position.ra) || !Number.isFinite(position.dec)) {
+      this.callbacks.onDensityHover?.(null);
+      return;
+    }
+    const pixel = new Healpix(session.densityNside).ang2pix(new Pointing(
+      null,
+      false,
+      ((90 - Number(position.dec)) * Math.PI) / 180,
+      (normalizeRa(Number(position.ra)) * Math.PI) / 180,
+    ));
+    const cell = session.densityCells.get(pixel);
+    this.emitDensityHover(cell ? { data: { kind: "density", pixel, nside: session.densityNside, total: cell.count, layers: cell.layers } } : null);
   }
 
   private themeGridColor(): string {
@@ -455,6 +496,7 @@ export class AladinExplorer {
 
   setLayerSelected(layerId: string, selected: boolean): void {
     if (!this.assetTargets.has(layerId)) return;
+    this.cancelAutoAnchor();
     if (selected) this.selectedLayerIds.add(layerId); else this.selectedLayerIds.delete(layerId);
     this.activeAssetId = this.selectedLayerIds.size === 1 ? [...this.selectedLayerIds][0]! : null;
     this.activateSession([...this.selectedLayerIds]);
@@ -463,6 +505,7 @@ export class AladinExplorer {
   }
 
   focusAsset(assetId: string | null): void {
+    this.cancelAutoAnchor();
     this.selectedLayerIds.clear();
     (assetId ? [assetId] : [...this.assetTargets.keys()]).forEach((id) => this.selectedLayerIds.add(id));
     this.activeAssetId = assetId; this.activateSession([...this.selectedLayerIds]);
@@ -475,6 +518,7 @@ export class AladinExplorer {
 
   gotoRaDec(raDeg: number, decDeg: number): void {
     if (!this.aladin || this.disposed) return;
+    this.cancelAutoAnchor();
     const nextRa = normalizeRa(raDeg);
     const nextDec = clampDec(decDeg);
     const current = this.getCurrentView();
@@ -486,6 +530,7 @@ export class AladinExplorer {
 
   setFov(fovDeg: number): void {
     if (!this.aladin || this.disposed) return;
+    this.cancelAutoAnchor();
     const nextFov = Math.max(MIN_FOV_DEG, Math.min(MAX_FOV_DEG, fovDeg));
     const current = this.getCurrentView();
     this.aladin.setFov(nextFov);
@@ -525,8 +570,11 @@ export class AladinExplorer {
   private async queryViewport(generation: number): Promise<void> {
     if (this.disposed || generation !== this.generation || !this.aladin) return;
     const view = this.getCurrentView();
-    const boxes = viewportBoxes(view, this.host);
+    const boxes = viewportBoxes(view, this.host, this.aladin);
     const assetIds = [...this.selectedLayerIds];
+    this.densityModeActive = false;
+    this.lastDensityHoverKey = null;
+    this.callbacks.onDensityHover?.(null);
     if (!assetIds.length || !this.scopesForLayers(assetIds).length) {
       this.activateSession(assetIds);
       this.emitStatus({ phase: "empty", returned: 0, total: 0, truncated: false, message: assetIds.length ? "所选图层仅有覆盖；下载并扫描后可显示数据点" : "当前未选中数据图层" });
@@ -534,9 +582,16 @@ export class AladinExplorer {
     }
     const session = this.activateSession(assetIds);
     session.lastUsed = Date.now();
+    if (view.fovDeg > DENSITY_FOV_THRESHOLD) {
+      await this.queryDensityViewport(generation, view, boxes, session, assetIds);
+      return;
+    }
+    session.densityCatalogs.forEach(catalog => catalog.hide?.());
+    session.catalogs.forEach(catalog => catalog.show?.());
     const jobs = subtractRects(boxes, [...(session.indexing ? [] : session.coveredRects), ...session.pendingRects]);
     if (!jobs.length) {
       this.emitSessionStatus(session, true);
+      if (!session.renderedObjectIds.size) await this.maybeAutoAnchor(session, generation);
       return;
     }
     const controller = new AbortController();
@@ -544,67 +599,57 @@ export class AladinExplorer {
     this.activeRequest = request;
     session.indexing = false;
     jobs.forEach((job) => session.pendingRects.push(job));
-      this.emitStatus({ phase: "loading", returned: session.renderedObjectIds.size, total: session.total, truncated: session.truncated, complete: false, assets: this.assetProgress(session, "loading"), overlapCount: session.overlapSources.size, indexing: session.indexing });
+    this.emitStatus({ phase: "loading", displayMode: "points", returned: session.renderedObjectIds.size,
+      total: session.total, truncated: false, complete: false, assets: this.assetProgress(session, "loading"),
+      overlapCount: session.overlapSources.size, indexing: session.indexing });
     try {
       for (const bbox of jobs) {
-        let cursor: unknown[] | undefined;
-        let firstPage = true;
-        const seenCursors = new Set<string>();
-        let jobComplete = false;
-        while (true) {
-          const input: ObjectRegionQueryInput = {
-            bbox,
-            region: {
-              nside: this.snapshot.nside,
-              pixels: this.snapshot.pixels,
-              coordinateFrame: "ICRS",
-              ordering: "NESTED",
-            },
-            coordinateFrame: "ICRS",
-            ordering: "NESTED",
-            layerScopes: this.scopesForLayers(assetIds),
-            limit: QUERY_LIMIT,
-            includeAttributes: false,
-            cursor,
-          };
-          const result = await workspaceApi.skyPointsQuery(input, controller.signal);
-          if (this.disposed || generation !== this.generation || controller.signal.aborted) return;
-          if (result.status === "error") throw new Error(result.message ?? "对象查询失败");
-          session.indexing ||= Boolean(result.indexing);
-          if (session.indexing) session.coveredRects = [];
-          if (firstPage) firstPage = false;
-          this.appendRecords(session, result.objects);
-          session.total = Math.max(session.total, result.total);
-          const nextCursor = nextPageCursor(result);
-          const cursorKey = nextCursor ? JSON.stringify(nextCursor) : "";
-          const hasMore = Boolean(nextCursor?.length && result.objects.length && !seenCursors.has(cursorKey));
-          if (hasMore) seenCursors.add(cursorKey);
-          const budgetReached = session.renderedObjectIds.size >= MAX_SESSION_RECORDS;
-          this.emitStatus({
-            phase: "loading",
-            returned: session.renderedObjectIds.size,
-            total: session.total,
-            truncated: hasMore || budgetReached,
-            complete: false,
-            assets: this.assetProgress(session, "loading"),
-            overlapCount: session.overlapSources.size,
-            indexing: session.indexing,
-          });
-          if (!hasMore || budgetReached) {
-            session.truncated ||= hasMore || budgetReached;
-            jobComplete = true;
-            break;
+        const activeLayers = new Set(assetIds.filter(id => (this.assetTargets.get(id)?.scopes?.length ?? 0) > 0));
+        const cursors = new Map<string, unknown[] | undefined>();
+        const seenCursors = new Map<string, Set<string>>();
+        const countedLayers = new Set<string>();
+        while (activeLayers.size) {
+          for (const layerId of [...activeLayers]) {
+            const input: ObjectRegionQueryInput = {
+              bbox,
+              region: { nside: this.snapshot.nside, pixels: this.snapshot.pixels, coordinateFrame: "ICRS", ordering: "NESTED" },
+              coordinateFrame: "ICRS", ordering: "NESTED", layerScopes: this.scopesForLayers([layerId]),
+              limit: QUERY_LIMIT, includeAttributes: false, cursor: cursors.get(layerId),
+            };
+            const result = await workspaceApi.skyPointsQuery(input, controller.signal);
+            if (this.disposed || generation !== this.generation || controller.signal.aborted) return;
+            if (result.status !== "ready") throw new Error(result.message ?? "数据点查询未完成");
+            session.indexing ||= Boolean(result.indexing);
+            if (session.indexing) session.coveredRects = [];
+            if (!countedLayers.has(layerId)) {
+              session.total += result.total;
+              countedLayers.add(layerId);
+            }
+            await this.appendRecordsInBatches(session, result.objects, controller.signal);
+            if (this.disposed || generation !== this.generation || controller.signal.aborted) return;
+            const nextCursor = nextPageCursor(result);
+            if (nextCursor?.length) {
+              const cursorKey = JSON.stringify(nextCursor);
+              const seen = seenCursors.get(layerId) ?? new Set<string>();
+              if (!result.objects.length || seen.has(cursorKey)) throw new Error("数据点分页游标重复，未能确认视野已完整加载");
+              seen.add(cursorKey);
+              seenCursors.set(layerId, seen);
+              cursors.set(layerId, nextCursor);
+            } else activeLayers.delete(layerId);
+            this.emitStatus({ phase: "loading", displayMode: "points", returned: session.renderedObjectIds.size,
+              total: session.total, truncated: false, complete: false, assets: this.assetProgress(session, "loading"),
+              overlapCount: session.overlapSources.size, indexing: session.indexing });
+            await yieldToBrowser();
+            if (this.disposed || generation !== this.generation || controller.signal.aborted) return;
           }
-          cursor = nextCursor;
-          await yieldToBrowser();
-          if (this.disposed || generation !== this.generation || controller.signal.aborted) return;
         }
-        if (jobComplete && !session.indexing) {
+        if (!session.indexing) {
           session.coveredRects.push(bbox);
           session.coveredRects = compactRects(session.coveredRects);
         }
       }
       this.emitSessionStatus(session, true);
+      if (!session.renderedObjectIds.size) await this.maybeAutoAnchor(session, generation, controller.signal);
     } catch (error) {
       if (controller.signal.aborted || this.disposed || generation !== this.generation) return;
       this.emitStatus({ phase: "error", returned: session.renderedObjectIds.size, total: session.total, truncated: session.truncated, complete: true, message: error instanceof Error ? error.message : String(error) });
@@ -618,6 +663,140 @@ export class AladinExplorer {
         this.indexRefreshTimer = setTimeout(() => { this.indexRefreshTimer = null; this.scheduleQuery(0); }, INDEX_REFRESH_MS);
       }
     }
+  }
+
+  private densityNside(view: AladinExplorerView): number {
+    const ideal = (58.63 * Math.max(320, this.host.clientWidth)) / Math.max(0.01, view.fovDeg * DENSITY_TARGET_CELL_PX);
+    return 2 ** Math.max(0, Math.min(8, Math.round(Math.log2(ideal))));
+  }
+
+  private async queryDensityViewport(generation: number, view: AladinExplorerView, boxes: QueryRect[], session: ViewportSession, assetIds: string[]): Promise<void> {
+    this.densityModeActive = true;
+    this.lastDensityHoverKey = null;
+    this.callbacks.onDensityHover?.(null);
+    session.densityCells.clear();
+    session.densityCatalogs.forEach(catalog => { catalog.clear?.(); catalog.hide?.(); });
+    session.catalogs.forEach(catalog => catalog.hide?.());
+    const layers: AstroPointDensityLayerInput[] = assetIds.map(id => ({ id, scopes: this.assetTargets.get(id)?.scopes ?? [] }));
+    const controller = new AbortController();
+    const request: ActiveRequest = { controller, generation, session, jobs: boxes };
+    this.activeRequest?.controller.abort();
+    this.activeRequest = request;
+    this.emitStatus({ phase: "loading", displayMode: "density", returned: 0, total: 0, truncated: false,
+      complete: false, indexing: session.indexing, assets: this.assetProgress(session, "loading"), overlapCount: session.overlapSources.size });
+    try {
+      const result = await workspaceApi.skyPointDensity({
+        region: { nside: this.snapshot.nside, pixels: this.snapshot.pixels, coordinateFrame: "ICRS", ordering: "NESTED" },
+        boxes, layers, targetNside: this.densityNside(view),
+      }, controller.signal);
+      if (this.disposed || generation !== this.generation || controller.signal.aborted) return;
+      if (result.status !== "ready") throw new Error(result.message ?? "密度聚合未能完成");
+      session.indexing = result.indexing;
+      this.renderDensityCells(session, result, layers);
+      this.emitStatus({ phase: result.total ? "ready" : "empty", displayMode: "density", returned: result.cells.length,
+        densityCells: result.cells.length, total: result.total, truncated: false, complete: !result.indexing,
+        indexing: result.indexing, assets: this.assetProgress(session, result.total ? "ready" : "idle"), overlapCount: session.overlapSources.size,
+        message: result.total ? undefined : "所选视野内没有已索引数据点" });
+    } catch (error) {
+      if (controller.signal.aborted || this.disposed || generation !== this.generation) return;
+      this.emitStatus({ phase: "error", displayMode: "density", returned: 0, total: 0, truncated: false, complete: true,
+        message: error instanceof Error ? error.message : String(error) });
+    } finally {
+      if (this.activeRequest === request) this.activeRequest = null;
+      if (!this.disposed && generation === this.generation && session.indexing && this.activeSession === session) {
+        this.indexRefreshTimer = setTimeout(() => { this.indexRefreshTimer = null; this.scheduleQuery(0); }, INDEX_REFRESH_MS);
+      }
+    }
+  }
+
+  private renderDensityCells(session: ViewportSession, result: AstroPointDensityResult, layers: AstroPointDensityLayerInput[]): void {
+    const healpix = new Healpix(result.nside);
+    session.densityNside = result.nside;
+    session.densityCells = new Map(result.cells.map(cell => [cell.pixel, cell]));
+    const cellArea = 41_252.961_249_419_27 / (12 * result.nside ** 2);
+    let maximumDensity = 1;
+    result.cells.forEach(cell => cell.layers.forEach(layer => { maximumDensity = Math.max(maximumDensity, layer.count / cellArea); }));
+    const byLayer = new Map<string, Array<{ raDeg: number; decDeg: number; pixel: number; count: number; cell: typeof result.cells[number] }>>();
+    for (const cell of result.cells) {
+      const center = healpix.pix2ang(cell.pixel);
+      const raDeg = normalizeRa(center.phi * 180 / Math.PI);
+      const decDeg = 90 - center.theta * 180 / Math.PI;
+      for (const layer of cell.layers) {
+        const values = byLayer.get(layer.id) ?? [];
+        values.push({ raDeg, decDeg, pixel: cell.pixel, count: layer.count, cell });
+        byLayer.set(layer.id, values);
+      }
+    }
+    for (const layer of layers) {
+      let catalog = session.densityCatalogs.get(layer.id);
+      const target = this.assetTargets.get(layer.id);
+      if (!target) continue;
+      if (!catalog) {
+        const color = target.color;
+        catalog = A.catalog({
+          name: `${target.label} density`, color, sourceSize: 24, onlyFootprints: false, readOnly: true,
+          shape: (source: any) => {
+            const vertices = source.data?.vertices;
+            if (!Array.isArray(vertices) || !A?.polygon || !A?.footprint) return "square";
+            const points = vertices.map((vertex: { raDeg: number; decDeg: number }) => [vertex.raDeg, vertex.decDeg]);
+            return A.footprint([A.polygon(points, { color, fill: true, fillColor: color, opacity: source.data.opacity, lineWidth: 0.2 })]);
+          },
+        });
+        this.aladin.addCatalog(catalog);
+        session.densityCatalogs.set(layer.id, catalog);
+      }
+      catalog.clear?.();
+      catalog.hide?.();
+      const sources = (byLayer.get(layer.id) ?? []).map(entry => {
+        const boundary = healpix.getBoundaries(entry.pixel).map(vertex => ({
+          raDeg: normalizeRa(Math.atan2(vertex.y, vertex.x) * 180 / Math.PI),
+          decDeg: Math.asin(Math.max(-1, Math.min(1, vertex.z))) * 180 / Math.PI,
+        }));
+        const density = entry.count / cellArea;
+        const opacity = 0.12 + 0.58 * Math.log1p(density) / Math.log1p(maximumDensity);
+        return A.source(entry.raDeg, entry.decDeg, {
+          kind: "density", layerId: layer.id, nside: result.nside, pixel: entry.pixel,
+          count: entry.count, total: entry.cell.count, opacity, vertices: boundary,
+          layers: entry.cell.layers,
+        }, { color: target.color });
+      });
+      if (sources.length) catalog.addSources(sources);
+      catalog.show?.();
+    }
+    this.host.dataset.densityNside = String(result.nside);
+    this.host.dataset.densityCells = String(result.cells.length);
+  }
+
+  private async maybeAutoAnchor(session: ViewportSession, generation: number, signal?: AbortSignal): Promise<void> {
+    if (!this.initialViewport || this.autoAnchorAttempted || session.indexing || session.renderedObjectIds.size) return;
+    this.autoAnchorAttempted = true;
+    if (signal?.aborted) return;
+    const controller = new AbortController();
+    const abortFromRequest = (): void => controller.abort();
+    signal?.addEventListener("abort", abortFromRequest, { once: true });
+    this.autoAnchorController = controller;
+    try {
+      const result = await workspaceApi.skyPointAnchor({
+        region: { nside: this.snapshot.nside, pixels: this.snapshot.pixels, coordinateFrame: "ICRS", ordering: "NESTED" },
+        layerScopes: this.scopesForLayers([...this.selectedLayerIds]), coordinateFrame: "ICRS", ordering: "NESTED",
+        limit: 1, includeAttributes: false, trackTotalHits: false,
+      }, controller.signal);
+      if (this.disposed || generation !== this.generation || controller.signal.aborted || !this.initialViewport) return;
+      if (result.status !== "ready") throw new Error(result.message ?? "首屏没有数据点，定位查询失败");
+      this.initialViewport = false;
+      this.autoAnchorController = null;
+      if (result.point) this.gotoRaDec(result.point.raDeg, result.point.decDeg);
+    } catch (error) {
+      if (!controller.signal.aborted) throw error;
+    } finally {
+      signal?.removeEventListener("abort", abortFromRequest);
+      if (this.autoAnchorController === controller) this.autoAnchorController = null;
+    }
+  }
+
+  private cancelAutoAnchor(): void {
+    this.autoAnchorController?.abort();
+    this.autoAnchorController = null;
   }
 
   private sessionKey(assetIds: readonly string[]): string {
@@ -638,6 +817,9 @@ export class AladinExplorer {
           catalogs: [],
           catalogsByLayer: new Map(),
           overlapCatalog: null,
+          densityCatalogs: new Map(),
+          densityNside: 1,
+          densityCells: new Map(),
           overlapSources: new Map(),
           overlapBuckets: new Map(),
           catalogColors: new Set(),
@@ -652,7 +834,9 @@ export class AladinExplorer {
     }
     if (this.activeSession !== session) {
       this.activeSession?.catalogs.forEach((catalog) => catalog.hide?.());
+      this.activeSession?.densityCatalogs.forEach((catalog) => catalog.hide?.());
       session.catalogs.forEach((catalog) => catalog.show?.());
+      session.densityCatalogs.forEach((catalog) => catalog.show?.());
       this.activeSession = session;
       this.evictSessions(session);
     }
@@ -675,6 +859,10 @@ export class AladinExplorer {
       if (this.aladin?.removeCatalog) this.aladin.removeCatalog(catalog);
       else catalog.removeAll?.();
     });
+    session.densityCatalogs.forEach((catalog) => {
+      if (this.aladin?.removeCatalog) this.aladin.removeCatalog(catalog);
+      else catalog.removeAll?.();
+    });
     this.sessions.delete(session.key);
     if (this.activeSession === session) this.activeSession = null;
   }
@@ -688,6 +876,7 @@ export class AladinExplorer {
       truncated: session.truncated,
       complete: complete && !session.indexing,
       indexing: session.indexing,
+      displayMode: "points",
       message: session.indexing ? "坐标索引生成中，已完成的数据点会自动更新" : returned ? undefined : "所选图层在当前天区和视野内没有数据点",
       assets: this.assetProgress(session, returned ? "ready" : "idle"),
       overlapCount: session.overlapSources.size,
@@ -735,7 +924,7 @@ export class AladinExplorer {
     const addedRecords: AstroObjectRecord[] = [];
     const groups = new Map<string, { layer: AladinLayerDescriptor; records: AstroObjectRecord[] }>();
     records.forEach((record) => {
-      if (session.renderedObjectIds.has(record.object_id) || session.renderedObjectIds.size >= MAX_SESSION_RECORDS) return;
+      if (session.renderedObjectIds.has(record.object_id)) return;
       session.renderedObjectIds.add(record.object_id);
       addedRecords.push(record);
       for (const key of session.assetIds) if (this.scopesForLayers([key]).some((scope) => scope.assetId === record.asset_id && (!scope.sourceId || scope.sourceId === record.attributes?.source_id))) session.returnedByAsset.set(key, (session.returnedByAsset.get(key) ?? 0) + 1);
@@ -747,12 +936,11 @@ export class AladinExplorer {
     groups.forEach(({ layer, records: groupRecords }) => {
       let catalog = session.catalogsByLayer.get(layer.key);
       if (!catalog) {
-        const marker = createPointMarker(layer.color, pointShapeFor(layer.key), 6);
         catalog = A.catalog({
           name: layer.label,
           color: layer.color,
-          sourceSize: marker.width,
-          shape: (_source: any, context: CanvasRenderingContext2D) => drawPointMarker(_source, context, marker),
+          sourceSize: 9,
+          shape: "circle",
         });
         catalog.selectSize = 24;
         this.aladin.addCatalog(catalog);
@@ -785,6 +973,17 @@ export class AladinExplorer {
       }
     });
     return addedRecords;
+  }
+
+  private async appendRecordsInBatches(session: ViewportSession, records: readonly AstroObjectRecord[], signal: AbortSignal): Promise<void> {
+    for (let offset = 0; offset < records.length; offset += POINT_RENDER_BATCH_SIZE) {
+      if (signal.aborted || this.disposed) return;
+      this.appendRecords(session, records.slice(offset, offset + POINT_RENDER_BATCH_SIZE));
+      if (offset + POINT_RENDER_BATCH_SIZE < records.length) {
+        await yieldToBrowser();
+        if (signal.aborted || this.disposed) return;
+      }
+    }
   }
 
   private updateOverlapMarker(session: ViewportSession, key: string, records: AstroObjectRecord[]): void {
@@ -852,6 +1051,7 @@ export class AladinExplorer {
   dispose(): void {
     if (this.disposed) return;
     this.disposed = true;
+    this.cancelAutoAnchor();
     this.generation += 1;
     this.activeRequest?.controller.abort();
     this.activeRequest = null;
