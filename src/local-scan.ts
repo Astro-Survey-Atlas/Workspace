@@ -70,6 +70,7 @@ export interface LocalCsvScanOptions {
 }
 
 export interface LocalObjectIndexDocument {
+  data_batch_id?: string;
   _index: string;
   _id: string;
   object_id: string;

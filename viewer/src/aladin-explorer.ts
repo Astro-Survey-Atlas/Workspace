@@ -1,4 +1,5 @@
 import A from "aladin-lite";
+import { ArrowRight, createIcons } from "lucide";
 import { Healpix, Pointing } from "healpixjs";
 
 import type { AstroObjectRecord, AstroPointDensityLayerInput, AstroPointDensityResult, ObjectRegionQueryInput, SkyDataPointScope } from "../../src/astro-object-index";
@@ -32,6 +33,7 @@ export interface AladinAssetTarget {
   defaultFovDeg: number;
   objectCount?: number;
   returned?: number;
+  pointKind?: "image_center" | "object";
 }
 
 export interface AladinLayerDescriptor {
@@ -52,6 +54,7 @@ export interface AladinExplorerStatus {
   indexing?: boolean;
   displayMode?: "points" | "density";
   densityCells?: number;
+  regionPointState?: "loading" | "available" | "empty" | "indexing" | "error";
 }
 
 export interface AladinAssetProgress {
@@ -68,15 +71,19 @@ export interface AladinExplorerView {
   raDeg: number;
   decDeg: number;
   fovDeg: number;
+  fovXDeg?: number;
+  fovYDeg?: number;
 }
 
 export interface AladinExplorerCallbacks {
   resolveLayer: (record: AstroObjectRecord) => AladinLayerDescriptor;
+  resolveSurvey?: (id: string) => { label: string; color: string };
   onObject: (point: SurveyObjectPoint | null) => void;
   onStatus: (status: AladinExplorerStatus) => void;
   onViewChange?: (view: AladinExplorerView) => void;
+  onViewInteraction?: () => void;
   onAssetChange?: (assetId: string | null) => void;
-  onDensityHover?: (detail: { pixel: number; nside: number; total: number; layers: Array<{ id: string; label: string; color: string; count: number }> } | null) => void;
+  onDensityHover?: (detail: { pixel: number; nside: number; total: number; surveys: Array<{ id: string; label: string; color: string; count: number; assetId?: string }> } | null) => void;
   initialRecords?: ReadonlyMap<string, { records: AstroObjectRecord[]; total: number; truncated?: boolean }>;
 }
 
@@ -114,7 +121,7 @@ const QUERY_LIMIT = 2000;
 const POINT_RENDER_BATCH_SIZE = 500;
 const QUERY_DEBOUNCE_MS = 200;
 const INDEX_REFRESH_MS = 10_000;
-const DENSITY_FOV_THRESHOLD = 0.75;
+const DENSITY_FOV_THRESHOLD = 1.5;
 const DENSITY_TARGET_CELL_PX = 80;
 const MIN_FOV_DEG = 0.05;
 const MAX_FOV_DEG = 180;
@@ -124,9 +131,19 @@ function finiteNumber(value: unknown, fallback: number): number {
   return typeof value === "number" && Number.isFinite(value) ? value : fallback;
 }
 
-function fovWidth(fov: unknown, fallback: number): number {
-  if (Array.isArray(fov)) return Math.max(MIN_FOV_DEG, finiteNumber(fov[0], fallback));
-  return Math.max(MIN_FOV_DEG, finiteNumber(fov, fallback));
+function coordinatePair(value: unknown): [number, number] | null {
+  if (!Array.isArray(value) && !ArrayBuffer.isView(value)) return null;
+  const pair = value as unknown as ArrayLike<number>;
+  return Number.isFinite(pair[0]) && Number.isFinite(pair[1]) ? [pair[0]!, pair[1]!] : null;
+}
+
+function fovDimensions(fov: unknown, fallback: number): [number, number] {
+  if (Array.isArray(fov)) return [
+    Math.max(MIN_FOV_DEG, finiteNumber(fov[0], fallback)),
+    Math.max(MIN_FOV_DEG, finiteNumber(fov[1], fallback)),
+  ];
+  const value = Math.max(MIN_FOV_DEG, finiteNumber(fov, fallback));
+  return [value, value];
 }
 
 function viewportBoxes(view: AladinExplorerView, host: HTMLElement, aladin?: any): QueryRect[] {
@@ -138,8 +155,8 @@ function viewportBoxes(view: AladinExplorerView, host: HTMLElement, aladin?: any
     const samples: Array<[number, number]> = [];
     for (const [xRatio, yRatio] of ratios) {
       try {
-        const point = aladin.pix2world(width * xRatio, height * yRatio);
-        if (Array.isArray(point) && Number.isFinite(point[0]) && Number.isFinite(point[1])) {
+        const point = coordinatePair(aladin.pix2world(width * xRatio, height * yRatio));
+        if (point) {
           samples.push([normalizeRa(point[0]), clampDec(point[1])]);
         }
       } catch { /* Use the camera-derived bounds below. */ }
@@ -164,8 +181,8 @@ function viewportBoxes(view: AladinExplorerView, host: HTMLElement, aladin?: any
     }
   }
   const aspect = Math.max(0.25, host.clientWidth / Math.max(1, host.clientHeight));
-  const horizontalFov = view.fovDeg;
-  const verticalFov = horizontalFov / aspect;
+  const horizontalFov = view.fovXDeg ?? view.fovDeg;
+  const verticalFov = view.fovYDeg ?? horizontalFov / aspect;
   const decHalf = Math.min(90, verticalFov / 2);
   const decMin = Math.max(-90, view.decDeg - decHalf);
   const decMax = Math.min(90, view.decDeg + decHalf);
@@ -188,6 +205,122 @@ function viewportBoxes(view: AladinExplorerView, host: HTMLElement, aladin?: any
     ];
   }
   return [{ raMin: rawMin, raMax: rawMax, decMin, decMax }];
+}
+
+interface DirectionTarget {
+  assetId: string;
+  raDeg: number;
+  decDeg: number;
+}
+
+interface DirectionGuidePlacement {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+function tangentOffset(centerRa: number, centerDec: number, ra: number, dec: number): { east: number; north: number } {
+  const center = raDecToVector(centerRa, centerDec);
+  const target = raDecToVector(ra, dec);
+  const a = (centerRa * Math.PI) / 180;
+  const d = (centerDec * Math.PI) / 180;
+  const east = { x: -Math.sin(a), y: Math.cos(a), z: 0 };
+  const north = { x: -Math.sin(d) * Math.cos(a), y: -Math.sin(d) * Math.sin(a), z: Math.cos(d) };
+  const dot = Math.max(0.0001, center.x * target.x + center.y * target.y + center.z * target.z);
+  return {
+    east: (target.x * east.x + target.y * east.y + target.z * east.z) / dot,
+    north: (target.x * north.x + target.y * north.y + target.z * north.z) / dot,
+  };
+}
+
+function raDecToVector(ra: number, dec: number): { x: number; y: number; z: number } {
+  const a = (ra * Math.PI) / 180;
+  const d = (dec * Math.PI) / 180;
+  return { x: Math.cos(d) * Math.cos(a), y: Math.cos(d) * Math.sin(a), z: Math.sin(d) };
+}
+
+function directionToTarget(
+  aladin: any,
+  width: number,
+  height: number,
+  view: AladinExplorerView,
+  target: DirectionTarget,
+): { dx: number; dy: number } | null {
+  try {
+    const projected = coordinatePair(aladin?.world2pix?.(target.raDeg, target.decDeg));
+    if (projected) {
+      const [x, y] = projected;
+      const margin = 24;
+      if (x >= margin && x <= width - margin && y >= margin && y <= height - margin) return null;
+      return { dx: x - width / 2, dy: y - height / 2 };
+    }
+  } catch { /* Use the local tangent projection below. */ }
+
+  try {
+    const rightWorld = coordinatePair(aladin?.pix2world?.(width / 2 + 30, height / 2));
+    const downWorld = coordinatePair(aladin?.pix2world?.(width / 2, height / 2 + 30));
+    if (!rightWorld || !downWorld) return null;
+    const right = tangentOffset(view.raDeg, view.decDeg, rightWorld[0]!, rightWorld[1]!);
+    const down = tangentOffset(view.raDeg, view.decDeg, downWorld[0]!, downWorld[1]!);
+    const targetOffset = tangentOffset(view.raDeg, view.decDeg, target.raDeg, target.decDeg);
+    const determinant = right.east * down.north - down.east * right.north;
+    if (Math.abs(determinant) < 1e-8) return null;
+    const dx = (targetOffset.east * down.north - down.east * targetOffset.north) / determinant;
+    const dy = (right.east * targetOffset.north - targetOffset.east * right.north) / determinant;
+    return Number.isFinite(dx) && Number.isFinite(dy) ? { dx, dy } : null;
+  } catch {
+    return null;
+  }
+}
+
+function placeDirectionGuide(
+  containerWidth: number,
+  containerHeight: number,
+  dx: number,
+  dy: number,
+  occupied: readonly DirectionGuidePlacement[],
+): DirectionGuidePlacement {
+  const edgePadding = 8;
+  const width = Math.max(1, Math.min(252, containerWidth - edgePadding * 2));
+  const height = Math.max(1, Math.min(38, containerHeight - edgePadding * 2));
+  const centerX = containerWidth / 2;
+  const centerY = containerHeight / 2;
+  const maxOffsetX = Math.max(1, centerX - width / 2 - edgePadding);
+  const maxOffsetY = Math.max(1, centerY - height / 2 - edgePadding);
+  const scale = Math.max(Math.abs(dx) / maxOffsetX, Math.abs(dy) / maxOffsetY, 0.0001);
+  const base = {
+    x: Math.max(edgePadding, Math.min(containerWidth - width - edgePadding, centerX + dx / scale - width / 2)),
+    y: Math.max(edgePadding, Math.min(containerHeight - height - edgePadding, centerY + dy / scale - height / 2)),
+    width,
+    height,
+  };
+  const collides = (candidate: DirectionGuidePlacement): boolean => occupied.some((other) =>
+    candidate.x < other.x + other.width + 4 && candidate.x + candidate.width + 4 > other.x
+      && candidate.y < other.y + other.height + 4 && candidate.y + candidate.height + 4 > other.y);
+  if (!collides(base)) return base;
+  const candidates: DirectionGuidePlacement[] = [];
+  for (let offset = height + 6; offset <= containerHeight; offset += height + 6) {
+    for (const direction of [-1, 1]) {
+      candidates.push({ ...base, y: Math.max(edgePadding, Math.min(containerHeight - height - edgePadding, base.y + offset * direction)) });
+      candidates.push({ ...base, x: Math.max(edgePadding, Math.min(containerWidth - width - edgePadding, base.x + offset * direction)) });
+    }
+  }
+  return candidates.find((candidate) => !collides(candidate)) ?? base;
+}
+
+function angularDistanceDeg(raA: number, decA: number, raB: number, decB: number): number {
+  const a = (decA * Math.PI) / 180;
+  const b = (decB * Math.PI) / 180;
+  const deltaRa = ((raB - raA) * Math.PI) / 180;
+  const cosine = Math.sin(a) * Math.sin(b) + Math.cos(a) * Math.cos(b) * Math.cos(deltaRa);
+  return (Math.acos(Math.max(-1, Math.min(1, cosine))) * 180) / Math.PI;
+}
+
+function formatGuideDistance(deg: number): string {
+  if (deg >= 10) return `${deg.toFixed(0)}°`;
+  if (deg >= 1) return `${deg.toFixed(1)}°`;
+  return `${Math.round(deg * 60)}′`;
 }
 
 function boxKey(box: QueryRect): string {
@@ -263,7 +396,18 @@ export class AladinExplorer {
   private readonly selectedLayerIds = new Set<string>();
   private readonly assetTargets = new Map<string, AladinAssetTarget>();
   private readonly sessions = new Map<string, ViewportSession>();
+  private readonly directionTargets = new Map<string, DirectionTarget>();
+  private readonly regionPointStates = new Map<string, NonNullable<AladinExplorerStatus["regionPointState"]>>();
   private aladin: any = null;
+  private directionGuideLayer: HTMLDivElement | null = null;
+  private densityLabelLayer: HTMLDivElement | null = null;
+  private readonly densityLabels = new Map<number, { element: HTMLDivElement; raDeg: number; decDeg: number; vertices: Array<[number, number]> }>();
+  private directionAnchorController: AbortController | null = null;
+  private pointDetailController: AbortController | null = null;
+  private directionAnchorGeneration = 0;
+  private directionTargetsPromise: Promise<void> = Promise.resolve();
+  private directionGuideTimer: ReturnType<typeof setTimeout> | null = null;
+  private removeInteractionListeners: (() => void) | null = null;
   private activeSession: ViewportSession | null = null;
   private activeRequest: ActiveRequest | null = null;
   private queryTimer: ReturnType<typeof setTimeout> | null = null;
@@ -277,7 +421,6 @@ export class AladinExplorer {
   private activeAssetId: string | null;
   private lastObjectClickAt = 0;
   private initialViewport = true;
-  private autoAnchorAttempted = false;
   private autoAnchorController: AbortController | null = null;
   private densityModeActive = false;
   private lastDensityHoverKey: string | null = null;
@@ -352,13 +495,22 @@ export class AladinExplorer {
     this.themeObserver.observe(document.documentElement, { attributes: true, attributeFilter: ["data-theme"] });
     this.aladin.showCatalog?.(true);
 
-     const initialTarget = this.activeAssetId ? this.assetTargets.get(this.activeAssetId) : undefined;
+    const initialTarget = this.activeAssetId ? this.assetTargets.get(this.activeAssetId) : undefined;
     this.aladin.gotoRaDec(initialTarget?.centerRaDeg ?? this.snapshot.centerRaDeg, initialTarget?.centerDecDeg ?? this.snapshot.centerDecDeg);
-    this.aladin.setFov(initialTarget?.defaultFovDeg ?? this.snapshot.initialFovDeg);
+    this.applyFov(initialTarget?.defaultFovDeg ?? this.snapshot.initialFovDeg);
+    this.densityLabelLayer = document.createElement("div");
+    this.densityLabelLayer.className = "aladin-density-labels";
+    this.densityLabelLayer.hidden = true;
+    this.densityLabelLayer.setAttribute("aria-label", "密度块巡天数据点数量");
+    this.host.append(this.densityLabelLayer);
+    this.directionGuideLayer = document.createElement("div");
+    this.directionGuideLayer.className = "aladin-direction-guides";
+    this.directionGuideLayer.setAttribute("aria-label", "视野外数据点导航");
+    this.host.append(this.directionGuideLayer);
     this.bindEvents();
     this.resizeObserver = typeof ResizeObserver === "undefined"
       ? null
-      : new ResizeObserver(() => this.scheduleQuery(0));
+      : new ResizeObserver(() => { this.renderDirectionGuides(); this.positionDensityLabels(); this.scheduleQuery(0); });
     this.resizeObserver?.observe(this.host);
     this.renderSeedRecords();
     this.callbacks.onAssetChange?.(this.activeAssetId);
@@ -366,17 +518,46 @@ export class AladinExplorer {
   }
 
   private bindEvents(): void {
+    const onInteraction = (): void => {
+      this.initialViewport = false;
+      this.cancelAutoAnchor();
+      this.pointDetailController?.abort();
+      this.directionAnchorController?.abort();
+      this.directionAnchorController = null;
+      this.directionAnchorGeneration += 1;
+      for (const [id, state] of this.regionPointStates) if (state === "loading") this.regionPointStates.delete(id);
+      this.callbacks.onViewInteraction?.();
+      this.scheduleQuery(QUERY_DEBOUNCE_MS);
+    };
+    const onPointerMove = (event: PointerEvent): void => { if (event.buttons) onInteraction(); };
+    const onDoubleClick = (event: MouseEvent): void => {
+      const session = this.activeSession;
+      if (!this.densityModeActive || !session || this.getCurrentView().fovDeg <= DENSITY_FOV_THRESHOLD) return;
+      const bounds = this.host.getBoundingClientRect();
+      let position: [number, number] | null;
+      try { position = coordinatePair(this.aladin?.pix2world?.(event.clientX - bounds.left, event.clientY - bounds.top)); } catch { return; }
+      if (!position) return;
+      const healpix = new Healpix(session.densityNside);
+      const pixel = healpix.ang2pix(new Pointing(null, false, (90 - position[1]) * Math.PI / 180, normalizeRa(position[0]) * Math.PI / 180));
+      if (!session.densityCells.has(pixel)) return;
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      onInteraction();
+      const center = healpix.pix2ang(pixel);
+      this.gotoRaDec(normalizeRa(center.phi * 180 / Math.PI), 90 - center.theta * 180 / Math.PI);
+      this.setFov(0.5);
+    };
+    this.host.addEventListener("wheel", onInteraction, { capture: true, passive: true });
+    this.host.addEventListener("pointermove", onPointerMove, { capture: true, passive: true });
+    this.host.addEventListener("dblclick", onDoubleClick, true);
+    this.removeInteractionListeners = () => {
+      this.host.removeEventListener("wheel", onInteraction, true);
+      this.host.removeEventListener("pointermove", onPointerMove, true);
+      this.host.removeEventListener("dblclick", onDoubleClick, true);
+    };
     const onViewChange = (): void => {
-      if (Date.now() >= this.pendingViewExpiresAt) this.pendingView = null;
-      if (!this.pendingView) {
-        const current = this.getCurrentView();
-        const sameCenter = Math.abs(((current.raDeg - this.snapshot.centerRaDeg + 540) % 360) - 180) < 0.001
-          && Math.abs(current.decDeg - this.snapshot.centerDecDeg) < 0.001;
-        if (!sameCenter || Math.abs(current.fovDeg - this.snapshot.initialFovDeg) >= 0.001) {
-          this.initialViewport = false;
-          this.cancelAutoAnchor();
-        }
-      }
+      this.scheduleDirectionGuides();
+      this.positionDensityLabels();
       this.scheduleQuery(QUERY_DEBOUNCE_MS);
       window.setTimeout(() => {
         if (!this.disposed) this.callbacks.onViewChange?.(this.getCurrentView());
@@ -384,7 +565,7 @@ export class AladinExplorer {
     };
     this.aladin.on?.("positionChanged", onViewChange);
     this.aladin.on?.("zoomChanged", onViewChange);
-    this.aladin.on?.("viewChanged", onViewChange);
+    this.aladin.on?.("resizeChanged", onViewChange);
     this.aladin.on?.("objectClicked", (source: any) => {
       if (source?.data?.kind === "density") {
         this.emitDensityHover(source);
@@ -393,7 +574,10 @@ export class AladinExplorer {
       const record = source?.data?.record as AstroObjectRecord | undefined;
       if (record) {
         this.lastObjectClickAt = Date.now();
-        void workspaceApi.skyPointDetail(record.object_id).then(({ point }) => { if (!this.disposed && this.host.dataset.objectSelected === point.object_id) this.callbacks.onObject(this.toObjectPoint(point)); }).catch(() => undefined);
+        this.pointDetailController?.abort();
+        const controller = new AbortController();
+        this.pointDetailController = controller;
+        void workspaceApi.skyPointDetail(record.object_id, controller.signal).then(({ point }) => { if (!controller.signal.aborted && !this.disposed && this.host.dataset.objectSelected === point.object_id) this.callbacks.onObject(this.toObjectPoint(point)); }).catch(() => undefined);
         this.host.dataset.objectSelected = record.object_id;
         this.callbacks.onObject(this.toObjectPoint(record, source?.data?.overlap ? {
           overlapCount: Number(source.data.overlapCount) || undefined,
@@ -426,11 +610,8 @@ export class AladinExplorer {
     const key = `${Number(data.nside)}:${Number(data.pixel)}`;
     if (this.lastDensityHoverKey === key) return;
     this.lastDensityHoverKey = key;
-    const layers = Array.isArray(data.layers) ? data.layers.map((entry: { id: string; count: number }) => {
-      const target = this.assetTargets.get(entry.id);
-      return { id: entry.id, label: target?.label ?? entry.id, color: target?.color ?? "#ffffff", count: Number(entry.count) || 0 };
-    }) : [];
-    this.callbacks.onDensityHover?.({ pixel: Number(data.pixel), nside: Number(data.nside), total: Number(data.total) || 0, layers });
+    const surveys = this.describeDensitySurveys(data.surveys ?? []);
+    this.callbacks.onDensityHover?.({ pixel: Number(data.pixel), nside: Number(data.nside), total: Number(data.total) || 0, surveys });
   }
 
   private emitDensityAt(position: { ra?: number | null; dec?: number | null }): void {
@@ -446,7 +627,7 @@ export class AladinExplorer {
       (normalizeRa(Number(position.ra)) * Math.PI) / 180,
     ));
     const cell = session.densityCells.get(pixel);
-    this.emitDensityHover(cell ? { data: { kind: "density", pixel, nside: session.densityNside, total: cell.count, layers: cell.layers } } : null);
+    this.emitDensityHover(cell ? { data: { kind: "density", pixel, nside: session.densityNside, total: cell.count, surveys: cell.surveys } } : null);
   }
 
   private themeGridColor(): string {
@@ -460,18 +641,39 @@ export class AladinExplorer {
   }
 
   private emitStatus(status: AladinExplorerStatus): void {
+    this.lastStatus = status;
     this.callbacks.onStatus(status);
   }
 
+  private lastStatus: AladinExplorerStatus | null = null;
+
   private getCurrentView(): AladinExplorerView {
-    if (this.pendingView && Date.now() < this.pendingViewExpiresAt) return this.pendingView;
-    this.pendingView = null;
-    const raDec = this.aladin?.getRaDec?.();
+    if (Date.now() >= this.pendingViewExpiresAt) this.pendingView = null;
+    const width = this.host.clientWidth;
+    const height = this.host.clientHeight;
+    const project = (x: number, y: number): [number, number] | null => {
+      try { return coordinatePair(this.aladin?.pix2world?.(x, y)); } catch { return null; }
+    };
+    // Read the rendered sky: Aladin's cached vertical FOV can remain 180°
+    // after a fullscreen resize, and getRaDec may return a Float64Array.
+    const center = project(width / 2, height / 2);
+    const raDec = center ?? coordinatePair(this.aladin?.getRaDec?.());
     const fov = this.aladin?.getFov?.();
-    const raDeg = normalizeRa(Array.isArray(raDec) ? finiteNumber(raDec[0], this.snapshot.centerRaDeg) : this.snapshot.centerRaDeg);
-    const decDeg = clampDec(Array.isArray(raDec) ? finiteNumber(raDec[1], this.snapshot.centerDecDeg) : this.snapshot.centerDecDeg);
-    const width = fovWidth(fov, this.snapshot.initialFovDeg);
-    return { raDeg, decDeg, fovDeg: Math.min(MAX_FOV_DEG, width) };
+    const raDeg = normalizeRa(raDec?.[0] ?? this.pendingView?.raDeg ?? this.snapshot.centerRaDeg);
+    const decDeg = clampDec(raDec?.[1] ?? this.pendingView?.decDeg ?? this.snapshot.centerDecDeg);
+    const fallback = fovDimensions(fov, this.pendingView?.fovDeg ?? this.snapshot.initialFovDeg);
+    const span = (a: [number, number] | null, b: [number, number] | null, defaultSpan: number): number =>
+      center && a && b ? Math.max(MIN_FOV_DEG,
+        angularDistanceDeg(...a, ...center) + angularDistanceDeg(...center, ...b)) : defaultSpan;
+    const fovXDeg = span(project(0, height / 2), project(width, height / 2), fallback[0]);
+    const fovYDeg = span(project(width / 2, 0), project(width / 2, height), fallback[1]);
+    return {
+      raDeg,
+      decDeg,
+      fovDeg: Math.min(MAX_FOV_DEG, Math.max(fovXDeg, fovYDeg)),
+      fovXDeg,
+      fovYDeg,
+    };
   }
 
   getView(): AladinExplorerView {
@@ -497,6 +699,7 @@ export class AladinExplorer {
   setLayerSelected(layerId: string, selected: boolean): void {
     if (!this.assetTargets.has(layerId)) return;
     this.cancelAutoAnchor();
+    this.initialViewport = false;
     if (selected) this.selectedLayerIds.add(layerId); else this.selectedLayerIds.delete(layerId);
     this.activeAssetId = this.selectedLayerIds.size === 1 ? [...this.selectedLayerIds][0]! : null;
     this.activateSession([...this.selectedLayerIds]);
@@ -506,6 +709,7 @@ export class AladinExplorer {
 
   focusAsset(assetId: string | null): void {
     this.cancelAutoAnchor();
+    this.initialViewport = false;
     this.selectedLayerIds.clear();
     (assetId ? [assetId] : [...this.assetTargets.keys()]).forEach((id) => this.selectedLayerIds.add(id));
     this.activeAssetId = assetId; this.activateSession([...this.selectedLayerIds]);
@@ -519,6 +723,7 @@ export class AladinExplorer {
   gotoRaDec(raDeg: number, decDeg: number): void {
     if (!this.aladin || this.disposed) return;
     this.cancelAutoAnchor();
+    this.initialViewport = false;
     const nextRa = normalizeRa(raDeg);
     const nextDec = clampDec(decDeg);
     const current = this.getCurrentView();
@@ -528,12 +733,27 @@ export class AladinExplorer {
     this.scheduleQuery(0);
   }
 
+  private applyFov(fovDeg: number): void {
+    if (!this.aladin) return;
+    this.aladin.setFov(fovDeg);
+    // Aladin sets the horizontal span; our FOV limits the larger viewport
+    // axis. Measure the projection so portrait and fullscreen layouts agree.
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const measured = this.getCurrentView().fovDeg;
+      if (Math.abs(measured - fovDeg) <= fovDeg * 0.001) break;
+      const horizontal = coordinatePair(this.aladin.getFov?.())?.[0];
+      if (!horizontal || !Number.isFinite(measured) || measured <= 0) break;
+      this.aladin.setFov(Math.min(MAX_FOV_DEG, horizontal * fovDeg / measured));
+    }
+  }
+
   setFov(fovDeg: number): void {
     if (!this.aladin || this.disposed) return;
     this.cancelAutoAnchor();
+    this.initialViewport = false;
     const nextFov = Math.max(MIN_FOV_DEG, Math.min(MAX_FOV_DEG, fovDeg));
     const current = this.getCurrentView();
-    this.aladin.setFov(nextFov);
+    this.applyFov(nextFov);
     this.pendingView = { raDeg: current.raDeg, decDeg: current.decDeg, fovDeg: nextFov };
     this.pendingViewExpiresAt = Date.now() + 700;
     this.scheduleQuery(0);
@@ -557,7 +777,11 @@ export class AladinExplorer {
     if (this.indexRefreshTimer) clearTimeout(this.indexRefreshTimer);
     this.indexRefreshTimer = null;
     this.generation += 1;
-    this.activeRequest?.controller.abort();
+    const previous = this.activeRequest;
+    if (previous) {
+      previous.session.pendingRects = previous.session.pendingRects.filter(rect => !previous.jobs.includes(rect));
+      previous.controller.abort();
+    }
     this.activeRequest = null;
     if (this.queryTimer) clearTimeout(this.queryTimer);
     const generation = this.generation;
@@ -572,11 +796,12 @@ export class AladinExplorer {
     const view = this.getCurrentView();
     const boxes = viewportBoxes(view, this.host, this.aladin);
     const assetIds = [...this.selectedLayerIds];
-    this.densityModeActive = false;
-    this.lastDensityHoverKey = null;
-    this.callbacks.onDensityHover?.(null);
     if (!assetIds.length || !this.scopesForLayers(assetIds).length) {
       this.activateSession(assetIds);
+      this.densityModeActive = false;
+      this.activeSession?.densityCatalogs.forEach((catalog) => catalog.hide?.());
+      this.lastDensityHoverKey = null;
+      this.callbacks.onDensityHover?.(null);
       this.emitStatus({ phase: "empty", returned: 0, total: 0, truncated: false, message: assetIds.length ? "所选图层仅有覆盖；下载并扫描后可显示数据点" : "当前未选中数据图层" });
       return;
     }
@@ -586,11 +811,15 @@ export class AladinExplorer {
       await this.queryDensityViewport(generation, view, boxes, session, assetIds);
       return;
     }
-    session.densityCatalogs.forEach(catalog => catalog.hide?.());
     session.catalogs.forEach(catalog => catalog.show?.());
     const jobs = subtractRects(boxes, [...(session.indexing ? [] : session.coveredRects), ...session.pendingRects]);
     if (!jobs.length) {
+      session.densityCatalogs.forEach(catalog => catalog.hide?.());
+      this.densityModeActive = false;
+      this.lastDensityHoverKey = null;
+      this.callbacks.onDensityHover?.(null);
       this.emitSessionStatus(session, true);
+      this.refreshDirectionTargets();
       if (!session.renderedObjectIds.size) await this.maybeAutoAnchor(session, generation);
       return;
     }
@@ -602,6 +831,7 @@ export class AladinExplorer {
     this.emitStatus({ phase: "loading", displayMode: "points", returned: session.renderedObjectIds.size,
       total: session.total, truncated: false, complete: false, assets: this.assetProgress(session, "loading"),
       overlapCount: session.overlapSources.size, indexing: session.indexing });
+    let viewportCompleted = false;
     try {
       for (const bbox of jobs) {
         const activeLayers = new Set(assetIds.filter(id => (this.assetTargets.get(id)?.scopes?.length ?? 0) > 0));
@@ -648,7 +878,13 @@ export class AladinExplorer {
           session.coveredRects = compactRects(session.coveredRects);
         }
       }
+      session.densityCatalogs.forEach(catalog => catalog.hide?.());
+      this.densityModeActive = false;
+      this.lastDensityHoverKey = null;
+      this.callbacks.onDensityHover?.(null);
+      viewportCompleted = true;
       this.emitSessionStatus(session, true);
+      this.refreshDirectionTargets();
       if (!session.renderedObjectIds.size) await this.maybeAutoAnchor(session, generation, controller.signal);
     } catch (error) {
       if (controller.signal.aborted || this.disposed || generation !== this.generation) return;
@@ -659,6 +895,7 @@ export class AladinExplorer {
         if (index >= 0) session.pendingRects.splice(index, 1);
       });
       if (this.activeRequest === request) this.activeRequest = null;
+      if (viewportCompleted && !controller.signal.aborted && generation === this.generation) this.refreshEmptyStatus();
       if (!this.disposed && generation === this.generation && session.indexing && this.activeSession === session) {
         this.indexRefreshTimer = setTimeout(() => { this.indexRefreshTimer = null; this.scheduleQuery(0); }, INDEX_REFRESH_MS);
       }
@@ -671,12 +908,6 @@ export class AladinExplorer {
   }
 
   private async queryDensityViewport(generation: number, view: AladinExplorerView, boxes: QueryRect[], session: ViewportSession, assetIds: string[]): Promise<void> {
-    this.densityModeActive = true;
-    this.lastDensityHoverKey = null;
-    this.callbacks.onDensityHover?.(null);
-    session.densityCells.clear();
-    session.densityCatalogs.forEach(catalog => { catalog.clear?.(); catalog.hide?.(); });
-    session.catalogs.forEach(catalog => catalog.hide?.());
     const layers: AstroPointDensityLayerInput[] = assetIds.map(id => ({ id, scopes: this.assetTargets.get(id)?.scopes ?? [] }));
     const controller = new AbortController();
     const request: ActiveRequest = { controller, generation, session, jobs: boxes };
@@ -684,6 +915,7 @@ export class AladinExplorer {
     this.activeRequest = request;
     this.emitStatus({ phase: "loading", displayMode: "density", returned: 0, total: 0, truncated: false,
       complete: false, indexing: session.indexing, assets: this.assetProgress(session, "loading"), overlapCount: session.overlapSources.size });
+    let viewportCompleted = false;
     try {
       const result = await workspaceApi.skyPointDensity({
         region: { nside: this.snapshot.nside, pixels: this.snapshot.pixels, coordinateFrame: "ICRS", ordering: "NESTED" },
@@ -692,17 +924,28 @@ export class AladinExplorer {
       if (this.disposed || generation !== this.generation || controller.signal.aborted) return;
       if (result.status !== "ready") throw new Error(result.message ?? "密度聚合未能完成");
       session.indexing = result.indexing;
+      session.catalogs.forEach(catalog => catalog.hide?.());
+      this.densityModeActive = true;
+      this.lastDensityHoverKey = null;
+      this.callbacks.onDensityHover?.(null);
       this.renderDensityCells(session, result, layers);
-      this.emitStatus({ phase: result.total ? "ready" : "empty", displayMode: "density", returned: result.cells.length,
+      this.renderDirectionGuides();
+      this.refreshDirectionTargets();
+      const status: AladinExplorerStatus = { phase: result.total ? "ready" : "empty", displayMode: "density", returned: result.cells.length,
         densityCells: result.cells.length, total: result.total, truncated: false, complete: !result.indexing,
-        indexing: result.indexing, assets: this.assetProgress(session, result.total ? "ready" : "idle"), overlapCount: session.overlapSources.size,
-        message: result.total ? undefined : "所选视野内没有已索引数据点" });
+        indexing: result.indexing, assets: this.assetProgress(session, result.total ? "ready" : "idle").map(asset => ({
+          ...asset, total: result.layers.find(layer => layer.id === asset.assetId)?.count ?? 0,
+        })), overlapCount: session.overlapSources.size,
+        message: result.total ? undefined : "所选视野内没有已索引数据点" };
+      this.emitSessionStatus(session, true, status);
+      viewportCompleted = true;
     } catch (error) {
       if (controller.signal.aborted || this.disposed || generation !== this.generation) return;
       this.emitStatus({ phase: "error", displayMode: "density", returned: 0, total: 0, truncated: false, complete: true,
         message: error instanceof Error ? error.message : String(error) });
     } finally {
       if (this.activeRequest === request) this.activeRequest = null;
+      if (viewportCompleted && !controller.signal.aborted && generation === this.generation) this.refreshEmptyStatus();
       if (!this.disposed && generation === this.generation && session.indexing && this.activeSession === session) {
         this.indexRefreshTimer = setTimeout(() => { this.indexRefreshTimer = null; this.scheduleQuery(0); }, INDEX_REFRESH_MS);
       }
@@ -757,7 +1000,7 @@ export class AladinExplorer {
         return A.source(entry.raDeg, entry.decDeg, {
           kind: "density", layerId: layer.id, nside: result.nside, pixel: entry.pixel,
           count: entry.count, total: entry.cell.count, opacity, vertices: boundary,
-          layers: entry.cell.layers,
+          layers: entry.cell.layers, surveys: entry.cell.surveys,
         }, { color: target.color });
       });
       if (sources.length) catalog.addSources(sources);
@@ -765,27 +1008,269 @@ export class AladinExplorer {
     }
     this.host.dataset.densityNside = String(result.nside);
     this.host.dataset.densityCells = String(result.cells.length);
+    this.renderDensityLabels(session);
+  }
+
+  private describeDensitySurveys(surveys: AstroPointDensityResult["cells"][number]["surveys"]) {
+    return surveys.filter(survey => survey.count > 0).map(survey => {
+      const asset = survey.assetId ? this.assetTargets.get(survey.assetId)
+        ?? [...this.assetTargets.values()].find(target => target.scopes?.some(scope => scope.assetId === survey.assetId)) : undefined;
+      const descriptor = survey.id
+        ? this.callbacks.resolveSurvey?.(survey.id) ?? { label: survey.id, color: "#a8b3ff" }
+        : { label: asset ? `${asset.label}（未标注巡天）` : "未标注巡天", color: asset?.color ?? "#a8b3ff" };
+      return { ...survey, ...descriptor };
+    }).sort((left, right) => right.count - left.count || left.label.localeCompare(right.label));
+  }
+
+  private renderDensityLabels(session: ViewportSession): void {
+    const host = this.densityLabelLayer;
+    if (!host) return;
+    host.replaceChildren();
+    this.densityLabels.clear();
+    const healpix = new Healpix(session.densityNside);
+    for (const cell of session.densityCells.values()) {
+      if (!cell.count) continue;
+      const center = healpix.pix2ang(cell.pixel);
+      const raDeg = normalizeRa(center.phi * 180 / Math.PI);
+      const decDeg = 90 - center.theta * 180 / Math.PI;
+      const label = document.createElement("div");
+      label.className = "aladin-density-label";
+      label.dataset.pixel = String(cell.pixel);
+      label.dataset.nside = String(session.densityNside);
+      label.dataset.raDeg = String(raDeg);
+      label.dataset.decDeg = String(decDeg);
+      label.setAttribute("role", "group");
+      const total = document.createElement("strong");
+      total.className = "aladin-density-label-total";
+      total.textContent = `${cell.count.toLocaleString()} 个数据点`;
+      label.append(total);
+      const surveys = this.describeDensitySurveys(cell.surveys);
+      label.setAttribute("aria-label", surveys.map(survey => `${survey.label} ${survey.count} 个数据点`).join("，") + "。双击密度块放大到 0.5°");
+      for (const survey of surveys) {
+        const row = document.createElement("div");
+        row.className = "aladin-density-label-row";
+        row.dataset.surveyId = survey.id;
+        if (survey.assetId) row.dataset.assetId = survey.assetId;
+        row.style.setProperty("--survey-color", survey.color);
+        const swatch = document.createElement("i");
+        swatch.setAttribute("aria-hidden", "true");
+        const name = document.createElement("span");
+        name.textContent = survey.label;
+        name.title = survey.label;
+        const count = document.createElement("output");
+        count.textContent = survey.count.toLocaleString();
+        row.append(swatch, name, count);
+        label.append(row);
+      }
+      host.append(label);
+      this.densityLabels.set(cell.pixel, { element: label, raDeg, decDeg,
+        vertices: healpix.getBoundaries(cell.pixel).map(vertex => [
+          normalizeRa(Math.atan2(vertex.y, vertex.x) * 180 / Math.PI),
+          Math.asin(Math.max(-1, Math.min(1, vertex.z))) * 180 / Math.PI,
+        ]),
+      });
+    }
+    this.positionDensityLabels();
+  }
+
+  private positionDensityLabels(): void {
+    const host = this.densityLabelLayer;
+    if (!host || !this.aladin || this.disposed) return;
+    host.hidden = !this.densityModeActive || !this.densityLabels.size || this.getCurrentView().fovDeg <= DENSITY_FOV_THRESHOLD;
+    if (host.hidden) return;
+    const width = this.host.clientWidth;
+    const height = this.host.clientHeight;
+    const project = (ra: number, dec: number): [number, number] | null => {
+      try { return coordinatePair(this.aladin.world2pix(ra, dec)); } catch { return null; }
+    };
+    for (const { element, raDeg, decDeg, vertices } of this.densityLabels.values()) {
+      const center = project(raDeg, decDeg);
+      const boundary = vertices.map(vertex => project(...vertex)).filter((point): point is [number, number] => point !== null);
+      const left = Math.max(0, Math.min(...boundary.map(point => point[0])));
+      const right = Math.min(width, Math.max(...boundary.map(point => point[0])));
+      const top = Math.max(0, Math.min(...boundary.map(point => point[1])));
+      const bottom = Math.min(height, Math.max(...boundary.map(point => point[1])));
+      element.hidden = !center || right <= left || bottom <= top;
+      if (element.hidden || !center) continue;
+      const halfWidth = element.offsetWidth / 2;
+      const halfHeight = element.offsetHeight / 2;
+      const x = Math.max(left, Math.min(right, center[0]));
+      const y = Math.max(top, Math.min(bottom, center[1]));
+      element.style.left = `${Math.max(halfWidth + 4, Math.min(width - halfWidth - 4, x))}px`;
+      element.style.top = `${Math.max(halfHeight + 4, Math.min(height - halfHeight - 4, y))}px`;
+    }
+  }
+
+  private refreshDirectionTargets(): void {
+    const layerIds = [...this.selectedLayerIds].filter(id => !this.directionTargets.has(id)
+      && !["empty", "error", "indexing"].includes(this.regionPointStates.get(id) ?? "") && this.scopesForLayers([id]).length);
+    if (this.disposed || this.directionAnchorController || !layerIds.length) return;
+    const controller = new AbortController();
+    const generation = ++this.directionAnchorGeneration;
+    this.directionAnchorController = controller;
+    for (const id of this.directionTargets.keys()) if (!this.selectedLayerIds.has(id)) this.directionTargets.delete(id);
+    layerIds.forEach(id => this.regionPointStates.set(id, "loading"));
+    this.renderDirectionGuides();
+    this.refreshEmptyStatus();
+    this.directionTargetsPromise = Promise.all(layerIds.map(async (assetId) => {
+      const layerScopes = this.scopesForLayers([assetId]);
+      if (!layerScopes.length) return;
+      try {
+        const result = await workspaceApi.skyPointAnchor({
+          region: { nside: this.snapshot.nside, pixels: this.snapshot.pixels, coordinateFrame: "ICRS", ordering: "NESTED" },
+          layerScopes, coordinateFrame: "ICRS", ordering: "NESTED", limit: 1,
+          includeAttributes: false, trackTotalHits: false,
+        }, controller.signal);
+        if (this.disposed || generation !== this.directionAnchorGeneration || controller.signal.aborted) return;
+        if (result.status !== "ready") throw new Error(result.message ?? "选区点位查询失败");
+        this.regionPointStates.set(assetId, result.point ? "available" : result.indexing ? "indexing" : "empty");
+        if (result.point) this.directionTargets.set(assetId, { assetId, raDeg: result.point.raDeg, decDeg: result.point.decDeg });
+        this.renderDirectionGuides();
+      } catch {
+        if (!controller.signal.aborted && generation === this.directionAnchorGeneration) this.regionPointStates.set(assetId, "error");
+      }
+    })).then(() => {
+      if (!this.disposed && generation === this.directionAnchorGeneration) {
+        if (this.directionAnchorController === controller) this.directionAnchorController = null;
+        this.renderDirectionGuides();
+        this.refreshEmptyStatus();
+      }
+    });
+  }
+
+  private regionPointState(): NonNullable<AladinExplorerStatus["regionPointState"]> {
+    const states = [...this.selectedLayerIds].filter(id => this.scopesForLayers([id]).length)
+      .map(id => this.regionPointStates.get(id) ?? "loading");
+    if (states.includes("available")) return "available";
+    if (states.includes("indexing")) return "indexing";
+    if (states.includes("loading")) return "loading";
+    if (states.includes("error")) return "error";
+    return "empty";
+  }
+
+  private refreshEmptyStatus(): void {
+    const session = this.activeSession;
+    if (!session || this.disposed) return;
+    const density = this.densityModeActive && this.lastStatus?.displayMode === "density" ? this.lastStatus : undefined;
+    if (density ? density.total > 0 : session.renderedObjectIds.size > 0) return;
+    // A region hint must not replace a viewport request's progress or error.
+    if (this.activeRequest || (this.lastStatus?.phase === "error" && !this.lastStatus.regionPointState)) return;
+    this.emitSessionStatus(session, true, density);
+    if (this.regionPointState() === "indexing" && !this.indexRefreshTimer) {
+      this.indexRefreshTimer = setTimeout(() => {
+        this.indexRefreshTimer = null;
+        for (const [id, state] of this.regionPointStates) if (state === "indexing") this.regionPointStates.delete(id);
+        this.scheduleQuery(0);
+      }, INDEX_REFRESH_MS);
+    }
+  }
+
+  retryNavigation(): void {
+    this.directionAnchorController?.abort();
+    this.directionAnchorController = null;
+    this.directionAnchorGeneration += 1;
+    for (const [id, state] of this.regionPointStates) if (state !== "available") this.regionPointStates.delete(id);
+    if (this.activeSession) this.activeSession.coveredRects = [];
+    this.scheduleQuery(0);
+  }
+
+  private scheduleDirectionGuides(): void {
+    if (this.disposed || this.directionGuideTimer) return;
+    this.directionGuideTimer = setTimeout(() => {
+      this.directionGuideTimer = null;
+      this.renderDirectionGuides();
+    }, 80);
+  }
+
+  private renderDirectionGuides(): void {
+    const host = this.directionGuideLayer;
+    if (!host || !this.aladin || this.disposed) return;
+    host.replaceChildren();
+    const view = this.getCurrentView();
+    const width = this.host.clientWidth;
+    const height = this.host.clientHeight;
+    if (width < 100 || height < 100) {
+      this.host.dataset.directionGuideCount = "0";
+      return;
+    }
+    const selected = new Set(this.selectedLayerIds);
+    const candidates = [...this.directionTargets.values()]
+      .filter((target) => selected.has(target.assetId))
+      .map((target) => ({
+        target,
+        distanceDeg: angularDistanceDeg(view.raDeg, view.decDeg, target.raDeg, target.decDeg),
+        direction: directionToTarget(this.aladin, width, height, view, target),
+      }))
+      .filter((entry): entry is typeof entry & { direction: { dx: number; dy: number } } => entry.direction !== null)
+      .sort((left, right) => left.distanceDeg - right.distanceDeg)
+      .slice(0, 5);
+    const occupied: DirectionGuidePlacement[] = [];
+    for (const { target, distanceDeg, direction } of candidates) {
+      const placement = placeDirectionGuide(width, height, direction.dx, direction.dy, occupied);
+      occupied.push(placement);
+      const layer = this.assetTargets.get(target.assetId);
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "aladin-direction-guide";
+      button.dataset.assetId = target.assetId;
+      button.style.left = `${placement.x}px`;
+      button.style.top = `${placement.y}px`;
+      button.style.width = `${placement.width}px`;
+      button.style.height = `${placement.height}px`;
+      button.style.setProperty("--asset-color", layer?.color ?? "#38c8b5");
+      button.title = `前往 ${layer?.label ?? target.assetId} 的数据点`;
+      button.setAttribute("aria-label", `${button.title}，距离 ${formatGuideDistance(distanceDeg)}`);
+
+      const arrow = document.createElement("span");
+      arrow.className = "aladin-direction-guide-arrow";
+      arrow.setAttribute("aria-hidden", "true");
+      arrow.style.setProperty("--direction-angle", `${Math.atan2(direction.dy, direction.dx)}rad`);
+      const icon = document.createElement("i");
+      icon.dataset.lucide = "arrow-right";
+      arrow.append(icon);
+      const label = document.createElement("span");
+      label.className = "aladin-direction-guide-name";
+      label.textContent = layer?.label ?? target.assetId;
+      const distance = document.createElement("span");
+      distance.className = "aladin-direction-guide-distance";
+      distance.textContent = formatGuideDistance(distanceDeg);
+      button.append(arrow, label, distance);
+      button.addEventListener("click", () => {
+        const targetFov = Math.min(this.getCurrentView().fovDeg, layer?.defaultFovDeg ?? this.snapshot.initialFovDeg);
+        // The confirmed anchor can be newer than a cached empty viewport.
+        if (this.activeSession) this.activeSession.coveredRects = [];
+        this.gotoRaDec(target.raDeg, target.decDeg);
+        this.setFov(targetFov);
+      });
+      host.append(button);
+    }
+    createIcons({ icons: { ArrowRight }, attrs: { "aria-hidden": "true" } });
+    this.host.dataset.directionGuideCount = String(candidates.length);
   }
 
   private async maybeAutoAnchor(session: ViewportSession, generation: number, signal?: AbortSignal): Promise<void> {
-    if (!this.initialViewport || this.autoAnchorAttempted || session.indexing || session.renderedObjectIds.size) return;
-    this.autoAnchorAttempted = true;
+    if (!this.initialViewport || session.indexing || session.renderedObjectIds.size) return;
     if (signal?.aborted) return;
+    this.cancelAutoAnchor();
     const controller = new AbortController();
     const abortFromRequest = (): void => controller.abort();
     signal?.addEventListener("abort", abortFromRequest, { once: true });
     this.autoAnchorController = controller;
     try {
-      const result = await workspaceApi.skyPointAnchor({
-        region: { nside: this.snapshot.nside, pixels: this.snapshot.pixels, coordinateFrame: "ICRS", ordering: "NESTED" },
-        layerScopes: this.scopesForLayers([...this.selectedLayerIds]), coordinateFrame: "ICRS", ordering: "NESTED",
-        limit: 1, includeAttributes: false, trackTotalHits: false,
-      }, controller.signal);
+      const abortPending = new Promise<void>((resolve) => controller.signal.addEventListener("abort", () => resolve(), { once: true }));
+      await Promise.race([this.directionTargetsPromise, abortPending]);
       if (this.disposed || generation !== this.generation || controller.signal.aborted || !this.initialViewport) return;
-      if (result.status !== "ready") throw new Error(result.message ?? "首屏没有数据点，定位查询失败");
+      const view = this.getCurrentView();
+      const target = [...this.directionTargets.values()]
+        .sort((left, right) => angularDistanceDeg(view.raDeg, view.decDeg, left.raDeg, left.decDeg)
+          - angularDistanceDeg(view.raDeg, view.decDeg, right.raDeg, right.decDeg))[0];
+      if (!target) return;
       this.initialViewport = false;
       this.autoAnchorController = null;
-      if (result.point) this.gotoRaDec(result.point.raDeg, result.point.decDeg);
+      // A confirmed point supersedes the empty entry result, including when
+      // its coordinate overlaps the rectangle previously cached as empty.
+      session.coveredRects = [];
+      this.gotoRaDec(target.raDeg, target.decDeg);
     } catch (error) {
       if (!controller.signal.aborted) throw error;
     } finally {
@@ -838,6 +1323,9 @@ export class AladinExplorer {
       session.catalogs.forEach((catalog) => catalog.show?.());
       session.densityCatalogs.forEach((catalog) => catalog.show?.());
       this.activeSession = session;
+      this.densityLabelLayer?.replaceChildren();
+      this.densityLabels.clear();
+      this.positionDensityLabels();
       this.evictSessions(session);
     }
     session.lastUsed = Date.now();
@@ -867,18 +1355,29 @@ export class AladinExplorer {
     if (this.activeSession === session) this.activeSession = null;
   }
 
-  private emitSessionStatus(session: ViewportSession, complete: boolean): void {
-    const returned = session.renderedObjectIds.size;
+  private emitSessionStatus(session: ViewportSession, complete: boolean, density?: AladinExplorerStatus): void {
+    const returned = density?.returned ?? session.renderedObjectIds.size;
+    const regionPointState = this.regionPointState();
+    const indexing = session.indexing || regionPointState === "indexing";
+    const locating = !returned && regionPointState === "loading";
+    const imagesOnly = session.assetIds.length > 0 && session.assetIds.every(id => this.assetTargets.get(id)?.pointKind === "image_center");
     this.emitStatus({
-      phase: returned ? "ready" : "empty",
+      phase: returned ? "ready" : locating || indexing ? "loading" : regionPointState === "error" ? "error" : "empty",
       returned,
-      total: session.total,
+      total: density?.total ?? session.total,
       truncated: session.truncated,
-      complete: complete && !session.indexing,
-      indexing: session.indexing,
-      displayMode: "points",
-      message: session.indexing ? "坐标索引生成中，已完成的数据点会自动更新" : returned ? undefined : "所选图层在当前天区和视野内没有数据点",
-      assets: this.assetProgress(session, returned ? "ready" : "idle"),
+      complete: complete && !indexing && !locating,
+      indexing,
+      regionPointState,
+      displayMode: density ? "density" : "points",
+      densityCells: density?.densityCells,
+      message: returned ? undefined : indexing ? "坐标索引生成中，已完成的数据点会自动更新"
+        : locating ? "当前视野暂无数据点，正在查找选区内的数据点…"
+          : regionPointState === "available" ? "当前视野暂无数据点，可点击方向箭头前往选区内的数据位置。"
+            : regionPointState === "error" ? "选区点位查询失败，暂时无法判断选区是否为空，请重试。"
+              : imagesOnly ? "所选区块有影像覆盖，但没有已索引的影像中心点。影像范围可能延伸至此，中心位于区块外。"
+                : "所选区块有覆盖记录，但没有已索引数据点。",
+      assets: density?.assets ?? this.assetProgress(session, returned ? "ready" : "idle"),
       overlapCount: session.overlapSources.size,
     });
   }
@@ -927,7 +1426,11 @@ export class AladinExplorer {
       if (session.renderedObjectIds.has(record.object_id)) return;
       session.renderedObjectIds.add(record.object_id);
       addedRecords.push(record);
-      for (const key of session.assetIds) if (this.scopesForLayers([key]).some((scope) => scope.assetId === record.asset_id && (!scope.sourceId || scope.sourceId === record.attributes?.source_id))) session.returnedByAsset.set(key, (session.returnedByAsset.get(key) ?? 0) + 1);
+      for (const key of session.assetIds) if (this.scopesForLayers([key]).some((scope) => scope.assetId === record.asset_id && (!scope.sourceId || scope.sourceId === record.attributes?.source_id))) {
+        session.returnedByAsset.set(key, (session.returnedByAsset.get(key) ?? 0) + 1);
+        this.regionPointStates.set(key, "available");
+        if (!this.directionTargets.has(key)) this.directionTargets.set(key, { assetId: key, raDeg: record.ra_deg, decDeg: record.dec_deg });
+      }
       const layer = this.callbacks.resolveLayer(record);
       const group = groups.get(layer.key) ?? { layer, records: [] };
       group.records.push(record);
@@ -1051,7 +1554,13 @@ export class AladinExplorer {
   dispose(): void {
     if (this.disposed) return;
     this.disposed = true;
+    this.removeInteractionListeners?.();
+    this.removeInteractionListeners = null;
     this.cancelAutoAnchor();
+    this.pointDetailController?.abort();
+    this.directionAnchorController?.abort();
+    this.directionAnchorController = null;
+    this.directionAnchorGeneration += 1;
     this.generation += 1;
     this.activeRequest?.controller.abort();
     this.activeRequest = null;
@@ -1059,6 +1568,8 @@ export class AladinExplorer {
     this.queryTimer = null;
     if (this.indexRefreshTimer) clearTimeout(this.indexRefreshTimer);
     this.indexRefreshTimer = null;
+    if (this.directionGuideTimer) clearTimeout(this.directionGuideTimer);
+    this.directionGuideTimer = null;
     this.resizeObserver?.disconnect();
     this.resizeObserver = null;
     this.themeObserver?.disconnect();
@@ -1069,6 +1580,9 @@ export class AladinExplorer {
     this.sessions.clear();
     this.activeSession = null;
     this.disposeAladin();
+    this.directionGuideLayer = null;
+    this.densityLabelLayer = null;
+    this.densityLabels.clear();
     this.host.replaceChildren();
   }
 }

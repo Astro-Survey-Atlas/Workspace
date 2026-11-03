@@ -272,8 +272,8 @@ export interface RemoteCoverageScanInput {
   coverage: CoverageJobSpec;
 }
 
-async function getJson<T>(url: string): Promise<T> {
-  const response = await fetch(url, { headers: { Accept: "application/json" } });
+async function getJson<T>(url: string, signal?: AbortSignal): Promise<T> {
+  const response = await fetch(url, { headers: { Accept: "application/json" }, signal });
   if (!response.ok) {
     const body = (await response.json().catch(() => ({}))) as { error?: string };
     throw new Error(body.error ?? `Request failed: ${response.status}`);
@@ -350,8 +350,9 @@ export const workspaceApi = {
   },
   async configBackupPublicSelection(): Promise<PublicSelectionRestore | null> { return (await getJson<{ restore: PublicSelectionRestore | null }>("/api/config-backup/public-selection")).restore; },
   async retryConfigBackupPublicSelection(): Promise<PublicSelectionRestore> { return (await postJson<{ restore: PublicSelectionRestore }>("/api/config-backup/public-selection/retry", {})).restore; },
-  async dataAssetStatuses(): Promise<DataAssetOperationalStatusResponse[]> {
-    return (await getJson<{ statuses: DataAssetOperationalStatusResponse[] }>("/api/data-assets/status")).statuses;
+  async dataAssetStatuses(assetIds?: string[], signal?: AbortSignal): Promise<DataAssetOperationalStatusResponse[]> {
+    const query = assetIds ? `?${new URLSearchParams({ assetIds: assetIds.join(",") })}` : "";
+    return (await getJson<{ statuses: DataAssetOperationalStatusResponse[] }>(`/api/data-assets/status${query}`, signal)).statuses;
   },
   async dataAsset(id: string): Promise<DataAssetRecord> {
     return (await getJson<{ asset: DataAssetRecord }>(`/api/data-assets/${encodeURIComponent(id)}`)).asset;
@@ -499,14 +500,14 @@ export const workspaceApi = {
   async deleteResourcePackage(id: string): Promise<void> {
     await deleteRequest(`/api/resource-packages/${encodeURIComponent(id)}`);
   },
-  async skyOverview(input: { survey: string; release: string; nside: number; cells: number[] }): Promise<AstroOverviewResponse> {
+  async skyOverview(input: { survey: string; release: string; nside: number; cells: number[] }, signal?: AbortSignal): Promise<AstroOverviewResponse> {
     const parameters = new URLSearchParams({
       survey: input.survey,
       release: input.release,
       nside: String(input.nside),
       cells: input.cells.join(","),
     });
-    return getJson<AstroOverviewResponse>(`/api/sky/overview?${parameters}`);
+    return getJson<AstroOverviewResponse>(`/api/sky/overview?${parameters}`, signal);
   },
   async skyQuery(input: AstroSkyQueryInput): Promise<AstroSpatialSummary> {
     return postJson<AstroSpatialSummary>("/api/sky/query", input);
@@ -529,8 +530,8 @@ export const workspaceApi = {
   async skyPointInspect(input: SkyPointInspectionInput, signal?: AbortSignal): Promise<SkyPointInspectionResult> {
     return postJson<SkyPointInspectionResult>("/api/sky/points/inspect", input, signal);
   },
-  async skyPointDetail(id: string): Promise<{ point: import("../../src/astro-object-index").AstroObjectRecord }> {
-    return getJson(`/api/sky/points/${encodeURIComponent(id)}`);
+  async skyPointDetail(id: string, signal?: AbortSignal): Promise<{ point: import("../../src/astro-object-index").AstroObjectRecord }> {
+    return getJson(`/api/sky/points/${encodeURIComponent(id)}`, signal);
   },
   async derivedRepair(assetId: string, mode: "moc" | "positions" | "both"): Promise<unknown> {
     return postJson(`/api/data-assets/${encodeURIComponent(assetId)}/derived-repairs`, { mode });
@@ -538,12 +539,12 @@ export const workspaceApi = {
   async skyObjectsQuery(input: ObjectRegionQueryInput, signal?: AbortSignal): Promise<AstroObjectQueryResult> {
     return postJson<AstroObjectQueryResult>("/api/sky/objects/query", input, signal);
   },
-  async skyCoverage(input: { nside: number; assetIds?: string[]; survey?: string; release?: string }): Promise<WorkspaceAssetCoverageResponse> {
+  async skyCoverage(input: { nside: number; assetIds?: string[]; survey?: string; release?: string }, signal?: AbortSignal): Promise<WorkspaceAssetCoverageResponse> {
     const parameters = new URLSearchParams({ nside: String(input.nside) });
     if (input.assetIds?.length) parameters.set("assetIds", input.assetIds.join(","));
     if (input.survey) parameters.set("survey", input.survey);
     if (input.release) parameters.set("release", input.release);
-    return getJson<WorkspaceAssetCoverageResponse>(`/api/sky/coverage?${parameters}`);
+    return getJson<WorkspaceAssetCoverageResponse>(`/api/sky/coverage?${parameters}`, signal);
   },
   async skyOverlap(input: { sourceIds?: string[]; surveyIds?: string[]; assetIds?: string[]; nside?: number; includePublic?: boolean; includeWorkspace?: boolean }, signal?: AbortSignal): Promise<SkyOverlapResponse> {
     return postJson<SkyOverlapResponse>("/api/sky/overlap", input, signal);
@@ -662,8 +663,8 @@ export const workspaceApi = {
   async confirmWorkspaceAgentTool(id: string, approved: boolean): Promise<WorkspaceAgentSession> {
     return (await postJson<{ session: WorkspaceAgentSession }>(`/api/agent/workspace-sessions/${encodeURIComponent(id)}/confirm`, { approved })).session;
   },
-  async userMocs(): Promise<UserMocArtifact[]> {
-    return (await getJson<{ artifacts: UserMocArtifact[] }>("/api/user-mocs")).artifacts;
+  async userMocs(signal?: AbortSignal): Promise<UserMocArtifact[]> {
+    return (await getJson<{ artifacts: UserMocArtifact[] }>("/api/user-mocs", signal)).artifacts;
   },
   async registerSurvey(input: SurveyRegistrationInput): Promise<SurveyRecord> {
     return (await postJson<{ survey: SurveyRecord }>("/api/surveys/registrations", input)).survey;

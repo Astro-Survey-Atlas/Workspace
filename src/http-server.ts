@@ -1,5 +1,7 @@
 ﻿import path from "node:path";
 import { randomUUID } from "node:crypto";
+import { createReadStream } from "node:fs";
+import { once } from "node:events";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
@@ -9,6 +11,7 @@ import express from "express";
 import type { NextFunction, Request, Response } from "express";
 
 import { AgentService } from "./agent.js";
+import { responseCancellation } from "./http-request-cancellation.js";
 import { AstroIndexService, ASTRO_FILE_INDEX, ASTRO_OVERVIEW_NSIDE, type AstroCoverageLayer, type AstroSkyQueryInput } from "./astro-index.js";
 import { DerivedRepairService, imagePointsContainingCoordinate, SKY_DATA_POINT_INDEX } from "./derived-repairs.js";
 import { angularSeparationArcsec, AstroObjectIndexService, coordinateInHealpixRegion, coordinateSearchBbox, type AstroCellsQueryInput, type AstroObjectRecord, type AstroPointDensityQueryInput, type ObjectRegionQueryInput, type SkyDataPointScope } from "./astro-object-index.js";
@@ -19,7 +22,7 @@ import { ConnectorIngestRunCatalog, publicConnectorIngestRun, type ConnectorInge
 import { WarehouseScanQueue } from "./warehouse-scan-queue.js";
 import { DataStatisticsClient } from "./data-statistics-client.js";
 import { assetLinkedToConnector } from "./data-statistics.js";
-import { currentWarehouseLayerIds, warehouseLayerBelongsToAsset, workspaceLayerIdForAsset } from "./workspace-layer-identity.js";
+import { dataBatchForRun, currentQualityBatch, currentWarehouseLayerIds, warehouseLayerBelongsToAsset, workspaceLayerIdForAsset } from "./workspace-layer-identity.js";
 import { WorkspaceConfigBackupService } from "./workspace-config-backup.js";
 import { DataCatalogRegistry, type DataAssetAccess, type DataAssetRecord, type DataAssetRegistrationInput } from "./data-catalog.js";
 import { deriveDataAssetOperationalStatus, latestAssetScan, type DataAssetCoverageEvidence, type DataAssetRunEvidence } from "./data-asset-status.js";
@@ -114,8 +117,13 @@ const connectorRuns = new ConnectorIngestRunCatalog(metadataStore);
 const userMocs = new UserMocArtifactStore({ root: userMocRoot });
 const dataStatistics = new DataStatisticsClient({ root: path.join(stateRoot, "statistics"), workspaceScanRoot: path.join(stateRoot, "workspace-scans"),
   evidenceRoot: process.env.ASTRO_WAREHOUSE_EVIDENCE_MOUNT_PATH ?? "/var/lib/atlas-evidence" });
-const astroObjectIndex = new AstroObjectIndexService({ baseUrl: astroEsUrl });
-const skyDataPoints = new AstroObjectIndexService({ baseUrl: astroEsUrl, objectIndex: SKY_DATA_POINT_INDEX });
+const currentDataBatches = async (): Promise<ReadonlyMap<string, string>> => {
+  const [assets, runs] = await Promise.all([dataCatalog.list(), connectorRuns.list()]);
+  return new Map(assets.filter(asset => asset.scanSpec?.format === "fits" && asset.scanSpec.fitsQualityProfile)
+    .map(asset => [asset.id, currentQualityBatch(asset.id, runs)?.id ?? "pending-quality-validation"]));
+};
+const astroObjectIndex = new AstroObjectIndexService({ baseUrl: astroEsUrl, dataBatches: currentDataBatches });
+const skyDataPoints = new AstroObjectIndexService({ baseUrl: astroEsUrl, objectIndex: SKY_DATA_POINT_INDEX, dataBatches: currentDataBatches });
 const localCsvScans = new LocalCsvScanExecutor({
   enabled: localCsvScanEnabled,
   connectors,
@@ -611,18 +619,23 @@ app.get("/api/data-assets", async (request: Request, response: Response) => {
  * metadata registry; this endpoint is the workflow read model used by the
  * coverage view and by clients that need to decide the next action.
  */
-app.get("/api/data-assets/status", async (_request: Request, response: Response) => {
+app.get("/api/data-assets/status", async (request: Request, response: Response) => {
+  const signal = responseCancellation(response);
   try {
-    const assets = await dataCatalog.list();
+    const rawAssetIds = queryText(request.query.assetIds, "assetIds");
+    const requestedIds = request.query.assetIds === undefined ? undefined : new Set(rawAssetIds?.split(",").map(id => id.trim()).filter(Boolean));
+    const assets = (await dataCatalog.list()).filter(asset => !requestedIds || requestedIds.has(asset.id));
+    signal.throwIfAborted();
+    if (!assets.length) { response.json({ statuses: [] }); return; }
     const [connectorRecords, runs] = await Promise.all([connectors.list(), connectorRuns.list()]);
     const artifacts = await userMocs.list();
     const repairs = await derivedRepairs.list();
-    const artifactSelections = selectUserMocArtifacts(artifacts);
+    const artifactSelections = selectUserMocArtifacts(artifacts, assets, runs);
     const warehouse = await warehouseIndex.coverage({
       nside: ASTRO_OVERVIEW_NSIDE,
       ...(assets.length ? { assetIds: assets.map((asset) => asset.id) } : {}),
       layerIds: workspaceWarehouseLayerIds(assets, artifacts, runs),
-    });
+    }, signal);
     const connectorById = new Map(connectorRecords.map((connector) => [connector.id, connector]));
     const connectorByLocation = new Map(connectorRecords.map((connector) => [connector.locationKey, connector]));
     const statuses = await Promise.all(assets.map(async (asset) => {
@@ -638,12 +651,13 @@ app.get("/api/data-assets/status", async (_request: Request, response: Response)
       const uniqueLinked = [...new Map(linked.map((connector) => [connector.id, connector])).values()];
       const latestRun = latestAssetScan(runs, asset.id);
       const latestWorkspaceRun = latestAssetScan(runs.filter(run => run.executor === "workspace"), asset.id);
-      const pointQuery = await astroObjectIndex.queryObjects({ bbox: { raMin: 0, raMax: 360, decMin: -90, decMax: 90 }, layerScopes: [{ assetId: asset.id }], limit: 1, includeAttributes: false }, [astroObjectIndex.objectIndex, SKY_DATA_POINT_INDEX]);
+      signal.throwIfAborted();
+      const pointQuery = await astroObjectIndex.queryObjects({ bbox: { raMin: 0, raMax: 360, decMin: -90, decMax: 90 }, layerScopes: [{ assetId: asset.id }], limit: 1, includeAttributes: false }, [astroObjectIndex.objectIndex, SKY_DATA_POINT_INDEX], signal);
       let coverage: DataAssetCoverageEvidence | undefined;
       try {
         const [legacy, local] = await Promise.all([
-          astroIndex.coverage({ nside: ASTRO_OVERVIEW_NSIDE, assetIds: [asset.id] }),
-          astroObjectIndex.queryCoverageFacts({ nside: ASTRO_OVERVIEW_NSIDE, assetIds: [asset.id] }),
+          astroIndex.coverage({ nside: ASTRO_OVERVIEW_NSIDE, assetIds: [asset.id] }, signal),
+          astroObjectIndex.queryCoverageFacts({ nside: ASTRO_OVERVIEW_NSIDE, assetIds: [asset.id] }, signal),
         ]);
         const warehouseLayer = warehouse.layers.find((candidate) => warehouseLayerForAsset(candidate, asset));
         const artifactSelection = [...artifactSelections.values()].find(({ latest }) => latest.layerId === workspaceLayerIdForAsset(asset.id)
@@ -662,11 +676,12 @@ app.get("/api/data-assets/status", async (_request: Request, response: Response)
           objectStatus: pointQuery.status,
           activeCoverage: warehouseLayer?.state === "ACTIVE" || mocLayer?.mocStatus === "ready",
           latestMocStatus: mocLayer?.latestMocStatus,
-          pixels: [...new Set([...legacy.pixels, ...local.pixels, ...(warehouseLayer?.pixels ?? []), ...(mocLayer?.pixels ?? [])])],
+          pixels: [...new Set([...(asset.scanSpec?.format === "fits" && asset.scanSpec.fitsQualityProfile ? [] : legacy.pixels), ...local.pixels, ...(warehouseLayer?.pixels ?? []), ...(mocLayer?.pixels ?? [])])],
           objectCount: pointQuery.total,
           message: [legacy.message, local.message, warehouseLayer?.message, mocLayer?.message, pointQuery.message].filter(Boolean).join("; ") || undefined,
         };
       } catch (error) {
+        signal.throwIfAborted();
         coverage = { status: "unavailable", pixels: [], message: error instanceof Error ? error.message : String(error) };
       }
       const derived = deriveDataAssetOperationalStatus({
@@ -678,7 +693,9 @@ app.get("/api/data-assets/status", async (_request: Request, response: Response)
         localScanConfigured: workspaceScanningEnabled && astroObjectIndex.configured,
         warehouseConfigured: warehouseEnabled && warehouseIndex.configured,
       });
-      const repair = repairs.find((task) => task.assetId === asset.id && task.mode !== "moc" && !task.maxFiles);
+      const repair = repairs.find((task) => task.assetId === asset.id && task.mode !== "moc" && !task.maxFiles
+        && (!(asset.scanSpec?.format === "fits" && asset.scanSpec.fitsQualityProfile)
+          || runs.some(run => run.id === task.scanRunId && dataBatchForRun(run) === currentQualityBatch(asset.id, runs)?.id)));
       return {
         ...derived,
         assetName: asset.name,
@@ -702,13 +719,16 @@ app.get("/api/data-assets/status", async (_request: Request, response: Response)
             processedFiles: latestRun.processedFiles ?? 0,
             fileCount: latestRun.fileCount,
             failedFiles: latestRun.failedFiles ?? 0,
+            acceptedFileCount: latestRun.acceptedFileCount, skippedFileCount: latestRun.skippedFileCount,
+            ...(latestRun.connectorId && (latestRun.skippedFileCount ?? 0) > 0 ? { skippedFilesUrl: `/api/connectors/${encodeURIComponent(latestRun.connectorId)}/ingest-runs/${encodeURIComponent(latestRun.id)}/skipped-files` } : {}),
           },
         } : {}),
       };
     }));
+    signal.throwIfAborted();
     response.json({ statuses });
   } catch (error) {
-    sendApiError(response, error);
+    if (!signal.aborted) sendApiError(response, error);
   }
 });
 
@@ -909,6 +929,37 @@ app.get("/api/connectors/:id/runs", async (request: Request, response: Response)
   } catch (error) {
     sendApiError(response, error);
   }
+});
+
+app.get("/api/connectors/:id/ingest-runs/:runId/skipped-files", async (request: Request, response: Response) => {
+  const signal = responseCancellation(response);
+  try {
+    const connectorId = datasetIdFrom(request);
+    await connectors.get(connectorId);
+    const runId = String(request.params.runId);
+    const runs = await connectorRuns.list();
+    const run = runs.find(run => run.id === runId && run.connectorId === connectorId);
+    if (!run) throw new RangeError("Scan run not found");
+    const selected = run.executor === "warehouse-batch" ? runs.filter(child => child.parentRunId === run.id && child.status === "succeeded") : [run];
+    const root = path.resolve(process.env.ASTRO_WAREHOUSE_EVIDENCE_MOUNT_PATH ?? "/var/lib/atlas-evidence");
+    response.set({ "Content-Type": "application/x-ndjson", "Cache-Control": "private, no-store",
+      "Content-Disposition": `attachment; filename="${run.id}-skipped-files.ndjson"` });
+    for (const child of selected) {
+      if (!child.evidencePath) continue;
+      const directory = path.resolve(child.evidencePath);
+      if (!directory.startsWith(root + path.sep)) throw new Error("Evidence is outside the private volume");
+      const stream = createReadStream(path.join(directory, "skipped-files.ndjson"));
+      try {
+        for await (const chunk of stream) {
+          if (response.destroyed) break;
+          if (!response.write(chunk)) await once(response, "drain", { signal });
+        }
+      } catch (error) { if (!(error && typeof error === "object" && "code" in error && error.code === "ENOENT")) throw error; }
+      finally { stream.destroy(); }
+      if (response.destroyed) return;
+    }
+    response.end();
+  } catch (error) { if (response.headersSent) response.destroy(); else sendApiError(response, error); }
 });
 
 app.get("/api/connectors/:id/ingest-runs/:runId/logs", async (request: Request, response: Response) => {
@@ -1380,6 +1431,7 @@ function queryText(value: unknown, name: string, maximum = 160): string | undefi
 }
 
 app.get("/api/sky/overview", async (request: Request, response: Response) => {
+  const signal = responseCancellation(response);
   try {
     const survey = queryText(request.query.survey, "survey");
     const release = queryText(request.query.release, "release");
@@ -1391,9 +1443,9 @@ app.get("/api/sky/overview", async (request: Request, response: Response) => {
       release,
       nside,
       cells: queryCells(request.query.cells),
-    }));
+    }, signal));
   } catch (error) {
-    sendApiError(response, error);
+    if (!signal.aborted) sendApiError(response, error);
   }
 });
 
@@ -1443,33 +1495,40 @@ app.post("/api/sky/points/scopes", async (request: Request, response: Response) 
   } catch (error) { sendApiError(response, error); }
 });
 app.post("/api/sky/points/query", async (request: Request, response: Response) => {
+  const signal = responseCancellation(response);
   try {
     const input = request.body as ObjectRegionQueryInput;
     if (!input.region || !Array.isArray(input.layerScopes)) throw new RangeError("Data point queries require an entry region and explicit layer scopes");
-    const result = await astroObjectIndex.queryObjects(input, [astroObjectIndex.objectIndex, SKY_DATA_POINT_INDEX]);
+    const result = await astroObjectIndex.queryObjects(input, [astroObjectIndex.objectIndex, SKY_DATA_POINT_INDEX], signal);
+    signal.throwIfAborted();
     response.json({ ...result, indexing: await derivedRepairs.isIndexing(input.layerScopes) });
   } catch (error) { sendApiError(response, error); }
 });
 app.post("/api/sky/points/density", async (request: Request, response: Response) => {
+  const signal = responseCancellation(response);
   try {
     const input = request.body as AstroPointDensityQueryInput;
     if (!input || !Array.isArray(input.layers)) throw new RangeError("Point density requires explicit layers");
-    const result = await astroObjectIndex.queryPointDensity(input, [astroObjectIndex.objectIndex, SKY_DATA_POINT_INDEX]);
+    const result = await astroObjectIndex.queryPointDensity(input, [astroObjectIndex.objectIndex, SKY_DATA_POINT_INDEX], signal);
+    signal.throwIfAborted();
     const layerScopes = input.layers.flatMap(layer => layer.scopes ?? []);
     response.json({ ...result, indexing: layerScopes.length ? await derivedRepairs.isIndexing(layerScopes) : false });
   } catch (error) { sendApiError(response, error); }
 });
 app.post("/api/sky/points/anchor", async (request: Request, response: Response) => {
+  const signal = responseCancellation(response);
   try {
     const input = request.body as ObjectRegionQueryInput;
     if (!input.region || !Array.isArray(input.layerScopes)) throw new RangeError("Point anchor requires an entry region and explicit layer scopes");
-    const result = await astroObjectIndex.queryObjects({ ...input, limit: 1, includeAttributes: false, trackTotalHits: false }, [astroObjectIndex.objectIndex, SKY_DATA_POINT_INDEX]);
+    const result = await astroObjectIndex.queryObjects({ ...input, limit: 1, includeAttributes: false, trackTotalHits: false }, [astroObjectIndex.objectIndex, SKY_DATA_POINT_INDEX], signal);
+    signal.throwIfAborted();
     response.json({ status: result.status, message: result.message,
       point: result.objects[0] ? { objectId: result.objects[0].object_id, raDeg: result.objects[0].ra_deg, decDeg: result.objects[0].dec_deg } : null,
       indexing: await derivedRepairs.isIndexing(input.layerScopes) });
   } catch (error) { sendApiError(response, error); }
 });
 app.post("/api/sky/points/inspect", async (request: Request, response: Response) => {
+  const signal = responseCancellation(response);
   try {
     const body = request.body as Record<string, unknown> | null;
     if (!body || typeof body !== "object" || Array.isArray(body)) throw new RangeError("Point inspection input is required");
@@ -1487,9 +1546,10 @@ app.post("/api/sky/points/inspect", async (request: Request, response: Response)
       return;
     }
     const [nearby, footprintCandidates] = await Promise.all([
-      astroObjectIndex.queryObjects({ bbox, region, layerScopes, limit: 2_000 }, [astroObjectIndex.objectIndex, SKY_DATA_POINT_INDEX]),
-      astroObjectIndex.queryImageFootprints({ raDeg, decDeg: decDeg as number, layerScopes, limit: 1_000 }),
+      astroObjectIndex.queryObjects({ bbox, region, layerScopes, limit: 2_000 }, [astroObjectIndex.objectIndex, SKY_DATA_POINT_INDEX], signal),
+      astroObjectIndex.queryImageFootprints({ raDeg, decDeg: decDeg as number, layerScopes, limit: 1_000 }, signal),
     ]);
+    signal.throwIfAborted();
     if (nearby.status !== "ready") {
       response.status(nearby.status === "unavailable" ? 503 : 502).json({ error: nearby.message ?? "Coordinate search failed" });
       return;
@@ -1505,8 +1565,9 @@ app.post("/api/sky/points/inspect", async (request: Request, response: Response)
     const matches = [...unique.values()].sort((left, right) => left.separationArcsec - right.separationArcsec
       || left.point.object_id.localeCompare(right.point.object_id));
     const indexedImages = footprintCandidates.pointIds.length
-      ? await astroObjectIndex.getPointsByIds(footprintCandidates.pointIds, [astroObjectIndex.objectIndex, SKY_DATA_POINT_INDEX])
+      ? await astroObjectIndex.getPointsByIds(footprintCandidates.pointIds, [astroObjectIndex.objectIndex, SKY_DATA_POINT_INDEX], signal)
       : [];
+    signal.throwIfAborted();
     const images = await imagePointsContainingCoordinate(indexedImages, raDeg, decDeg as number);
     response.json({ raDeg, decDeg, radiusArcsec, matches, images,
       truncated: nearby.total > nearby.objects.length || footprintCandidates.truncated,
@@ -1514,7 +1575,9 @@ app.post("/api/sky/points/inspect", async (request: Request, response: Response)
   } catch (error) { sendApiError(response, error); }
 });
 app.get("/api/sky/points/:id", async (request: Request, response: Response) => {
-  try { const point = await astroObjectIndex.getPoint(datasetIdFrom(request), [astroObjectIndex.objectIndex, SKY_DATA_POINT_INDEX]);
+  const signal = responseCancellation(response);
+  try { const point = await astroObjectIndex.getPoint(datasetIdFrom(request), [astroObjectIndex.objectIndex, SKY_DATA_POINT_INDEX], signal);
+    signal.throwIfAborted();
     if (!point) { response.status(404).json({ error: "Data point not found" }); return; } response.json({ point });
   } catch (error) { sendApiError(response, error); }
 });
@@ -1663,7 +1726,7 @@ async function overlapSources(context: OverlapSourceContext): Promise<SkyOverlap
     layerIds: warehouseLayerIds,
   });
   if (warehouseLayerIds.length && warehouse.status === "error") throw new Error("Workspace coverage is temporarily unavailable; retry this query.");
-  const artifactSelections = selectUserMocArtifacts(artifacts);
+  const artifactSelections = selectUserMocArtifacts(artifacts, assets, runs);
   await Promise.all(assets.map(async (asset) => {
     const [legacy, local] = await Promise.all([
       context.nside <= 256
@@ -1671,7 +1734,7 @@ async function overlapSources(context: OverlapSourceContext): Promise<SkyOverlap
         : Promise.resolve({ status: "unavailable" as const, index: ASTRO_FILE_INDEX, nside: context.nside, pixels: [], byAsset: [], message: "legacy coverage supports NSIDE up to 16" }),
       astroObjectIndex.queryCoverageFacts({ nside: Math.min(context.nside, 256), assetIds: [asset.id] }),
     ]);
-    const pixels = new Set<number>(context.nside <= 256 ? [...legacy.pixels, ...local.pixels] : []);
+    const pixels = new Set<number>(context.nside <= 256 ? [...(asset.scanSpec?.format === "fits" && asset.scanSpec.fitsQualityProfile ? [] : legacy.pixels), ...local.pixels] : []);
     warehouse.layers.filter((layer) => warehouseLayerForAsset(layer, asset)).forEach((layer) => layer.pixels.forEach((pixel) => pixels.add(pixel)));
     const mocSelection = [...artifactSelections.values()].find(({ latest }) => latest.layerId === workspaceLayerIdForAsset(asset.id) || latest.layerId === asset.id || latest.layerId === `user-${asset.id}`);
     const mocRanges = mocSelection ? await userMocs.projectionRanges(mocSelection.renderable.layerId, mocSelection.renderable.scanRunId, Math.log2(context.nside)) : [];
@@ -2226,9 +2289,12 @@ function artifactTimestamp(artifact: UserMocArtifact): string {
  * artifact as the display/download source while a replacement is pending or
  * failed. Artifact history remains available through /api/user-mocs.
  */
-function selectUserMocArtifacts(artifacts: readonly UserMocArtifact[]): Map<string, UserMocArtifactSelection> {
+function selectUserMocArtifacts(artifacts: readonly UserMocArtifact[], assets: readonly DataAssetRecord[], runs: readonly ConnectorIngestRunRecord[]): Map<string, UserMocArtifactSelection> {
   const grouped = new Map<string, UserMocArtifact[]>();
   artifacts.forEach((artifact) => {
+    const asset = assets.find(asset => warehouseLayerBelongsToAsset(artifact.layerId, asset.id));
+    if (asset?.scanSpec?.format === "fits" && asset.scanSpec.fitsQualityProfile
+      && artifact.scanRunId !== currentQualityBatch(asset.id, runs)?.id) return;
     const entries = grouped.get(artifact.layerId) ?? [];
     entries.push(artifact);
     grouped.set(artifact.layerId, entries);
@@ -2340,6 +2406,7 @@ async function artifactCoverageLayer(
 }
 
 app.get("/api/sky/coverage", async (request: Request, response: Response) => {
+  const signal = responseCancellation(response);
   try {
     const nside = Number(request.query.nside ?? ASTRO_OVERVIEW_NSIDE);
     nsideOrderForCoverage(nside);
@@ -2354,7 +2421,6 @@ app.get("/api/sky/coverage", async (request: Request, response: Response) => {
     };
 
     const artifacts = await userMocs.list();
-    const artifactSelections = selectUserMocArtifacts(artifacts);
     const knownAssets = await dataCatalog.list();
     const surveyAliases = new Set(survey ? [survey, ...await surveyDirectory.aliases(survey)] : []);
     if (survey) {
@@ -2367,13 +2433,15 @@ app.get("/api/sky/coverage", async (request: Request, response: Response) => {
       }
     }
     const runs = await connectorRuns.list();
+    const artifactSelections = selectUserMocArtifacts(artifacts, knownAssets, runs);
+    signal.throwIfAborted();
     const ownedWarehouseLayerIds = workspaceWarehouseLayerIds(knownAssets, artifacts, runs);
     const warehouse = await warehouseIndex.coverage({
       nside,
       ...(rawAssetIds && assetIds.length ? { assetIds } : {}),
       ...(release ? { release } : {}),
       layerIds: ownedWarehouseLayerIds,
-    });
+    }, signal);
     if (survey) warehouse.layers = warehouse.layers.filter((layer) => {
       const asset = knownAssets.find((candidate) => warehouseLayerForAsset(layer, candidate));
       const id = asset?.surveyId ?? layer.surveyId;
@@ -2390,6 +2458,7 @@ app.get("/api/sky/coverage", async (request: Request, response: Response) => {
       const statuses: WorkspaceCoverageStatus[] = [];
       const messages: string[] = [];
       for (const assetId of [...new Set(assetIds)]) {
+        signal.throwIfAborted();
         let asset: DataAssetRecord;
         try { asset = await dataCatalog.get(assetId); } catch { continue; }
         if (survey && (!asset.surveyId || !surveyAliases.has(asset.surveyId))) continue;
@@ -2399,9 +2468,9 @@ app.get("/api/sky/coverage", async (request: Request, response: Response) => {
         // historical scanner documents visible without rewriting them.
         const [legacy, local] = await Promise.all([
           nside <= ASTRO_OVERVIEW_NSIDE
-            ? astroIndex.coverage({ nside, assetIds: [assetId] })
+            ? astroIndex.coverage({ nside, assetIds: [assetId] }, signal)
             : Promise.resolve({ status: "unavailable" as const, index: ASTRO_FILE_INDEX, nside, pixels: [], byAsset: [], message: "legacy file coverage is available only through NSIDE 16" }),
-          astroObjectIndex.queryCoverageFacts({ nside, assetIds: [assetId] }),
+          astroObjectIndex.queryCoverageFacts({ nside, assetIds: [assetId] }, signal),
         ]);
         const warehouseLayer = warehouse.layers.find((candidate) => warehouseLayerForAsset(candidate, asset));
         const artifactSelection = [...artifactSelections.values()].find(({ latest }) => latest.layerId === workspaceLayerIdForAsset(asset.id)
@@ -2413,7 +2482,8 @@ app.get("/api/sky/coverage", async (request: Request, response: Response) => {
         const officialReady = mocLayer?.mocStatus === "ready" || warehouseLayer?.state === "ACTIVE";
         const preview = officialReady ? undefined : await warehouseScans.coveragePreview(asset.id, nside);
         const pointPreview = !officialReady && nside <= 256
-          ? await astroObjectIndex.queryPointCoverage({ assetId: asset.id, nside }, [astroObjectIndex.objectIndex, SKY_DATA_POINT_INDEX]) : undefined;
+          ? await astroObjectIndex.queryPointCoverage({ assetId: asset.id, nside }, [astroObjectIndex.objectIndex, SKY_DATA_POINT_INDEX], signal) : undefined;
+        signal.throwIfAborted();
         const pixels = new Set<number>(legacy.pixels);
         local.pixels.forEach((pixel) => pixels.add(pixel));
         warehouseLayer?.pixels.forEach((pixel) => pixels.add(pixel));
@@ -2486,6 +2556,7 @@ app.get("/api/sky/coverage", async (request: Request, response: Response) => {
         }
       }
       if (layers.length || survey) {
+        signal.throwIfAborted();
         const status = aggregateCoverageStatus(statuses);
         response.json({
           status,
@@ -2500,7 +2571,7 @@ app.get("/api/sky/coverage", async (request: Request, response: Response) => {
       }
     }
     const local = nside <= ASTRO_OVERVIEW_NSIDE
-      ? await astroIndex.coverage({ ...baseInput, ...(assetIds.length ? { assetIds } : {}) })
+      ? await astroIndex.coverage({ ...baseInput, ...(assetIds.length ? { assetIds } : {}) }, signal)
       : { status: "unavailable" as const, index: ASTRO_FILE_INDEX, nside, pixels: [], byAsset: [], message: "legacy file coverage is available only through NSIDE 16" };
     const assetForLayer = (layerId: string | undefined): DataAssetRecord | undefined => {
       if (!layerId) return undefined;
@@ -2510,7 +2581,9 @@ app.get("/api/sky/coverage", async (request: Request, response: Response) => {
       .map((selection) => ({ selection, asset: assetForLayer(selection.latest.layerId) }))
       .filter(({ selection, asset }) => artifactMatchesCoverageFilter(selection.latest, asset, survey, release))
       .map(async ({ selection, asset }): Promise<AstroCoverageLayer> => {
+        signal.throwIfAborted();
         const layer = await artifactCoverageLayer(selection.renderable, nside, asset, selection.latest);
+        signal.throwIfAborted();
         return layer;
       }));
     const warehouseLayers = warehouse.layers.map((layer): AstroCoverageLayer => {
@@ -2553,12 +2626,13 @@ app.get("/api/sky/coverage", async (request: Request, response: Response) => {
       layersByKey.set(key, existing ? mergeCoverageLayers(existing, layer, key) : { ...layer, key });
     });
     for (const asset of knownAssets) {
+      signal.throwIfAborted();
       const key = `asset:${asset.id}`;
       const existing = layersByKey.get(key);
       if (existing?.mocStatus === "ready" || existing?.state === "ACTIVE") continue;
       const preview = await warehouseScans.coveragePreview(asset.id, nside);
       const pointPreview = nside <= 256
-        ? await astroObjectIndex.queryPointCoverage({ assetId: asset.id, nside }, [astroObjectIndex.objectIndex, SKY_DATA_POINT_INDEX]) : undefined;
+        ? await astroObjectIndex.queryPointCoverage({ assetId: asset.id, nside }, [astroObjectIndex.objectIndex, SKY_DATA_POINT_INDEX], signal) : undefined;
       if (!preview && !pointPreview?.pixels.length) continue;
       const previewLayer: AstroCoverageLayer = {
         key,
@@ -2581,6 +2655,7 @@ app.get("/api/sky/coverage", async (request: Request, response: Response) => {
       layersByKey.set(key, existing ? mergeCoverageLayers(existing, previewLayer, key) : previewLayer);
     }
     const layers = [...layersByKey.values()];
+    signal.throwIfAborted();
     response.json({
       ...local,
       status: aggregateCoverageStatus([
@@ -2594,7 +2669,7 @@ app.get("/api/sky/coverage", async (request: Request, response: Response) => {
       ...(warehouse.message ? { message: [local.message, warehouse.message].filter(Boolean).join("; ") } : {}),
     });
   } catch (error) {
-    sendApiError(response, error);
+    if (!signal.aborted) sendApiError(response, error);
   }
 });
 

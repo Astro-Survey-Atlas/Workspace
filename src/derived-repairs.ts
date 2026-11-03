@@ -1,3 +1,4 @@
+import { currentQualityBatch, dataBatchForRun } from "./workspace-layer-identity.js";
 import { createHash, randomUUID } from "node:crypto";
 import { createReadStream } from "node:fs";
 import { mkdir, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
@@ -57,21 +58,21 @@ export async function convertPositionHeaders(records: unknown[]): Promise<Record
 export function pointDocument(point: HeaderPoint, asset: { id: string; surveyId?: string; releaseId?: string; product?: string }, run: ConnectorIngestRunRecord, sourceId?: string): LocalObjectIndexDocument {
   if (!Number.isFinite(point.ra_deg) || !Number.isFinite(point.dec_deg) || Math.abs(point.dec_deg) > 90 || point.ra_deg < 0 || point.ra_deg >= 360
     || !point.file_id || !Number.isInteger(point.hdu_index)) throw new Error("Invalid ICRS header coordinate");
-  const id = createHash("sha256").update(`${asset.id}\n${point.file_id}\n${point.hdu_index}\n${point.position_role}`).digest("hex");
+  const id = createHash("sha256").update(`${asset.id}\n${point.file_id}\n${point.hdu_index}\n${point.position_role}${dataBatchForRun(run) ? `\n${dataBatchForRun(run)}` : ""}`).digest("hex");
   const loc = new Hploc(); loc.setZ(Math.cos((90 - point.dec_deg) * Math.PI / 180)); loc.phi = point.ra_deg * Math.PI / 180;
   return { _index: SKY_DATA_POINT_INDEX, _id: id, object_id: id, ra_deg: point.ra_deg, dec_deg: point.dec_deg,
     sky_position: { lat: point.dec_deg, lon: point.ra_deg > 180 ? point.ra_deg - 360 : point.ra_deg },
     healpix_order: 8, healpix_pixel: new Healpix(256).loc2pix(loc), survey: asset.surveyId ?? "user", release: asset.releaseId ?? "user",
     product: asset.product ?? "image", modality: point.position_role === "image_center" ? "image" : "pointing", asset_id: asset.id,
-    source_file_id: point.file_id, scan_run_id: run.id, attributes: Object.fromEntries(Object.entries({ source_uri: point.source_uri, file_name: point.file_name,
+    source_file_id: point.file_id, scan_run_id: run.id, ...(dataBatchForRun(run) ? { data_batch_id: dataBatchForRun(run) } : {}), attributes: Object.fromEntries(Object.entries({ source_uri: point.source_uri, file_name: point.file_name,
       hdu_index: point.hdu_index, position_role: point.position_role, position_method: point.position_method, coordinate_frame: "ICRS",
       header_scope: point.header_scope, selected_hdu_index: point.selected_hdu_index,
       header: point.header, primary_header: point.primary_header, source_snapshot_sha256: run.sourceSnapshotSha256, source_id: sourceId }).filter(([, value]) => value !== undefined).map(([key, value]) => [key, String(value)])) };
 }
 
-export function imageFootprintDocuments(point: HeaderPoint, assetId: string, sourceId?: string): AstroImageFootprintDocument[] {
+export function imageFootprintDocuments(point: HeaderPoint, assetId: string, sourceId?: string, dataBatchId?: string): AstroImageFootprintDocument[] {
   if (point.position_role !== "image_center" || !Array.isArray(point.footprint_bounds)) return [];
-  const pointId = createHash("sha256").update(`${assetId}\n${point.file_id}\n${point.hdu_index}\n${point.position_role}`).digest("hex");
+  const pointId = createHash("sha256").update(`${assetId}\n${point.file_id}\n${point.hdu_index}\n${point.position_role}${dataBatchId ? `\n${dataBatchId}` : ""}`).digest("hex");
   return point.footprint_bounds.map((bounds, index) => {
     if (!Array.isArray(bounds) || bounds.length !== 4 || !bounds.every(Number.isFinite)) throw new Error("Invalid WCS footprint bounds");
     const [raMin, raMax, decMin, decMax] = bounds;
@@ -79,7 +80,7 @@ export function imageFootprintDocuments(point: HeaderPoint, assetId: string, sou
       throw new Error("Invalid WCS footprint bounds");
     }
     const id = createHash("sha256").update(`${pointId}\n${index}`).digest("hex");
-    return { _id: id, _index: "astro_data_image_footprint_index_v1", point_id: pointId, asset_id: assetId,
+    return { _id: id, _index: "astro_data_image_footprint_index_v1", point_id: pointId, asset_id: assetId, ...(dataBatchId ? { data_batch_id: dataBatchId } : {}),
       ...(sourceId ? { source_id: sourceId } : {}), ra_min: raMin!, ra_max: raMax!, dec_min: decMin!, dec_max: decMax! };
   });
 }
@@ -204,7 +205,10 @@ export class DerivedRepairService {
     } } finally { this.#polling = false; }
   }
   async #advance(task: DerivedRepair): Promise<void> {
-    const run = (await this.#options.runs.list()).find((run) => run.id === task.scanRunId);
+    const runs = await this.#options.runs.list();
+    const run = runs.find((run) => run.id === task.scanRunId);
+    const current = currentQualityBatch(task.assetId, runs);
+    if (current && (!run || dataBatchForRun(run) !== current.id)) throw new Error("This scan was superseded by a quality rebuild");
     if (!run || run.status !== "succeeded" || run.sourceSnapshotSha256 !== task.sourceSnapshotSha256) throw new Error("Original successful scan identity changed");
     const evidencePath = path.resolve(run.evidencePath!);
     const root = path.resolve(this.#options.evidenceRoot);
@@ -240,7 +244,7 @@ export class DerivedRepairService {
       if (committed > task.indexedBytes) await this.#indexBatch(task, run, committed);
       if (committed > (task.footprintIndexedBytes ?? 0)) await this.#indexFootprintBatch(task, run, committed);
       if (checkpoint.phase !== "RUNNING" && task.indexedBytes === committed && (task.footprintIndexedBytes ?? committed) === committed) {
-        task.phase = "complete"; task.status = checkpoint.phase === "FAILED" || task.pointCount === 0 ? "failed"
+        task.phase = "complete"; task.status = checkpoint.phase === "FAILED" || task.pointCount === 0 && run.acceptedFileCount !== 0 ? "failed"
           : checkpoint.phase === "PARTIAL" || task.coordinateErrors > 0 || task.mocStatus && task.mocStatus !== "ready" ? "partial" : "succeeded";
       }
     }
@@ -254,7 +258,7 @@ export class DerivedRepairService {
     try { for await (const line of reader) {
       const record = JSON.parse(line) as HeaderPoint;
       if (fileId !== record.file_id && bytes >= 8 * 1024 * 1024) break;
-      fileId = record.file_id; records.push(record); bytes += Buffer.byteLength(line) + 1;
+      fileId = record.file_id; records.push(run.fitsQualityProfile ? { ...record, fits_quality_profile: run.fitsQualityProfile } : record); bytes += Buffer.byteLength(line) + 1;
     } } finally { reader.close(); input.destroy(); }
     const converted = await convertPositionHeaders(records);
     const asset = await this.#options.assets.get(task.assetId);
@@ -287,7 +291,7 @@ export class DerivedRepairService {
     try { for await (const line of reader) {
       const record = JSON.parse(line) as HeaderPoint;
       if (fileId !== record.file_id && bytes >= 8 * 1024 * 1024) break;
-      fileId = record.file_id; records.push(record); bytes += Buffer.byteLength(line) + 1;
+      fileId = record.file_id; records.push(run.fitsQualityProfile ? { ...record, fits_quality_profile: run.fitsQualityProfile } : record); bytes += Buffer.byteLength(line) + 1;
     } } finally { reader.close(); input.destroy(); }
     const converted = await convertPositionHeaders(records);
     const asset = await this.#options.assets.get(task.assetId);
@@ -296,7 +300,7 @@ export class DerivedRepairService {
     let footprintErrors = 0;
     for (const value of converted) {
       if (value.error || value.position_role !== "image_center") continue;
-      try { documents.push(...imageFootprintDocuments(value as HeaderPoint, asset.id, fileSource(String(value.source_uri), sources))); }
+      try { documents.push(...imageFootprintDocuments(value as HeaderPoint, asset.id, fileSource(String(value.source_uri), sources), dataBatchForRun(run))); }
       catch { footprintErrors += 1; }
     }
     try {
@@ -327,6 +331,15 @@ export class DerivedRepairService {
   async isIndexing(scopes: readonly SkyDataPointScope[]): Promise<boolean> {
     if (!scopes.length) return false;
     const assetIds = new Set(scopes.map((scope) => scope.assetId));
-    return (await this.list()).some((task) => assetIds.has(task.assetId) && task.mode !== "moc" && !task.maxFiles && ["queued", "running"].includes(task.status));
+    const runs = await this.#options.runs.list();
+    const currentBatches = new Map([...assetIds].map(id => [id, currentQualityBatch(id, runs)?.id]));
+    const currentRun = (assetId: string, run: ConnectorIngestRunRecord | undefined) => !currentBatches.get(assetId)
+      || run && dataBatchForRun(run) === currentBatches.get(assetId);
+    // A queued/enumerating image scan will create position tasks after its
+    // first accepted shard. Keep Aladin refreshing throughout that interval.
+    if (runs.some(run => run.assetId && assetIds.has(run.assetId) && run.backend === "warehouse"
+      && run.coverage?.mode === "fits-wcs" && ["queued", "running"].includes(run.status) && currentRun(run.assetId, run))) return true;
+    return (await this.list()).some(task => assetIds.has(task.assetId) && task.mode !== "moc" && !task.maxFiles
+      && ["queued", "running"].includes(task.status) && currentRun(task.assetId, runs.find(run => run.id === task.scanRunId)));
   }
 }

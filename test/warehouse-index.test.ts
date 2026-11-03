@@ -8,6 +8,36 @@ function esResponse(value: unknown, status = 200): Response {
   return new Response(JSON.stringify(value), { status, headers: { "content-type": "application/json" } });
 }
 
+test("cancelling one coverage lookup does not cancel or poison another caller's geometry", async () => {
+  const reads: Array<{ signal: AbortSignal; finish: () => void }> = [];
+  const service = new WarehouseIndexService({ url: "https://warehouse.example", fetchImpl: async (input, init) => {
+    if (String(input).includes("/ast_layer_index_v1/")) return esResponse({ hits: { total: 1, hits: [{ _source: {
+      layer_id: "workspace-fixture", survey_id: "fixture", release_id: "local", product_id: "image", state: "ACTIVE", available_orders: [4],
+    } }] } });
+    assert.ok(init?.signal);
+    const signal = init.signal;
+    return new Promise<Response>((resolve, reject) => {
+      signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+      reads.push({ signal, finish: () => resolve(esResponse({ aggregations: { geometry: { buckets: [
+        { key: { order: 4, pixel: 815 }, doc_count: 1 },
+      ] } } })) });
+    });
+  } });
+  const controller = new AbortController();
+  const first = service.coverage({ nside: 16 }, controller.signal);
+  const firstRejected = assert.rejects(first, { name: "AbortError" });
+  const second = service.coverage({ nside: 16 });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(reads.length, 2);
+  controller.abort();
+  await firstRejected;
+  assert.equal(reads[1]!.signal.aborted, false);
+  reads[1]!.finish();
+  assert.deepEqual((await second).pixels, [815]);
+  assert.deepEqual((await service.coverage({ nside: 16 })).pixels, [815]);
+  assert.equal(reads.length, 2, "only completed geometry should be reused");
+});
+
 test("real PARTITIONED markers publish complete batches and allow file reverse lookup", async () => {
   const layerId = "workspace-csst-batch-12345678-1234-1234-1234-123456789012", snapshot = "a".repeat(64);
   let complete = false;

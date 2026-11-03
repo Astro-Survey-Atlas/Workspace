@@ -20,6 +20,7 @@ import {
   type ObjectRegionQueryInput,
 } from "../src/astro-object-index.js";
 import type { LocalScanDocument } from "../src/local-scan.js";
+import { responseCancellation } from "../src/http-request-cancellation.js";
 
 async function requestBody(request: IncomingMessage): Promise<string> {
   let body = "";
@@ -41,6 +42,43 @@ async function withServer(
     await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
   }
 }
+
+test("disconnecting a viewport client closes its Elasticsearch request", async () => {
+  let start: () => void = () => {};
+  const started = new Promise<void>(resolve => { start = resolve; });
+  let close: () => void = () => {};
+  const closed = new Promise<void>(resolve => { close = resolve; });
+  let finish: () => void = () => {};
+  await withServer(async (request, response) => {
+    await requestBody(request);
+    response.on("close", close);
+    finish = () => response.end(JSON.stringify({ hits: { total: { value: 0 }, hits: [] } }));
+    start();
+  }, async baseUrl => {
+    const index = new AstroObjectIndexService({ baseUrl });
+    await withServer(async (_request, response) => {
+      try {
+        const result = await index.queryObjects({ bbox: { raMin: 149, raMax: 150, decMin: 1, decMax: 2 } }, undefined, responseCancellation(response));
+        if (!response.destroyed) response.end(JSON.stringify(result));
+      } catch { if (!response.destroyed) response.end(); }
+    }, async viewportUrl => {
+      const controller = new AbortController();
+      const query = fetch(viewportUrl, { signal: controller.signal });
+      await started;
+      let forcedCompletion = false;
+      const fallback = setTimeout(() => { forcedCompletion = true; finish(); }, 500);
+      try {
+        controller.abort();
+        await assert.rejects(query, { name: "AbortError" });
+        await closed;
+        assert.equal(forcedCompletion, false, "Elasticsearch must stop before its response completes");
+      } finally {
+        clearTimeout(fallback);
+        finish();
+      }
+    });
+  });
+});
 
 test("point preview aggregates real indexed positions even when coverage facts have not been published", async () => {
   await withServer(async (request, response) => {
@@ -645,7 +683,8 @@ test("point density lowers its target NSIDE and retries when aggregation buckets
     response.end(JSON.stringify({
       hits: { total: { value: 7, relation: "eq" } },
       aggregations: {
-        by_cell: { sum_other_doc_count: incomplete ? 1 : 0, buckets: incomplete ? [] : [{ key: 0, doc_count: 7 }] },
+        by_cell: { sum_other_doc_count: incomplete ? 1 : 0, buckets: incomplete ? [] : [{ key: 0, doc_count: 7,
+          by_survey: { sum_other_doc_count: 0, buckets: [{ key: "cosmos", doc_count: 7 }] } }] },
         by_layer: { buckets: {
           catalog: { by_cell: { sum_other_doc_count: 0, buckets: [{ key: 0, doc_count: 7 }] } },
         } },
@@ -662,7 +701,7 @@ test("point density lowers its target NSIDE and retries when aggregation buckets
     assert.equal(result.status, "ready");
     assert.equal(result.nside, 8);
     assert.equal(result.total, 7);
-    assert.deepEqual(result.cells, [{ pixel: 0, count: 7, layers: [{ id: "catalog", count: 7 }] }]);
+    assert.deepEqual(result.cells, [{ pixel: 0, count: 7, layers: [{ id: "catalog", count: 7 }], surveys: [{ id: "cosmos", count: 7 }] }]);
     assert.deepEqual(result.layers, [{ id: "catalog", count: 7 }]);
   });
 
@@ -672,6 +711,80 @@ test("point density lowers its target NSIDE and retries when aggregation buckets
   assert.equal((((firstAggs.by_cell!.terms as Record<string, unknown>).script as Record<string, unknown>).params as Record<string, unknown>).childCount, 256);
   assert.equal((((secondAggs.by_cell!.terms as Record<string, unknown>).script as Record<string, unknown>).params as Record<string, unknown>).childCount, 1_024);
   assert.equal(bodies[0]!.size, 0);
+});
+
+test("density survey counts use the selected point union even when layer scopes overlap", async () => {
+  await withServer(async (request, response) => {
+    const body = JSON.parse(await requestBody(request));
+    assert.deepEqual(body.aggs.by_cell.aggs.by_survey.terms, { field: "survey", missing: "", size: 64 });
+    assert.match(JSON.stringify(body.query), /asset-a/);
+    response.end(JSON.stringify({ hits: { total: { value: 7 } }, aggregations: {
+      by_cell: { sum_other_doc_count: 0, buckets: [{ key: 0, doc_count: 7,
+        by_survey: { sum_other_doc_count: 0, buckets: [{ key: "cosmos", doc_count: 4 }, { key: "euclid", doc_count: 3 }] } }] },
+      by_layer: { buckets: {
+        all: { by_cell: { sum_other_doc_count: 0, buckets: [{ key: 0, doc_count: 7 }] } },
+        subset: { by_cell: { sum_other_doc_count: 0, buckets: [{ key: 0, doc_count: 4 }] } },
+      } },
+    } }));
+  }, async baseUrl => {
+    const result = await new AstroObjectIndexService({ baseUrl }).queryPointDensity({
+      region: { nside: 16, pixels: [1], coordinateFrame: "ICRS", ordering: "NESTED" },
+      boxes: [{ raMin: 10, raMax: 20, decMin: -5, decMax: 5 }], targetNside: 16,
+      layers: [{ id: "all", scopes: [{ assetId: "asset-a" }] }, { id: "subset", scopes: [{ assetId: "asset-a", sourceId: "one" }] }],
+    });
+    assert.equal(result.status, "ready");
+    assert.equal(result.total, 7);
+    assert.deepEqual(result.cells[0]?.surveys, [{ id: "cosmos", count: 4 }, { id: "euclid", count: 3 }]);
+    assert.equal(result.cells[0]?.count, 7);
+  });
+});
+
+test("density refuses truncated survey counts instead of presenting them as complete", async () => {
+  await withServer(async (request, response) => {
+    await requestBody(request);
+    response.end(JSON.stringify({ hits: { total: 7 }, aggregations: {
+      by_cell: { sum_other_doc_count: 0, buckets: [{ key: 0, doc_count: 7,
+        by_survey: { sum_other_doc_count: 3, buckets: [{ key: "cosmos", doc_count: 4 }] } }] },
+      by_layer: { buckets: { catalog: { by_cell: { sum_other_doc_count: 0, buckets: [{ key: 0, doc_count: 7 }] } } } },
+    } }));
+  }, async baseUrl => {
+    const result = await new AstroObjectIndexService({ baseUrl }).queryPointDensity({
+      region: { nside: 16, pixels: [1], coordinateFrame: "ICRS", ordering: "NESTED" },
+      boxes: [{ raMin: 10, raMax: 20, decMin: -5, decMax: 5 }], targetNside: 16,
+      layers: [{ id: "catalog", scopes: [{ assetId: "asset-a" }] }],
+    });
+    assert.equal(result.status, "error");
+    assert.deepEqual(result.cells, []);
+    assert.match(result.message ?? "", /survey counts/);
+  });
+});
+
+test("density separates unassigned survey placeholders by source asset", async () => {
+  await withServer(async (request, response) => {
+    const body = JSON.parse(await requestBody(request));
+    assert.match(JSON.stringify(body.aggs.by_cell.aggs.unassigned_assets.filter), /user/);
+    assert.equal(body.aggs.by_cell.aggs.unassigned_assets.aggs.by_asset.terms.field, "asset_id");
+    response.end(JSON.stringify({ hits: { total: 7 }, aggregations: {
+      by_cell: { sum_other_doc_count: 0, buckets: [{ key: 0, doc_count: 7,
+        by_survey: { sum_other_doc_count: 0, buckets: [{ key: "user", doc_count: 5 }, { key: "", doc_count: 1 }, { key: "cosmos", doc_count: 1 }] },
+        unassigned_assets: { doc_count: 6, by_asset: { sum_other_doc_count: 0, buckets: [{ key: "asset-a", doc_count: 4 }, { key: "asset-b", doc_count: 2 }] } },
+      }] },
+      by_layer: { buckets: {
+        a: { by_cell: { sum_other_doc_count: 0, buckets: [{ key: 0, doc_count: 4 }] } },
+        b: { by_cell: { sum_other_doc_count: 0, buckets: [{ key: 0, doc_count: 3 }] } },
+      } },
+    } }));
+  }, async baseUrl => {
+    const result = await new AstroObjectIndexService({ baseUrl }).queryPointDensity({
+      region: { nside: 16, pixels: [1], coordinateFrame: "ICRS", ordering: "NESTED" },
+      boxes: [{ raMin: 10, raMax: 20, decMin: -5, decMax: 5 }], targetNside: 16,
+      layers: [{ id: "a", scopes: [{ assetId: "asset-a" }] }, { id: "b", scopes: [{ assetId: "asset-b" }] }],
+    });
+    assert.equal(result.status, "ready");
+    assert.deepEqual(result.cells[0]?.surveys, [
+      { id: "cosmos", count: 1 }, { id: "", assetId: "asset-a", count: 4 }, { id: "", assetId: "asset-b", count: 2 },
+    ]);
+  });
 });
 
 test("point density reports unavailable without Elasticsearch and validates explicit layers", async () => {
@@ -688,4 +801,31 @@ test("point density reports unavailable without Elasticsearch and validates expl
     ...input,
     layers: [{ id: "", scopes: [] }],
   }), /unique non-empty id/);
+});
+
+
+test("current batch filters every point, footprint and coverage search and changes without stale cache", async () => {
+  let batch = "new-batch";
+  const queries: Record<string, unknown>[] = [];
+  await withServer(async (request, response) => {
+    queries.push(JSON.parse(await requestBody(request)) as Record<string, unknown>);
+    response.setHeader("Content-Type", "application/json");
+    response.end(JSON.stringify({ hits: { total: { value: 0 }, hits: [] },
+      aggregations: { point_cells: { buckets: [], sum_other_doc_count: 0 } } }));
+  }, async baseUrl => {
+    const index = new AstroObjectIndexService({ baseUrl, dataBatches: async () => new Map([["w1", batch]]) });
+    await index.queryObjects({ bbox: { raMin: 0, raMax: 360, decMin: -90, decMax: 90 }, layerScopes: [{ assetId: "w1" }] });
+    await index.queryPointCoverage({ assetId: "w1", nside: 16 });
+    await index.queryImageFootprints({ raDeg: 20, decDeg: 10, layerScopes: [{ assetId: "w1" }] });
+    await index.getPoint("old-object", ["astro_data_point_index_v1"]);
+    assert.equal(queries.length, 4);
+    for (const query of queries) {
+      assert.match(JSON.stringify(query.query), /"data_batch_id":"new-batch"/);
+      assert.match(JSON.stringify(query.query), /"must_not"/);
+    }
+    batch = "replacement-batch";
+    await index.queryObjects({ bbox: { raMin: 0, raMax: 360, decMin: -90, decMax: 90 }, layerScopes: [{ assetId: "w1" }] });
+    assert.match(JSON.stringify(queries.at(-1)?.query), /replacement-batch/);
+    assert.doesNotMatch(JSON.stringify(queries.at(-1)?.query), /new-batch/);
+  });
 });

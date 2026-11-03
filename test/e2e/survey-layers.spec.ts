@@ -1474,7 +1474,8 @@ test("Aladin switches to a per-layer density field at wide fields of view", asyn
       await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({
         status: "ready", index: "astro_object_index_v1", coordinateFrame: "ICRS", ordering: "NESTED",
         nside: input.targetNside, total, layers,
-        cells: [{ pixel, count: total, layers: contributingLayers }], truncated: false, indexing: false,
+        cells: [{ pixel, count: total, layers: contributingLayers,
+          surveys: contributingLayers.map((layer, index) => ({ id: `survey-${index}`, count: layer.count })) }], truncated: false, indexing: false,
       }) });
     });
   });
@@ -1489,8 +1490,19 @@ test("Aladin switches to a per-layer density field at wide fields of view", asyn
   expect(bounds).not.toBeNull();
   await page.mouse.move(bounds!.x + bounds!.width / 2, bounds!.y + bounds!.height / 2);
   await page.mouse.wheel(0, 900);
-  await expect.poll(async () => Number(await aladin.getAttribute("data-fov-deg")), { timeout: 5_000 }).toBeGreaterThan(0.75);
+  await expect.poll(async () => Number(await aladin.getAttribute("data-fov-deg")), { timeout: 5_000 }).toBeGreaterThan(1.5);
   await expect.poll(() => densityRequests.length, { timeout: 15_000 }).toBeGreaterThan(0);
+  // Wheel zoom animates through several density requests. Hover only after
+  // the final viewport and its density response have settled.
+  let previousFov = "";
+  let stableFovSamples = 0;
+  await expect.poll(async () => {
+    const fov = await aladin.getAttribute("data-fov-deg") ?? "";
+    stableFovSamples = fov === previousFov ? stableFovSamples + 1 : 0;
+    previousFov = fov;
+    return stableFovSamples;
+  }, { timeout: 5_000, intervals: [100, 200, 300] }).toBeGreaterThanOrEqual(2);
+  await expect(aladin).toHaveAttribute("data-object-complete", "true");
   await expect(aladin).toHaveAttribute("data-display-mode", "density");
   await expect(page.locator("#object-status")).toContainText("CELLS");
   expect(densityRequests[0]?.layers.some((layer) => layer.scopes.length > 0)).toBe(true);

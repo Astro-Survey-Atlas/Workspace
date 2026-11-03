@@ -49,6 +49,7 @@ export interface DataAssetCsvScanSpec {
 
 export interface DataAssetFitsScanSpec {
   format: "fits";
+  fitsQualityProfile?: "csst-wcs-v1";
   fileNamePattern?: string;
   modality?: string;
   product?: string;
@@ -122,6 +123,7 @@ const ASSET_STATUSES: readonly DataAssetStatus[] = ["ready", "metadata_only", "u
 const PROJECT_STATES: readonly DataAssetProjectState[] = ["public_reference", "acquired", "processed", "deliverable", "planned"];
 const PROJECT_STATE_PRIORITY: readonly DataAssetProjectState[] = ["deliverable", "processed", "acquired", "public_reference", "planned"];
 const SCAN_SPEC_FIELDS = new Set([
+  "fitsQualityProfile",
   "format",
   "fileNamePattern",
   "objectIdColumn",
@@ -185,8 +187,11 @@ function validateScanSpec(value: unknown): DataAssetScanSpec | undefined {
     if (fileNamePattern) validateCoverageFileNamePattern(fileNamePattern, "scanSpec.fileNamePattern");
     const modality = scanSpecText(scanSpec.modality, "scanSpec.modality", SCAN_SPEC_TEXT_MAXIMUM, false);
     const product = scanSpecText(scanSpec.product, "scanSpec.product", SCAN_SPEC_TEXT_MAXIMUM, false);
-    return { format, ...(fileNamePattern ? { fileNamePattern } : {}), ...(modality ? { modality } : {}), ...(product ? { product } : {}) };
+    const fitsQualityProfile = scanSpec.fitsQualityProfile;
+    if (fitsQualityProfile !== undefined && fitsQualityProfile !== "csst-wcs-v1") throw new RangeError("Unknown FITS quality profile");
+    return { format, ...(fitsQualityProfile ? { fitsQualityProfile } : {}), ...(fileNamePattern ? { fileNamePattern } : {}), ...(modality ? { modality } : {}), ...(product ? { product } : {}) };
   }
+  if (scanSpec.fitsQualityProfile !== undefined) throw new RangeError("FITS quality profile requires fits format");
   if (format !== "csv") throw new RangeError("scanSpec.format must be csv or fits");
   const objectIdColumn = scanSpecText(scanSpec.objectIdColumn, "scanSpec.objectIdColumn", SCAN_SPEC_COLUMN_MAXIMUM)!;
   const raColumn = scanSpecText(scanSpec.raColumn, "scanSpec.raColumn", SCAN_SPEC_COLUMN_MAXIMUM)!;

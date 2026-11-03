@@ -289,15 +289,15 @@ export class WarehouseIndexService {
     return { layers, coverages, truncated };
   }
 
-  async coverage(input: { nside: number; assetIds?: string[]; survey?: string; release?: string; layerIds?: string[] }): Promise<WarehouseCoverageResponse> {
+  async coverage(input: { nside: number; assetIds?: string[]; survey?: string; release?: string; layerIds?: string[] }, signal?: AbortSignal): Promise<WarehouseCoverageResponse> {
+    signal?.throwIfAborted();
     const targetOrder = nsideOrder(input.nside);
     if (!this.url) return { status: "unavailable", index: this.coverageIndex, nside: input.nside, pixels: [], layers: [], inactiveLayers: [], message: "ASTRO_WAREHOUSE_ES_URL is not configured" };
     try {
-      const metadata = await this.#pages(this.layerIndex, input.layerIds === undefined ? { match_all: {} } : { terms: { layer_id: input.layerIds } }, [{ layer_id: "asc" }]);
+      const metadata = await this.#pages(this.layerIndex, input.layerIds === undefined ? { match_all: {} } : { terms: { layer_id: input.layerIds } }, [{ layer_id: "asc" }], signal);
       if (metadata.truncated) throw new WarehouseIndexError("Warehouse layer selection is incomplete");
-      const catalog = { layers: await this.#resolvePartitionedLayers(metadata.hits.map(layerFromHit)
-        .filter((layer): layer is WarehouseLayerSnapshot => Boolean(layer) && layer!.layerMode !== "CANDIDATE")) };
-      const selected = catalog.layers.filter((layer) => {
+      const scopedLayers = metadata.hits.map(layerFromHit)
+        .filter((layer): layer is WarehouseLayerSnapshot => Boolean(layer) && layer!.layerMode !== "CANDIDATE").filter((layer) => {
         const assetMatch = !input.assetIds?.length || input.assetIds.some((assetId) => warehouseLayerBelongsToAsset(layer.layerId, assetId));
         // An explicit empty layerIds list means "no owned layers". This is
         // used by Workspace when Warehouse is reachable but has no local task
@@ -305,12 +305,13 @@ export class WarehouseIndexService {
         const layerIdMatch = input.layerIds === undefined || input.layerIds.includes(layer.layerId);
         return assetMatch && (!input.survey || layer.surveyId === input.survey) && (!input.release || layer.releaseId === input.release) && layerIdMatch;
       });
+      const selected = await this.#resolvePartitionedLayers(scopedLayers, signal);
       const byLayer = new Map<string, Set<number>>();
       const orders = new Map<string, Set<number>>();
       const available = new Map<string, Set<number>>();
       const precisions = new Map<string, Set<ScanPrecision>>();
       await Promise.all(selected.filter(layer => layer.state === "ACTIVE").map(async layer => {
-        const geometry = await this.#projectedGeometry(layer, targetOrder);
+        const geometry = await this.#projectedGeometry(layer, targetOrder, signal);
         byLayer.set(layer.layerId, geometry.pixels); orders.set(layer.layerId, geometry.nativeOrders);
         available.set(layer.layerId, geometry.availableOrders); precisions.set(layer.layerId, geometry.precisions);
       }));
@@ -333,31 +334,33 @@ export class WarehouseIndexService {
       });
       return { status: "ready", index: this.coverageIndex, nside: input.nside, pixels: [...new Set(layers.flatMap((layer) => layer.pixels))].sort((a, b) => a - b), layers, inactiveLayers: selected.filter((layer) => layer.state !== "ACTIVE") };
     } catch (error) {
+      signal?.throwIfAborted();
       return { status: "error", index: this.coverageIndex, nside: input.nside, pixels: [], layers: [], inactiveLayers: [], message: error instanceof Error ? error.message : String(error) };
     }
   }
 
   /** Aggregate unique projected cells in ES; repeated file edges never cap an overview. */
-  #projectedGeometry(layer: WarehouseLayerSnapshot, targetOrder: number): Promise<ProjectedGeometry> {
+  async #projectedGeometry(layer: WarehouseLayerSnapshot, targetOrder: number, signal?: AbortSignal): Promise<ProjectedGeometry> {
+    signal?.throwIfAborted();
     const key = JSON.stringify([layer, targetOrder]);
     const existing = this.#geometryCache.get(key);
     if (existing && existing.expiresAt > Date.now()) return existing.promise;
     this.#geometryCache.delete(key);
     for (const [cachedKey, value] of this.#geometryCache) if (value.expiresAt <= Date.now()) this.#geometryCache.delete(cachedKey);
     while (this.#geometryCache.size >= 16) this.#geometryCache.delete(this.#geometryCache.keys().next().value!);
-    const entry = { promise: this.#loadProjectedGeometry(layer, targetOrder), expiresAt: Number.POSITIVE_INFINITY, cells: 0 };
-    entry.promise = entry.promise.then(geometry => {
-      entry.cells = geometry.pixels.size; entry.expiresAt = Date.now() + 60_000;
-      while ([...this.#geometryCache.values()].reduce((sum, value) => sum + value.cells, 0) > 200_000) this.#geometryCache.delete(this.#geometryCache.keys().next().value!);
-      return geometry;
-    }).catch(error => { if (this.#geometryCache.get(key) === entry) this.#geometryCache.delete(key); throw error; });
+    // Only completed geometry is shared. A browser cancelling its own request
+    // must not cancel another caller or leave an aborted promise in the cache.
+    const geometry = await this.#loadProjectedGeometry(layer, targetOrder, signal);
+    signal?.throwIfAborted();
+    const entry = { promise: Promise.resolve(geometry), expiresAt: Date.now() + 60_000, cells: geometry.pixels.size };
     this.#geometryCache.set(key, entry);
-    return entry.promise;
+    while ([...this.#geometryCache.values()].reduce((sum, value) => sum + value.cells, 0) > 200_000) this.#geometryCache.delete(this.#geometryCache.keys().next().value!);
+    return geometry;
   }
 
-  async #loadProjectedGeometry(layer: WarehouseLayerSnapshot, targetOrder: number): Promise<ProjectedGeometry> {
+  async #loadProjectedGeometry(layer: WarehouseLayerSnapshot, targetOrder: number, signal?: AbortSignal): Promise<ProjectedGeometry> {
     const pixels = new Set<number>(), nativeOrders = new Set<number>(), availableOrders = new Set<number>(), precisions = new Set<ScanPrecision>();
-    const committed = await this.#committedBindings(layer);
+    const committed = await this.#committedBindings(layer, signal);
     if (committed.truncated) throw new WarehouseIndexError("Warehouse committed coverage scope is incomplete");
     if (!committed.bindings.size) return { pixels, nativeOrders, availableOrders, precisions };
     const validFrame = (field: string, values: string[]) => ({ bool: { should: [{ terms: { [field]: values } }, { bool: { must_not: { exists: { field } } } }], minimum_should_match: 1 } });
@@ -379,7 +382,7 @@ export class WarehouseIndexService {
         : { size: 0, query, aggs: { geometry: { composite: { size: 5000, sources: [
           { order: { terms: { field: "healpix_order" } } },
           { pixel: { terms: { script: { lang: "painless", source: "long o=doc['healpix_order'].value; long p=doc['healpix_cell'].value; return o>params.order ? (long)(p/Math.pow(4,o-params.order)) : p;", params: { order: targetOrder } } } } },
-        ], ...(after ? { after } : {}) }, aggs: { precisions: { terms: { field: "precision", size: 4 } }, legacy_precisions: { terms: { field: "coverage_precision", size: 4 } }, source_orders: { terms: { field: "source_order", size: 30 } } } } } }, Math.max(this.#timeoutMs, 15_000));
+        ], ...(after ? { after } : {}) }, aggs: { precisions: { terms: { field: "precision", size: 4 } }, legacy_precisions: { terms: { field: "coverage_precision", size: 4 } }, source_orders: { terms: { field: "source_order", size: 30 } } } } } }, Math.max(this.#timeoutMs, 15_000), signal);
       if (response.timed_out || response._shards?.failed) throw new WarehouseIndexError("Warehouse overview aggregation is incomplete");
       const buckets = response.aggregations?.geometry?.buckets;
       if (buckets) {
@@ -622,10 +625,10 @@ export class WarehouseIndexService {
     return { directories, truncated, notes: [...notes] };
   }
 
-  async #resolvePartitionedLayers(layers: WarehouseLayerSnapshot[]): Promise<WarehouseLayerSnapshot[]> {
+  async #resolvePartitionedLayers(layers: WarehouseLayerSnapshot[], signal?: AbortSignal): Promise<WarehouseLayerSnapshot[]> {
     return Promise.all(layers.map(async layer => {
       if (layer.layerMode !== "PARTITIONED" || layer.expectedPartitionCount === undefined) return layer;
-      const committed = await this.#committedBindings(layer);
+      const committed = await this.#committedBindings(layer, signal);
       if (committed.truncated || layer.expectedPartitionCount < 1 || committed.candidates.length !== layer.expectedPartitionCount) {
         return { ...layer, state: "UPDATING" as const };
       }
@@ -641,7 +644,8 @@ export class WarehouseIndexService {
     }));
   }
 
-  async #committedBindings(layer: WarehouseLayerSnapshot): Promise<{ bindings: Map<string, ScanBinding>; truncated: boolean; notes: string[]; candidates: WarehouseLayerSnapshot[] }> {
+  async #committedBindings(layer: WarehouseLayerSnapshot, signal?: AbortSignal): Promise<{ bindings: Map<string, ScanBinding>; truncated: boolean; notes: string[]; candidates: WarehouseLayerSnapshot[] }> {
+    signal?.throwIfAborted();
     const bindings = new Map<string, ScanBinding>();
     if (layer.layerMode !== "PARTITIONED") {
       bindings.set(layer.layerId, { scanRunId: layer.scanRunId, observation: false });
@@ -650,7 +654,7 @@ export class WarehouseIndexService {
     if (!layer.activeScopeId || !layer.scopeSnapshotSha256) return { bindings, truncated: true, notes: [`${layer.layerId}: missing committed scan scope`], candidates: [] };
     const members = await this.#pages(process.env.ASTRO_WAREHOUSE_PARTITION_INDEX ?? "ast_partition_index_v1", {
       bool: { filter: [{ term: { layer_id: layer.layerId } }, { term: { scope_id: layer.activeScopeId } }, { term: { state: "ACTIVE" } }] },
-    }, [{ partition_id: "asc" }]);
+    }, [{ partition_id: "asc" }], signal);
     let truncated = members.truncated;
     for (const hit of members.hits) {
       const member = hit._source ?? {};
@@ -661,7 +665,7 @@ export class WarehouseIndexService {
     }
     const candidates: WarehouseLayerSnapshot[] = [];
     if (bindings.size) {
-      const pointed = await this.#search(this.layerIndex, { size: bindings.size, query: { terms: { layer_id: [...bindings.keys()] } } });
+      const pointed = await this.#search(this.layerIndex, { size: bindings.size, query: { terms: { layer_id: [...bindings.keys()] } } }, this.#timeoutMs, signal);
       const active = new Set((pointed.hits?.hits ?? []).flatMap(hit => hit._source?.state === "ACTIVE" ? [text(hit._source.layer_id) ?? hit._id!] : []));
       for (const id of bindings.keys()) if (!active.has(id)) { bindings.delete(id); truncated = true; }
       for (const hit of pointed.hits?.hits ?? []) {
@@ -673,13 +677,13 @@ export class WarehouseIndexService {
     return { bindings, truncated, notes: [], candidates };
   }
 
-  async #pages(index: string, query: unknown, sort: unknown[]): Promise<{ hits: SearchHit[]; truncated: boolean }> {
+  async #pages(index: string, query: unknown, sort: unknown[], signal?: AbortSignal): Promise<{ hits: SearchHit[]; truncated: boolean }> {
     const hits: SearchHit[] = [];
     let after: unknown[] | undefined;
     const maximum = Math.min(this.#maxDocuments, 50_000);
     while (hits.length < maximum) {
       const size = Math.min(1000, maximum - hits.length);
-      const response = await this.#search(index, { size, track_total_hits: true, query, sort, ...(after ? { search_after: after } : {}) });
+      const response = await this.#search(index, { size, track_total_hits: true, query, sort, ...(after ? { search_after: after } : {}) }, this.#timeoutMs, signal);
       const page = response.hits?.hits ?? [];
       hits.push(...page);
       if (!page.length || (total(response) === undefined ? page.length < size : hits.length >= total(response)!)) return { hits, truncated: false };
@@ -690,12 +694,17 @@ export class WarehouseIndexService {
     return { hits, truncated: true };
   }
 
-  async #search(index: string, body: unknown, timeoutMs = this.#timeoutMs): Promise<SearchResponse> {
+  async #search(index: string, body: unknown, timeoutMs = this.#timeoutMs, signal?: AbortSignal): Promise<SearchResponse> {
+    signal?.throwIfAborted();
     if (!this.url) throw new WarehouseIndexError("Warehouse Elasticsearch is not configured");
     let response: Response;
     try {
-      response = await this.#fetch(`${this.url}/${encodeURIComponent(index)}/_search`, { method: "POST", headers: { Accept: "application/json", "Content-Type": "application/json", ...(this.#authorization ? { Authorization: this.#authorization } : {}) }, body: JSON.stringify(body), signal: AbortSignal.timeout(timeoutMs) });
-    } catch (error) { throw new WarehouseIndexError(`Warehouse Elasticsearch request failed: ${error instanceof Error ? error.message : String(error)}`); }
+      const timeout = AbortSignal.timeout(timeoutMs);
+      response = await this.#fetch(`${this.url}/${encodeURIComponent(index)}/_search`, { method: "POST", headers: { Accept: "application/json", "Content-Type": "application/json", ...(this.#authorization ? { Authorization: this.#authorization } : {}) }, body: JSON.stringify(body), signal: signal ? AbortSignal.any([timeout, signal]) : timeout });
+    } catch (error) {
+      signal?.throwIfAborted();
+      throw new WarehouseIndexError(`Warehouse Elasticsearch request failed: ${error instanceof Error ? error.message : String(error)}`);
+    }
     if (!response.ok) throw new WarehouseIndexError(`Warehouse Elasticsearch returned HTTP ${response.status}`);
     return await response.json() as SearchResponse;
   }

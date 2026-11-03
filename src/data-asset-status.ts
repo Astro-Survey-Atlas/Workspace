@@ -47,7 +47,7 @@ export interface DataAssetOperationalStatus {
   dataPointAnchor?: { raDeg: number; decDeg: number };
   dataPointStatus?: string;
   dataPointProgress?: { processedFiles: number; fileCount: number; errors: number };
-  scanProgress?: { status: string; executor?: string; phase?: string; processedFiles: number; fileCount: number; failedFiles: number };
+  scanProgress?: { status: string; executor?: string; phase?: string; processedFiles: number; fileCount: number; failedFiles: number; acceptedFileCount?: number; skippedFileCount?: number; skippedFilesUrl?: string };
   message?: string;
 }
 

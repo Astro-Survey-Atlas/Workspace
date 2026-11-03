@@ -359,7 +359,8 @@ export class AstroIndexService {
     return { files, truncated: totalHits(response) > 5000 };
   }
 
-  async overview(input: AstroSkyOverviewInput): Promise<AstroOverviewResponse> {
+  async overview(input: AstroSkyOverviewInput, signal?: AbortSignal): Promise<AstroOverviewResponse> {
+    signal?.throwIfAborted();
     const cells = validateCells(input.cells);
     validateNside(input.nside);
     const cacheKey = `${input.survey}|${input.release}|${input.nside}|${cells.join(",")}`;
@@ -370,7 +371,7 @@ export class AstroIndexService {
       nside: input.nside,
       filters: { survey: input.survey, release: input.release },
       cellFilters: aggregateCellFilters(cells, input.nside),
-    });
+    }, signal);
     const cellValues = cells.map((pixel) => ({
       pixel,
       ...(result.cellSummaries.get(pixel) ?? emptySummary(this.#index, input.nside, result.summary.status, result.summary.message)),
@@ -388,7 +389,8 @@ export class AstroIndexService {
     return value;
   }
 
-  async coverage(input: AstroCoverageInput): Promise<AstroCoverageResponse> {
+  async coverage(input: AstroCoverageInput, signal?: AbortSignal): Promise<AstroCoverageResponse> {
+    signal?.throwIfAborted();
     if (!isPowerOfTwo(input.nside) || input.nside > 256) throw new RangeError("coverage nside must be a power of two no greater than 256");
     const assetIds = input.assetIds?.filter(Boolean);
     const must: unknown[] = [{ term: { spatial_status: "known" } }];
@@ -420,7 +422,7 @@ export class AstroIndexService {
             aggs: { bytes: { sum: { field: "size_bytes" } } },
           };
         }
-        const response = await this.#request({ size: 0, query: { bool: { filter: must } }, aggs });
+        const response = await this.#request({ size: 0, query: { bool: { filter: must } }, aggs }, signal);
         const aggregation = response.aggregations?.coverage_cells;
         const buckets = aggregation?.buckets ?? [];
         buckets.forEach((bucket) => {
@@ -441,6 +443,7 @@ export class AstroIndexService {
         byAsset,
       };
     } catch (error) {
+      signal?.throwIfAborted();
       return emptyCoverage(this.#index, input.nside, "error", error instanceof Error ? error.message : String(error));
     }
   }
@@ -450,7 +453,8 @@ export class AstroIndexService {
     nside: number;
     filters: Pick<AstroSkyQueryInput, "survey" | "release" | "product" | "modality" | "assetIds">;
     cellFilters?: Record<string, { terms: { coverage_cells: number[] } }>;
-  }): Promise<SearchResult> {
+  }, signal?: AbortSignal): Promise<SearchResult> {
+    signal?.throwIfAborted();
     if (!this.configured) {
       const summary = emptySummary(this.#index, input.nside, "unavailable", "ASTRO_ES_URL is not configured");
       return { summary, cellSummaries: new Map() };
@@ -492,8 +496,9 @@ export class AstroIndexService {
       track_total_hits: true,
       query: { bool: { filter: must } },
       aggs,
-      });
+      }, signal);
     } catch (error) {
+      signal?.throwIfAborted();
       const unavailable = error instanceof AstroIndexUnavailableError;
       const status = unavailable ? "unavailable" : "error";
       const summary = emptySummary(this.#index, input.nside, status, error instanceof Error ? error.message : String(error));
@@ -508,7 +513,8 @@ export class AstroIndexService {
     return summarize(response, this.#index, input.nside, buckets);
   }
 
-  async #request(body: Record<string, unknown>): Promise<ElasticsearchSearchResponse> {
+  async #request(body: Record<string, unknown>, signal?: AbortSignal): Promise<ElasticsearchSearchResponse> {
+    signal?.throwIfAborted();
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), this.#timeoutMs);
     try {
@@ -520,7 +526,7 @@ export class AstroIndexService {
           ...(this.#authorization ? { Authorization: this.#authorization } : {}),
         },
         body: JSON.stringify(body),
-        signal: controller.signal,
+        signal: signal ? AbortSignal.any([controller.signal, signal]) : controller.signal,
       });
       if (response.status === 404) {
         throw new AstroIndexUnavailableError(`Elasticsearch index ${this.#index} is not available`);
@@ -542,6 +548,7 @@ export class AstroIndexService {
       }
       return await response.json() as ElasticsearchSearchResponse;
     } catch (error) {
+      signal?.throwIfAborted();
       if (error instanceof Error && error.name === "AbortError") throw new Error("Elasticsearch request timed out");
       throw error;
     } finally {

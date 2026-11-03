@@ -65,6 +65,7 @@ import { nestedSkyRegion } from "./sky-region";
 import { summarizeCoverageEvidence, summarizeCoverageMatches, summarizeScanScopes } from "./reverse-lookup-summary";
 import { normalizeLayerOrder } from "./layer-order";
 import { notifyWorkspace, notifyWorkspaceError } from "./notifications";
+import { CoverageLoader } from "./coverage-loader";
 
 type ViewMode = "catalog" | "packages" | "connectors" | "layers" | "workflow" | "system";
 
@@ -868,6 +869,7 @@ function pushAladinToast(message: string, tone: "info" | "success" | "error" = "
 }
 
 function destroyViewer(): void {
+  stopCoverageLoading();
   layerViewer?.dispose();
   aladinExplorer?.dispose();
   clearAladinPointInspection();
@@ -879,6 +881,7 @@ function destroyViewer(): void {
   aladinAssetDrawerOpen = false;
   byId("aladin-explorer").hidden = true;
   byId("aladin-controls").hidden = true;
+  byId("aladin-region-status").hidden = true;
   byId("aladin-asset-nav").replaceChildren();
   byId("scene-stage").classList.remove("aladin-active");
   byId("scene-coordinate-readout").hidden = true;
@@ -959,7 +962,9 @@ function renderAladinAssetNavigation(targets: readonly AladinAssetTarget[], _act
     const title = document.createElement("strong"); title.textContent = target.label;
     const progress = latestAladinStatus?.assets?.find((entry) => entry.assetId === target.assetId);
     const detail = document.createElement("small"); detail.textContent = target.coverageOnly ? "仅有公开覆盖 · 下载并扫描后可显示数据点"
-      : `${formatInteger(progress?.returned ?? target.returned ?? 0)} / ${formatInteger(progress?.total ?? target.objectCount ?? 0)} 个数据点`;
+      : latestAladinStatus?.displayMode === "density"
+        ? latestAladinStatus.phase === "loading" ? "密度统计中…" : `${formatInteger(progress?.total ?? 0)} 个数据点 · 密度场`
+        : `${formatInteger(progress?.returned ?? target.returned ?? 0)} / ${formatInteger(progress?.total ?? target.objectCount ?? 0)} 个数据点`;
     label.append(check, title, detail); nav.append(label);
   }
   if (!targets.length) nav.textContent = "此进入区域没有已选图层";
@@ -972,6 +977,8 @@ function syncAladinView(): void {
   host.dataset.raDeg = view.raDeg.toFixed(6);
   host.dataset.decDeg = view.decDeg.toFixed(6);
   host.dataset.fovDeg = view.fovDeg.toFixed(4);
+  host.dataset.fovXDeg = (view.fovXDeg ?? view.fovDeg).toFixed(4);
+  host.dataset.fovYDeg = (view.fovYDeg ?? view.fovDeg).toFixed(4);
   canvas.dataset.aladinRa = host.dataset.raDeg;
   canvas.dataset.aladinDec = host.dataset.decDeg;
   canvas.dataset.aladinFov = host.dataset.fovDeg;
@@ -994,7 +1001,7 @@ function renderAladinFullscreenState(): void {
   syncAladinFullscreenInspector();
 }
 
-function renderAladinDensityHover(detail: { pixel: number; nside: number; total: number; layers: Array<{ id: string; label: string; color: string; count: number }> } | null): void {
+function renderAladinDensityHover(detail: { pixel: number; nside: number; total: number; surveys: Array<{ id: string; label: string; color: string; count: number; assetId?: string }> } | null): void {
   const panel = byId("aladin-density-hover");
   if (!detail) {
     panel.hidden = true;
@@ -1008,7 +1015,7 @@ function renderAladinDensityHover(detail: { pixel: number; nside: number; total:
   total.textContent = `${formatInteger(detail.total)} 个数据点`;
   heading.append(cell, total);
   const layers = document.createElement("ul");
-  detail.layers.filter((layer) => layer.count > 0).forEach((layer) => {
+  detail.surveys.filter((layer) => layer.count > 0).forEach((layer) => {
     const row = document.createElement("li");
     const swatch = document.createElement("i");
     swatch.style.setProperty("--density-layer-color", layer.color);
@@ -1019,7 +1026,9 @@ function renderAladinDensityHover(detail: { pixel: number; nside: number; total:
     row.append(swatch, label, count);
     layers.append(row);
   });
-  panel.replaceChildren(heading, layers);
+  const hint = document.createElement("small");
+  hint.textContent = `${detail.surveys.some(survey => survey.assetId) ? "未标注巡天按来源资产列出 · " : ""}双击密度块，放大到 0.5°`;
+  panel.replaceChildren(heading, layers, hint);
   panel.hidden = false;
 }
 
@@ -1039,8 +1048,15 @@ function renderAladinStatus(status: AladinExplorerStatus): void {
   const host = byId("aladin-explorer");
   const selectionEmpty = status.phase === "empty" && status.message?.includes("当前选区没有可探索的用户资产");
   if (status.phase === "error") pushAladinToast(status.message ?? "数据点查询失败", "error");
-  else if (status.phase === "empty" && !selectionEmpty && !status.indexing) pushAladinToast(status.message ?? "当前视野暂无数据点", "info");
-  else if (status.message && !selectionEmpty && !status.indexing) pushAladinToast(status.message, "info");
+  const regionState = status.regionPointState ?? (status.indexing ? "indexing" : "loading");
+  host.dataset.regionPointState = regionState;
+  const regionPanel = byId("aladin-region-status");
+  regionPanel.hidden = status.returned > 0 || !status.message || status.phase === "initializing";
+  regionPanel.setAttribute("aria-busy", String(status.phase === "loading"));
+  byId("aladin-region-message").textContent = status.message ?? "";
+  byId("aladin-inspect-coverage").hidden = regionPanel.hidden || regionState !== "empty"
+    || !(aladinSnapshot?.assetTargets.some(target => target.pointKind === "image_center"));
+  byId("aladin-retry-navigation").hidden = regionPanel.hidden || status.phase !== "error";
   host.dataset.queryPhase = status.phase;
   host.dataset.objectReturned = String(status.returned);
   host.dataset.objectTotal = String(status.total);
@@ -1063,7 +1079,7 @@ function renderAladinStatus(status: AladinExplorerStatus): void {
   loadedSummary.textContent = densityMode
     ? `${formatInteger(status.total)} DATA POINTS · ${formatInteger(status.densityCells ?? status.returned)} DENSITY CELLS${status.indexing ? " · 索引生成中" : ""}`
     : `${formatInteger(status.returned)} / ${formatInteger(status.total)} DATA POINTS${status.indexing ? " · 索引生成中" : ""}`;
-  byId("aladin-cache-state").textContent = status.indexing ? "自动更新中" : status.assets?.some((asset) => asset.cacheState === "cached") ? "CACHE RETAINED" : status.phase === "loading" ? "FETCHING NEW SKY" : "CACHE READY";
+  byId("aladin-cache-state").textContent = status.phase === "loading" ? "FETCHING NEW SKY" : status.indexing ? "自动更新中" : status.assets?.some((asset) => asset.cacheState === "cached") ? "CACHE RETAINED" : "CACHE READY";
   if (aladinSnapshot) renderAladinAssetNavigation(aladinSnapshot.assetTargets, aladinExplorer?.getActiveAssetId() ?? null);
   syncAladinView();
 }
@@ -1071,6 +1087,7 @@ function renderAladinStatus(status: AladinExplorerStatus): void {
 async function enterAladinExplorer(menu: SkyRegionMenu): Promise<void> {
   const pixels = [...new Set(menu.pixels)].filter((pixel) => Number.isInteger(pixel)).sort((a, b) => a - b);
   if (!pixels.length) return;
+  stopCoverageLoading();
 
   const generation = ++aladinEntryGeneration;
   aladinEntryAbort?.abort();
@@ -1102,6 +1119,7 @@ async function enterAladinExplorer(menu: SkyRegionMenu): Promise<void> {
     const layer = displayLayerFor({ assetId: entry.id, key: entry.id });
     return { assetId: entry.id, scopes: entry.scopes, coverageOnly: entry.scopes.length === 0,
       label: entry.label ?? layer.label, color: entry.color ?? layer.color,
+      pointKind: ["image", "cube"].includes(dataAssets.find(asset => asset.id === entry.id)?.kind ?? "") ? "image_center" : "object",
       centerRaDeg: fallbackCenter.raDeg, centerDecDeg: fallbackCenter.decDeg,
       defaultFovDeg: initialFovDeg, returned: 0 };
   });
@@ -1162,6 +1180,11 @@ async function enterAladinExplorer(menu: SkyRegionMenu): Promise<void> {
 
   aladinEntryAbort = null;
   aladinExplorer = new AladinExplorer(host, snapshot, {
+    resolveSurvey: (id) => {
+      const survey = localSurveyRecordsById.get(id) ?? publicSurveyRecordsById.get(id);
+      const card = surveyCards.find(candidate => candidate.id === id) ?? publicSurveyCards.find(candidate => candidate.id === id);
+      return { label: survey?.name ?? card?.name ?? (id || "未标注巡天"), color: surveyDisplayColor(id || "unlabelled", survey?.color ?? card?.color) };
+    },
     resolveLayer: (record) => {
       const layer = displayLayerFor({
         assetId: record.asset_id,
@@ -1186,6 +1209,12 @@ async function enterAladinExplorer(menu: SkyRegionMenu): Promise<void> {
     onStatus: renderAladinStatus,
     onAssetChange: (assetId) => renderAladinAssetNavigation(targets, assetId),
     onViewChange: () => syncAladinView(),
+    onViewInteraction: () => {
+      if (!aladinPointInspectionAbort) return;
+      clearAladinPointInspection();
+      const status = document.querySelector(".aladin-inspector-status");
+      if (status) status.textContent = "视野已改变，点击数据点可查看当前位置的信息。";
+    },
     onDensityHover: renderAladinDensityHover,
   });
   renderAladinFullscreenState();
@@ -1216,6 +1245,7 @@ async function leaveAladinExplorer(): Promise<void> {
   aladinAssetDrawerOpen = false;
   byId("aladin-explorer").hidden = true;
   byId("aladin-controls").hidden = true;
+  byId("aladin-region-status").hidden = true;
   renderAladinFullscreenState();
   renderAladinAssetDrawerState();
   byId("aladin-asset-nav").replaceChildren();
@@ -2288,6 +2318,8 @@ function queryAladinPoint(point: SurveyObjectPoint, radiusArcsec: number, status
     if (controller.signal.aborted || generation !== aladinPointInspectionGeneration) return;
     status.textContent = `查询失败：${error instanceof Error ? error.message : String(error)}`;
     results.replaceChildren();
+  }).finally(() => {
+    if (aladinPointInspectionAbort === controller) aladinPointInspectionAbort = null;
   });
 }
 
@@ -2307,7 +2339,7 @@ function renderAladinPointInspector(point: SurveyObjectPoint): void {
   heading.textContent = `RA ${point.raDeg.toFixed(6)}° · Dec ${point.decDeg >= 0 ? "+" : ""}${point.decDeg.toFixed(6)}°`;
   const selected = document.createElement("p");
   selected.className = "aladin-inspector-selected";
-  selected.textContent = `已选对象 ${point.objectId ?? "未命名"}`;
+  selected.textContent = point.objectId ? `已选对象 ${point.objectId}` : "入口坐标 · 所选图层的影像覆盖";
   const controls = document.createElement("label");
   controls.className = "aladin-inspector-radius";
   const label = document.createElement("span");
@@ -2607,18 +2639,6 @@ function euclidOverviewPixels(): number[] {
   )].sort((left, right) => left - right);
 }
 
-async function loadEuclidAstroOverview(): Promise<void> {
-  const cells = euclidOverviewPixels();
-  if (!cells.length) return;
-  const overview = await workspaceApi.skyOverview({ survey: "euclid", release: "euclid-q1", nside: 16, cells });
-  astroOverview = overview;
-  if (mode === "layers") {
-    byId("dataset-state").textContent = overview.status === "ready"
-      ? "公开覆盖与工作区已扫描空间索引已载入"
-      : "公开覆盖已载入；工作区空间索引尚未建立";
-  }
-}
-
 function userDataAssets(): DataAssetRecord[] {
   return dataAssets;
 }
@@ -2680,6 +2700,7 @@ function normalizedAssetCoverage(asset: DataAssetRecord, response: WorkspaceAsse
   const pixels = [...new Set((layer?.pixels ?? response.pixels).filter((pixel) => Number.isInteger(pixel) && pixel >= 0))].sort((left, right) => left - right);
   const objectCount = coverageObjectCount(asset.id, response, layer);
   return {
+    ...layer,
     key: `asset:${asset.id}`,
     assetId: asset.id,
     assetIds: [asset.id],
@@ -2697,139 +2718,158 @@ function normalizedAssetCoverage(asset: DataAssetRecord, response: WorkspaceAsse
   };
 }
 
-async function independentAssetCoverage(assets: DataAssetRecord[], nside: number): Promise<{ layers: Array<ReturnType<typeof normalizedAssetCoverage>>; legacy: WorkspaceCoverageLayer[] }> {
-  let aggregate: WorkspaceAssetCoverageResponse | null = null;
-  try {
-    aggregate = await workspaceApi.skyCoverage({ nside, assetIds: assets.map((asset) => asset.id) });
-  } catch (error) {
-    console.warn("Unable to load aggregate workspace coverage; retrying assets independently", error);
-  }
+type CoverageResult =
+  | { kind: "asset"; layer: ReturnType<typeof normalizedAssetCoverage> }
+  | { kind: "extra"; coverage?: WorkspaceAssetCoverageResponse; artifacts: UserMocArtifact[] }
+  | { kind: "status"; statuses: DataAssetOperationalStatusResponse[] }
+  | { kind: "overview"; overview: AstroOverviewResponse | null };
 
-  const exactLayers = new Map<string, WorkspaceAssetCoverageLayer>();
-  aggregate?.layers?.forEach((layer) => {
-    const assetIds = coverageLayerAssetIds(layer);
-    if (assetIds.length === 1) exactLayers.set(assetIds[0]!, layer);
-  });
-  const responses = new Map<string, WorkspaceAssetCoverageResponse>();
-  if (aggregate) {
-    assets.forEach((asset) => {
-      const layer = exactLayers.get(asset.id);
-      if (layer) responses.set(asset.id, { ...aggregate!, pixels: layer.pixels, byAsset: layer.byAsset, layers: [layer], status: layer.status ?? aggregate!.status });
-    });
-  }
+let coverageLoader: CoverageLoader<CoverageResult> | null = null;
+let coverageLoadGeneration = 0;
+let coverageRenderFrame: number | null = null;
+const coverageResultCache = new Map<string, { at: number; value: CoverageResult }>();
 
-  const missing = assets.filter((asset) => !responses.has(asset.id));
-  const settled = await Promise.allSettled(missing.map((asset) => workspaceApi.skyCoverage({ nside, assetIds: [asset.id] })));
-  settled.forEach((result, index) => {
-    const asset = missing[index]!;
-    if (result.status === "fulfilled") responses.set(asset.id, result.value);
-    else responses.set(asset.id, { status: "error", index: "workspace-coverage", nside, pixels: [], byAsset: [], message: result.reason instanceof Error ? result.reason.message : String(result.reason) });
-  });
-
-  const legacy = (aggregate?.layers ?? [])
-    .filter((layer) => !coverageLayerAssetIds(layer).length && layer.pixels.length > 0)
-    .map((layer) => ({ ...layer, nside: aggregate!.nside }));
-  return {
-    layers: assets.map((asset) => normalizedAssetCoverage(asset, responses.get(asset.id)!)),
-    legacy,
-  };
+function selectedCoverageJobKeys(): string[] {
+  const ids = [...new Set([...visibleAssetIds, ...(selectedLayerAssetId ? [selectedLayerAssetId] : [])])];
+  return [...ids, ...ids.map(id => `status:${id}`),
+    ...(visibleWorkspaceLayerKeys.size || unassignedWorkspaceVisible ? ["@extra"] : []),
+    ...(visibleSurveyIds.has("euclid") ? ["@overview"] : [])];
 }
 
-async function loadWorkspaceAssetCoverage(scannedAssetId?: string): Promise<void> {
-  const assets = userDataAssets();
-  const availableAssetIds = new Set(assets.map((asset) => asset.id));
-  visibleAssetIds = new Set([...visibleAssetIds].filter((assetId) => availableAssetIds.has(assetId)));
-  if (selectedLayerAssetId && !availableAssetIds.has(selectedLayerAssetId)) selectedLayerAssetId = null;
-  const nside = surveyFootprints?.nside ?? 16;
-  const extraCoverageResult = await Promise.allSettled([
-    workspaceApi.skyCoverage({ nside }),
-    workspaceApi.userMocs(),
-    workspaceApi.dataAssetStatuses(),
-  ]);
-  const extraCoverage = extraCoverageResult[0]?.status === "fulfilled" ? extraCoverageResult[0].value : undefined;
-  const listedMocs = extraCoverageResult[1]?.status === "fulfilled" ? extraCoverageResult[1].value : [];
-  const statusResult = extraCoverageResult[2];
-  if (statusResult?.status === "fulfilled") {
-    coverageStatusesByAsset.clear();
-    statusResult.value.forEach((status) => coverageStatusesByAsset.set(status.assetId, status));
-  } else {
-    [...coverageStatusesByAsset.keys()].filter((assetId) => !availableAssetIds.has(assetId)).forEach((assetId) => coverageStatusesByAsset.delete(assetId));
-  }
+function renderCoverageLoading(): void {
+  const panel = byId("coverage-load-status");
+  if (!coverageLoader || mode !== "layers" || aladinSnapshot) { panel.hidden = true; return; }
+  const pending = coverageLoader.pendingSelected().filter(key => !key.startsWith("status:"));
+  const failed = coverageLoader.failedSelected().filter(key => !key.startsWith("status:"));
+  panel.hidden = !pending.length && !failed.length;
+  panel.setAttribute("aria-busy", String(pending.length > 0));
+  byId("coverage-load-message").textContent = pending.length
+    ? `正在加载所选图层覆盖 · ${pending.length} 项待完成`
+    : `${failed.length} 个所选图层覆盖加载失败`;
+  byId("coverage-load-retry").hidden = !failed.length;
+}
+
+function prioritizeCoverageSelection(): void {
+  coverageLoader?.setSelected(selectedCoverageJobKeys());
+  renderCoverageLoading();
+}
+
+function stopCoverageLoading(): void {
+  coverageLoadGeneration += 1;
+  coverageLoader?.dispose();
+  coverageLoader = null;
+  if (coverageRenderFrame !== null) cancelAnimationFrame(coverageRenderFrame);
+  coverageRenderFrame = null;
+  byId("coverage-load-status").hidden = true;
+}
+
+function applyExtraCoverage(result: Extract<CoverageResult, { kind: "extra" }>, assets: DataAssetRecord[], nside: number): void {
   userMocArtifacts.clear();
-  listedMocs.forEach((artifact) => userMocArtifacts.set(artifact.id, artifact));
+  result.artifacts.forEach(artifact => userMocArtifacts.set(artifact.id, artifact));
   workspaceExtraLayers.clear();
-  for (const layer of extraCoverage?.layers ?? []) {
+  for (const layer of result.coverage?.layers ?? []) {
     const normalized = { ...layer, nside } as WorkspaceCoverageLayer;
-    // An explicitly keyed MOC is its own selectable layer even when the
-    // coverage response also records the source asset. Asset-backed warehouse
-    // layers continue to collapse into the asset card to avoid duplicates.
     if (layerBelongsToAsset(normalized, assets) && !normalized.key?.startsWith("moc:")) continue;
     const key = workspaceExtraLayerKey(normalized);
-    if (!key) continue;
-    workspaceExtraLayers.set(key, { ...normalized, key, pixels: [...new Set(normalized.pixels)].sort((a, b) => a - b) });
+    if (key) workspaceExtraLayers.set(key, { ...normalized, key, pixels: [...new Set(normalized.pixels)].sort((a, b) => a - b) });
   }
-  // The artifact endpoint remains useful when the coverage endpoint is
-  // degraded. Preserve its state card even when no projection is available.
-  for (const artifact of listedMocs) {
-    if (assets.some((asset) => [asset.id, workspaceLayerIdForAsset(asset.id), `user-${asset.id}`].includes(artifact.layerId))) continue;
+  for (const artifact of result.artifacts) {
+    if (assets.some(asset => [asset.id, workspaceLayerIdForAsset(asset.id), `user-${asset.id}`].includes(artifact.layerId))) continue;
     const key = `moc:${artifact.id}`;
     if (!workspaceExtraLayers.has(key)) workspaceExtraLayers.set(key, userMocLayer(artifact, nside));
   }
-  if (!workspaceLayerVisibilityPreferenceRestored) {
-    visibleWorkspaceLayerKeys = new Set([...workspaceExtraLayers.entries()]
-      .filter(([, layer]) => layer.status === "ready")
-      .map(([key]) => key));
-    workspaceLayerVisibilityPreferenceRestored = true;
-  } else {
-    visibleWorkspaceLayerKeys = new Set([...visibleWorkspaceLayerKeys].filter((key) => workspaceExtraLayers.has(key)));
-  }
+  // Loading geometry never opts a user into another layer, including previews.
+  workspaceLayerVisibilityPreferenceRestored = true;
+  legacyWorkspaceLayers = (result.coverage?.layers ?? [])
+    .filter(layer => !coverageLayerAssetIds(layer).length && !workspaceExtraLayerKey({ ...layer, nside }))
+    .map(layer => ({ ...layer, nside }));
+  hasUnassignedWorkspaceCoverage = legacyWorkspaceLayers.some(layer => layer.pixels.length > 0 && !layer.surveyId);
+}
 
-  const coverage = assets.length
-    ? await independentAssetCoverage(assets, nside)
-    : { layers: [], legacy: [] as WorkspaceCoverageLayer[] };
-  workspaceAssetLayers.clear();
-  coverage.layers.forEach((layer) => workspaceAssetLayers.set(layer.assetId, layer));
-  legacyWorkspaceLayers = coverage.legacy;
-  hasUnassignedWorkspaceCoverage = legacyWorkspaceLayers.some((layer) => layer.pixels.length > 0 && !layer.surveyId);
-  const coveredAssetIds = new Set(coverage.layers.filter((layer) => layer.pixels.length > 0).map((layer) => layer.assetId));
-  if (!assetVisibilityPreferenceRestored) {
-    // Existing user assets are listed but remain opt-in. A newly completed
-    // scan is the only asset that may be surfaced automatically.
-    visibleAssetIds.clear();
-    assetVisibilityPreferenceRestored = true;
+async function loadWorkspaceAssetCoverage(scannedAssetId?: string): Promise<void> {
+  stopCoverageLoading();
+  const generation = coverageLoadGeneration;
+  const assets = [...userDataAssets()];
+  const available = new Set(assets.map(asset => asset.id));
+  visibleAssetIds = new Set([...visibleAssetIds].filter(id => available.has(id)));
+  assetVisibilityPreferenceRestored = true;
+  if (selectedLayerAssetId && !available.has(selectedLayerAssetId)) selectedLayerAssetId = null;
+  const nside = surveyFootprints?.nside ?? 16;
+  for (const [id, layer] of workspaceAssetLayers) if (!available.has(id) || layer.nside !== nside) workspaceAssetLayers.delete(id);
+  for (const id of coverageStatusesByAsset.keys()) if (!available.has(id)) coverageStatusesByAsset.delete(id);
+  const keys = [...assets.map(asset => asset.id), "@extra", ...assets.map(asset => `status:${asset.id}`), "@overview"];
+  const cached = new Map<string, CoverageResult>();
+  for (const key of keys) {
+    const entry = coverageResultCache.get(`${nside}:${key}`);
+    if (!scannedAssetId && entry && Date.now() - entry.at < 60_000) cached.set(key, entry.value);
   }
-  if (scannedAssetId && coveredAssetIds.has(scannedAssetId)) visibleAssetIds.add(scannedAssetId);
-  for (const layer of coverage.layers) {
-    if (layer.preview && layer.pixels.length > 0) visibleAssetIds.add(layer.assetId);
-  }
-
-  layerViewer?.setWorkspaceCoverageLayers([...coverage.layers, ...legacyWorkspaceLayers, ...workspaceExtraLayers.values()], nside);
-  // Add newly covered assets to layer order, but don't add all known layers
-  const knownKeys = new Set(knownLayerOrderKeys());
-  const filteredOrder = layerOrder.filter((key) => knownKeys.has(key));
-  const newPublicKeys = footprintSurveyIds()
-    .map((surveyId) => `public-survey:${surveyId}`)
-    .filter((key) => !filteredOrder.includes(key));
-  const newAssetKeys = assets.map((asset) => `asset:${asset.id}`).filter((key) => knownKeys.has(key) && !filteredOrder.includes(key));
-  const newWorkspaceKeys = [...workspaceExtraLayers.keys()].filter((key) => !filteredOrder.includes(key));
-  const newUnassignedKey = hasUnassignedWorkspaceCoverage && !filteredOrder.includes("workspace-unassigned") ? ["workspace-unassigned"] : [];
-  layerOrder = [...filteredOrder, ...newPublicKeys, ...newAssetKeys, ...newWorkspaceKeys, ...newUnassignedKey];
-  applyLayerOrder(false);
-  layerViewer?.setVisibleAssets(visibleAssetIds);
-  layerViewer?.setVisibleWorkspaceLayerKeys(visibleWorkspaceLayerKeys);
-  layerViewer?.setVisibleSurveys(new Set([...visibleSurveyIds, ...(unassignedWorkspaceVisible ? ["__unassigned__"] : [])]));
-  buildSurveyList();
-  renderCoverageMetrics();
-  persistLayerPreferences();
-  if (mode === "layers") {
-    coverage.layers.filter((layer) => layer.coverageStatus === "error").forEach((layer) => {
-      notifyWorkspace("用户资产覆盖读取失败", `${layer.assetName ?? layer.assetId} · ${layer.message ?? "空间索引不可用"}`, { tone: "warning", dedupeMs: 5_000 });
-      console.warn(`Unable to load workspace coverage for ${layer.assetId}`, layer.message);
+  const scheduleRender = (): void => {
+    renderCoverageLoading();
+    if (coverageRenderFrame !== null) return;
+    coverageRenderFrame = requestAnimationFrame(() => {
+      coverageRenderFrame = null;
+      if (generation !== coverageLoadGeneration || !layerViewer) return;
+      layerViewer.setWorkspaceCoverageLayers([...workspaceAssetLayers.values(), ...legacyWorkspaceLayers, ...workspaceExtraLayers.values()], nside);
+      const known = knownLayerOrderKeys();
+      layerOrder = [...layerOrder.filter(key => known.includes(key)), ...known.filter(key => !layerOrder.includes(key))];
+      applyLayerOrder(false);
+      layerViewer.setVisibleAssets(visibleAssetIds);
+      layerViewer.setVisibleWorkspaceLayerKeys(visibleWorkspaceLayerKeys);
+      buildSurveyList();
+      renderCoverageMetrics();
+      persistLayerPreferences();
+      const inspected = selectedLayerAssetId ? assets.find(asset => asset.id === selectedLayerAssetId) : undefined;
+      if (inspected) renderLayerAssetDetails(inspected);
     });
-  }
-  if (extraCoverageResult[0]?.status === "rejected") {
-    console.warn("Unable to load Warehouse and user MOC coverage", extraCoverageResult[0].reason);
-  }
+  };
+  const applyResult = (key: string, value: CoverageResult): void => {
+    if (value.kind === "asset") {
+      workspaceAssetLayers.set(value.layer.assetId, value.layer);
+      if (key === scannedAssetId && value.layer.pixels.length) { visibleAssetIds.add(key); prioritizeCoverageSelection(); }
+    } else if (value.kind === "status") value.statuses.forEach(status => coverageStatusesByAsset.set(status.assetId, status));
+    else if (value.kind === "extra") applyExtraCoverage(value, assets, nside);
+    else if (value.overview) {
+      astroOverview = value.overview;
+      byId("dataset-state").textContent = value.overview.status === "ready"
+        ? "公开覆盖与工作区已扫描空间索引已载入" : "公开覆盖已载入；工作区空间索引尚未建立";
+    }
+  };
+  coverageLoader = new CoverageLoader(keys, async (key, signal): Promise<CoverageResult> => {
+    if (key === "@extra") {
+      const [coverage, artifacts] = await Promise.all([workspaceApi.skyCoverage({ nside }, signal), workspaceApi.userMocs(signal)]);
+      signal.throwIfAborted();
+      if (coverage.status === "error") throw new Error(coverage.message ?? "覆盖索引查询失败");
+      return { kind: "extra", coverage, artifacts };
+    }
+    if (key === "@overview") {
+      const cells = euclidOverviewPixels();
+      return { kind: "overview", overview: cells.length ? await workspaceApi.skyOverview({ survey: "euclid", release: "euclid-q1", nside: 16, cells }, signal) : null };
+    }
+    if (key.startsWith("status:")) return { kind: "status", statuses: await workspaceApi.dataAssetStatuses([key.slice(7)], signal) };
+    const asset = assets.find(asset => asset.id === key)!;
+    const response = await workspaceApi.skyCoverage({ nside, assetIds: [key] }, signal);
+    if (response.status === "error") throw new Error(response.message ?? "覆盖索引查询失败");
+    return { kind: "asset", layer: normalizedAssetCoverage(asset, response) };
+  }, (key, phase, value, error) => {
+    if (generation !== coverageLoadGeneration) return;
+    if (phase === "ready" && value) {
+      coverageResultCache.set(`${nside}:${key}`, { at: Date.now(), value });
+      applyResult(key, value);
+    }
+    if (phase === "error" && assets.some(asset => asset.id === key)) {
+      const asset = assets.find(asset => asset.id === key)!;
+      const previous = workspaceAssetLayers.get(key);
+      workspaceAssetLayers.set(key, { ...(previous ?? normalizedAssetCoverage(asset, { status: "error", index: "workspace-coverage", nside, pixels: [], byAsset: [] })),
+        coverageStatus: "error", message: error });
+    }
+    scheduleRender();
+  }, cached);
+  for (const [key, value] of cached) applyResult(key, value);
+  // Cached geometry is painted immediately; selected jobs always precede the
+  // global extra-layer lookup and all unselected per-asset work.
+  prioritizeCoverageSelection();
+  scheduleRender();
+  await coverageLoader.settled();
 }
 
 async function refreshWorkspaceAssets(scannedAssetId?: string): Promise<void> {
@@ -3425,6 +3465,7 @@ function renderAssetsReleaseDetail(
 }
 
 function applyLayerPreferences(): void {
+  prioritizeCoverageSelection();
   applyLayerOrder();
   layerViewer?.setLayoutMode(overlapModeActive ? "overlap" : layerLayoutMode);
   layerViewer?.setVisibleSurveys(new Set([...visibleSurveyIds, ...(unassignedWorkspaceVisible ? ["__unassigned__"] : [])]));
@@ -3741,7 +3782,9 @@ async function watchRemoteCoverageScan(assetId: string, runId: string): Promise<
       const run = runs.find((candidate) => candidate.id === runId);
       if (!run || run.status === "failed" || (run.status === "succeeded" && run.mocStatus !== "pending")) {
         if (run?.status === "succeeded" && run.mocStatus === "ready") {
-          notifyWorkspace("用户 MOC 已生成", dataAssets.find((asset) => asset.id === assetId)?.name ?? assetId, { tone: "success" });
+          notifyWorkspace((run.skippedFileCount ?? 0) > 0 ? `扫描完成，已跳过 ${formatInteger(run.skippedFileCount!)} 个异常文件` : "用户 MOC 已生成", dataAssets.find((asset) => asset.id === assetId)?.name ?? assetId, { tone: "success" });
+        } else if (run?.status === "succeeded" && run.acceptedFileCount === 0) {
+          notifyWorkspace("扫描完成，无可用文件", "文件均已跳过，可在资产详情下载原因清单。", { tone: "info" });
         } else if (run?.status === "failed" || run?.mocStatus === "failed") {
           notifyWorkspace("远程覆盖扫描失败", run.error ?? "Warehouse 未返回可用覆盖", { tone: "error" });
         }
@@ -3879,13 +3922,20 @@ function renderLayerAssetDetails(asset: DataAssetRecord): void {
   const projectState = asset.projectState === "acquired"
     ? "已掌握（已登记访问权，不代表已有空间覆盖）"
     : PROJECT_STATE_LABELS[asset.projectState] ?? asset.projectState;
+  if (operational?.scanProgress?.skippedFilesUrl) {
+    const report = document.createElement("button");
+    report.type = "button"; report.textContent = "下载跳过文件清单";
+    report.addEventListener("click", () => { window.open(operational.scanProgress!.skippedFilesUrl!, "_blank", "noopener"); });
+    actions.push(report);
+  }
   inspectorRows(asset.name, [
     ["巡天 / 发布", `${asset.surveyId ?? "未关联"} / ${asset.releaseId ?? "未关联"}`],
     ["数据类型", asset.kind],
+    ["覆盖含义", coverageMeaning(layer, asset)],
     ["使用阶段", projectState],
     ["覆盖状态", `${COVERAGE_STATE_LABELS[coverageState] ?? coverageState}${coverage && coverage !== COVERAGE_STATE_LABELS[coverageState] ? ` · ${coverage}` : ""}`],
     ["数据点", `${operational?.dataPointCount === undefined ? "—" : formatInteger(operational.dataPointCount)} · ${statusLabels[operational?.dataPointStatus ?? "not_indexed"] ?? operational?.dataPointStatus ?? "尚未生成"}`],
-    ...(operational?.scanProgress ? [["扫描进度", `${phaseLabels[operational.scanProgress.phase ?? ""] ?? "处理中"} · ${formatInteger(operational.scanProgress.processedFiles)} / ${formatInteger(operational.scanProgress.fileCount)} 文件 · ${operational.scanProgress.failedFiles} 项失败`] as [string, string]] : []),
+    ...(operational?.scanProgress ? [["扫描进度", `${operational.scanProgress.status === "succeeded" ? "扫描完成" : phaseLabels[operational.scanProgress.phase ?? ""] ?? "处理中"} · ${formatInteger(operational.scanProgress.processedFiles)} / ${formatInteger(operational.scanProgress.fileCount)} 文件 · ${formatInteger(operational.scanProgress.acceptedFileCount ?? 0)} 通过 · ${formatInteger(operational.scanProgress.skippedFileCount ?? 0)} 跳过 · ${operational.scanProgress.failedFiles} 项失败`] as [string, string]] : []),
     ...(operational?.dataPointProgress && !operational.scanProgress ? [["扫描进度", `${formatInteger(operational.dataPointProgress.processedFiles)} / ${formatInteger(operational.dataPointProgress.fileCount)} 文件 · ${operational.dataPointProgress.errors} 项问题`] as [string, string]] : []),
     ["目录对象查询", operational?.objects === "queryable" ? "可查询" : operational?.objects === "unavailable" ? "索引不可用" : "尚未建立对象索引"],
     ["下一步", nextAction],
@@ -3894,6 +3944,12 @@ function renderLayerAssetDetails(asset: DataAssetRecord): void {
     ...(scan?.format === "csv" ? [["对象列", `${scan.objectIdColumn} · RA ${scan.raColumn} · Dec ${scan.decColumn}`] as [string, string]] : []),
     ...(scan?.format === "fits" || asset.kind === "image" || asset.kind === "cube" ? [["扫描格式", "FITS 图像范围与 WCS 中心"] as [string, string]] : []),
   ], actions);
+}
+
+function coverageMeaning(layer?: WorkspaceCoverageLayer, asset?: DataAssetRecord): string {
+  if (layer?.coverageRole === "object_presence") return "数据点分布";
+  if (["image_extent", "footprint"].includes(layer?.coverageRole ?? "") || asset?.kind === "image" || asset?.kind === "cube") return "影像覆盖 · 中心点可能位于覆盖区块外";
+  return "空间覆盖";
 }
 
 function workspaceLayerStatusLabel(layer: WorkspaceCoverageLayer): string {
@@ -3982,6 +4038,10 @@ function buildSurveyList(): void {
           ? visibleWorkspaceLayerKeys.has(key)
           : unassignedWorkspaceVisible;
     card.classList.toggle("visible", visible);
+    const coveragePhase = asset ? coverageLoader?.phase(asset.id) : undefined;
+    if (coveragePhase) card.dataset.coverageLoadState = coveragePhase;
+    const loading = Boolean(asset && (visible || selectedLayerAssetId === asset.id) && (coveragePhase === "loading" || coveragePhase === "queued"));
+    card.setAttribute("aria-busy", String(loading));
     if (asset) card.classList.add("workspace-asset-card");
     if (workspaceLayer) card.classList.add("workspace-extra-card");
     if (isUnassigned) card.classList.add("workspace-unassigned");
@@ -4048,7 +4108,7 @@ function buildSurveyList(): void {
     body.tabIndex = 0;
     const activate = (): void => {
       if (survey) void selectSurvey(survey.id, "public").catch(showFatal);
-      else if (asset) { selectedLayerAssetId = asset.id; renderLayerAssetDetails(asset); }
+      else if (asset) { selectedLayerAssetId = asset.id; prioritizeCoverageSelection(); renderLayerAssetDetails(asset); }
       else if (workspaceLayer) renderWorkspaceLayerDetails(workspaceLayer);
     };
     body.addEventListener("click", activate);
@@ -4072,7 +4132,9 @@ function buildSurveyList(): void {
       const operational = coverageStatusesByAsset.get(asset.id);
       const coverageState = operational?.coverage ?? (layer?.status === "pending" || layer?.coverageStatus === "pending" ? "pending" : layer?.pixels.length ? "ready" : layer?.status === "error" || layer?.coverageStatus === "error" ? "failed" : "not_started");
       count.textContent = COVERAGE_STATE_LABELS[coverageState] ?? coverageState;
-      metadata.textContent = [asset.surveyId ?? "未设置巡天标签", asset.releaseId ?? "未设置发布标签", operational?.dataPointCount ? `${formatInteger(operational.dataPointCount)} 个数据点` : layer?.objectCount !== undefined ? `${formatInteger(layer.objectCount)} 个目录对象` : undefined].filter(Boolean).join(" · ");
+      if (loading) count.textContent = "加载覆盖中…";
+      else if (coveragePhase === "error") count.textContent = "覆盖加载失败 · 可重试";
+      metadata.textContent = [asset.surveyId ?? "未设置巡天标签", asset.releaseId ?? "未设置发布标签", coverageMeaning(layer, asset), operational?.dataPointCount !== undefined ? `${formatInteger(operational.dataPointCount)} 个已索引数据点` : layer?.objectCount !== undefined && asset.kind !== "image" && asset.kind !== "cube" ? `${formatInteger(layer.objectCount)} 个目录对象` : undefined].filter(Boolean).join(" · ");
     } else if (workspaceLayer) {
       count.textContent = workspaceLayer.status === "ready" ? `${formatInteger(workspaceLayer.pixels.length)} CELLS` : workspaceLayer.status === "pending" ? "PENDING" : workspaceLayer.status === "error" ? "FAILED" : "UNAVAILABLE";
       metadata.textContent = [workspaceLayer.source === "warehouse" ? "WAREHOUSE" : "USER MOC", workspaceLayer.surveyId, workspaceLayer.releaseId, workspaceLayer.precision].filter(Boolean).join(" · ");
@@ -4290,10 +4352,6 @@ async function activateMode(nextMode: ViewMode): Promise<void> {
     layerViewer.setVisibleSurveys(visibleSurveyIds);
     layerViewer.setInteractionMode(layerInteractionMode);
     applyLayerPreferences();
-    void loadEuclidAstroOverview().catch((error) => {
-      notifyWorkspace("公开覆盖索引查询失败", error instanceof Error ? error.message : String(error), { tone: "warning", dedupeMs: 5_000 });
-      console.warn("Unable to load Euclid workspace coverage overview", error);
-    });
     void loadWorkspaceAssetCoverage().catch((error) => {
       notifyWorkspace("用户资产覆盖读取失败", error instanceof Error ? error.message : String(error), { tone: "warning", dedupeMs: 5_000 });
       console.warn("Unable to load custom workspace coverage", error);
@@ -4391,6 +4449,15 @@ byId<HTMLButtonElement>("reset-button").addEventListener("click", () => {
   }
 });
 byId<HTMLButtonElement>("aladin-fullscreen").addEventListener("click", () => void toggleAladinFullscreen());
+byId<HTMLButtonElement>("aladin-inspect-coverage").addEventListener("click", () => {
+  if (!aladinSnapshot) return;
+  renderAladinPointInspector({ raDeg: aladinSnapshot.centerRaDeg, decDeg: aladinSnapshot.centerDecDeg });
+});
+byId<HTMLButtonElement>("aladin-retry-navigation").addEventListener("click", () => aladinExplorer?.retryNavigation());
+byId<HTMLButtonElement>("coverage-load-retry").addEventListener("click", () => {
+  coverageLoader?.retry();
+  renderCoverageLoading();
+});
 byId<HTMLButtonElement>("aladin-asset-drawer-toggle").addEventListener("click", () => {
   setAladinAssetDrawer(!aladinAssetDrawerOpen);
 });

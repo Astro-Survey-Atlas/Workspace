@@ -39,6 +39,9 @@ def image_position(record):
         return None
     center_pixel = ((width - 1) / 2, (height - 1) / 2)
     center = wcs.pixel_to_world(*center_pixel).icrs
+    if "validated_ra_deg" in record:
+        if abs(((float(center.ra.deg) - float(record["validated_ra_deg"]) + 180) % 360) - 180) > 1e-8 or abs(float(center.dec.deg) - float(record["validated_dec_deg"])) > 1e-8:
+            raise ValueError("Warehouse validated center does not match retained header")
     samples = max(64, min(4096, math.ceil(2 * (width + height) / 32)))
     edge = [i / samples for i in range(samples + 1)]
     x = [t * (width - 1) for t in edge] + [width - 1] * samples + [(1 - t) * (width - 1) for t in edge] + [0] * samples
@@ -96,6 +99,12 @@ def emit(value):
     print(json.dumps(value, separators=(",", ":"), allow_nan=False), flush=True)
 
 def process(records):
+    if any(record.get("validation_status") == "rejected" for record in records):
+        return
+    validated = any("validation_status" in record or "fits_quality_profile" in record for record in records)
+    if validated:
+        records = [record for record in records if record.get("validation_status") == "accepted"
+                   and record.get("hdu_index") == record.get("selected_hdu_index")]
     points = []
     for record in records:
         try:
@@ -106,7 +115,7 @@ def process(records):
                 points.append(point)
         except Exception as error:
             emit({"file_id": record["file_id"], "hdu_index": record["hdu_index"], "error": str(error)})
-    if not points and records:
+    if not points and records and not validated:
         try:
             point = pointing_position(records[0])
             if point is not None:

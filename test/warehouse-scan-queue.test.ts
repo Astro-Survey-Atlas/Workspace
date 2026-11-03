@@ -27,8 +27,13 @@ test("bounded S3 queue freezes pages, resumes after restart, and retries only fa
   const root = await mkdtemp(path.join(os.tmpdir(), "scan-queue-"));
   const store = new SqliteMetadataStore(":memory:"); await store.initialize();
   const listed: number[] = [];
+  let releaseSlowListing: (() => void) | undefined;
   const server = createServer((request, response) => {
     const url = new URL(request.url!, "http://localhost"); const offset = Number(url.searchParams.get("continuation-token") ?? 0);
+    if (url.searchParams.get("prefix") === "slow") {
+      releaseSlowListing = () => response.end('<ListBucketResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><IsTruncated>false</IsTruncated></ListBucketResult>');
+      return;
+    }
     listed.push(offset);
     const stop = Math.min(offset + 1000, 4001);
     const rows = Array.from({ length: stop - offset }, (_, i) => `<Contents><Key>images/CSST_${String(offset + i).padStart(6, "0")}.fits</Key><Size>100</Size></Contents>`).join("");
@@ -45,13 +50,18 @@ test("bounded S3 queue freezes pages, resumes after restart, and retries only fa
   connector = await connectors.setCredentialReference(connector.id, credentials.managedReference(connector.id));
   const assets = new DataCatalogRegistry(store);
   const asset = await assets.register({ name: "CSST queue", kind: "image", product: "image", connectorIds: [connector.id], accesses: [{ connector: "s3", connectorId: connector.id, uri: connector.locationKey, format: "fits" }] });
+  let slowConnector = await connectors.register({ name: "Slow inventory", kind: "s3", config: { ...connector.config, prefix: "slow" } });
+  slowConnector = await connectors.setCredentialReference(slowConnector.id, credentials.managedReference(connector.id));
+  const slowAsset = await assets.register({ name: "Slow inventory", kind: "image", product: "image", connectorIds: [slowConnector.id], accesses: [{ connector: "s3", connectorId: slowConnector.id, uri: slowConnector.locationKey, format: "fits" }] });
   const runs = new ConnectorIngestRunCatalog(store);
   const coverage: CoverageJobSnapshot = { surveyId: "csst", releaseId: "test", product: "image", mode: "fits-wcs" as const, coordinateFrame: "ICRS" as const, coverageRole: "image_extent", dataOrigin: "observed", sourceTier: "user_file_derived", maxOrder: 10, queryOrder: 8 as const, previewOrder: 4 as const };
   const input: GenericScanInput = { assetId: asset.id, coverage, allowedSuffixes: [".fits"] };
   const submitted: Array<{ id: string; frozen: FrozenScanSelection }> = [];
   const positions: string[] = []; let merges = 0;
   const warehouse = {
-    prepareConnectorScan: async () => ({ connector, asset, input }),
+    prepareConnectorScan: async (connectorId: string) => connectorId === slowConnector.id
+      ? { connector: slowConnector, asset: slowAsset, input: { ...input, assetId: slowAsset.id } }
+      : { connector, asset, input },
     submitScan: async (_connectorId: string, _input: GenericScanInput, key?: string, frozen?: FrozenScanSelection) => {
       assert.ok(frozen);
       const text = await readFile(frozen.inventory.path, "utf8");
@@ -73,16 +83,20 @@ test("bounded S3 queue freezes pages, resumes after restart, and retries only fa
     artifacts: { importEvidence: async () => { merges++; return { id: "moc-batch", status: "ready", availableOrders: [8], precision: "estimated" } as UserMocArtifact; } },
     onCompleted: async (_asset: string, runId: string) => { if (!positions.includes(runId)) positions.push(runId); } };
   let queue = new WarehouseScanQueue(options);
-  t.after(async () => { queue.stop(); await new Promise<void>(resolve => server.close(() => resolve())); await store.close(); await rm(root, { recursive: true, force: true }); });
+  t.after(async () => { queue.stop(); releaseSlowListing?.(); await new Promise<void>(resolve => server.close(() => resolve())); await store.close(); await rm(root, { recursive: true, force: true }); });
   const parent = await queue.submit(connector.id, {}, "one-logical-batch");
   const parentRun = async () => (await runs.list()).find(run => run.id === parent.id)!;
   await waitUntil(async () => (await parentRun()).batchProgress?.active === 2);
   assert.equal(submitted.length, 2); assert.deepEqual(listed, [0, 1000, 2000, 3000, 4000]);
   const state = JSON.parse(await readFile(path.join(options.root, parent.id, "batch.json"), "utf8"));
   assert.deepEqual(state.shards.map((shard: { fileCount: number }) => shard.fileCount), [2000, 2000, 1]);
+  const slowParent = await queue.submit(slowConnector.id, {}, "slow-source-batch");
+  await waitUntil(async () => Boolean(releaseSlowListing));
   await runs.update(submitted[0]!.id, { status: "succeeded" }); await runs.update(submitted[1]!.id, { status: "failed", error: "source unavailable" });
   await queue.tick(); assert.equal(submitted.length, 3);
-  assert.deepEqual(positions, [submitted[0]!.id], "successful shard positions must be available before the whole batch finishes");
+  assert.deepEqual(positions, [submitted[0]!.id], "a blocked listing must not delay successful shard positions or the next Scanner Job");
+  releaseSlowListing!();
+  await waitUntil(async () => (await runs.list()).find(run => run.id === slowParent.id)!.status === "failed");
   await runs.update(submitted[2]!.id, { status: "succeeded" }); await queue.tick();
   assert.equal((await parentRun()).status, "failed");
   queue.stop();

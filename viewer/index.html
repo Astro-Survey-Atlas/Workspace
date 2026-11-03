@@ -237,6 +237,17 @@
           </div>
         </div>
         <div id="aladin-density-hover" class="aladin-density-hover" role="status" aria-live="polite" hidden></div>
+        <aside id="aladin-region-status" class="sky-load-status aladin-region-status" role="status" aria-live="polite" hidden>
+          <span class="coverage-lookup-spinner" aria-hidden="true"></span>
+          <span id="aladin-region-message"></span>
+          <button id="aladin-inspect-coverage" type="button" hidden>查看覆盖影像</button>
+          <button id="aladin-retry-navigation" type="button" hidden>重试</button>
+        </aside>
+        <aside id="coverage-load-status" class="sky-load-status" role="status" aria-live="polite" hidden>
+          <span class="coverage-lookup-spinner" aria-hidden="true"></span>
+          <span id="coverage-load-message"></span>
+          <button id="coverage-load-retry" type="button" hidden>重试</button>
+        </aside>
         <div class="scene-hud-top">
           <div class="scene-readout">
             <span><b>FRAME</b> <span id="scene-frame-label">ICRS</span></span>

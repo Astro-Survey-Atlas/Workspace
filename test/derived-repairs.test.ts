@@ -3,7 +3,7 @@ import test from "node:test";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { convertPositionHeaders, DerivedRepairService, imagePointsContainingCoordinate, pointDocument, SKY_DATA_POINT_INDEX } from "../src/derived-repairs.js";
+import { convertPositionHeaders, DerivedRepairService, imagePointsContainingCoordinate, pointDocument, imageFootprintDocuments, SKY_DATA_POINT_INDEX } from "../src/derived-repairs.js";
 import { stageWarehouseInventory } from "../src/warehouse-inventory.js";
 import type { ConnectorIngestRunRecord } from "../src/connector-history.js";
 import type { ConnectorIngestRunCatalog } from "../src/connector-history.js";
@@ -78,11 +78,22 @@ test("indexing indication follows selected private assets, excluding MOC repairs
       { assetId: "moc", mode: "moc", status: "running" }, { assetId: "done", mode: "positions", status: "partial" },
       { assetId: "active", mode: "positions", status: "running" }];
     for (const [i, task] of tasks.entries()) await writeFile(path.join(root, `derived-${i}.json`), JSON.stringify({ ...task, createdAt: "2026-10-10" }));
-    const service = new DerivedRepairService({ root } as ConstructorParameters<typeof DerivedRepairService>[0]);
+    const runs = [
+      { id: "image", assetId: "queued-image", backend: "warehouse", status: "queued", coverage: { mode: "fits-wcs" } },
+      { id: "catalog", assetId: "queued-catalog", backend: "warehouse", status: "running", coverage: { mode: "catalog-radec" } },
+      { id: "failed", assetId: "failed-image", backend: "warehouse", status: "failed", coverage: { mode: "fits-wcs" } },
+      { id: "old", assetId: "rebuilt", backend: "warehouse", executor: "warehouse-batch", status: "running", coverage: { mode: "fits-wcs" }, fitsQualityProfile: "csst-wcs-v1", createdAt: "2026-11-02" },
+      { id: "new", assetId: "rebuilt", backend: "warehouse", executor: "warehouse-batch", status: "succeeded", coverage: { mode: "fits-wcs" }, fitsQualityProfile: "csst-wcs-v1", createdAt: "2026-11-03" },
+    ] as ConnectorIngestRunRecord[];
+    const service = new DerivedRepairService({ root, runs: { list: async () => runs } } as ConstructorParameters<typeof DerivedRepairService>[0]);
     assert.equal(await service.isIndexing([]), false);
     assert.equal(await service.isIndexing([{ assetId: "sample" }, { assetId: "moc" }, { assetId: "done" }]), false);
     assert.equal(await service.isIndexing([{ assetId: "unrelated" }]), false);
     assert.equal(await service.isIndexing([{ assetId: "active", sourceId: "concrete-source" }]), true);
+    assert.equal(await service.isIndexing([{ assetId: "queued-image" }]), true, "refresh before the first position repair exists");
+    assert.equal(await service.isIndexing([{ assetId: "queued-catalog" }, { assetId: "failed-image" }, { assetId: "rebuilt" }]), false);
+    runs[0]!.status = "succeeded";
+    assert.equal(await service.isIndexing([{ assetId: "queued-image" }]), false);
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 test("index timeouts retry the same committed headers without rereading sources or double-counting partial writes", async () => {
@@ -217,4 +228,25 @@ test("finite derived inventory validates completed snapshot and is reusable with
     await writeFile(path.join(root, "normalized-scan.json"), JSON.stringify({ ...evidence, phase: "FAILED" }));
     await assert.rejects(stageWarehouseInventory(root, path.join(root, "other.ndjson"), identity), /identity mismatch/);
   } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+
+test("Warehouse rejection cannot be revived from raw WCS or primary pointing", async () => {
+  const primary = header({ SIMPLE: true, NAXIS: 0, RA_TARG: 10, DEC_TARG: 20 });
+  const science = header({ XTENSION: "IMAGE", NAXIS: 2, NAXIS1: 100, NAXIS2: 100, CRPIX1: 50.5, CRPIX2: 50.5,
+    CRVAL1: 12.5, CRVAL2: -3.25, CTYPE1: "RA---TAN", CTYPE2: "DEC--TAN", CDELT1: -0.001, CDELT2: 0.001 });
+  const records = [0, 1].map(hdu_index => ({ file_id: "rejected", file_name: "bad.fits", hdu_index,
+    header: hdu_index ? science : primary, primary_header: primary, selected_hdu_index: 1,
+    validation_status: "rejected", fits_quality_profile: "csst-wcs-v1" }));
+  assert.deepEqual(await convertPositionHeaders(records), []);
+  const accepted = await convertPositionHeaders(records.map(record => ({ ...record, validation_status: "accepted" })));
+  assert.equal(accepted.length, 1); assert.equal(accepted[0]?.hdu_index, 1);
+  const oldRun = { id: "child-1", parentRunId: "batch-1", fitsQualityProfile: "csst-wcs-v1" } as ConnectorIngestRunRecord;
+  const newRun = { ...oldRun, id: "child-2", parentRunId: "batch-2" };
+  const point = accepted[0] as Parameters<typeof pointDocument>[0];
+  const first = pointDocument(point, { id: "w1" }, oldRun);
+  const second = pointDocument(point, { id: "w1" }, newRun);
+  assert.notEqual(first._id, second._id); assert.equal(second.data_batch_id, "batch-2");
+  const footprint = imageFootprintDocuments(point, "w1", undefined, "batch-2")[0];
+  assert.equal(footprint?.point_id, second._id); assert.equal(footprint?.data_batch_id, "batch-2");
 });

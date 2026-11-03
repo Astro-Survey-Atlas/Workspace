@@ -66,6 +66,9 @@ export interface ConnectorIngestRun {
   processedFiles?: number;
   failedFiles?: number;
   pointCount?: number;
+  acceptedFileCount?: number;
+  skippedFileCount?: number;
+  fitsQualityProfile?: "csst-wcs-v1";
   createdAt: string;
   updatedAt?: string;
 }
@@ -116,6 +119,9 @@ export interface ConnectorIngestRunInput {
   processedFiles?: number;
   failedFiles?: number;
   pointCount?: number;
+  acceptedFileCount?: number;
+  skippedFileCount?: number;
+  fitsQualityProfile?: "csst-wcs-v1";
 }
 
 export interface ConnectorIngestRunInternalInput extends ConnectorIngestRunInput {
@@ -310,6 +316,9 @@ export class ConnectorIngestRunCatalog {
       ...(input.processedFiles === undefined ? {} : { processedFiles: optionalCount(input.processedFiles, "processedFiles") }),
       ...(input.failedFiles === undefined ? {} : { failedFiles: optionalCount(input.failedFiles, "failedFiles") }),
       ...(input.pointCount === undefined ? {} : { pointCount: optionalCount(input.pointCount, "pointCount") }),
+      ...(input.acceptedFileCount === undefined ? {} : { acceptedFileCount: optionalCount(input.acceptedFileCount, "acceptedFileCount") }),
+      ...(input.skippedFileCount === undefined ? {} : { skippedFileCount: optionalCount(input.skippedFileCount, "skippedFileCount") }),
+      ...(input.fitsQualityProfile === undefined ? {} : { fitsQualityProfile: input.fitsQualityProfile }),
       secretName: optionalText(input.secretName, 63),
       idempotencyKeyHash: keyHash,
       ...(input.logicalRunId ? { logicalRunId: input.logicalRunId } : {}),
@@ -374,6 +383,9 @@ export class ConnectorIngestRunCatalog {
       ...(patch.processedFiles === undefined ? {} : { processedFiles: optionalCount(patch.processedFiles, "processedFiles") }),
       ...(patch.failedFiles === undefined ? {} : { failedFiles: optionalCount(patch.failedFiles, "failedFiles") }),
       ...(patch.pointCount === undefined ? {} : { pointCount: optionalCount(patch.pointCount, "pointCount") }),
+      ...(patch.acceptedFileCount === undefined ? {} : { acceptedFileCount: optionalCount(patch.acceptedFileCount, "acceptedFileCount") }),
+      ...(patch.skippedFileCount === undefined ? {} : { skippedFileCount: optionalCount(patch.skippedFileCount, "skippedFileCount") }),
+      ...(patch.fitsQualityProfile === undefined ? {} : { fitsQualityProfile: patch.fitsQualityProfile }),
       ...(patch.secretName === undefined ? {} : { secretName: optionalText(patch.secretName, 63) }),
       updatedAt: new Date().toISOString(),
     };
@@ -431,6 +443,9 @@ export function normalizeConnectorIngestRuns(entries: unknown[]): ConnectorInges
     optionalCount(record.processedFiles, "processedFiles");
     optionalCount(record.failedFiles, "failedFiles");
     optionalCount(record.pointCount, "pointCount");
+    optionalCount(record.acceptedFileCount, "acceptedFileCount");
+    optionalCount(record.skippedFileCount, "skippedFileCount");
+    if (record.fitsQualityProfile !== undefined && record.fitsQualityProfile !== "csst-wcs-v1") throw new RangeError("Unknown FITS quality profile");
     if (record.coverage !== undefined) validateCoverageJobSnapshot(record.coverage);
     return structuredClone(record);
   });

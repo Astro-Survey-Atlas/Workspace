@@ -77,6 +77,7 @@ export interface AstroPointDensityCell {
   pixel: number;
   count: number;
   layers: Array<{ id: string; count: number }>;
+  surveys: Array<{ id: string; count: number; assetId?: string }>;
 }
 
 export interface AstroPointDensityResult {
@@ -117,6 +118,7 @@ export interface AstroImageFootprintDocument {
   _id: string;
   _index: typeof ASTRO_IMAGE_FOOTPRINT_INDEX;
   point_id: string;
+  data_batch_id?: string;
   asset_id: string;
   source_id?: string;
   ra_min: number;
@@ -289,6 +291,7 @@ export interface AstroObjectIndexOptions {
   objectIndex?: string;
   coverageIndex?: string;
   timeoutMs?: number;
+  dataBatches?: () => Promise<ReadonlyMap<string, string>>;
 }
 
 const DEFAULT_LIMIT = 500;
@@ -306,6 +309,8 @@ const MAX_BULK_BYTES = 2 * 1024 * 1024;
 const DEFAULT_TIMEOUT_MS = 2_500;
 const MAX_POINT_DENSITY_LAYERS = 64;
 const MAX_POINT_DENSITY_BUCKETS = 32_768;
+const MAX_POINT_DENSITY_SURVEYS = 64;
+const UNASSIGNED_DENSITY_SURVEYS = ["", "user", "__unassigned__"];
 
 const OBJECT_SOURCE_FIELDS = [
   "object_id",
@@ -962,7 +967,9 @@ function pointDensityQueryBody(input: ReturnType<typeof validatePointDensityInpu
     { bool: { should: viewportFilters, minimum_should_match: 1 } },
   ];
   const childCount = (ASTRO_OBJECT_NATIVE_NSIDE / targetNside) ** 2;
-  const bucketSize = Math.max(12, Math.min(4_096, Math.floor(MAX_POINT_DENSITY_BUCKETS / Math.max(1, input.layers.length))));
+  const bucketSize = Math.max(12, Math.min(4_096, Math.floor(
+    (MAX_POINT_DENSITY_BUCKETS - input.layers.length) / (input.layers.length + 2 + 2 * MAX_POINT_DENSITY_SURVEYS),
+  )));
   return {
     size: 0,
     track_total_hits: true,
@@ -970,7 +977,16 @@ function pointDensityQueryBody(input: ReturnType<typeof validatePointDensityInpu
     aggs: {
       by_cell: { terms: {
         script: { source: "Math.floor(doc['healpix_pixel'].value / params.childCount)", params: { childCount } },
-        size: 4_096,
+        size: bucketSize,
+      }, aggs: {
+        by_survey: { terms: { field: "survey", missing: "", size: MAX_POINT_DENSITY_SURVEYS } },
+        unassigned_assets: {
+          filter: { bool: { should: [
+            { terms: { survey: UNASSIGNED_DENSITY_SURVEYS } },
+            { bool: { must_not: { exists: { field: "survey" } } } },
+          ], minimum_should_match: 1 } },
+          aggs: { by_asset: { terms: { field: "asset_id", missing: "", size: MAX_POINT_DENSITY_SURVEYS } } },
+        },
       } },
       by_layer: {
         filters: { filters: Object.fromEntries(input.layers.map(layer => [layer.id, scopedLayerFilter(layer.scopes)])) },
@@ -1315,8 +1331,11 @@ export class AstroObjectIndexService {
   readonly #coverageIndex: string;
   readonly #timeoutMs: number;
   readonly #authorization?: string;
+  readonly #dataBatches?: () => Promise<ReadonlyMap<string, string>>;
+  #batchMappingsReady = false;
 
   constructor(options: AstroObjectIndexOptions = {}) {
+    this.#dataBatches = options.dataBatches;
     const endpoint = parseElasticsearchEndpoint(options.baseUrl ?? process.env.ASTRO_ES_URL ?? "");
     this.#baseUrl = endpoint.url ?? "";
     this.#authorization = endpoint.authorization;
@@ -1352,14 +1371,14 @@ export class AstroObjectIndexService {
     return ASTRO_IMAGE_FOOTPRINT_INDEX;
   }
 
-  async getPoint(id: string, readIndices: readonly string[]): Promise<AstroObjectRecord | undefined> {
+  async getPoint(id: string, readIndices: readonly string[], signal?: AbortSignal): Promise<AstroObjectRecord | undefined> {
     if (!id || id.length > 512) throw new RangeError("Invalid point identity");
     const indices = readIndices.map((index) => normalizeIndex(index, "readIndex", this.#objectIndex));
-    const result = await this.#requestJson(`/${indices.map(encodeURIComponent).join(",")}/_search?ignore_unavailable=true`, JSON.stringify({ size: 1, query: { term: { object_id: id } } }), "application/json") as ElasticsearchSearchResponse;
+    const result = await this.#requestJson(`/${indices.map(encodeURIComponent).join(",")}/_search?ignore_unavailable=true`, JSON.stringify({ size: 1, query: { term: { object_id: id } } }), "application/json", signal) as ElasticsearchSearchResponse;
     return hitsFromResponse(result).map((hit) => objectFromHit(hit)).find((value) => value !== undefined);
   }
 
-  async getPointsByIds(ids: readonly string[], readIndices: readonly string[]): Promise<AstroObjectRecord[]> {
+  async getPointsByIds(ids: readonly string[], readIndices: readonly string[], signal?: AbortSignal): Promise<AstroObjectRecord[]> {
     if (!ids.length) return [];
     if (ids.length > 2_000 || ids.some((id) => typeof id !== "string" || !/^[a-f0-9]{64}$/.test(id))) {
       throw new RangeError("point ids must contain at most 2000 SHA-256 identities");
@@ -1369,7 +1388,7 @@ export class AstroObjectIndexService {
       size: ids.length,
       query: { terms: { object_id: [...new Set(ids)] } },
       sort: [{ object_id: "asc" }],
-    }), "application/json") as ElasticsearchSearchResponse;
+    }), "application/json", signal) as ElasticsearchSearchResponse;
     return hitsFromResponse(response).map((hit) => objectFromHit(hit)).filter((point): point is AstroObjectRecord => Boolean(point));
   }
 
@@ -1389,6 +1408,7 @@ export class AstroObjectIndexService {
         product: { type: "keyword" },
         modality: { type: "keyword" },
         asset_id: { type: "keyword" },
+        data_batch_id: { type: "keyword" },
         source_file_id: { type: "keyword" },
         scan_run_id: { type: "keyword" },
         attributes: { type: "flattened", ignore_above: 8192 },
@@ -1405,6 +1425,7 @@ export class AstroObjectIndexService {
         product: { type: "keyword" },
         modality: { type: "keyword" },
         asset_id: { type: "keyword" },
+        data_batch_id: { type: "keyword" },
         source_file_id: { type: "keyword" },
         scan_run_id: { type: "keyword" },
         coverage_role: { type: "keyword" },
@@ -1420,6 +1441,7 @@ export class AstroObjectIndexService {
       properties: {
         point_id: { type: "keyword" },
         asset_id: { type: "keyword" },
+        data_batch_id: { type: "keyword" },
         source_id: { type: "keyword" },
         ra_min: { type: "double" },
         ra_max: { type: "double" },
@@ -1427,6 +1449,12 @@ export class AstroObjectIndexService {
         dec_max: { type: "double" },
       },
     });
+    if (this.#dataBatches && !this.#batchMappingsReady) {
+      for (const index of new Set([this.#objectIndex, this.#coverageIndex, this.imageFootprintIndex])) {
+        await this.#requestJson(`/${encodeURIComponent(index)}/_mapping`, JSON.stringify({ properties: { data_batch_id: { type: "keyword" } } }), "application/json");
+      }
+      this.#batchMappingsReady = true;
+    }
   }
 
   async bulkImageFootprints(documents: AstroImageFootprintDocument[]): Promise<number> {
@@ -1464,7 +1492,7 @@ export class AstroObjectIndexService {
     return documents.length;
   }
 
-  async queryImageFootprints(input: AstroImageFootprintQuery): Promise<AstroImageFootprintQueryResult> {
+  async queryImageFootprints(input: AstroImageFootprintQuery, signal?: AbortSignal): Promise<AstroImageFootprintQueryResult> {
     const raDeg = validateCoordinate(input.raDeg, "raDeg", 0, 360);
     const decDeg = validateCoordinate(input.decDeg, "decDeg", -90, 90);
     const scopes = validateLayerScopes(input.layerScopes);
@@ -1485,7 +1513,7 @@ export class AstroObjectIndexService {
           scopedLayerFilter(scopes),
         ] } },
         sort: [{ point_id: "asc" }],
-      }), "application/json") as ElasticsearchSearchResponse;
+      }), "application/json", signal) as ElasticsearchSearchResponse;
     } catch (error) {
       if (error instanceof ElasticsearchUnavailableError) return { pointIds: [], total: 0, truncated: false };
       throw error;
@@ -1540,7 +1568,8 @@ export class AstroObjectIndexService {
     return { objectCount, coverageCount };
   }
 
-  async queryCoverageFacts(input: AstroCoverageFactQueryInput): Promise<AstroCoverageFactQueryResult> {
+  async queryCoverageFacts(input: AstroCoverageFactQueryInput, signal?: AbortSignal): Promise<AstroCoverageFactQueryResult> {
+    signal?.throwIfAborted();
     const normalized = validateCoverageInput(input);
     if (!this.configured) {
       return {
@@ -1558,6 +1587,7 @@ export class AstroObjectIndexService {
         `/${encodeURIComponent(this.#coverageIndex)}/_search`,
         JSON.stringify(coverageQueryBody(normalized)),
         "application/json",
+        signal,
       ) as ElasticsearchSearchResponse;
       const merged = new Map<string, AstroCoverageFact>();
       for (const hit of hitsFromResponse(response)) {
@@ -1584,6 +1614,7 @@ export class AstroObjectIndexService {
         ...(hitsFromResponse(response).length === 10_000 ? { message: "Local coverage metadata reached its 10,000 record limit; directory results may be incomplete." } : {}),
       };
     } catch (error) {
+      signal?.throwIfAborted();
       const message = error instanceof Error ? error.message : String(error);
       return {
         status: error instanceof ElasticsearchUnavailableError ? "unavailable" : "error",
@@ -1647,7 +1678,8 @@ export class AstroObjectIndexService {
     }
   }
 
-  async queryPointCoverage(input: { assetId: string; nside: number }, readIndices: readonly string[] = [this.#objectIndex]): Promise<AstroPointCoverageResult> {
+  async queryPointCoverage(input: { assetId: string; nside: number }, readIndices: readonly string[] = [this.#objectIndex], signal?: AbortSignal): Promise<AstroPointCoverageResult> {
+    signal?.throwIfAborted();
     validateCoverageInput({ nside: input.nside });
     if (!input.assetId.trim()) throw new RangeError("Point coverage requires an assetId");
     const index = readIndices.map(value => normalizeIndex(value, "readIndex", this.#objectIndex)).join(",");
@@ -1661,7 +1693,7 @@ export class AstroObjectIndexService {
           script: { source: "doc['healpix_pixel'].value / params.factor", params: { factor: (ASTRO_OBJECT_NATIVE_NSIDE / input.nside) ** 2 } },
           size: Math.min(10_000, 12 * input.nside ** 2),
         } } },
-      }), "application/json") as ElasticsearchSearchResponse;
+      }), "application/json", signal) as ElasticsearchSearchResponse;
       if (response.timed_out || (isRecord(response._shards) && Number(response._shards.failed) > 0)) throw new Error("Point coverage query did not complete");
       const cells = isRecord(response.aggregations) && isRecord(response.aggregations.point_cells) ? response.aggregations.point_cells : undefined;
       if (!cells || !Array.isArray(cells.buckets)) throw new Error("Point coverage aggregation is missing");
@@ -1671,11 +1703,12 @@ export class AstroObjectIndexService {
       return { index, nside: input.nside, pixels, total: totalFromHits(response.hits?.total), status: "ready", truncated,
         ...(truncated ? { message: "数据点预览仅显示部分已索引区域" } : {}) };
     } catch (error) {
+      signal?.throwIfAborted();
       return { ...empty, status: error instanceof ElasticsearchUnavailableError ? "unavailable" : "error", message: error instanceof Error ? error.message : String(error) };
     }
   }
 
-  async queryPointDensity(input: AstroPointDensityQueryInput, readIndices: readonly string[] = [this.#objectIndex]): Promise<AstroPointDensityResult> {
+  async queryPointDensity(input: AstroPointDensityQueryInput, readIndices: readonly string[] = [this.#objectIndex], signal?: AbortSignal): Promise<AstroPointDensityResult> {
     const normalized = validatePointDensityInput(input);
     const index = readIndices.map(value => normalizeIndex(value, "readIndex", this.#objectIndex)).join(",");
     let nside = normalized.targetNside;
@@ -1694,6 +1727,7 @@ export class AstroObjectIndexService {
           `/${encodedIndex}/_search?ignore_unavailable=true`,
           JSON.stringify(pointDensityQueryBody(normalized, nside)),
           "application/json",
+          signal,
         ) as ElasticsearchSearchResponse;
         if (response.timed_out || (isRecord(response._shards) && Number(response._shards.failed) > 0)) {
           throw new Error("Point density aggregation did not complete");
@@ -1723,7 +1757,32 @@ export class AstroObjectIndexService {
           if (!isRecord(bucket)) continue;
           const pixel = Number(bucket.key);
           if (!Number.isSafeInteger(pixel) || pixel < 0 || pixel >= 12 * nside ** 2) continue;
-          cells.set(pixel, { pixel, count: Number(bucket.doc_count) || 0, layers: [] });
+          const bySurvey = bucket.by_survey;
+          if (!isRecord(bySurvey) || !Array.isArray(bySurvey.buckets)) throw new Error("Point density survey counts are missing");
+          if (Number(bySurvey.sum_other_doc_count) > 0 || Number(bySurvey.doc_count_error_upper_bound) > 0) {
+            throw new Error("Point density survey counts exceed the aggregation budget");
+          }
+          const surveyCounts = bySurvey.buckets.flatMap(survey => isRecord(survey) && typeof survey.key === "string"
+            && Number.isSafeInteger(survey.doc_count) && Number(survey.doc_count) > 0
+            ? [{ id: survey.key, count: Number(survey.doc_count) }] : []);
+          const surveys: AstroPointDensityCell["surveys"] = surveyCounts.filter(survey => !UNASSIGNED_DENSITY_SURVEYS.includes(survey.id));
+          const unassignedCount = surveyCounts.filter(survey => UNASSIGNED_DENSITY_SURVEYS.includes(survey.id)).reduce((sum, survey) => sum + survey.count, 0);
+          if (unassignedCount) {
+            const unassignedAssets = bucket.unassigned_assets;
+            const byAsset = isRecord(unassignedAssets) ? unassignedAssets.by_asset : undefined;
+            if (!isRecord(byAsset) || !Array.isArray(byAsset.buckets) || Number(byAsset.sum_other_doc_count) > 0
+              || Number(byAsset.doc_count_error_upper_bound) > 0) throw new Error("Point density unassigned survey sources are incomplete");
+            const sources = byAsset.buckets.flatMap(asset => isRecord(asset) && typeof asset.key === "string"
+              && Number.isSafeInteger(asset.doc_count) && Number(asset.doc_count) > 0
+              ? [{ id: "", count: Number(asset.doc_count), ...(asset.key ? { assetId: asset.key } : {}) }] : []);
+            if (sources.reduce((sum, source) => sum + source.count, 0) !== unassignedCount) throw new Error("Point density unassigned survey sources are incomplete");
+            surveys.push(...sources);
+          }
+          const count = Number(bucket.doc_count) || 0;
+          if (surveys.reduce((sum, survey) => sum + survey.count, 0) !== count) {
+            throw new Error("Point density survey counts are incomplete");
+          }
+          cells.set(pixel, { pixel, count, layers: [], surveys });
         }
         const layerBuckets = byLayer.buckets as Record<string, unknown>;
         const layerCounts = normalized.layers.map(layer => {
@@ -1749,12 +1808,13 @@ export class AstroObjectIndexService {
       }
       throw new Error("Point density could not fit within the aggregation bucket budget");
     } catch (error) {
+      signal?.throwIfAborted();
       const message = error instanceof Error ? error.message : String(error);
       return empty(error instanceof ElasticsearchUnavailableError ? "unavailable" : "error", message);
     }
   }
 
-  async queryObjects(input: ObjectRegionQueryInput, readIndices?: readonly string[]): Promise<AstroObjectQueryResult> {
+  async queryObjects(input: ObjectRegionQueryInput, readIndices?: readonly string[], signal?: AbortSignal): Promise<AstroObjectQueryResult> {
     const normalized = validateQueryInput(input);
     if (!this.configured) {
       return queryResult(this.#objectIndex, normalized, "unavailable", {
@@ -1767,6 +1827,7 @@ export class AstroObjectIndexService {
         `/${encodeURIComponent(readIndices?.map((index) => normalizeIndex(index, "readIndex", this.#objectIndex)).join(",") ?? this.#objectIndex)}/_search${readIndices ? "?ignore_unavailable=true" : ""}`,
         JSON.stringify(queryBody(normalized)),
         "application/json",
+        signal,
       ) as ElasticsearchSearchResponse;
       const hits = hitsFromResponse(response);
       return queryResult(this.#objectIndex, normalized, "ready", {
@@ -1775,6 +1836,7 @@ export class AstroObjectIndexService {
         searchAfter: nextSearchAfter(hits),
       });
     } catch (error) {
+      signal?.throwIfAborted();
       const message = error instanceof Error ? error.message : String(error);
       return queryResult(
         this.#objectIndex,
@@ -1802,7 +1864,22 @@ export class AstroObjectIndexService {
     }
   }
 
-  async #requestJson(path: string, body: string, contentType: string): Promise<unknown> {
+  async #requestJson(path: string, body: string, contentType: string, signal?: AbortSignal): Promise<unknown> {
+    signal?.throwIfAborted();
+    if (this.#dataBatches && /\/_search(?:\?|$)/.test(path)) {
+      const batches = await this.#dataBatches();
+      if (batches.size) {
+        const request = JSON.parse(body) as Record<string, unknown>;
+        const visible = { bool: { should: [
+          { bool: { must_not: [{ terms: { asset_id: [...batches.keys()] } }] } },
+          ...[...batches].map(([assetId, batchId]) => ({ bool: { filter: [
+            { term: { asset_id: assetId } }, { term: { data_batch_id: batchId } },
+          ] } })),
+        ], minimum_should_match: 1 } };
+        request.query = { bool: { filter: [request.query ?? { match_all: {} }, visible] } };
+        body = JSON.stringify(request);
+      }
+    }
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), this.#timeoutMs);
     try {
@@ -1814,7 +1891,7 @@ export class AstroObjectIndexService {
           ...(this.#authorization ? { Authorization: this.#authorization } : {}),
         },
         body,
-        signal: controller.signal,
+        signal: signal ? AbortSignal.any([controller.signal, signal]) : controller.signal,
       });
       const responseBody = await response.text();
       if (response.status === 404) {
@@ -1828,6 +1905,7 @@ export class AstroObjectIndexService {
         throw new Error("Elasticsearch returned invalid JSON");
       }
     } catch (error) {
+      signal?.throwIfAborted();
       if (controller.signal.aborted || (error instanceof Error && error.name === "AbortError")) {
         throw new Error(`Elasticsearch request timed out after ${this.#timeoutMs} ms`);
       }

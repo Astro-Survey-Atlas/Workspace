@@ -17,8 +17,20 @@ export function currentWarehouseLayerIds(assetId: string, runs: readonly Connect
     && (run.assetId === assetId || run.assetIds?.includes(assetId))
     && run.warehouseLayerId && warehouseLayerBelongsToAsset(run.warehouseLayerId, assetId))
     .sort((left, right) => right.createdAt.localeCompare(left.createdAt) || right.id.localeCompare(left.id));
-  const current = eligible.find(run => run.status === "succeeded")
+  const qualityRun = eligible.find(run => run.fitsQualityProfile);
+  const current = qualityRun ?? eligible.find(run => run.status === "succeeded")
     ?? eligible.find(run => run.status === "running" || run.status === "queued");
   return current?.warehouseLayerId ? [current.warehouseLayerId]
     : [assetId, workspaceLayerIdForAsset(assetId), `user-${assetId}`];
+}
+
+/** A quality rebuild supersedes historical data immediately, including after failure/restart. */
+export function currentQualityBatch(assetId: string, runs: readonly ConnectorIngestRunRecord[]): ConnectorIngestRunRecord | undefined {
+  return runs.filter(run => !run.parentRunId && run.fitsQualityProfile
+    && (run.assetId === assetId || run.assetIds?.includes(assetId)))
+    .sort((a, b) => b.createdAt.localeCompare(a.createdAt) || b.id.localeCompare(a.id))[0];
+}
+
+export function dataBatchForRun(run: ConnectorIngestRunRecord): string | undefined {
+  return run.fitsQualityProfile ? run.parentRunId ?? run.id : undefined;
 }

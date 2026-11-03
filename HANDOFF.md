@@ -1,13 +1,68 @@
 # Workspace handoff
 
-Updated: 2026-10-30, Asia/Shanghai.
+Updated: 2026-11-03, Asia/Shanghai.
 
 ## Current work
 
-The latest Aladin performance and fullscreen Inspector changes are deployed to
-Dev at Helm revision **114**, image
-`0.0.1-dev-20261030-aladin-density-r1`. See the final deployment section for
-the live verification details.
+The CSST quality repair is deployed to Dev at Workspace Helm revision **122**,
+image `0.0.1-dev-20261103-csst-quality-r3`, with Warehouse Operator revision
+**26** and scanner `0.2.0-20261103-csst-quality-r1`. Read
+`docs/csst-w1-w4-quality-rescan-20261103.md` for policy, validation and the four
+full-scan root IDs. All Warehouse scans now skip deterministic file errors by
+default; transport/runtime/index failures remain explicit. CSST additionally
+uses `csst-wcs-v1`: nominal scale tolerance 1%, axis-angle tolerance 1°, missing
+nominal scales rejected. Workspace excludes rejected headers and previous
+quality generations from all point/bounds/coverage query paths.
+
+The user explicitly authorized full W1–W4 rescans on November 3; this supersedes
+the older limited-CSST instructions below. Four uncapped durable batches are
+submitted against the actual W1_Phot–W4_Phot sibling sources, with 2,000 files
+per shard and at most two Scanner Jobs globally. At 12:40 Asia/Shanghai, W1
+had frozen its complete 356,112-file inventory into 179 shards, with two
+Scanner Jobs running and no completed or failed shards. Their private writing
+checkpoints contained 814 accepted files so far; those are unfinished shard
+results, not published points or completed root counters. W2 was enumerating
+(45,738 discovered files); W3–W4 remained queued. This is ongoing work, not a
+claim that the complete inventories have been scanned. Source listing runs in the
+background, allowing already frozen batches to continue scanning and publish
+accepted positions while another source enumerates. Restarts resume existing
+listing checkpoints and jobs. Aladin reports indexing throughout queued scans
+and source enumeration, before the first point task exists, and continues
+automatically refreshing. Do not submit duplicate batches.
+
+End-to-end real-source acceptance passed for 32 FITS files: 20 accepted and 12
+skipped, producing 20 positions and corresponding bounds; all four private
+MOCs are ready. The 12 historical sample IDs now return HTTP 404. Historical
+evidence and raw sources remain intact; old derived documents are logically
+isolated by the publication filter. Workspace full verify passed with 409
+tests, four skipped, zero failures. Warehouse static gates passed; S3/local
+and Asset scan assertions passed, and both Workspace caller smoke tests
+reported PASSED. The baseline/Asset suites still report the existing external
+Gaia MOC `DiscoveryTlsError`, documented separately in the report. Private
+receipts and baseline diffs are at the directory named by
+`/tmp/csst-quality-implementation-path`.
+The private receipt also contains a running read-only first-shard observer,
+`monitor-first-shards.py`, which writes `first-shard-live-validation.json`
+to check completed shards for queryable points/bounds, matching counters and a
+working skip-report download. Require `passed: true`; the initial checks may
+still be pending during automatic indexing. Check that receipt before repeating
+validation; it does not resubmit scans or index any data.
+
+The selected-coverage loading, selection preservation and Aladin empty-region
+UX fixes are deployed to Dev at Helm revision **119**, image
+`0.0.1-dev-20261102-coverage-ux-r1`. Coverage loads selected assets first and
+cancels unrelated background reads. Aladin distinguishes an empty viewport
+from a region without indexed centers; image coverage has an explicit
+coordinate inspection action. Entering and leaving Aladin preserves the
+external checkbox selection. See the November 2 deployment section below.
+
+The latest Aladin density counts and double-click navigation are deployed to
+Dev at Helm revision **118**, image
+`0.0.1-dev-20261030-aladin-density-counts-r2`. FOV above 1.5 degrees uses
+density cells with survey counts; double-clicking a cell centers it at FOV
+0.5 degrees. This includes the earlier viewport loading, cancellation,
+Inspector, initial navigation and direction guides. See the final deployment
+section for live verification details.
 
 The coverage overlap order slider and C0x camera navigation shipped to Dev at
 Helm revision **109**, image `0.0.1-dev-20261029-overlap-slider-r1`, and remain
@@ -753,3 +808,388 @@ the deployment build worktree. Focused service tests passed 21/21. Inspector
 and density browser regressions passed against deployed Dev. Live COSMOS checks
 returned 1,720,500 queryable positions; a bounded density query returned
 264,912 points across two NSIDE 32 cells with `indexing=false`.
+
+## Aladin initial navigation and direction guides (October 30)
+
+Deployed Dev at Helm revision **115**, image
+`0.0.1-dev-20261030-aladin-navigation-r1`. Ready Pod
+`asa-workspace-7bfb98659c-pnnj8` reports image digest
+`sha256:1e23b15ccd2158efd0bb70a87353e6cc6667396fdece40eb4b1c967399e03e80`
+and zero restarts. `/healthz` is healthy; deployed HTML, JS and CSS match
+the rebuilt local frontend byte for byte. Deployment evidence is private at
+`/tmp/workspace-navigation-dev-20261030-d3i8bi_f/`.
+
+The viewer reads both actual Aladin FOV axes and compensates the current
+Aladin Lite AIT scalar so entry remains approximately 0.5 degrees. Empty
+entry viewports wait for independently retained real point anchors, restricted
+to each selected layer and the frozen entry HEALPix region. One anchor per
+selected layer supplies clickable offscreen direction guides with layer color,
+label and distance. Clicking a guide centers its real anchor and narrows to
+the layer's default FOV. This is not a global nearest-point search. Guide
+requests survive viewport cancellation and stop on disposal. Density stays
+visible while replacement density or zoomed-in point results are loading.
+
+`npm run verify:types`, `npm run build:viewer` and `git diff --check` passed.
+The focused empty-entry/anchor/marker/zoom/direction-guide browser regression
+passed locally and against the deployed frontend with API fixtures. The
+existing per-layer density regression passed after waiting for wheel zoom
+and its density response to settle before hovering; the original failure
+hovered during the animated viewport transition. Real Dev browser verification
+used a service port-forward because the browser's route to the public Dev
+hostname did not load the application; direct LAN HTTP verification succeeded.
+
+With real COSMOS data, **查看数据点** opened at RA 149.999342, Dec 1.391676,
+displayed FOV 0.4625 degrees, and rendered 2,000 real catalog records before
+the verification browser closed. Canvas markers were present, every observed
+point request included viewport/region/layer scopes, the drawer reopened, and
+there were no page errors. This is initial-render verification, not a claim
+that all COSMOS records or the full initial viewport finished loading. COSMOS
+still reports 1,720,500 queryable records and its earlier coverage scan failure.
+
+The image overlays only rebuilt `dist/viewer` on the revision 114 runtime;
+server code and dependencies are unchanged. The checked server-side Helm
+proposal and live deployment spec differ only in the Workspace image.
+The repository chart's readiness/liveness probes differ from revision 114,
+so the deployment used a private chart copy retaining those deployed probes.
+Existing resources, storage, credentials, downloader and Elasticsearch settings
+were preserved. The repository chart remains unchanged; future deployments
+must inspect its probe differences before upgrading from it directly.
+
+Changes remain uncommitted. No scan, retry, inventory refresh, repair, download
+or index rebuild was submitted. The existing density suite temporarily selected
+its baseline public resource packages and restored the preceding activation
+state afterward.
+
+## Aladin viewport loading and Inspector styling (October 30)
+
+Deployed Dev at Helm revision **116**, image
+`0.0.1-dev-20261030-aladin-viewport-r1`. Pod
+`asa-workspace-6f6b79b957-c4hbs` is Ready with zero restarts, running digest
+`sha256:5e817135fbd289068f654f674e46a17668764b2353593846a3ca2e4c7010c2e3`.
+`/healthz` is healthy. Deployed HTML, JS, CSS and the changed server modules
+match the local build. Private evidence:
+`/tmp/workspace-viewport-dev-20261030-rzael_e7/`.
+
+The stale viewport had several confirmed causes. Aladin can return a
+`Float64Array` for its center and projected point coordinates; rejecting those
+values froze the readout and misplaced direction guides. Its cached vertical
+FOV can also remain 180 degrees after fullscreen resizing, incorrectly
+selecting density mode. The viewer now derives center and angular spans from
+the rendered projection. Programmatic FOV settings are calibrated against
+those spans, replacing the fixed pi/2 compensation from revision 115, so the
+larger viewport axis opens at approximately 0.5 degrees across layouts.
+
+Dragging and wheel interaction immediately abort stale point pagination,
+density, point detail, coordinate inspection and pending optional anchor
+requests. A debounced query then loads the current viewport; optional
+direction anchors resume afterward and reuse successful results. Cancelled
+pending rectangles are removed before replacement queries calculate missing
+coverage. Completed cached areas remain reusable. The response disconnect
+signal now reaches the Elasticsearch fetch for point, density, anchor and
+inspection routes; cancelling only the browser request previously left that
+upstream work running. Loading status takes precedence over retained-cache
+status. Initial layout changes no longer consume the only auto-anchor
+attempt, and a confirmed anchor invalidates an earlier empty entry cache.
+
+The fullscreen Coordinate Inspector uses the Aladin deck's raised surface,
+border, small radius, clipped corner, accent and compact header. It is 320px
+wide with an independently scrolling body and compact record cards; shared
+theme variables replace undefined sidebar variables. Desktop, fullscreen and
+mobile behaviours remain covered by the existing browser case.
+
+`npm run verify:types`, `npm run build` and `git diff --check` passed. The
+focused object-index/cache suite passed **25/25**, including a real HTTP
+disconnect closing the upstream Elasticsearch socket. Five browser cases
+passed: empty entry with anchor/marker/direction-guide return, cancelling old
+pagination on pan, fullscreen zoom then pan into uncached sky, Inspector
+layouts and per-layer density transitions. The fullscreen test deliberately
+exposes uncached sky; moving within a completely loaded area correctly reuses
+the cache without another request.
+
+Real COSMOS verification against the deployed service opened at RA 149.999342,
+Dec 1.391676 and FOV **0.5000** degrees, with 2,000 initial records. After
+fullscreen zoom and pan, the center moved to Dec 1.616845 at FOV 0.4323;
+new scoped point queries returned further 2,000-record pages. Old point and
+density requests were observed as aborted. Real painted markers were clicked
+to open the themed Inspector, and the layer drawer closed and reopened.
+Every observed point query included viewport, frozen HEALPix region and only
+the COSMOS layer scope. The final check observed no API failures or page
+errors. This verifies incremental loading and navigation, not completion of
+every viewport page or availability of the external CDS HiPS imagery.
+
+The runtime image overlays rebuilt server and viewer files on revision 115;
+existing Python runtime and dependencies are retained. The Helm manifest and
+live Deployment spec differ only in the Workspace image. As with revision
+115, the private chart copy retains the deployed probes; repository chart,
+resources, mounts, Secrets, downloader and Elasticsearch settings are unchanged.
+No scan, retry, inventory refresh, repair, download or index rebuild was
+submitted. Changes remain uncommitted.
+
+## Density cell counts and double-click navigation (October 30)
+
+Deployed Dev at Helm revision **118**, image
+`0.0.1-dev-20261030-aladin-density-counts-r2`. Pod
+`asa-workspace-6cb754c859-cqvjf` is Ready with zero restarts, running digest
+`sha256:74828396ffb212cb57fdceb4440c5080262fa3f4259c98e008972a13c5ba3dfe`.
+`/healthz` is healthy; deployed frontend and server module hashes match the
+local build. Private evidence:
+`/tmp/workspace-density-counts-dev-20261030-t40sfkpg/`.
+
+Density mode now starts strictly above **1.5 degrees**. Each occupied cell has
+a projected label with its total and a separate count for each indexed survey.
+The aggregation reads the union of the selected layer scopes, so overlapping
+layer filters do not double the survey counts. Counts remain restricted to
+the frozen entry HEALPix region and current viewport bounds. The hover panel
+shows the same survey breakdown and the double-click hint; the layer deck
+shows current density totals instead of stale point-cache progress.
+
+COSMOS currently has the placeholder survey `user`, not a registered COSMOS
+survey tag. Empty, missing, `user` and `__unassigned__` tags are therefore
+counted separately by source asset and labelled with the asset name plus
+**未标注巡天**. Formal survey tags still combine across selected assets.
+This avoids merging unrelated unassigned assets into a fictitious `user`
+survey and does not rewrite indexed metadata. Survey/source aggregation
+buckets share a bounded budget with cell/layer buckets; truncated or
+inconsistent breakdowns return an explicit error instead of partial counts.
+
+Labels follow projected HEALPix geometry and let pointer events reach the
+sky canvas. Double-click handling intercepts Aladin's default recentering,
+identifies the occupied cell under the pointer, centers its actual ICRS
+HEALPix center and applies calibrated FOV **0.5 degrees**. The existing
+viewport cancellation path interrupts obsolete work; selected layers and
+the entry region remain scoped when point loading resumes.
+
+`npm run build` and `git diff --check` passed. The object-index, viewport-cache
+and isolated HTTP scan fixture suites passed **29/29**. Five focused browser
+scenarios passed across the navigation and density runs. The final mixed
+survey/unassigned-source test confirms separate per-cell numbers, point mode
+between 0.75 and 1.5 degrees, the higher density threshold and exact cell-center
+double-click navigation; it was rerun after adding unassigned source labels.
+
+Live COSMOS opened at FOV 0.5000 degrees, stayed in point mode at 0.8743 and
+switched to density at 2.8905. All **62 cells / 1,062,464 scoped records** had
+matching API and rendered counts. Double-clicking NSIDE 256 pixel 436096
+centered RA 150.468750, Dec 1.342993 at FOV 0.5000 and returned a fresh
+2,000-record page. Old point/density requests were observed as aborted; all
+queries preserved the COSMOS scope and no Workspace API failures occurred.
+The remote CDS 2MASS backdrop failed to fetch during this check; indexed
+positions, density labels and navigation were verified independently.
+
+The runtime overlays rebuilt server and viewer files on the existing runtime.
+Manifest and Deployment comparisons confirmed an image-only upgrade with
+deployed probes, resources, mounts, Secrets, downloader and Elasticsearch
+settings retained. The density browser suite restored prior public package
+activation after its fixtures. No real scan, repair, download or reindexing
+was submitted. Changes remain uncommitted.
+
+## Selected coverage and Aladin region state (November 2, revision 119)
+
+Dev is deployed at Helm revision **119**, image
+`0.0.1-dev-20261102-coverage-ux-r1`, digest
+`sha256:13de52cd77a76a213a4e4bbe999512061bf001842884ae0fb8ca7060e6349703`.
+The private receipt is `/tmp/workspace-coverage-ux-20261102-a8xt8t2n/`;
+`/tmp/workspace-coverage-ux-receipt-path` points to it. Its baseline preserves
+all work already present before this task. Changes remain uncommitted.
+
+The old coverage refresh automatically selected every preview asset and
+waited for global coverage/status work before publishing geometry. It now
+preserves the exact selected set, paints each completed layer incrementally,
+and exposes compact loading/error/retry states plus per-card progress.
+Selected and inspected assets have two foreground request slots; unselected
+work gets one background slot after a paint opportunity. Selecting pending
+coverage preempts unrelated work. Returning from Aladin reuses completed
+coverage for up to 60 seconds without reselecting previews.
+
+`/api/data-assets/status` accepts an optional `assetIds` filter and preserves
+its existing all-assets behavior without that parameter. Coverage, status
+and overview requests carry browser cancellation through the HTTP response
+to the Workspace Elasticsearch/Warehouse clients, including paginated reads.
+Warehouse geometry caches completed results only, so one cancelled request
+cannot cancel another caller or cache its aborted promise. No sibling
+Warehouse or Assets repository was changed.
+
+Aladin region navigation records loading/available/empty/indexing/error
+states separately from viewport results. Empty views wait for the frozen
+region anchor lookup before explaining absence; available anchors provide
+manual direction guides. Automatic entry movement runs at most once and
+stops on user movement. Following a confirmed guide rechecks its destination
+even if an older empty viewport was cached. Image/cube layers explain that
+image extent can cross a region while its indexed center lies outside it.
+The inline action inspects the frozen entry coordinate with the same region
+and selected layer scopes; it labels this as a coordinate, not an unnamed
+object. Status panels use the Aladin palette and fit fullscreen/mobile
+layouts. The existing FOV > 1.5 degree density threshold, per-survey counts
+and double-click-to-cell-center at 0.5 degrees remain intact.
+
+Read-only diagnosis confirmed that CSST Simulation W1, asset
+`user-d4639a71-b684-4789-977f-75e1e150c641`, has coarse image coverage in
+NSIDE 16 / NESTED pixel 815 but no indexed point/center inside that frozen
+region. This is not only an initially small viewport. An independent Astropy
+check agrees with the indexed WCS footprints, but some original FITS WCS
+matrices have suspicious degree-per-pixel scales and large pointing/center
+disagreements. Six bounded Range reads totaling 17,280 header bytes confirmed
+the critical CD cards for one example, not whole-header byte equality.
+Some normal files share the same CRS filename category, so the category must
+not be treated as uniformly invalid. Scientific validation/calibration,
+quarantine and any reindexing remain separate work; no FITS/WCS, source
+coverage, point index, scan, repair or download was changed or submitted.
+
+Validation: server/viewer/CLI builds, strict chart checks and diff checks
+passed. The complete service suite passed **407 tests**, with **4 skipped**.
+Coverage scheduling, abort isolation and real HTTP disconnect regressions
+passed. All **11 unique Aladin/coverage browser scenarios** passed; the final
+mobile test was rerun after fixing its fullscreen-resize test setup. The
+other ten passed together in the final suite. Fixtures mock the APIs and do
+not change public package activation. The browser plugin reported no
+connected browser, so live checks used the existing standalone Playwright
+workflow.
+
+Live W1 verification selected the reported RA 303.47878 / Dec 28.75541 in
+pixel 815, entered at region center RA 303.75 / Dec 27.309956 and FOV 0.5,
+showed the image-coverage/no-indexed-center explanation, and offered no false
+point-direction guide. Coordinate inspection at the entry center returned
+**10 covering images / 0 nearby objects** inside the same region/layer scope.
+The earlier diagnostic at the original clicked coordinate returned 11 images;
+these are different coordinates. Fullscreen displayed the coordinate drawer;
+returning to the sphere kept only W1 checked. The first geometry request was
+scoped to W1, and no Workspace API failure or unexpected write occurred.
+
+Live COSMOS entered at RA 149.999342 / Dec 1.391676 and FOV 0.5 with a
+2,000-point page, stayed in point mode at FOV 0.8743, and displayed **62 density
+cells / 1,062,464 scoped records** at FOV 2.8905. All cell/survey labels matched
+the API. Double-clicking pixel 436096 at NSIDE 256 centered RA 150.46875 /
+Dec 1.342993 at FOV 0.5 and returned fresh points. Obsolete point requests were
+aborted. No Workspace API failures occurred; the external CDS 2MASS backdrop
+reported fetch/HiPS errors independently of these verified data layers.
+
+Post-deployment comparisons confirm both the Helm manifest and live
+Deployment changed only the Workspace image. Deployed server/frontend hashes
+match the build. Pod `asa-workspace-58895bb9bc-7bq6q` is ready with zero
+restarts; the public `/healthz` is healthy. Existing deployed probes, Secrets,
+resources, storage, downloader and Elasticsearch settings were retained using
+the private runtime chart copy. The repository chart remains unchanged.
+
+## FITS observation-position audit (November 3)
+
+The user clarified that FITS-header RA/Dec should represent a file/HDU
+observation position, with image/spectrum/etc. classified from file content.
+They requested diagnosis of scan/index versus rendering before implementation.
+No image-pixel preview or source detection is requested. This audit changed no
+running code or deployment and submitted no scan, repair or index write.
+
+See `docs/workspace-fits-position-audit-20261103.md` for the reproducible API,
+header, HEALPix, Warehouse-worker and browser checks. Private evidence:
+`/tmp/workspace-w1-coordinate-audit-20261103-ohnzmc0k/`; pointer:
+`/tmp/workspace-w1-coordinate-audit-path`.
+
+Confirmed: W1 pixel 815 returns zero points even without a viewport filter,
+while coordinate inspection at the original click returns 11 images. All 11
+stored centers reproduce from their retained WCS; none belongs to pixel 815.
+The first file's WCS center is 123.345843 / 11.555288 (pixel 288), while its
+explicit RA_OBJ/DEC_OBJ and RA_PNT0/DEC_PNT0 are 269.061405 / 75.945966
+(pixel 735). Neither coordinate is the user's clicked RA 303.47877 /
+Dec 28.75543 in pixel 815. Its indexed O8 pixel 73787 is correct, and the
+point is retrievable at its stored coordinate. Do not attribute this case to
+the initial FOV or fix it by placing a marker at the selected HEALPix center.
+
+The primary cards are retained but the direct-coordinate extractor ignores
+CSST RA_OBJ/DEC_OBJ and RA_PNT keys. It only tries its three supported primary
+coordinate pairs when no WCS center exists. The science CD matrix has
+suspicious degree/pixel scales; both Workspace and Warehouse accept it and
+reproduce a very broad footprint and displaced center. A header-only replay
+confirms that Warehouse labels it usable. Scientific validity remains separate
+from the fact that the current calculations reproduce stored evidence.
+
+A fresh standalone browser check of real Dev W1 data returned and painted an
+image-center marker at FOV 0.5, with no API/page errors or unexpected writes.
+This excludes a general failure to draw FITS image positions. Inspector
+**附近星表对象 0** excludes image centers/pointings by design and does not mean
+there are no observation files. Product typing also needs correction:
+`pointDocument` derives modality from position_role, and a spectral-axis
+header control is stored as pointing. Local Workspace FITS scans additionally
+discard direct-coordinate-only rows by filtering to image_center; this is a
+separate path from the already-indexed W1 example.
+
+The abandoned November 3 image-preview wording assertions were restored to
+their task-baseline version; no production UI fix was made for that mistaken
+direction. Next work should address coordinate-key support, explicit provenance,
+WCS/pointing validation and content-based product typing before any existing
+scientific data correction.
+
+## Source FITS attribution follow-up (November 3)
+
+The user requested a firm distinction between source-file errors, Warehouse
+scanning and Workspace processing. The follow-up compared original source
+ASCII headers for all 11 reported W1 files and one normal CRS control. Both
+primary and science headers match their retained counterparts byte for byte
+through END in all 12 files. The bounded source reads totaled 207,360 bytes
+across 72 Range requests, without reading scientific arrays. ETags and offsets
+were checked; no credentials were emitted, scan submitted or index changed.
+
+There is now source-internal evidence rather than only a suspicious-looking
+matrix. All 11 reported files declare PIXSCAL1/2 = 0.074 arcsec/pixel, but
+their CD column norms imply scales 12,326 to 417,045 times larger. The first
+file implies 1,645.424364 and 20,862.741893 arcsec/pixel. A normal CRS control
+from the same asset implies 0.073999285 and 0.073998909, matching its declared
+scale. This is a source WCS-metadata inconsistency; do not generalize it to
+all CRS files, all W1 files, or FITS payload corruption.
+
+A handwritten TAN inverse, independent of all project code and Astropy,
+reproduces the stored centers for all 12 files within 1e-9 degrees. For this
+case, source metadata is the origin of the anomalous coverage and displaced
+center; Warehouse did not corrupt the saved cards and Workspace did not
+numerically mistransform them. Both stages lack appropriate WCS plausibility
+validation. Workspace's omitted RA_OBJ/RA_PNT extraction, modality and Inspector
+limitations remain separate findings. This sharpens and supersedes the
+earlier broad attribution to Workspace interpretation as the primary cause.
+
+The durable audit is updated in
+`docs/workspace-fits-position-audit-20261103.md`. Private raw headers, source
+comparison hashes, scripts and numeric receipts are at
+`/tmp/workspace-fits-source-triage-20261103-cxuhzvxp/`; pointer:
+`/tmp/workspace-fits-source-triage-path`. Run `verify-source-triage.py` there
+for the standard-library-only comparison. No runtime implementation or
+deployment changed, and no source-coordinate replacement was attempted.
+
+## Independent W1–W4 header samples (November 3)
+
+The user requested fresh W1 samples and five files each from W2, W3 and W4
+before deciding whether to retain CSST for MVP. The actual source directories
+are sibling W1_Phot/W2_Phot/W3_Phot/W4_Phot under the existing simulation
+output. Do not conflate them with the separate wide-v2/deep-v1/deep-v2 assets.
+
+Five new files per group, each from a different exposure, were selected before
+quality inspection using fixed seed `csst-w1-w4-20261103-fixed-v1`. Complete
+delimiter listings found 9,892 / 10,152 / 10,452 / 11,768 exposure directories;
+W1 excluded the 12 previously inspected exposures. No suspect file was swapped
+out after inspection. Source-header reads totaled 120 Range requests and
+345,600 bytes; ETags/sizes matched the frozen selection. No image arrays,
+scan/repair/download tasks, deployments or scientific index writes were made.
+
+Results: W1 5/5, W2 5/5 and W3 5/5 passed the header consistency checks; W4
+4/5 passed and 1/5 needs review. None of these 20 reproduced the earlier
+many-orders-of-magnitude scale problem. All 20 provide finite ICRS/TAN centers
+that agree with an independent handwritten TAN inverse within 1e-9 degrees.
+The 19 passing samples have maximum scale discrepancy below 0.006%.
+
+The W4 review file is
+`CSST_MSC_MS_WIDE_20221030195240_20221030195510_10600030723_23_L0_V01.fits`.
+Declared scale: 0.074 arcsec/pixel; CD axis scales: 0.073850741 / 0.080765926
+(axis 2 +9.143%); CD axis angle: 93.314025 degrees. Center:
+359.691598 / -41.376078; target separation: 0.198030 degrees; maximum corner
+radius: 0.214738 degrees. This merits metadata review, not a claim of whole-file
+corruption or the severe geometry expansion seen in the original 815 cases.
+The 1% scale / 1-degree axis-angle screens are diagnostic thresholds for these
+CSST samples, not universal FITS/WCS validity rules.
+
+The sampling supports retaining header-checked CSST examples for MVP with a
+WCS quality gate. Five per group cannot establish population failure rates;
+do not merge the deliberately problem-selected earlier 11 with this independent
+sample to estimate a global rate. No runtime quality-gate fix has been made.
+
+Detailed Chinese report and all 20 filenames/coordinates:
+`docs/csst-w1-w4-header-sample-audit-20261103.md`. Private evidence:
+`/tmp/workspace-csst-w1-w4-samples-20261103-jcfk5gzz/`; pointer:
+`/tmp/workspace-csst-w1-w4-samples-path`. The receipt contains selection scripts,
+raw source headers, `analyze-samples.py`, `summary.json`, `file-results.json`
+and a CSV of the 19 candidate files; none has been imported into the system.

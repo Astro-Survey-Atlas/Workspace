@@ -622,7 +622,8 @@ function extractionPlan(_asset: DataAssetRecord, _input: GenericScanInput, cover
   if (coverage.mode === "nested-healpix") {
     return { mode: "catalog-healpix", catalog: { healpixColumn: coverage.healpixColumn, healpixOrder: coverage.healpixOrder } };
   }
-  if (coverage.mode === "fits-wcs") return { mode: "fits-wcs", outputOrder: coverage.maxOrder };
+  if (coverage.mode === "fits-wcs") return { mode: "fits-wcs", outputOrder: coverage.maxOrder,
+    ...(_asset.scanSpec?.format === "fits" && _asset.scanSpec.fitsQualityProfile ? { fitsQualityProfile: _asset.scanSpec.fitsQualityProfile } : {}) };
   throw new ConnectorScanPreconditionError("Workspace Warehouse scans require a supported user coverage mode");
 }
 
@@ -908,6 +909,7 @@ export class WarehouseScanService {
       evidencePath: `${this.#evidenceMountPath.replace(/\/+$/, "")}/${batchId}`,
       coverage, coverageRole: coverage.coverageRole, maxOrder: coverage.maxOrder, availableOrders: [], precision: "exact" as UserMocPrecision,
       mocStatus: "pending",
+      ...(asset.scanSpec?.format === "fits" && asset.scanSpec.fitsQualityProfile ? { fitsQualityProfile: asset.scanSpec.fitsQualityProfile } : {}),
       ...(frozen ? { parentRunId: frozen.parentRunId, logicalRunId: frozen.parentRunId, partitionId: frozen.partitionId } : {}),
     }, idempotency);
     const run = created.run;
@@ -1160,6 +1162,9 @@ export class WarehouseScanService {
     const terminalMessage = failureMessage(evidenceFailure, statusFailure);
     const current = await this.#runs.update(original.id, {
       ...(discoveredFiles === undefined ? {} : { fileCount: discoveredFiles }),
+      ...(typeof summary.processedItemCount === "number" ? { processedFiles: summary.processedItemCount } : {}),
+      ...(typeof summary.acceptedFileCount === "number" ? { acceptedFileCount: summary.acceptedFileCount } : {}),
+      ...(typeof summary.skippedFileCount === "number" ? { skippedFileCount: summary.skippedFileCount } : {}),
       ...(coverageDocuments === undefined ? {} : { documentCount: coverageDocuments }),
       ...(summaryEvidencePath ? { evidencePath: summaryEvidencePath } : {}),
       ...(availableOrders ? { availableOrders } : {}),
@@ -1176,6 +1181,11 @@ export class WarehouseScanService {
       await this.#runs.update(current.id, {
         ...(artifact ? { artifactId: artifact.id, mocStatus: artifact.status, availableOrders: artifact.availableOrders, maxOrder: artifact.maxOrder, precision: artifact.precision } : {}),
       });
+      await this.#cleanupSecret(current.secretName);
+      return;
+    }
+    if (phase === "SUCCEEDED" && current.acceptedFileCount === 0) {
+      await this.#runs.update(current.id, { mocStatus: "unavailable", error: "扫描完成，无可用文件；详见跳过清单。" });
       await this.#cleanupSecret(current.secretName);
       return;
     }

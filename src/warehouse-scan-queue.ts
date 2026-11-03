@@ -19,7 +19,7 @@ interface Batch {
   warehouseLayerId?: string;
   shards: Shard[]; pending: InventoryRow[]; continuationToken?: string; discoveryComplete?: boolean; fileCount: number; sourceFingerprint: string;
   roster?: { path: string; sha256: string; fileCount: number }; ruleSha?: string; scopeSha?: string; merged?: boolean;
-  maxFiles?: number; concurrency?: 1 | 2;
+  maxFiles?: number; concurrency?: 1 | 2; fitsQualityProfile?: "csst-wcs-v1";
 }
 interface Options {
   root: string; enabled: boolean; warehouse: Pick<WarehouseScanService, "prepareConnectorScan" | "submitScan" | "taskLogs">;
@@ -37,11 +37,14 @@ export const SCANNER_SHARD_FILES = 2000;
 export class WarehouseScanQueue {
   #batches = new Map<string, Batch>();
   #ticking = false;
+  #discovering?: string;
+  #stopped = false;
   #timer?: ReturnType<typeof setInterval>;
   constructor(readonly options: Options) {}
 
   async initialize(): Promise<void> {
     if (!this.options.enabled) return;
+    this.#stopped = false;
     await mkdir(this.options.root, { recursive: true });
     for (const name of await readdir(this.options.root)) {
       if (!/^ingest-[a-z0-9-]+$/.test(name)) continue;
@@ -52,7 +55,7 @@ export class WarehouseScanQueue {
     this.#timer = setInterval(() => void this.tick(), 5000); this.#timer.unref();
     void this.tick();
   }
-  stop(): void { if (this.#timer) clearInterval(this.#timer); }
+  stop(): void { this.#stopped = true; if (this.#timer) clearInterval(this.#timer); }
 
   async submit(connectorId: string, input: { assetId?: string; relativePath?: string; maxFiles?: number; concurrency?: 1 | 2 } = {}, key?: string): Promise<ConnectorIngestRunRecord> {
     if (input.maxFiles !== undefined && (!Number.isSafeInteger(input.maxFiles) || input.maxFiles < 1 || input.maxFiles > 10000)) throw new RangeError("maxFiles must be 1–10000, or omitted for the full source");
@@ -65,10 +68,12 @@ export class WarehouseScanQueue {
     const created = await this.options.runs.create(connector.locationKey, { connectorId, connectorName: connector.name, connectorKind: connector.kind,
       executor: "warehouse-batch", backend: "warehouse", taskKind: "user_coverage", assetId: asset.id, assetIds: [asset.id], assetName: asset.name,
       warehouseLayerId: `workspace-${asset.id}`, sourcePath: connectorScanPath(connector, prepared.input.path),
+      ...(asset.scanSpec?.format === "fits" && asset.scanSpec.fitsQualityProfile ? { fitsQualityProfile: asset.scanSpec.fitsQualityProfile } : {}),
       status: "queued", fileCount: 0, processedFiles: 0, mocStatus: "pending", coverage: prepared.input.coverage }, key);
     if (!created.created && (this.#batches.has(created.run.id) || created.run.status === "succeeded")) return created.run;
     const batch: Batch = { runId: created.run.id, connectorId, assetId: asset.id, input: prepared.input, phase: "discovering", shards: [], pending: [],
       warehouseLayerId: `workspace-${asset.id}-batch-${created.run.id.slice("ingest-".length)}`,
+      fitsQualityProfile: asset.scanSpec?.format === "fits" ? asset.scanSpec.fitsQualityProfile : undefined,
       fileCount: 0, sourceFingerprint: fingerprint(connector, prepared.input), maxFiles: input.maxFiles, concurrency: input.concurrency };
     await this.#save(batch); this.#batches.set(batch.runId, batch);
     const run = await this.options.runs.update(batch.runId, { warehouseLayerId: batch.warehouseLayerId });
@@ -108,7 +113,7 @@ export class WarehouseScanQueue {
   }
 
   async tick(): Promise<void> {
-    if (this.#ticking || !this.options.enabled) return;
+    if (this.#ticking || this.#stopped || !this.options.enabled) return;
     this.#ticking = true;
     try {
       let runs = await this.options.runs.list();
@@ -116,6 +121,7 @@ export class WarehouseScanQueue {
         && ["queued", "running"].includes(run.status)).length);
       for (const batch of this.#batches.values()) {
         try {
+          if (this.#discovering === batch.runId) continue;
           // Retained successful evidence is useful even when another shard or
           // the parent's metadata write failed. The callback is idempotent.
           await this.#submitPositions(batch, runs);
@@ -125,8 +131,13 @@ export class WarehouseScanQueue {
             await this.#save(batch);
           }
           if (!["discovering", "scanning", "finalizing"].includes(batch.phase)) continue;
-          if (batch.phase === "discovering") await this.#discover(batch);
-          let failed = 0, completed = 0, active = 0, processedFiles = 0, documents = 0;
+          if (batch.phase === "discovering") {
+            if (!this.#discovering) this.#startDiscovery(batch);
+            continue;
+          }
+          const prepared = await this.options.warehouse.prepareConnectorScan(batch.connectorId, batch.assetId, batch.input.path);
+          if ((prepared.asset.scanSpec?.format === "fits" ? prepared.asset.scanSpec.fitsQualityProfile : undefined) !== batch.fitsQualityProfile) throw new Error("FITS quality policy changed; start a new batch");
+          let failed = 0, completed = 0, active = 0, processedFiles = 0, documents = 0, acceptedFileCount = 0, skippedFileCount = 0;
           let batchSlots = Math.max(0, (batch.concurrency ?? 2) - runs.filter(run => run.parentRunId === batch.runId && ["queued", "running"].includes(run.status)).length);
           for (const shard of batch.shards) {
             // Reattach if Workspace stopped between submission and saving its binding.
@@ -143,11 +154,11 @@ export class WarehouseScanQueue {
               shard.runId = run.id; await this.#save(batch);
               if (run.status === "queued" || run.status === "running") { slots--; batchSlots--; }
             }
-            if (run?.status === "succeeded") { completed++; processedFiles += run.fileCount ?? 0; documents += run.documentCount ?? 0; }
+            if (run?.status === "succeeded") { completed++; processedFiles += run.fileCount ?? 0; documents += run.documentCount ?? 0; acceptedFileCount += run.acceptedFileCount ?? run.fileCount ?? 0; skippedFileCount += run.skippedFileCount ?? 0; }
             else if (run?.status === "failed") failed++;
             else if (run) active++;
           }
-          await this.options.runs.update(batch.runId, { status: "running", error: "", fileCount: batch.fileCount, processedFiles, documentCount: documents,
+          await this.options.runs.update(batch.runId, { status: "running", error: "", fileCount: batch.fileCount, processedFiles, documentCount: documents, acceptedFileCount, skippedFileCount,
             batchProgress: { completed, failed, total: batch.shards.length, active } });
           if (completed === batch.shards.length) {
             runs = await this.options.runs.list(); batch.phase = "finalizing"; await this.#save(batch);
@@ -168,11 +179,31 @@ export class WarehouseScanQueue {
     finally { this.#ticking = false; }
   }
 
+  #startDiscovery(batch: Batch): void {
+    this.#discovering = batch.runId;
+    // Enumerating a large source must not hold the polling loop: completed
+    // shards can publish positions and other frozen batches can keep scanning.
+    void this.#discover(batch).catch(async error => {
+      if (metadataLocked(error)) {
+        console.warn("Scan discovery will retry metadata contention", batch.runId);
+        return;
+      }
+      batch.phase = "failed";
+      await this.#save(batch);
+      await this.options.runs.update(batch.runId, { status: "failed", error: error instanceof Error ? error.message : "Source discovery failed", completedAt: new Date().toISOString() });
+    }).catch(error => console.error("Scan discovery unavailable", error instanceof Error ? error.message : "unknown"))
+      .finally(() => {
+        this.#discovering = undefined;
+        setImmediate(() => void this.tick());
+      });
+  }
+
   async #submitPositions(batch: Batch, runs: ConnectorIngestRunRecord[]): Promise<void> {
     for (const shard of batch.shards) {
       if (shard.positionsSubmitted || !shard.runId) continue;
       const child = runs.find(run => run.id === shard.runId);
       if (child?.status !== "succeeded" || child.coverage?.mode !== "fits-wcs") continue;
+      if (child.acceptedFileCount === 0) { shard.positionsSubmitted = true; await this.#save(batch); continue; }
       try {
         await this.options.onCompleted(batch.assetId, child.id);
         shard.positionsSubmitted = true;
@@ -200,7 +231,8 @@ export class WarehouseScanQueue {
     batch.shards.push({ id, path: filename, sha256: sha(text), fileCount: batch.pending.length, attempt: 0 }); batch.pending = [];
   }
   async #discover(batch: Batch): Promise<void> {
-    const { connector, scannerRoot, input } = await this.options.warehouse.prepareConnectorScan(batch.connectorId, batch.assetId, batch.input.path);
+    const { connector, asset, scannerRoot, input } = await this.options.warehouse.prepareConnectorScan(batch.connectorId, batch.assetId, batch.input.path);
+    if ((asset.scanSpec?.format === "fits" ? asset.scanSpec.fitsQualityProfile : undefined) !== batch.fitsQualityProfile) throw new Error("FITS quality policy changed; start a new batch");
     if (fingerprint(connector, input) !== batch.sourceFingerprint) throw new Error("Connector 或资产扫描配置已变化，请开始新的扫描。");
     const selected = connectorScanPath(connector, batch.input.path);
     const pattern = batch.input.coverage?.fileNamePattern ? new RegExp(batch.input.coverage.fileNamePattern) : undefined;
@@ -265,13 +297,17 @@ export class WarehouseScanQueue {
     const text = JSON.stringify(roster), filename = path.join(this.options.root, batch.runId, "roster.json");
     await writeFile(`${filename}.tmp`, text); await rename(`${filename}.tmp`, filename);
     batch.roster = { path: filename, sha256: sha(text), fileCount: roster.length };
-    batch.ruleSha = sha(JSON.stringify([batch.input, batch.maxFiles ?? null]));
+    batch.ruleSha = sha(JSON.stringify([batch.input, batch.maxFiles ?? null, batch.fitsQualityProfile ?? null]));
     batch.scopeSha = sha(`${batch.ruleSha}\n${roster.map(row => `${row.partitionId}\n${row.sourcePrefix}`).join("\n")}`);
     batch.phase = "scanning"; await this.#save(batch);
   }
 
   async #complete(batch: Batch, runs: ConnectorIngestRunRecord[]): Promise<void> {
     const children = batch.shards.map(shard => runs.find(run => run.id === shard.runId)!);
+    if (children.every(run => run.acceptedFileCount === 0)) {
+      await this.options.runs.update(batch.runId, { status: "succeeded", mocStatus: "unavailable", error: "扫描完成，无可用文件；详见跳过清单。", completedAt: new Date().toISOString() });
+      return;
+    }
     if (!batch.merged) {
       const snapshot = sha(children.map(run => run.sourceSnapshotSha256).join("\n"));
       const layerId = `workspace-${batch.assetId}`;

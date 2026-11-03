@@ -125,6 +125,7 @@ test("HTTP local CSV scan writes object and coverage documents and serves a mult
   let apiLogs = "";
   let warehouseRequestCount = 0;
   let ownEsUnavailable = false;
+  let heldCoverage: { started: () => void; closed: () => void; finish: () => void } | undefined;
 
   await import("node:fs/promises").then(({ mkdir }) => Promise.all([
     mkdir(sourceRoot, { recursive: true }),
@@ -181,6 +182,10 @@ test("HTTP local CSV scan writes object and coverage documents and serves a mult
       response.end();
       return;
     }
+    if (request.method === "POST" && pathname.endsWith("/_mapping")) {
+      response.end(JSON.stringify({ acknowledged: true }));
+      return;
+    }
     if (request.method === "POST" && pathname === "/_bulk") {
       const lines = body.trim().split("\n");
       const items: unknown[] = [];
@@ -221,7 +226,8 @@ test("HTTP local CSV scan writes object and coverage documents and serves a mult
           response.end(JSON.stringify({
             hits: { total: { value: 7, relation: "eq" }, hits: [] },
             aggregations: {
-              by_cell: { sum_other_doc_count: 0, buckets: [{ key: 1, doc_count: 7 }] },
+              by_cell: { sum_other_doc_count: 0, buckets: [{ key: 1, doc_count: 7,
+                by_survey: { sum_other_doc_count: 0, buckets: [{ key: "euclid", doc_count: 7 }] } }] },
               by_layer: { buckets: Object.fromEntries(Object.keys(layerFilters).map((layerId) => [layerId, {
                 by_cell: { sum_other_doc_count: 0, buckets: [{ key: 1, doc_count: 7 }] },
               }])) },
@@ -252,6 +258,13 @@ test("HTTP local CSV scan writes object and coverage documents and serves a mult
     if (request.method === "POST" && pathname === "/astro_coverage_index_v1/_search") {
       const query = JSON.parse(body) as Record<string, unknown>;
       coverageSearchBodies.push(query);
+      if (heldCoverage) {
+        const held = heldCoverage;
+        response.once("close", held.closed);
+        held.finish = () => response.end(JSON.stringify({ hits: { total: 0, hits: [] } }));
+        held.started();
+        return;
+      }
       const bool = (query.query as { bool?: { filter?: unknown[] } } | undefined)?.bool;
       const filters = bool?.filter ?? [];
       const assets = filters.flatMap((filter) => termValues(filter, "asset_id") ?? []);
@@ -702,6 +715,36 @@ test("HTTP local CSV scan writes object and coverage documents and serves a mult
     assert.equal(firstLayer.objectCount, coverageDocuments.reduce((sum, document) => sum + Number(document.source.objectCount), 0));
     assert.equal(coverageSearchBodies.length - searchesBeforeAssetCoverage, 2);
 
+    const searchesBeforeStatus = coverageSearchBodies.length;
+    const selectedStatuses = await apiJson<{ statuses: Array<{ assetId: string }> }>(baseUrl,
+      `/api/data-assets/status?assetIds=${encodeURIComponent(secondAssetResponse.asset.id)}`);
+    assert.deepEqual(selectedStatuses.statuses.map(status => status.assetId), [secondAssetResponse.asset.id]);
+    assert.equal(coverageSearchBodies.length - searchesBeforeStatus, 1, "a selected card must not query other assets' geometry");
+    const unknownStatuses = await apiJson<{ statuses: unknown[] }>(baseUrl, "/api/data-assets/status?assetIds=missing-asset");
+    assert.deepEqual(unknownStatuses.statuses, []);
+    assert.equal(coverageSearchBodies.length - searchesBeforeStatus, 1);
+
+    let startCoverage!: () => void, closeCoverage!: () => void;
+    const coverageStarted = new Promise<void>(resolve => { startCoverage = resolve; });
+    const coverageClosed = new Promise<void>(resolve => { closeCoverage = resolve; });
+    heldCoverage = { started: startCoverage, closed: closeCoverage, finish: () => {} };
+    const controller = new AbortController();
+    const cancelled = fetch(`${baseUrl}/api/sky/coverage?assetIds=${encodeURIComponent(assetResponse.asset.id)}`, { signal: controller.signal });
+    const cancelledResult = assert.rejects(cancelled, { name: "AbortError" });
+    await coverageStarted;
+    let forcedCompletion = false;
+    const fallback = setTimeout(() => { forcedCompletion = true; heldCoverage?.finish(); }, 1000);
+    try {
+      controller.abort();
+      await cancelledResult;
+      await coverageClosed;
+      assert.equal(forcedCompletion, false, "leaving coverage must close its upstream Elasticsearch request");
+    } finally {
+      clearTimeout(fallback);
+      heldCoverage.finish();
+      heldCoverage = undefined;
+    }
+
     const pointDensity = await apiJson<{
       status: string;
       nside: number;
@@ -721,7 +764,7 @@ test("HTTP local CSV scan writes object and coverage documents and serves a mult
     assert.equal(pointDensity.status, "ready");
     assert.equal(pointDensity.nside, 16);
     assert.equal(pointDensity.total, 7);
-    assert.deepEqual(pointDensity.cells, [{ pixel: 1, count: 7, layers: [{ id: "local-catalog", count: 7 }] }]);
+    assert.deepEqual(pointDensity.cells, [{ pixel: 1, count: 7, layers: [{ id: "local-catalog", count: 7 }], surveys: [{ id: "euclid", count: 7 }] }]);
     assert.deepEqual(pointDensity.layers, [{ id: "local-catalog", count: 7 }]);
     assert.equal(pointDensity.indexing, false);
     assert.equal(pointDensitySearchBodies.length, 1);
