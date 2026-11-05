@@ -60,6 +60,7 @@ spec:
             {{- $noProxy = append $noProxy (printf "%s-downloader" (include "asa-workspace.fullname" .)) }}
             {{- $noProxy = append $noProxy (include "asa-workspace.elasticsearchFullname" .) }}
             {{- if .Values.postgresql.enabled }}{{- $noProxy = append $noProxy (include "asa-workspace.postgresqlFullname" .) }}{{- end }}
+            {{- $noProxy = append $noProxy "$(KUBERNETES_SERVICE_HOST)" }}
             - name: NODE_USE_ENV_PROXY
               value: "1"
             - name: HTTP_PROXY

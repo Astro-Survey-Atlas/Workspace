@@ -190,9 +190,9 @@ helm install workspace ./charts/asa-workspace \
 external catalog services only through an HTTP proxy. Node's built-in proxy
 support is enabled for the Workspace process; the chart bypasses localhost,
 the Workspace, Downloader, Elasticsearch and PostgreSQL Services, plus
-`.svc` and `.cluster.local` names. Add any other internal hostnames to
-`networkProxy.noProxy`. Proxy URLs must not include credentials, a path, or a
-query string.
+`.svc` and `.cluster.local` names, and the Kubernetes API Service IP. Add any
+other internal hostnames to `networkProxy.noProxy`. Proxy URLs must not include
+credentials, a path, or a query string.
 
 ```yaml
 networkProxy:

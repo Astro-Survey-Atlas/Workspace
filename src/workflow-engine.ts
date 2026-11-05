@@ -900,36 +900,75 @@ export class WorkflowEngine {
         const filtered = await this.invokeUntracked<CrossmatchRecord[]>(run, "human_filter", "results.filter", { rows: matches, filter });
         const cutoutStep = this.step(run, "cutout");
         if (run.input.cutoutEnabled === true) {
-          const cutouts = await this.callStep<WorkflowCutoutSummary>(run, "cutout", {
-            rows: filtered,
-            sizeDeg: Number(run.input.cutoutSizeDeg ?? 0.008),
-            desiBands: run.input.desiBands ?? ["g", "r", "i", "z"],
-          }, (value) => ({
-            groups: value.groupsTotal,
-            groupsSucceeded: value.groupsSucceeded,
-            groupsFailed: value.groupsFailed,
-            targetsSucceeded: value.targetsSucceeded,
-            targetsFailed: value.targetsFailed,
-          }));
-          await this.store.writeArtifact(run, "cutouts.json", "application/json", cutouts.records.length,
-            `${JSON.stringify(cutouts)}\n`, false);
-          run.summary = {
-            ...run.summary,
-            cutoutGroups: cutouts.groupsTotal,
-            cutoutGroupsSucceeded: cutouts.groupsSucceeded,
-            cutoutGroupsFailed: cutouts.groupsFailed,
-            cutoutTargetsSucceeded: cutouts.targetsSucceeded,
-            cutoutTargetsFailed: cutouts.targetsFailed,
-            cutoutUnresolvedTargets: cutouts.unresolvedTargets,
-          };
-          if (cutouts.groupsFailed > 0 || cutouts.unresolvedTargets > 0) {
-            const message = `FITS cutout 部分失败：${cutouts.groupsFailed} 组失败，${cutouts.unresolvedTargets} 个目标没有图像来源`;
-            cutoutStep.status = "failed";
-            cutoutStep.error = message;
-            cutoutStep.completedAt = timestamp();
-            run.events.push({ at: cutoutStep.completedAt, type: "status", stepId: cutoutStep.id, message });
-            await this.store.save(run);
-            throw new Error(message);
+          if (filtered.length === 0) {
+            await withSpan("workflow.step cutout", {
+              "asa.component": "workflow",
+              "asa.workflow.key": run.workflowKey,
+              "asa.workflow.run_id": run.id,
+              "asa.step.id": "cutout",
+              "asa.step.status": "skipped",
+              "asa.cutout.skip_reason": "empty_selection",
+            }, async () => {
+              const skippedAt = timestamp();
+              cutoutStep.status = "skipped";
+              cutoutStep.startedAt = skippedAt;
+              cutoutStep.completedAt = skippedAt;
+              cutoutStep.outputSummary = { reason: "empty_selection", groups: 0, targets: 0 };
+              const cutouts: WorkflowCutoutSummary = {
+                groupsTotal: 0,
+                groupsSucceeded: 0,
+                groupsFailed: 0,
+                targetsTotal: 0,
+                targetsSucceeded: 0,
+                targetsFailed: 0,
+                unresolvedTargets: 0,
+                records: [],
+              };
+              await this.store.writeArtifact(run, "cutouts.json", "application/json", 0,
+                `${JSON.stringify(cutouts)}\n`, false);
+              run.summary = {
+                ...run.summary,
+                cutoutGroups: 0,
+                cutoutGroupsSucceeded: 0,
+                cutoutGroupsFailed: 0,
+                cutoutTargetsSucceeded: 0,
+                cutoutTargetsFailed: 0,
+                cutoutUnresolvedTargets: 0,
+              };
+              run.events.push({ at: skippedAt, type: "status", stepId: cutoutStep.id, message: "筛选结果为空，已跳过 FITS cutout" });
+            });
+          } else {
+            const cutouts = await this.callStep<WorkflowCutoutSummary>(run, "cutout", {
+              rows: filtered,
+              sizeDeg: Number(run.input.cutoutSizeDeg ?? 0.008),
+              desiBands: run.input.desiBands ?? ["g", "r", "i", "z"],
+            }, (value) => ({
+              groups: value.groupsTotal,
+              groupsSucceeded: value.groupsSucceeded,
+              groupsFailed: value.groupsFailed,
+              targetsSucceeded: value.targetsSucceeded,
+              targetsFailed: value.targetsFailed,
+            }));
+            await this.store.writeArtifact(run, "cutouts.json", "application/json", cutouts.records.length,
+              `${JSON.stringify(cutouts)}\n`, false);
+            run.summary = {
+              ...run.summary,
+              cutoutGroups: cutouts.groupsTotal,
+              cutoutGroupsSucceeded: cutouts.groupsSucceeded,
+              cutoutGroupsFailed: cutouts.groupsFailed,
+              cutoutTargetsSucceeded: cutouts.targetsSucceeded,
+              cutoutTargetsFailed: cutouts.targetsFailed,
+              cutoutUnresolvedTargets: cutouts.unresolvedTargets,
+            };
+            if (cutouts.groupsFailed > 0 || cutouts.unresolvedTargets > 0) {
+              const message = `FITS cutout 部分失败：${cutouts.groupsFailed} 组失败，${cutouts.unresolvedTargets} 个目标没有图像来源`;
+              cutoutStep.status = "failed";
+              cutoutStep.error = message;
+              cutoutStep.completedAt = timestamp();
+              run.events.push({ at: cutoutStep.completedAt, type: "status", stepId: cutoutStep.id, message });
+              await this.store.save(run);
+              throw new Error(message);
+            }
           }
         } else {
           cutoutStep.status = "skipped";

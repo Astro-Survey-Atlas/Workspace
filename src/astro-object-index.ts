@@ -145,6 +145,7 @@ export interface AstroObjectQueryResult {
   index: string;
   objects: AstroObjectRecord[];
   total: number;
+  totalRelation?: "eq" | "gte";
   limit: number;
   searchAfter?: unknown[];
   nextCursor?: unknown[];
@@ -972,7 +973,7 @@ function pointDensityQueryBody(input: ReturnType<typeof validatePointDensityInpu
   )));
   return {
     size: 0,
-    track_total_hits: true,
+    track_total_hits: false,
     query: { bool: { filter: [...filters, scopedLayerFilter(input.layers.flatMap(layer => layer.scopes))] } },
     aggs: {
       by_cell: { terms: {
@@ -1038,13 +1039,14 @@ function queryResult(
   index: string,
   input: NormalizedObjectRegionQuery,
   status: AstroObjectQueryStatus,
-  extras: { objects?: AstroObjectRecord[]; total?: number; searchAfter?: unknown[]; message?: string } = {},
+  extras: { objects?: AstroObjectRecord[]; total?: number; totalRelation?: "eq" | "gte"; searchAfter?: unknown[]; message?: string } = {},
 ): AstroObjectQueryResult {
   return {
     status,
     index,
     objects: extras.objects ?? [],
     total: extras.total ?? 0,
+    ...(extras.totalRelation ? { totalRelation: extras.totalRelation } : {}),
     limit: input.limit,
     ...(extras.searchAfter === undefined ? {} : { searchAfter: extras.searchAfter }),
     ...(extras.searchAfter === undefined ? {} : { nextCursor: extras.searchAfter }),
@@ -1802,7 +1804,7 @@ export class AstroObjectIndexService {
         });
         return {
           status: "ready", index, coordinateFrame: ASTRO_HEALPIX_COORDINATE_FRAME, ordering: ASTRO_HEALPIX_ORDERING,
-          nside, total: totalFromHits(response.hits?.total), layers: layerCounts,
+          nside, total: [...cells.values()].reduce((sum, cell) => sum + cell.count, 0), layers: layerCounts,
           cells: [...cells.values()].sort((left, right) => left.pixel - right.pixel), truncated: false,
         };
       }
@@ -1830,9 +1832,11 @@ export class AstroObjectIndexService {
         signal,
       ) as ElasticsearchSearchResponse;
       const hits = hitsFromResponse(response);
+      const reportedTotal = totalFromHits(response.hits?.total);
       return queryResult(this.#objectIndex, normalized, "ready", {
         objects: hits.map(objectFromHit),
-        total: totalFromHits(response.hits?.total),
+        total: normalized.trackTotalHits ? reportedTotal : Math.max(reportedTotal, hits.length),
+        totalRelation: normalized.trackTotalHits ? "eq" : "gte",
         searchAfter: nextSearchAfter(hits),
       });
     } catch (error) {

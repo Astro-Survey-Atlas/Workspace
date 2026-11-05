@@ -286,7 +286,8 @@ export class WorkspaceFitsCutoutService {
   }
 
   async #authorizedS3Source(sourceUri: string, allowWildcard = false): Promise<AuthorizedS3Source | undefined> {
-    if (!this.options.credentials) return undefined;
+    const credentials = this.options.credentials;
+    if (!credentials) return undefined;
     const location = parseS3Uri(sourceUri, allowWildcard);
     if (!location) return undefined;
     const candidates = (await this.options.connectors.list())
@@ -294,8 +295,12 @@ export class WorkspaceFitsCutoutService {
         && connector.config.bucket?.toLowerCase() === location.bucket && coversObjectKey(connector, location.key))
       .sort((left, right) => connectorPrefix(right).length - connectorPrefix(left).length);
     const connector = candidates[0];
-    if (!connector?.credentialRef) return undefined;
-    const saved = await this.options.credentials.get(connector.credentialRef);
+    const credentialRef = connector?.credentialRef;
+    if (!credentialRef) return undefined;
+    const saved = await withSpan("connector.credentials.read", {
+      "asa.component": "workflow",
+      "asa.connector.kind": "s3",
+    }, () => credentials.get(credentialRef));
     if (!saved?.accessKeyId || !saved.secretAccessKey) return undefined;
     const endpoint = connector.config.endpoint || saved.endpoint;
     if (!endpoint) return undefined;

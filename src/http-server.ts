@@ -1591,7 +1591,11 @@ app.post("/api/sky/points/query", async (request: Request, response: Response) =
   try {
     const input = request.body as ObjectRegionQueryInput;
     if (!input.region || !Array.isArray(input.layerScopes)) throw new RangeError("Data point queries require an entry region and explicit layer scopes");
-    const result = await astroObjectIndex.queryObjects(input, [astroObjectIndex.objectIndex, SKY_DATA_POINT_INDEX], signal);
+    const result = await astroObjectIndex.queryObjects(
+      { ...input, trackTotalHits: input.trackTotalHits === true },
+      [astroObjectIndex.objectIndex, SKY_DATA_POINT_INDEX],
+      signal,
+    );
     signal.throwIfAborted();
     response.json({ ...result, indexing: await derivedRepairs.isIndexing(input.layerScopes) });
   } catch (error) { sendApiError(response, error); }
@@ -1616,6 +1620,7 @@ app.post("/api/sky/points/anchor", async (request: Request, response: Response) 
     signal.throwIfAborted();
     response.json({ status: result.status, message: result.message,
       point: result.objects[0] ? { objectId: result.objects[0].object_id, raDeg: result.objects[0].ra_deg, decDeg: result.objects[0].dec_deg } : null,
+      ...(result.objects[0] ? { record: result.objects[0] } : {}),
       indexing: await derivedRepairs.isIndexing(input.layerScopes) });
   } catch (error) { sendApiError(response, error); }
 });

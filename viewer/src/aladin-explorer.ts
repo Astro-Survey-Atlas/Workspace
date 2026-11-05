@@ -211,6 +211,8 @@ interface DirectionTarget {
   assetId: string;
   raDeg: number;
   decDeg: number;
+  record?: AstroObjectRecord;
+  indexing?: boolean;
 }
 
 interface DirectionGuidePlacement {
@@ -514,6 +516,7 @@ export class AladinExplorer {
     this.resizeObserver?.observe(this.host);
     this.renderSeedRecords();
     this.callbacks.onAssetChange?.(this.activeAssetId);
+    this.refreshDirectionTargets();
     this.scheduleQuery(0);
   }
 
@@ -829,7 +832,7 @@ export class AladinExplorer {
     session.indexing = false;
     jobs.forEach((job) => session.pendingRects.push(job));
     this.emitStatus({ phase: "loading", displayMode: "points", returned: session.renderedObjectIds.size,
-      total: session.total, truncated: false, complete: false, assets: this.assetProgress(session, "loading"),
+      total: Math.max(session.total, session.renderedObjectIds.size), truncated: false, complete: false, assets: this.assetProgress(session, "loading"),
       overlapCount: session.overlapSources.size, indexing: session.indexing });
     let viewportCompleted = false;
     try {
@@ -844,13 +847,13 @@ export class AladinExplorer {
               bbox,
               region: { nside: this.snapshot.nside, pixels: this.snapshot.pixels, coordinateFrame: "ICRS", ordering: "NESTED" },
               coordinateFrame: "ICRS", ordering: "NESTED", layerScopes: this.scopesForLayers([layerId]),
-              limit: QUERY_LIMIT, includeAttributes: false, cursor: cursors.get(layerId),
+              limit: QUERY_LIMIT, includeAttributes: false, trackTotalHits: false, cursor: cursors.get(layerId),
             };
             const result = await workspaceApi.skyPointsQuery(input, controller.signal);
             if (this.disposed || generation !== this.generation || controller.signal.aborted) return;
-            if (result.status !== "ready") throw new Error(result.message ?? "数据点查询未完成");
             session.indexing ||= Boolean(result.indexing);
             if (session.indexing) session.coveredRects = [];
+            if (result.status !== "ready") throw new Error(result.message ?? "数据点查询未完成");
             if (!countedLayers.has(layerId)) {
               session.total += result.total;
               countedLayers.add(layerId);
@@ -867,7 +870,7 @@ export class AladinExplorer {
               cursors.set(layerId, nextCursor);
             } else activeLayers.delete(layerId);
             this.emitStatus({ phase: "loading", displayMode: "points", returned: session.renderedObjectIds.size,
-              total: session.total, truncated: false, complete: false, assets: this.assetProgress(session, "loading"),
+              total: Math.max(session.total, session.renderedObjectIds.size), truncated: false, complete: false, assets: this.assetProgress(session, "loading"),
               overlapCount: session.overlapSources.size, indexing: session.indexing });
             await yieldToBrowser();
             if (this.disposed || generation !== this.generation || controller.signal.aborted) return;
@@ -888,7 +891,16 @@ export class AladinExplorer {
       if (!session.renderedObjectIds.size) await this.maybeAutoAnchor(session, generation, controller.signal);
     } catch (error) {
       if (controller.signal.aborted || this.disposed || generation !== this.generation) return;
-      this.emitStatus({ phase: "error", returned: session.renderedObjectIds.size, total: session.total, truncated: session.truncated, complete: true, message: error instanceof Error ? error.message : String(error) });
+      const message = error instanceof Error ? error.message : String(error);
+      if (session.indexing) {
+        this.emitSessionStatus(session, false);
+      } else if (this.initialViewport && !session.renderedObjectIds.size) {
+        this.emitStatus({ phase: "loading", returned: 0, total: session.total, truncated: session.truncated, complete: false,
+          indexing: session.indexing, regionPointState: "loading", message: `当前视野查询失败，正在查找选区内的数据点：${message}` });
+      } else {
+        this.emitStatus({ phase: "error", returned: session.renderedObjectIds.size, total: Math.max(session.total, session.renderedObjectIds.size),
+          truncated: session.truncated, complete: true, message });
+      }
     } finally {
       jobs.forEach((job) => {
         const index = session.pendingRects.indexOf(job);
@@ -896,6 +908,12 @@ export class AladinExplorer {
       });
       if (this.activeRequest === request) this.activeRequest = null;
       if (viewportCompleted && !controller.signal.aborted && generation === this.generation) this.refreshEmptyStatus();
+      if (!viewportCompleted && !controller.signal.aborted && generation === this.generation
+        && this.initialViewport && !session.renderedObjectIds.size) {
+        this.refreshDirectionTargets();
+        await this.maybeAutoAnchor(session, generation);
+        if (!session.renderedObjectIds.size) this.refreshEmptyStatus();
+      }
       if (!this.disposed && generation === this.generation && session.indexing && this.activeSession === session) {
         this.indexRefreshTimer = setTimeout(() => { this.indexRefreshTimer = null; this.scheduleQuery(0); }, INDEX_REFRESH_MS);
       }
@@ -1124,7 +1142,13 @@ export class AladinExplorer {
         if (this.disposed || generation !== this.directionAnchorGeneration || controller.signal.aborted) return;
         if (result.status !== "ready") throw new Error(result.message ?? "选区点位查询失败");
         this.regionPointStates.set(assetId, result.point ? "available" : result.indexing ? "indexing" : "empty");
-        if (result.point) this.directionTargets.set(assetId, { assetId, raDeg: result.point.raDeg, decDeg: result.point.decDeg });
+        if (result.point) this.directionTargets.set(assetId, {
+          assetId,
+          raDeg: result.point.raDeg,
+          decDeg: result.point.decDeg,
+          ...(result.record ? { record: result.record } : {}),
+          indexing: result.indexing,
+        });
         this.renderDirectionGuides();
       } catch {
         if (!controller.signal.aborted && generation === this.directionAnchorGeneration) this.regionPointStates.set(assetId, "error");
@@ -1134,6 +1158,12 @@ export class AladinExplorer {
         if (this.directionAnchorController === controller) this.directionAnchorController = null;
         this.renderDirectionGuides();
         this.refreshEmptyStatus();
+      }
+    });
+    void this.directionTargetsPromise.then(() => {
+      const session = this.activeSession;
+      if (session && this.initialViewport && !session.renderedObjectIds.size) {
+        void this.maybeAutoAnchor(session, this.generation).catch(() => undefined);
       }
     });
   }
@@ -1156,10 +1186,13 @@ export class AladinExplorer {
     // A region hint must not replace a viewport request's progress or error.
     if (this.activeRequest || (this.lastStatus?.phase === "error" && !this.lastStatus.regionPointState)) return;
     this.emitSessionStatus(session, true, density);
-    if (this.regionPointState() === "indexing" && !this.indexRefreshTimer) {
+    if ((session.indexing || this.regionPointState() === "indexing") && !this.indexRefreshTimer) {
       this.indexRefreshTimer = setTimeout(() => {
         this.indexRefreshTimer = null;
-        for (const [id, state] of this.regionPointStates) if (state === "indexing") this.regionPointStates.delete(id);
+        if (this.disposed || this.activeSession !== session) return;
+        for (const [id, state] of this.regionPointStates) {
+          if (state === "indexing" || (session.indexing && state === "error")) this.regionPointStates.delete(id);
+        }
         this.scheduleQuery(0);
       }, INDEX_REFRESH_MS);
     }
@@ -1249,7 +1282,7 @@ export class AladinExplorer {
   }
 
   private async maybeAutoAnchor(session: ViewportSession, generation: number, signal?: AbortSignal): Promise<void> {
-    if (!this.initialViewport || session.indexing || session.renderedObjectIds.size) return;
+    if (!this.initialViewport || session.renderedObjectIds.size) return;
     if (signal?.aborted) return;
     this.cancelAutoAnchor();
     const controller = new AbortController();
@@ -1265,6 +1298,11 @@ export class AladinExplorer {
         .sort((left, right) => angularDistanceDeg(view.raDeg, view.decDeg, left.raDeg, left.decDeg)
           - angularDistanceDeg(view.raDeg, view.decDeg, right.raDeg, right.decDeg))[0];
       if (!target) return;
+      if (target.record) {
+        session.indexing ||= Boolean(target.indexing);
+        this.appendRecords(session, [target.record]);
+        this.emitSessionStatus(session, false);
+      }
       this.initialViewport = false;
       this.autoAnchorController = null;
       // A confirmed point supersedes the empty entry result, including when
@@ -1364,7 +1402,7 @@ export class AladinExplorer {
     this.emitStatus({
       phase: returned ? "ready" : locating || indexing ? "loading" : regionPointState === "error" ? "error" : "empty",
       returned,
-      total: density?.total ?? session.total,
+      total: density?.total ?? Math.max(session.total, returned),
       truncated: session.truncated,
       complete: complete && !indexing && !locating,
       indexing,

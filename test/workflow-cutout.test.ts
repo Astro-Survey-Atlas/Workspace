@@ -10,6 +10,7 @@ import { MemoryConnectorCredentialStore } from "../src/connector-credentials.js"
 import type { CatalogQueryClient } from "../src/catalog-mcp-client.js";
 import type { ConnectorRecord, ConnectorRegistry } from "../src/connectors.js";
 import { LocalConnectorRootsPolicy } from "../src/local-connector-roots.js";
+import { executeWorkflowCutouts } from "../src/workflow-cutout.js";
 import { WorkflowEngine, EUCLID_DESI_WORKFLOW } from "../src/workflow-engine.js";
 import { WorkspaceFitsCutoutService } from "../src/workflow-fits-cutout.js";
 import type { WorkflowMcpClient, WorkflowMcpRole } from "../src/workflow-mcp-client.js";
@@ -166,6 +167,71 @@ test("runs catalog match through HITL, grouped cutouts, Workspace artifacts, and
   assert.ok(completed.artifacts.some((artifact) => artifact.name === "result.json"));
   assert.ok(completed.lineage.artifacts.some((artifact) => artifact.name === "filtered.csv"));
   assert.ok(completed.lineage.artifacts.some((artifact) => artifact.name.startsWith("cutout-euclid-vis-")));
+});
+
+test("skips cutout and exports an empty result when human filtering removes every match", async (t) => {
+  const store = await temporaryStore(t);
+  const mcpFixture = new CutoutMcpFixture();
+  const mcp = mcpFixture as unknown as WorkflowMcpClient;
+  const cutoutService = new WorkspaceFitsCutoutService({
+    store,
+    connectors: {} as ConnectorRegistry,
+    localRoots: {} as LocalConnectorRootsPolicy,
+    mcp,
+  });
+  const engine = new WorkflowEngine(store, new CutoutCatalogClient(), mcp, undefined, cutoutService);
+  const created = await engine.createRun(EUCLID_DESI_WORKFLOW.key, {
+    raDeg: 0,
+    decDeg: 0,
+    queryRadiusArcsec: 10,
+    matchRadiusArcsec: 1.5,
+    limit: 50,
+    cutoutEnabled: true,
+    desiBands: ["g"],
+  });
+
+  await waitFor(store, created.id, ["waiting_for_input"]);
+  const completed = await engine.decide(created.id, {
+    action: "apply_filter",
+    filter: { logic: "and", conditions: [{ field: "separationArcsec", op: "<", value: 0 }] },
+  });
+
+  assert.equal(completed.status, "succeeded");
+  assert.equal(completed.summary.filteredRows, 0);
+  assert.equal(completed.steps.find((step) => step.id === "cutout")?.status, "skipped");
+  assert.deepEqual(completed.steps.find((step) => step.id === "cutout")?.outputSummary, {
+    reason: "empty_selection",
+    groups: 0,
+    targets: 0,
+  });
+  assert.equal(completed.steps.find((step) => step.id === "export")?.status, "succeeded");
+  assert.equal(mcpFixture.executions.length, 0);
+  assert.equal(mcpFixture.reads.length, 0);
+
+  const cutouts = JSON.parse(await store.readArtifact(completed.id, "cutouts.json")) as {
+    groupsTotal: number;
+    targetsTotal: number;
+    records: unknown[];
+  };
+  assert.deepEqual(cutouts, {
+    groupsTotal: 0,
+    groupsSucceeded: 0,
+    groupsFailed: 0,
+    targetsTotal: 0,
+    targetsSucceeded: 0,
+    targetsFailed: 0,
+    unresolvedTargets: 0,
+    records: [],
+  });
+  const filtered = await store.artifactPath(completed.id, "filtered.csv");
+  assert.equal(filtered.artifact.rowCount, 0);
+
+  assert.deepEqual(await executeWorkflowCutouts({
+    runId: completed.id,
+    rows: [],
+    sizeDeg: 0.008,
+    desiBands: ["g", "r", "i", "z"],
+  }), cutouts);
 });
 
 test("cuts an authorized S3 FITS section with temporary Connector credentials and bounded Range reads", async (t) => {

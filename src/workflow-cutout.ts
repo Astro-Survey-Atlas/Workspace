@@ -347,11 +347,34 @@ export async function executeWorkflowCutouts(options: {
   run?: WorkflowRun;
   onGroupComplete?: (checkpoint: WorkflowCutoutGroupCheckpoint) => Promise<void>;
 }): Promise<WorkflowCutoutSummary> {
+  if (options.rows.length === 0) {
+    return {
+      groupsTotal: 0,
+      groupsSucceeded: 0,
+      groupsFailed: 0,
+      targetsTotal: 0,
+      targetsSucceeded: 0,
+      targetsFailed: 0,
+      unresolvedTargets: 0,
+      records: [],
+    };
+  }
   if (!options.executor && (!options.mcp || !(await options.mcp.hasTool("cutout", "execute_cutout_group")))) {
     throw new Error("No enabled Workspace MCP server provides execute_cutout_group");
   }
   const { groups, unresolvedTargets } = await buildGroups(options.rows, options.desiBands, options.mcp);
-  if (groups.length === 0) throw new Error("No FITS source URI could be resolved for the selected matches");
+  if (groups.length === 0) {
+    return {
+      groupsTotal: 0,
+      groupsSucceeded: 0,
+      groupsFailed: 0,
+      targetsTotal: unresolvedTargets,
+      targetsSucceeded: 0,
+      targetsFailed: unresolvedTargets,
+      unresolvedTargets,
+      records: [],
+    };
+  }
 
   const results: Array<{ records: WorkflowCutoutRecord[]; failed: boolean } | undefined> = new Array(groups.length);
   let cursor = 0;

@@ -1,13 +1,116 @@
 # Workspace handoff
 
-Updated: 2026-11-04, Asia/Shanghai.
+Updated: 2026-11-05, Asia/Shanghai.
+
+## Current Dev state
+
+Workspace is deployed at Helm revision **145**, image
+`0.0.1-dev-20261105-aladin-fast-r3`, digest
+`sha256:3dcf2e6b30732c7b701d40db14dd7a17a465d426bb3aa109a510d8a48118814f`.
+Pod `asa-workspace-5df48b48-285jg` is Ready with zero restarts. `NO_PROXY` now includes the expanded
+Kubernetes Service IP; a read-only Connector Secret request returned HTTP 200
+in 18 ms.
+
+The two November 3 runs with cutouts enabled remain as failed records. Their
+cutout calls timed out while reading Connector Secrets through the configured
+HTTP proxy; the Kubernetes API Service IP had not been included in `NO_PROXY`.
+This was not an empty-filter failure: each run had 43 selected rows, five
+cutout groups and 215 failed targets. Their records were not modified.
+
+New run `wfr_20261105012541_6572797f` completed successfully with 43 filtered
+rows, five successful cutout groups, 215/215 FITS artifacts and zero unresolved
+targets. Run `wfr_20261105013325_96ffeade` verified the empty-selection path:
+zero filtered rows, cutout skipped, zero-row export and overall success. Full
+trace and artifact evidence is in the [session handoff](docs/session-handoff-20261103-agent.md).
+
+## Open UX and performance follow-ups (November 5)
+
+- Reduce `/api/sky/points/query` response size. A bounded viewport request with
+  `includeAttributes=false` still returns repeated and non-rendering metadata;
+  retain only map and selection fields in the point response, and fetch detail
+  fields on demand. A user-provided sample response was about 1.2 MB.
+- Restore fast first paint: measure and remove the startup dependency on slow
+  `/api/public-surveys` and `/api/survey-footprints` requests. Samples took
+  about 8-9 seconds and 1.35-2.77 seconds respectively.
+- Enable HTTP compression for JSON and static assets. The observed point query
+  response used `Content-Encoding: identity`; the main JS bundle was 3.41 MB
+  uncompressed.
+- Improve Elasticsearch headroom and query latency. The observed Pod used about
+  1,825 MiB of its 2 GiB limit and had a prior OOMKilled exit; bounded viewport
+  queries still timed out under active indexing.
+- Make Workflow cutout products discoverable. Successful FITS files are
+  registered as individual binary artifacts under
+  `/state/workflow-runs/<runId>/` and referenced by `outputUri` in
+  `cutouts.json`; the current Workflow UI exposes the CSV result and cutout
+  index, but not per-target FITS downloads or image previews.
+
+The Aladin HEALPix anchor fallback shipped in revision 142; revision 143 added
+the Viewer query changes. Revisions 144 and 145 disable exact hit counting by
+default on viewport requests, skip it in density searches, and expose a lower
+bound when the API does not receive an exact total. Those releases overlaid
+only the two compiled query modules on the r1 runtime image.
+
+## Aladin HEALPix 2071 query and anchor (November 5, revision 145)
+
+The W2 asset `user-b792b28e-aa41-47a8-aed4-a36245951509` includes NESTED
+NSIDE 16 pixel 2071. A prior full-region point query found about 13,173 rows;
+the initial Aladin viewport query could time out after 30 seconds. Before this
+fix, the viewport error path did not proceed to the region anchor lookup, so
+the map could remain blank even though the selected asset had indexed points.
+
+Aladin now obtains an anchor on entry and continues to the anchor fallback when
+the initial viewport query fails. The anchor response includes the real point
+record from the same Elasticsearch request; Aladin renders it and centers on
+its coordinates without a second ES detail query. While indexing is active,
+temporary query errors clear and retry on the 10-second refresh cycle.
+
+Aladin point viewport requests default to `track_total_hits=false` at the API;
+callers must explicitly opt into exact hit totals. They still fetch and paginate
+matching point records. Without exact counts, the API reports the number
+returned with `totalRelation="gte"`, and the Viewer uses the full loaded point
+count. Density requests also skip exact hit totals and derive their total from
+the cell aggregation already required to draw the map. The same-bbox Dev
+comparison returned one point in **15.1 s** without exact totals; with exact
+totals enabled, it took **45.5 s** and timed out.
+
+After revision 145, a bounded pixel 2071 query for RA 78.2-78.3 and Dec
+-66.2 to -66.0 returned the known point in **7.05 s** with HTTP 200,
+`total=1`, `totalRelation="gte"` and `indexing=true`. `/healthz` returned 200.
+
+These are filtered Elasticsearch searches, not `match_all`: for NSIDE 16
+pixel 2071 the region filter projects to native order 8 pixel range
+530176-530431, with `healpix_order=8`; the viewport adds RA/Dec ranges and the
+selected `asset_id`. Workspace searches both `astro_object_index_v1` and
+`astro_data_point_index_v1` so catalog rows and derived FITS points are both
+available. At the measurement, those indices held about 1.72M and 1.36M docs.
+
+Remaining latency is attributable to the live environment as well as query
+work: Elasticsearch is limited to 1 CPU / 2 GiB and used 1,823 MiB in the
+observed sample; two W2 scanner Pods were active. Before each search, the
+current FITS quality-batch visibility filter reads all 23 asset records and
+669 ingest-run records (the list endpoints took 2.1 s and 2.6 s respectively),
+then retains four quality-profile FITS assets. That is a separate app-side
+cost and is not a full-table Elasticsearch query.
+
+Read-only Dev evidence: the full-region anchor query can also time out during
+the active W2 scan, with `indexing=true`; a narrow bbox inside pixel 2071
+returned object `25540a5c5f0c8a9f15c05f0858fd7f484a59adae4a42c4d8f9e93ff6bff990b3`
+at RA **78.2502213459592**, Dec **-66.11439829855028**, from the selected W2
+asset. This confirms data presence and exposes remaining Elasticsearch load
+as the reason a broad query may need retries. The indexed record says release
+`csst-simulation-w2` but product `CSST Simulation W1`; that metadata mismatch
+was not changed.
+
+Helm revision 143 is Ready with zero restarts; `/healthz` returned 200 and the
+deployed HTML referenced the new Viewer bundle. Viewer typecheck/build and
+`git diff --check` passed. The browser runtime reported no available browser,
+so this turn did not perform a visual Aladin interaction check.
 
 ## Next session: Workspace Agent workflow and science acceptance
 
-Read [the November 3 session handoff](docs/session-handoff-20261103-agent.md)
-first. It contains the Agent entry points, current deployment, scan recovery,
-validation limits and private evidence locations. The older progress
-notes below are historical and do not override that handoff.
+Read the [session handoff](docs/session-handoff-20261103-agent.md) for Agent
+entry points, current deployment, scan recovery, validation limits and private
+evidence locations. The November 4 progress notes below are historical.
 
 The user committed Workspace changes on `main` as
 `008d1b478a4863f257a5b63ae76ac60b4a8c7a53`. The Workspace worktree was clean

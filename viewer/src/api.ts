@@ -524,7 +524,7 @@ export const workspaceApi = {
   async skyPointDensity(input: AstroPointDensityQueryInput, signal?: AbortSignal): Promise<AstroPointDensityResult & { indexing: boolean }> {
     return postJson<AstroPointDensityResult & { indexing: boolean }>("/api/sky/points/density", input, signal);
   },
-  async skyPointAnchor(input: ObjectRegionQueryInput, signal?: AbortSignal): Promise<{ status: string; message?: string; point: { objectId: string; raDeg: number; decDeg: number } | null; indexing: boolean }> {
+  async skyPointAnchor(input: ObjectRegionQueryInput, signal?: AbortSignal): Promise<{ status: string; message?: string; point: { objectId: string; raDeg: number; decDeg: number } | null; record?: import("../../src/astro-object-index").AstroObjectRecord; indexing: boolean }> {
     return postJson("/api/sky/points/anchor", input, signal);
   },
   async skyPointInspect(input: SkyPointInspectionInput, signal?: AbortSignal): Promise<SkyPointInspectionResult> {

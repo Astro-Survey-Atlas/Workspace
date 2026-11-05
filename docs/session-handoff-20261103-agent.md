@@ -1,17 +1,101 @@
 # Session 交接：Workspace Agent 实现与 CSST 扫描
 
-更新时间：2026-11-04，Asia/Shanghai；Workspace Agent/CLI r17 已部署，并完成目录与 MCP 运行核对。
+更新时间：2026-11-05，Asia/Shanghai；最新 Dev 部署为 Workspace Helm revision **145**。
 
-最新只读部署核对：Workspace 当前为 Helm revision **139**、镜像
+Workspace 运行镜像为
+`0.0.1-dev-20261105-aladin-fast-r3`，digest
+`sha256:3dcf2e6b30732c7b701d40db14dd7a17a465d426bb3aa109a510d8a48118814f`。
+Pod `asa-workspace-5df48b48-285jg` Ready、零重启，`/healthz` 返回 HTTP 200。
+Helm 在代理绕过列表中加入展开后的 `KUBERNETES_SERVICE_HOST`；当前值为
+`10.43.0.1`。Pod 内 Kubernetes Secret API 只读请求返回 HTTP 200、18 ms。
+
+## 2026-11-05 Aladin HEALPix 2071 查询与空视野修复
+
+W2 asset `user-b792b28e-aa41-47a8-aed4-a36245951509` 覆盖 NESTED NSIDE 16
+pixel 2071。此前同范围点查询约有 13,173 条记录，但初始 Aladin viewport
+查询会在 ES 负载下于 30 秒超时；旧错误分支没有继续查询选区 anchor，导致
+视野空白。现在 Aladin 入口会获取选区真实 anchor；viewport 查询失败时也会
+执行 fallback。anchor API 在同一响应中带回记录，Viewer 绘制该真实记录并
+居中到它，不再发第二次 ES 详情查询。`indexing=true` 时临时错误会在 10 秒后
+清理状态并自动重试。
+
+视野点查询 API 默认使用 `track_total_hits:false`，只有调用方显式设为 `true`
+才计算精确总命中数。查询仍按 search-after 分页取回真实点；快速模式返回当前
+命中数下界，并用 `totalRelation="gte"` 标记。Viewer 完成分页后按实际加载点数更新
+状态。大视野密度查询也关闭 hits 精确计数，总数由绘图所需的 cell 聚合桶求和。
+相同小 bbox 的线上对比：精确统计关闭时 15.1 秒返回 1 个点；开启时 45.5 秒后超时。
+
+revision 145 的只读线上查询使用 pixel 2071、RA 78.2-78.3、Dec -66.2 至 -66.0、
+单 asset 和 limit=1；7.05 秒返回已知数据点，HTTP 200，`total=1`、
+`totalRelation="gte"`、`indexing=true`。`/healthz` 返回 200。revision 144 曾部署
+只关闭精确统计的版本；revision 145 修正快速模式下 ES 不返回 hits.total 时 API
+错误显示 `total=0` 的问题。两次发布均只覆盖 r1 基础镜像中的 query 服务模块。
+
+Workspace 将 NSIDE 16 / pixel 2071 投影为 order 8 pixel 范围 **530176-530431**，
+并同时过滤 `healpix_order=8`、视野 RA/Dec 范围和选中的 asset ID。请求查
+`astro_object_index_v1` 与 `astro_data_point_index_v1` 两个索引以兼容目录行和
+FITS 派生点；索引当时分别约 1.72M 与 1.36M 文档。不是无条件全表查询。
+
+残余延时来自当前运行状态：Elasticsearch limit 为 1 CPU / 2 GiB，采样使用
+1,823 MiB，且有两个 W2 scanner Pod 运行。每次 ES 查询前的批次可见性逻辑还会
+读取全部 23 个资产和 669 条 ingest run（对应只读列表 API 分别耗时约 2.1 秒和
+2.6 秒），筛出四个质量 FITS asset。这段元数据准备与 ES 查询需要分别优化。
+
+只读 Dev 检查确认 anchor 查询可能在全区范围超时，但 pixel 2071 内一个窄
+bbox 查询返回真实点：RA 78.2502213459592、Dec -66.11439829855028，asset ID
+与选中 W2 一致。该记录的 release 是 `csst-simulation-w2`，product 却是
+`CSST Simulation W1`；这是待核实的元数据问题，没有修改索引数据。
+
+Helm revision 142 发布 anchor server+Viewer；revision 143 更新 Viewer bundle；
+revision 145 更新查询服务模块。发布镜像基于 revision 143 的 runtime，未部署其他
+未提交 Workflow 模块。当前 Pod Ready、零重启；`/healthz` 为 200。当前会话没有可用
+浏览器，因此未做视觉交互复现；
+全区查询在活动扫描期间仍可能超时，界面会保留 indexing 状态并自动重试。
+
+## 2026-11-05 FITS cutout 修复与运行证据
+
+November 3 的 `wfr_20261103192550_84e0cabc` 与
+`wfr_20261103193329_f932665a` 两条 cutout-enabled run 均保留为失败记录。
+Tempo 中五组 cutout 都在 `fits.cutout` 内失败；子 span 显示 Workspace 对
+`https://10.43.0.1/.../secrets/...` 的请求经 HTTP proxy 后约 5 秒 `ECONNRESET`，
+随后被记录为 timeout。两条 run 的筛选结果各为 43 行、五组共 215 个目标，
+因此这不是空筛选问题。修改后在旧配置下复现：Service IP 请求约 5 秒失败，
+而 `kubernetes.default.svc` 通过 `.svc` bypass 在 76 ms 返回 200。
+
+修复随 r1 部署：Helm 在 `NO_PROXY` 中追加 `$(KUBERNETES_SERVICE_HOST)`，由
+Kubernetes 展开为 Service IP。Workspace cutout 路径新增
+`connector.credentials.read` span，只记录 `asa.component=workflow` 和
+`asa.connector.kind=s3`，不记录凭据或 Connector ID。
+
+成功运行 `wfr_20261105012541_6572797f` 使用相同的 250 arcsec 查询、两份已登记
+FITS catalog 和原筛选条件 `separationArcsec <= 1`。候选池读取 Euclid 214 行、
+DESI 500 行并得到 46 个匹配；从 run 创建到 crossmatch 完成为约 42 秒。筛选出
+43 行后，FITS cutout 5/5 组、215/215 目标成功，unresolved 为 0；`filtered.csv`
+有 43 行，注册了 215 个 FITS artifact。抽查 artifact 返回 HTTP 200、63,360 字节，
+首个 FITS card 为 `SIMPLE = T`。cutout step 耗时约 246 秒。
+
+Tempo trace `63bfa1ee66acc42c03fabc0d1927cef8` 有 47 个 span、0 个错误；五个
+`connector.credentials.read` span 均成功。该 run 的血缘含两个 catalog source 和
+220 个 artifact。
+
+空筛选运行 `wfr_20261105013325_96ffeade` 通过 `separationArcsec < 0` 产生 0 行：
+cutout step 为 `skipped`，output summary reason 是 `empty_selection`，`cutouts.json`
+为 0 组/0 目标；`filtered.csv` 为 0 行，导出成功，整体 Workflow succeeded。
+Tempo trace `579cae0f2105ce7d5bdda2fce72f430a` 有 24 个 span、0 个错误，并记录
+`asa.cutout.skip_reason=empty_selection`。
+
+本轮 `npm run verify:types`、`npm run build`、Helm lint/template 与
+`git diff --check` 均通过。定向运行 `npx tsx --test test/workflow-cutout.test.ts`
+通过 3/3；全量测试套件未运行。镜像已构建并部署，Helm 使用
+`--reuse-values` 保留既有运行配置。
+
+## Earlier state: 2026-11-04 Agent/CLI r17
+
+当时 Workspace 为 Helm revision **139**、镜像
 `0.0.1-dev-20261104-agent-r17`，digest 为
 `sha256:782095a75b9793aa6def515e60d125e7e576e4d69338527d79d5a5db964880c1`。
-Pod `asa-workspace-7488f57d6c-djqtl` 为 `1/1 Ready`、零重启；最新 Pod 内
-`/healthz` 和 Elasticsearch health 均返回 HTTP 200。相邻两次资源采样从 816m CPU、
-1566 MiB 降至 660m CPU、1560 MiB（limit 2 GiB）；启动期以及最近一次
-readiness/liveness 事件仍有失败记录，需继续观察。
-Workspace CLI 可列出 3 个 `euclid-desi-crossmatch@1` run；它们仍等待研究者的
-`human_filter`，cutout/export 仍 pending。当前另有一个只读 Astroquery Agent 会话等待
-`call_mcp_tool` 人工确认，详见文末 r17 章节。
+Pod `asa-workspace-7488f57d6c-djqtl` Ready、零重启；该时点的三个 run 仍在
+`human_filter`，其余 r17 核对记录见下文。
 
 ## 新 session 从这里开始
 
