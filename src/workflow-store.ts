@@ -5,7 +5,7 @@ import path from "node:path";
 import type { AgentSession, WorkflowArtifact, WorkflowDefinition, WorkflowRun } from "./workflow.js";
 
 const MAX_PREVIEW_ROWS = 20;
-const MAX_ARTIFACT_ROWS = 1_000;
+const MAX_ARTIFACT_ROWS = 5_000;
 const MAX_ARTIFACT_BYTES = 5 * 1024 * 1024;
 const MAX_RUNS = 100;
 const MAX_AGE_MS = 30 * 24 * 60 * 60 * 1_000;
@@ -33,11 +33,23 @@ function assertId(value: string, label: string): void {
   if (!/^[a-zA-Z0-9][a-zA-Z0-9._-]*$/.test(value)) throw new RangeError(`Invalid ${label}: ${value}`);
 }
 
+function mergeArtifacts(...collections: WorkflowArtifact[][]): WorkflowArtifact[] {
+  const artifacts = new Map<string, WorkflowArtifact>();
+  for (const collection of collections) {
+    for (const artifact of collection) {
+      const current = artifacts.get(artifact.name);
+      if (!current || artifact.createdAt >= current.createdAt) artifacts.set(artifact.name, structuredClone(artifact));
+    }
+  }
+  return [...artifacts.values()].sort((left, right) => left.name.localeCompare(right.name));
+}
+
 export class WorkflowStore {
   readonly sessionsRoot: string;
   readonly #runs = new Map<string, WorkflowRun>();
   readonly #sessions = new Map<string, AgentSession>();
   readonly #writes = new Map<string, Promise<void>>();
+  readonly #artifactWrites = new Map<string, Promise<void>>();
 
   constructor(readonly root: string) {
     this.sessionsRoot = path.join(root, "_agent-sessions");
@@ -49,7 +61,7 @@ export class WorkflowStore {
     const runs = await this.loadRunsFromDisk();
     for (const run of runs) this.#runs.set(run.id, structuredClone(run));
     for (const run of runs) {
-      if (run.status === "queued" || run.status === "running") {
+      if (run.status === "running" && run.resume?.kind !== "human_filter") {
         run.status = "failed";
         run.error = "Service restarted before the workflow completed";
         run.completedAt = now();
@@ -67,7 +79,7 @@ export class WorkflowStore {
     await this.prune();
   }
 
-  async create(definition: WorkflowDefinition, input: Record<string, unknown>): Promise<WorkflowRun> {
+  async create(definition: WorkflowDefinition, input: Record<string, unknown>, traceparent?: string, agentInitiated = false): Promise<WorkflowRun> {
     const createdAt = now();
     const run: WorkflowRun = {
       id: `wfr_${createdAt.replace(/[-:.TZ]/g, "").slice(0, 14)}_${randomUUID().slice(0, 8)}`,
@@ -78,6 +90,8 @@ export class WorkflowStore {
       createdAt,
       updatedAt: createdAt,
       input: structuredClone(input),
+      ...(traceparent ? { traceparent } : {}),
+      ...(agentInitiated ? { agentInitiated: true } : {}),
       steps: definition.steps.map((step) => ({
         id: step.id,
         title: step.title,
@@ -100,6 +114,13 @@ export class WorkflowStore {
   async save(run: WorkflowRun): Promise<void> {
     assertId(run.id, "workflow run id");
     if (run.preview.length > MAX_PREVIEW_ROWS) throw new RangeError(`Workflow preview cannot exceed ${MAX_PREVIEW_ROWS} rows`);
+    const latest = this.#runs.get(run.id);
+    run.artifacts = mergeArtifacts(run.artifacts, latest?.artifacts ?? []);
+    run.lineage.artifacts = run.artifacts.map((candidate) => ({
+      name: candidate.name,
+      sha256: candidate.sha256,
+      rowCount: candidate.rowCount,
+    }));
     run.updatedAt = now();
     run.events = run.events.slice(-200);
     const snapshot = structuredClone(run);
@@ -174,6 +195,51 @@ export class WorkflowStore {
     }));
     if (persist) await this.save(run);
     return artifact;
+  }
+
+  async writeArtifactForRun(
+    runId: string,
+    name: string,
+    mediaType: string,
+    rowCount: number,
+    content: string | Buffer,
+  ): Promise<WorkflowArtifact> {
+    const [artifact] = await this.writeArtifactsForRun(runId, [{ name, mediaType, rowCount, content }]);
+    if (!artifact) throw new Error("Workflow artifact was not written");
+    return artifact;
+  }
+
+  async writeArtifactsForRun(
+    runId: string,
+    inputs: Array<{ name: string; mediaType: string; rowCount: number; content: string | Buffer }>,
+  ): Promise<WorkflowArtifact[]> {
+    const previous = this.#artifactWrites.get(runId) ?? Promise.resolve();
+    let release!: () => void;
+    const current = new Promise<void>((resolve) => { release = resolve; });
+    this.#artifactWrites.set(runId, current);
+    await previous.catch(() => undefined);
+    try {
+      const run = await this.get(runId);
+      const artifacts: WorkflowArtifact[] = [];
+      for (const input of inputs) {
+        artifacts.push(await this.writeArtifact(run, input.name, input.mediaType, input.rowCount, input.content, false));
+      }
+      const latest = this.#runs.get(runId) ?? run;
+      const snapshot = structuredClone(latest);
+      snapshot.artifacts = mergeArtifacts(snapshot.artifacts, artifacts);
+      snapshot.lineage.artifacts = snapshot.artifacts.map((candidate) => ({
+        name: candidate.name,
+        sha256: candidate.sha256,
+        rowCount: candidate.rowCount,
+      }));
+      snapshot.updatedAt = now();
+      this.#runs.set(runId, snapshot);
+      await this.serializedJsonWrite(`run:${runId}`, path.join(this.root, `${runId}.json`), snapshot);
+      return artifacts;
+    } finally {
+      if (this.#artifactWrites.get(runId) === current) this.#artifactWrites.delete(runId);
+      release();
+    }
   }
 
   async artifactPath(runId: string, name: string): Promise<{ run: WorkflowRun; artifact: WorkflowArtifact; filePath: string }> {

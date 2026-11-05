@@ -1,3 +1,4 @@
+import "./telemetry-bootstrap.js";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { spawn, execFileSync, type ChildProcess } from "node:child_process";
 import { createHash, timingSafeEqual } from "node:crypto";
@@ -12,6 +13,7 @@ import { validateRelativePath } from "./source-crawler.js";
 import { hashFile, isImmutableEuclidQ1EasFile, type CoverageDownloadFileState } from "./coverage-downloads.js";
 import { checkDownloadRoute, downloadFetch, type DownloadHealth, type DownloadProxyConfig } from "./download-transport.js";
 import type { WorkerDownloadJob } from "./download-worker-client.js";
+import { activeTraceparent, shutdownTelemetry, withRootSpan, withSpan, withTraceparent } from "./telemetry.js";
 
 type EngineStatus = { status: string; completedLength: string; totalLength: string; downloadSpeed: string; errorCode?: string; errorMessage?: string };
 interface DurableState { jobs: WorkerDownloadJob[]; config: DownloadProxyConfig; source: string; health?: DownloadHealth; healthHistory?: DownloadHealth[] }
@@ -356,64 +358,88 @@ export class DownloadWorker {
       await this.rpc("getGlobalStat"); this.engineAvailable = true;
       for (const job of this.jobs.values()) {
         if (!["queued", "running"].includes(job.status) || job.phase === "paused") continue;
-        job.status = "running"; job.phase = "downloading";
-        for (let index = 0; index < job.transfer.length; index++) {
-          const entry = job.transfer[index]!, key = `${job.id}:${index}`;
-          if (entry.status === "verified" || entry.status === "failed" || this.verifying.has(key)) continue;
-          if (entry.nextRetryAt && Date.parse(entry.nextRetryAt) > Date.now()) { job.phase = "retrying"; continue; }
-          let engine: EngineStatus | undefined;
-          if (entry.gid) try { engine = await this.rpc("tellStatus", [entry.gid, ["status", "completedLength", "totalLength", "downloadSpeed", "errorCode", "errorMessage"]]); } catch { /* Reconcile session or RPC result eviction. */ }
-          if (!engine) {
-            try { await this.prepare(job, entry, index); }
-            catch (error) { entry.status = "failed"; entry.error = error instanceof Error ? error.message.slice(0, 300) : "下载初始化失败"; }
-            continue;
-          }
-          entry.engineState = engine.status;
-          const bytes = Number(engine.completedLength);
-          if (bytes > entry.bytesPresent) { entry.lastProgressAt = new Date().toISOString(); entry.consecutiveFailures = 0; delete entry.nextRetryAt; }
-          entry.bytesPresent = bytes; entry.speedBytesPerSecond = Number(engine.downloadSpeed);
-          if (!entry.expectedSizeBytes && Number(engine.totalLength) > 0) entry.expectedSizeBytes = Number(engine.totalLength);
-          entry.etaSeconds = entry.speedBytesPerSecond > 0 && entry.expectedSizeBytes ? Math.ceil((entry.expectedSizeBytes - bytes) / entry.speedBytesPerSecond) : undefined;
-          if (bytes > 0) entry.status = "partial";
-          if (engine.status === "complete") {
-            job.phase = "verifying"; this.verifying.add(key);
-            const target = await this.safeTarget(job.directory, entry.relativePath);
-            // Hash large files concurrently with the scheduler; only one verifier owns each file.
-            void this.verify(entry, `${target}.part`, target).catch(error => { entry.status = "failed"; entry.error = error instanceof Error ? error.message : "校验失败"; })
-              .finally(() => { this.verifying.delete(key); void this.persist(); });
-          } else if (engine.status === "error" || engine.status === "removed") {
-            entry.error ??= `aria2 下载失败（${engine.errorCode ?? engine.status}）`;
-            entry.lastErrorCode ??= `ARIA2_${engine.errorCode ?? engine.status}`;
-            entry.speedBytesPerSecond = 0;
-            if (this.permanent(entry, engine)) entry.status = "failed";
-            else {
-              entry.retryCount = (entry.retryCount ?? 0) + 1;
-              entry.consecutiveFailures = (entry.consecutiveFailures ?? 0) + 1;
-              entry.nextRetryAt = new Date(Date.now() + Math.min(300_000, 15_000 * 2 ** Math.min(5, entry.consecutiveFailures - 1))).toISOString();
-              job.phase = "retrying";
+        await this.withJobSpan(job, async () => {
+          job.status = "running"; job.phase = "downloading";
+          for (let index = 0; index < job.transfer.length; index++) {
+            const entry = job.transfer[index]!, key = `${job.id}:${index}`;
+            if (entry.status === "verified" || entry.status === "failed" || this.verifying.has(key)) continue;
+            if (entry.nextRetryAt && Date.parse(entry.nextRetryAt) > Date.now()) { job.phase = "retrying"; continue; }
+            let engine: EngineStatus | undefined;
+            if (entry.gid) try { engine = await this.rpc("tellStatus", [entry.gid, ["status", "completedLength", "totalLength", "downloadSpeed", "errorCode", "errorMessage"]]); } catch { /* Reconcile session or RPC result eviction. */ }
+            if (!engine) {
+              try { await this.prepare(job, entry, index); }
+              catch (error) { entry.status = "failed"; entry.error = error instanceof Error ? error.message.slice(0, 300) : "下载初始化失败"; }
+              continue;
             }
-            await this.rpc("removeDownloadResult", [entry.gid]).catch(() => undefined);
-            delete entry.gid;
-          } else if (engine.status === "paused") {
-            await this.rpc("unpause", [entry.gid]).catch(() => undefined);
-          } else if (engine.status === "active" && entry.lastProgressAt && Date.now() - Date.parse(entry.lastProgressAt) > 300_000) job.phase = "waiting_network";
-        }
-        const unfinished = job.transfer.filter(e => e.status !== "verified" && e.status !== "failed");
-        const failed = job.transfer.filter(e => e.status === "failed");
-        if (!unfinished.length && ![...this.verifying].some(key => key.startsWith(`${job.id}:`))) {
-          job.status = failed.length ? (job.transfer.some(e => e.status === "verified") ? "partial" : "failed") : "completed";
-          job.phase = job.status;
-          job.error = failed.length ? `${job.transfer.length - failed.length}/${job.transfer.length} 个文件已校验；${failed.length} 个文件需要处理` : undefined;
-        } else if (this.config.enabled && this.health.status === "failed") job.phase = "waiting_network";
-        job.updatedAt = new Date().toISOString();
+            entry.engineState = engine.status;
+            const bytes = Number(engine.completedLength);
+            if (bytes > entry.bytesPresent) { entry.lastProgressAt = new Date().toISOString(); entry.consecutiveFailures = 0; delete entry.nextRetryAt; }
+            entry.bytesPresent = bytes; entry.speedBytesPerSecond = Number(engine.downloadSpeed);
+            if (!entry.expectedSizeBytes && Number(engine.totalLength) > 0) entry.expectedSizeBytes = Number(engine.totalLength);
+            entry.etaSeconds = entry.speedBytesPerSecond > 0 && entry.expectedSizeBytes ? Math.ceil((entry.expectedSizeBytes - bytes) / entry.speedBytesPerSecond) : undefined;
+            if (bytes > 0) entry.status = "partial";
+            if (engine.status === "complete") {
+              job.phase = "verifying"; this.verifying.add(key);
+              const target = await this.safeTarget(job.directory, entry.relativePath);
+              void this.verify(entry, `${target}.part`, target).catch(error => { entry.status = "failed"; entry.error = error instanceof Error ? error.message : "校验失败"; })
+                .finally(() => { this.verifying.delete(key); void this.persist(); });
+            } else if (engine.status === "error" || engine.status === "removed") {
+              entry.error ??= `aria2 下载失败（${engine.errorCode ?? engine.status}）`;
+              entry.lastErrorCode ??= `ARIA2_${engine.errorCode ?? engine.status}`;
+              entry.speedBytesPerSecond = 0;
+              if (this.permanent(entry, engine)) entry.status = "failed";
+              else {
+                entry.retryCount = (entry.retryCount ?? 0) + 1;
+                entry.consecutiveFailures = (entry.consecutiveFailures ?? 0) + 1;
+                entry.nextRetryAt = new Date(Date.now() + Math.min(300_000, 15_000 * 2 ** Math.min(5, entry.consecutiveFailures - 1))).toISOString();
+                job.phase = "retrying";
+              }
+              await this.rpc("removeDownloadResult", [entry.gid]).catch(() => undefined);
+              delete entry.gid;
+            } else if (engine.status === "paused") {
+              await this.rpc("unpause", [entry.gid]).catch(() => undefined);
+            } else if (engine.status === "active" && entry.lastProgressAt && Date.now() - Date.parse(entry.lastProgressAt) > 300_000) job.phase = "waiting_network";
+          }
+          const unfinished = job.transfer.filter(e => e.status !== "verified" && e.status !== "failed");
+          const failed = job.transfer.filter(e => e.status === "failed");
+          if (!unfinished.length && ![...this.verifying].some(key => key.startsWith(`${job.id}:`))) {
+            job.status = failed.length ? (job.transfer.some(e => e.status === "verified") ? "partial" : "failed") : "completed";
+            job.phase = job.status;
+            job.error = failed.length ? `${job.transfer.length - failed.length}/${job.transfer.length} 个文件已校验；${failed.length} 个文件需要处理` : undefined;
+          } else if (this.config.enabled && this.health.status === "failed") job.phase = "waiting_network";
+          job.updatedAt = new Date().toISOString();
+        });
       }
       await this.persist();
     } finally { this.ticking = false; }
+  }
+
+  private async withJobSpan(job: WorkerDownloadJob, work: () => Promise<void>): Promise<void> {
+    const attributes = {
+      "asa.component": "download",
+      "asa.download.job_id": job.id,
+    };
+    const finish = async (span: import("@opentelemetry/api").Span): Promise<void> => {
+      await work();
+      span.setAttribute("asa.download.files", job.transfer.filter((entry) => entry.status === "verified").length);
+      span.setAttribute("asa.download.bytes", job.transfer.reduce((total, entry) => total + entry.bytesPresent, 0));
+      span.setAttribute("asa.download.outcome", job.status);
+    };
+    if (job.traceparent) {
+      await withTraceparent(job.traceparent, () => withSpan("download.job", attributes, finish));
+      return;
+    }
+    await withRootSpan("download.job", attributes, async (span) => {
+      job.traceparent = activeTraceparent();
+      await finish(span);
+    });
   }
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const worker = new DownloadWorker(process.env.ASTRO_DOWNLOAD_STORAGE_ROOT ?? "/data/production", process.env.ASTRO_DOWNLOAD_WORKER_TOKEN ?? "", Number(process.env.PORT ?? 7080));
   void worker.initialize().catch(error => { console.error(error instanceof Error ? error.message : "下载服务启动失败"); process.exit(1); });
-  for (const signal of ["SIGTERM", "SIGINT"]) process.on(signal, () => { void worker.close().finally(() => process.exit(0)); });
+  for (const signal of ["SIGTERM", "SIGINT"]) process.on(signal, () => {
+    void worker.close().finally(() => void shutdownTelemetry().finally(() => process.exit(0)));
+  });
 }

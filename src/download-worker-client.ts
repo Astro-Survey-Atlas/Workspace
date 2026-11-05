@@ -9,6 +9,7 @@ export interface WorkerDownloadJob {
   phase: CoverageDownloadPhase;
   error?: string;
   updatedAt: string;
+  traceparent?: string;
 }
 
 export class DownloadWorkerClient {

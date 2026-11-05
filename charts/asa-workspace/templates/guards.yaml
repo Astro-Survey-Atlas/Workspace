@@ -8,6 +8,16 @@
 {{- if and (eq .Values.metadataStore.mode "bundled-postgresql") (empty .Values.postgresql.auth.username) }}{{ fail "postgresql.auth.username is required for bundled-postgresql" }}{{- end }}
 {{- if and (eq .Values.metadataStore.mode "bundled-postgresql") (empty .Values.postgresql.auth.database) }}{{ fail "postgresql.auth.database is required for bundled-postgresql" }}{{- end }}
 {{- if and (eq .Values.metadataStore.mode "sqlite") (not (hasPrefix "/state/" .Values.metadataStore.sqlite.path)) }}{{ fail "metadataStore.sqlite.path must be on the /state persistence mount" }}{{- end }}
+{{- if not (kindIs "map" .Values.scanner) }}{{ fail "scanner must be an object" }}{{- end }}
+{{- range $key, $_ := .Values.scanner }}{{- if not (has $key (list "enabled" "concurrency" "pollIntervalMs" "resources")) }}{{ fail (printf "scanner.%s is not a supported field" $key) }}{{- end }}{{- end }}
+{{- if not (kindIs "bool" .Values.scanner.enabled) }}{{ fail "scanner.enabled must be a boolean" }}{{- end }}
+{{- if or (lt (int .Values.scanner.concurrency) 1) (gt (int .Values.scanner.concurrency) 2) }}{{ fail "scanner.concurrency must be 1 or 2" }}{{- end }}
+{{- if or (lt (int .Values.scanner.pollIntervalMs) 1000) (gt (int .Values.scanner.pollIntervalMs) 300000) }}{{ fail "scanner.pollIntervalMs must be between 1000 and 300000 milliseconds" }}{{- end }}
+{{- if .Values.scanner.enabled }}
+{{- if not .Values.persistence.enabled }}{{ fail "scanner.enabled requires persistence.enabled=true" }}{{- end }}
+{{- if not (has "ReadWriteMany" .Values.persistence.accessModes) }}{{ fail "scanner.enabled requires persistence.accessModes to include ReadWriteMany" }}{{- end }}
+{{- if eq .Values.metadataStore.mode "sqlite" }}{{ fail "scanner.enabled requires bundled-postgresql or external-postgresql metadata storage" }}{{- end }}
+{{- end }}
 {{- if not (has .Values.search.mode (list "bundled" "external")) }}{{ fail "search.mode must be bundled or external" }}{{- end }}
 {{- if and (eq .Values.search.mode "bundled") (not .Values.elasticsearch.enabled) }}{{ fail "search.mode=bundled requires elasticsearch.enabled=true" }}{{- end }}
 {{- if and (eq .Values.search.mode "external") .Values.elasticsearch.enabled }}{{ fail "search.mode=external requires elasticsearch.enabled=false" }}{{- end }}

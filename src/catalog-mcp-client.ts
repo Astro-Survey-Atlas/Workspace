@@ -1,9 +1,27 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { SSEClientTransport } from "@modelcontextprotocol/sdk/client/sse.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import { SpanKind } from "@opentelemetry/api";
+import { activeMcpMetadata, classifyError, injectActiveTrace, recordMcpCall, withSpan } from "./telemetry.js";
 
 export interface CatalogQueryClient {
-  query(request: Record<string, unknown>): Promise<unknown>;
+  query(request: Record<string, unknown>, context?: CatalogQueryContext): Promise<unknown>;
+}
+
+export interface CatalogQueryContext {
+  catalog: string;
+  raDeg: number;
+  decDeg: number;
+  radiusArcsec: number;
+  limit: number;
+  fields?: Record<string, string>;
+}
+
+export interface CatalogQueryBackend {
+  provider: "workspace-mcp" | "catalog-mcp" | "esa-tap" | "noirlab-datalab";
+  release: string;
+  table: string;
+  tool?: string;
 }
 
 function parseToolResult(result: unknown): unknown {
@@ -78,31 +96,58 @@ export class McpCatalogQueryClient implements CatalogQueryClient {
     const timer = setTimeout(() => controller.abort(timeoutError(this.timeoutMs)), this.timeoutMs);
     const endpoint = new URL(this.url);
     const client = new Client({ name: "asa-workspace", version: "0.6.0" });
+    const started = performance.now();
+    let errorType: string | undefined;
     const transports = endpoint.pathname.endsWith("/sse")
-      ? [new SSEClientTransport(endpoint, { requestInit: { signal: controller.signal } }), new StreamableHTTPClientTransport(endpoint, { requestInit: { signal: controller.signal } })]
-      : [new StreamableHTTPClientTransport(endpoint, { requestInit: { signal: controller.signal } }), new SSEClientTransport(endpoint, { requestInit: { signal: controller.signal } })];
+      ? [new SSEClientTransport(endpoint, { requestInit: { signal: controller.signal }, fetch: tracedFetch }), new StreamableHTTPClientTransport(endpoint, { requestInit: { signal: controller.signal }, fetch: tracedFetch })]
+      : [new StreamableHTTPClientTransport(endpoint, { requestInit: { signal: controller.signal }, fetch: tracedFetch }), new SSEClientTransport(endpoint, { requestInit: { signal: controller.signal }, fetch: tracedFetch })];
     let connected = false;
     let connectionError: unknown;
     try {
-      for (const transport of transports) {
-        try {
-          await client.connect(transport);
-          connected = true;
-          break;
-        } catch (error) {
-          connectionError = error;
-          if (controller.signal.aborted) throw timeoutError(this.timeoutMs);
+      return await withSpan("tools/call es_query", {
+        "asa.component": "mcp-client",
+        "asa.mcp.server": "astro-catalog",
+        "gen_ai.tool.name": "es_query",
+        "mcp.method.name": "tools/call",
+        "network.protocol.name": "http",
+        "server.address": endpoint.hostname,
+        ...(endpoint.port ? { "server.port": Number(endpoint.port) } : {}),
+      }, async () => {
+        for (const transport of transports) {
+          try {
+            await client.connect(transport);
+            connected = true;
+            break;
+          } catch (error) {
+            connectionError = error;
+            if (controller.signal.aborted) throw timeoutError(this.timeoutMs);
+          }
         }
-      }
-      if (!connected) throw new Error(`Unable to connect: ${connectionError instanceof Error ? connectionError.message : String(connectionError)}`);
-      const result = await client.callTool({ name: "es_query", arguments: request }, undefined, { signal: controller.signal });
-      return parseToolResult(result);
+        if (!connected) throw new Error(`Unable to connect: ${connectionError instanceof Error ? connectionError.message : String(connectionError)}`);
+        const result = await client.callTool({
+          name: "es_query",
+          arguments: request,
+          _meta: activeMcpMetadata(),
+        }, undefined, { signal: controller.signal });
+        return parseToolResult(result);
+      }, { kind: SpanKind.CLIENT });
     } catch (error) {
+      errorType = classifyError(error);
       if (controller.signal.aborted) throw timeoutError(this.timeoutMs);
       throw error;
     } finally {
       clearTimeout(timer);
+      recordMcpCall("astro-catalog", (performance.now() - started) / 1000, "es_query", errorType);
       await client.close().catch(() => undefined);
     }
   }
+}
+
+async function tracedFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
+  const headers = new Headers(input instanceof Request ? input.headers : undefined);
+  new Headers(init?.headers).forEach((value, key) => headers.set(key, value));
+  const traceCarrier: Record<string, string> = {};
+  injectActiveTrace(traceCarrier);
+  for (const [key, value] of Object.entries(traceCarrier)) headers.set(key, value);
+  return fetch(input, { ...init, headers });
 }

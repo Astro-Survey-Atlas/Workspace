@@ -5,6 +5,7 @@ export interface StoredConnectorCredentials {
   accessKeyId: string;
   secretAccessKey: string;
   endpoint: string;
+  sessionToken?: string;
 }
 
 export interface ConnectorCredentialStore {
@@ -19,6 +20,7 @@ const MANAGED_SECRET_PREFIX = "astro-connector-";
 const ACCESS_KEY_NAMES = ["access-key", "s3-access-key", "root-user"];
 const SECRET_KEY_NAMES = ["secret-key", "s3-access-secret", "root-password"];
 const ENDPOINT_NAMES = ["s3-endpoint"];
+const SESSION_TOKEN_NAMES = ["session-token", "s3-session-token"];
 
 function parseReference(reference: string): { namespace: string; name: string } {
   const [namespace, name, ...extra] = reference.split("/");
@@ -181,7 +183,13 @@ export class KubernetesConnectorCredentialStore implements ConnectorCredentialSt
     const accessKeyId = decodeFirst(data, ACCESS_KEY_NAMES);
     const secretAccessKey = decodeFirst(data, SECRET_KEY_NAMES);
     if (!accessKeyId || !secretAccessKey) return undefined;
-    return { accessKeyId, secretAccessKey, endpoint: decodeFirst(data, ENDPOINT_NAMES) };
+    const sessionToken = decodeFirst(data, SESSION_TOKEN_NAMES);
+    return {
+      accessKeyId,
+      secretAccessKey,
+      endpoint: decodeFirst(data, ENDPOINT_NAMES),
+      ...(sessionToken ? { sessionToken } : {}),
+    };
   }
 
   async put(reference: string, credentials: StoredConnectorCredentials): Promise<void> {
@@ -196,6 +204,7 @@ export class KubernetesConnectorCredentialStore implements ConnectorCredentialSt
         "access-key": credentials.accessKeyId,
         "secret-key": credentials.secretAccessKey,
         "s3-endpoint": credentials.endpoint,
+        "session-token": credentials.sessionToken ?? "",
       },
     };
     const result = current.status === 404

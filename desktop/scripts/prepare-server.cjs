@@ -11,11 +11,22 @@ const path = require("node:path");
 const desktopRoot = path.resolve(__dirname, "..");
 const repoRoot = path.resolve(desktopRoot, "..");
 const serverEntry = path.join(repoRoot, "dist", "src", "http-server.js");
+const statisticsWorkerEntry = path.join(repoRoot, "dist", "src", "data-statistics-worker.js");
+const workspaceCliEntry = path.join(repoRoot, "packages", "cli", "dist", "index.js");
+const workspaceCliPackage = path.join(repoRoot, "packages", "cli", "package.json");
 const viewerDist = path.join(repoRoot, "dist", "viewer");
 const buildDir = path.join(desktopRoot, "build");
 
 if (!fs.existsSync(serverEntry)) {
   console.error("dist/src/http-server.js not found. Run `npm run build` in the repository root first.");
+  process.exit(1);
+}
+if (!fs.existsSync(statisticsWorkerEntry)) {
+  console.error("dist/src/data-statistics-worker.js not found. Run `npm run build` in the repository root first.");
+  process.exit(1);
+}
+if (!fs.existsSync(workspaceCliEntry) || !fs.existsSync(workspaceCliPackage)) {
+  console.error("packages/cli/dist/index.js not found. Run `npm run build` in the repository root first.");
   process.exit(1);
 }
 
@@ -49,7 +60,30 @@ execFileSync(
   { stdio: "inherit" }
 );
 
+execFileSync(
+  process.execPath,
+  [
+    path.join(desktopRoot, "node_modules", "esbuild", "bin", "esbuild"),
+    statisticsWorkerEntry,
+    "--bundle",
+    "--platform=node",
+    "--format=esm",
+    `--banner:js=${banner}`,
+    "--external:proxy-agent",
+    "--external:pg-native",
+    ...defineArgs,
+    `--outfile=${path.join(buildDir, "data-statistics-worker.mjs")}`,
+    "--log-level=warning"
+  ],
+  { stdio: "inherit" }
+);
+
 fs.rmSync(path.join(buildDir, "viewer"), { recursive: true, force: true });
 fs.cpSync(viewerDist, path.join(buildDir, "viewer"), { recursive: true });
+const cliPackageDir = path.join(buildDir, "packages", "cli");
+fs.rmSync(cliPackageDir, { recursive: true, force: true });
+fs.mkdirSync(path.join(cliPackageDir, "dist"), { recursive: true });
+fs.copyFileSync(workspaceCliPackage, path.join(cliPackageDir, "package.json"));
+fs.copyFileSync(workspaceCliEntry, path.join(cliPackageDir, "dist", "index.js"));
 
-console.log("prepared build/server.mjs and build/viewer");
+console.log("prepared build/server.mjs, build/data-statistics-worker.mjs, build/packages/cli, and build/viewer");

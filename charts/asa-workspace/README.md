@@ -35,6 +35,11 @@ When supplying `postgresql.auth.existingSecret`, its application-user password
 key must match `postgresql.auth.secretKeys.userPasswordKey` (`password` by
 default).
 
+For a controlled SQLite-to-PostgreSQL cutover, follow
+[`docs/workspace-metadata-migration.md`](../../docs/workspace-metadata-migration.md).
+The migration must complete before enabling Scanner, and it does not move the
+filesystem state stored under `/state`.
+
 The dependency archive and `Chart.lock` are vendored for reproducible source
 installs. Run `helm dependency build charts/asa-workspace` when updating
 or verifying the dependency.
@@ -177,4 +182,26 @@ helm install workspace ./charts/asa-workspace \
   --namespace asa-workspace --create-namespace \
   --set dataWarehouse.enabled=true \
   --set dataWarehouse.elasticsearch.url=http://atlas-warehouse-elasticsearch.atlas-warehouse.svc.cluster.local:9200
+```
+
+## Outbound HTTP proxy
+
+`networkProxy` is disabled by default. Enable it when the cluster can reach
+external catalog services only through an HTTP proxy. Node's built-in proxy
+support is enabled for the Workspace process; the chart bypasses localhost,
+the Workspace, Downloader, Elasticsearch and PostgreSQL Services, plus
+`.svc` and `.cluster.local` names. Add any other internal hostnames to
+`networkProxy.noProxy`. Proxy URLs must not include credentials, a path, or a
+query string.
+
+```yaml
+networkProxy:
+  enabled: true
+  url: http://proxy.example.internal:7890
+  noProxy:
+    - localhost
+    - 127.0.0.1
+    - ::1
+    - .svc
+    - .cluster.local
 ```

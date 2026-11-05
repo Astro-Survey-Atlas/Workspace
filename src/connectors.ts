@@ -70,7 +70,7 @@ export interface ConnectorCredentialsInput {
 type ResolvedConnectorCredentials = Required<Pick<ConnectorCredentialsInput, "accessKeyId" | "secretAccessKey">> & Pick<ConnectorCredentialsInput, "sessionToken">;
 
 export interface ConnectorCredentialSummary {
-  accessKeyId: string;
+  accessKeyConfigured: boolean;
   secretConfigured: boolean;
 }
 

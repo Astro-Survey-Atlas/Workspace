@@ -1,6 +1,12 @@
+import { SpanKind } from "@opentelemetry/api";
+import { classifyError, recordAiUsage, withSpan } from "./telemetry.js";
+
 export interface AiProviderChatMessage {
-  role: "user" | "assistant" | "tool";
+  role: "system" | "user" | "assistant" | "tool";
   content: string;
+  name?: string;
+  tool_call_id?: string;
+  tool_calls?: AiProviderToolCall[];
 }
 
 export interface AiProviderToolCall {
@@ -14,7 +20,16 @@ export interface AiProviderResponseMessage {
 }
 
 export interface AiProviderCompletionPayload {
-  choices?: Array<{ message?: AiProviderResponseMessage }>;
+  id?: string;
+  model?: string;
+  choices?: Array<{ message?: AiProviderResponseMessage; finish_reason?: string | null }>;
+  usage?: {
+    prompt_tokens?: number;
+    completion_tokens?: number;
+    total_tokens?: number;
+    prompt_tokens_details?: { cached_tokens?: number };
+    completion_tokens_details?: { reasoning_tokens?: number };
+  };
   error?: unknown;
 }
 
@@ -25,6 +40,8 @@ export interface AiProviderCompletionOptions {
   apiKey?: string;
   tools?: readonly unknown[];
   toolChoice?: unknown;
+  attempt?: number;
+  fallback?: "no_tools";
   signal?: AbortSignal;
   fetchImpl?: typeof fetch;
 }
@@ -168,24 +185,74 @@ export async function requestAiProviderCompletion(options: AiProviderCompletionO
     payload.tools = options.tools;
     payload.tool_choice = options.toolChoice ?? "auto";
   }
-  let response: Response;
+  const url = new URL(endpoint);
+  const provider = providerName(url.hostname);
+  const started = performance.now();
   try {
-    response = await fetchImpl(endpoint, {
-      method: "POST",
-      headers: {
-        Accept: "application/json",
-        "Content-Type": "application/json",
-        ...(options.apiKey ? { Authorization: `Bearer ${options.apiKey}` } : {}),
-      },
-      body: JSON.stringify(payload),
-      ...(options.signal ? { signal: options.signal } : {}),
-    });
+    const result = await withSpan(`chat ${options.model}`, {
+      "asa.component": "llm",
+      "gen_ai.operation.name": "chat",
+      "gen_ai.provider.name": provider,
+      "gen_ai.request.model": options.model,
+      "asa.llm.attempt": options.attempt ?? 1,
+      "asa.llm.stream": false,
+      ...(options.fallback ? { "asa.llm.fallback": options.fallback } : {}),
+      "peer.service": provider,
+      "server.address": url.hostname,
+      ...(url.port ? { "server.port": Number(url.port) } : {}),
+    }, async (span) => {
+      let response: Response;
+      try {
+        response = await fetchImpl(endpoint, {
+          method: "POST",
+          headers: {
+            Accept: "application/json",
+            "Content-Type": "application/json",
+            ...(options.apiKey ? { Authorization: `Bearer ${options.apiKey}` } : {}),
+          },
+          body: JSON.stringify(payload),
+          ...(options.signal ? { signal: options.signal } : {}),
+        });
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : String(error);
+        throw new AiProviderRequestError(`Provider request failed for ${safeEndpoint(endpoint)}: ${safeSnippet(detail)}`, { endpoint, cause: error });
+      }
+      const parsed = await decodeCompletionResponse(response, endpoint);
+      const choice = parsed.choices![0]!;
+      if (parsed.id) span.setAttribute("gen_ai.response.id", parsed.id);
+      if (parsed.model) span.setAttribute("gen_ai.response.model", parsed.model);
+      if (choice.finish_reason) span.setAttribute("gen_ai.response.finish_reasons", [choice.finish_reason]);
+      const usage = parsed.usage;
+      if (usage?.prompt_tokens !== undefined) span.setAttribute("gen_ai.usage.input_tokens", usage.prompt_tokens);
+      if (usage?.completion_tokens !== undefined) span.setAttribute("gen_ai.usage.output_tokens", usage.completion_tokens);
+      if (usage?.total_tokens !== undefined) span.setAttribute("asa.llm.total_tokens", usage.total_tokens);
+      if (usage?.prompt_tokens_details?.cached_tokens !== undefined) span.setAttribute("asa.llm.cached_input_tokens", usage.prompt_tokens_details.cached_tokens);
+      if (usage?.completion_tokens_details?.reasoning_tokens !== undefined) span.setAttribute("asa.llm.reasoning_tokens", usage.completion_tokens_details.reasoning_tokens);
+      if (usage?.prompt_tokens === undefined && usage?.completion_tokens === undefined) span.setAttribute("asa.llm.usage_missing", true);
+      recordAiUsage({
+        provider,
+        model: options.model,
+        durationSeconds: (performance.now() - started) / 1000,
+        ...(usage?.prompt_tokens === undefined ? {} : { promptTokens: usage.prompt_tokens }),
+        ...(usage?.completion_tokens === undefined ? {} : { completionTokens: usage.completion_tokens }),
+      });
+      return { endpoint, message: choice.message!, payload: parsed };
+    }, { kind: SpanKind.CLIENT });
+    return result;
   } catch (error) {
-    const detail = error instanceof Error ? error.message : String(error);
-    throw new AiProviderRequestError(`Provider request failed for ${safeEndpoint(endpoint)}: ${safeSnippet(detail)}`, { endpoint, cause: error });
+    recordAiUsage({ provider, model: options.model, durationSeconds: (performance.now() - started) / 1000, errorType: classifyError(error) });
+    throw error;
   }
-  const parsed = await decodeCompletionResponse(response, endpoint);
-  return { endpoint, message: parsed.choices![0]!.message!, payload: parsed };
+}
+
+function providerName(hostname: string): string {
+  const host = hostname.toLowerCase();
+  if (host === "api.openai.com" || host.endsWith(".openai.azure.com")) return host.endsWith(".openai.azure.com") ? "azure.ai.openai" : "openai";
+  if (host.includes("deepseek")) return "deepseek";
+  if (host.includes("anthropic")) return "anthropic";
+  if (host.includes("moonshot") || host.includes("kimi")) return "moonshot";
+  if (host.includes("qwen") || host.includes("dashscope")) return "qwen";
+  return "asa-llm-gateway";
 }
 
 export function isAiProviderToolsUnsupported(error: unknown): boolean {

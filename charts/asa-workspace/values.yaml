@@ -148,6 +148,34 @@ dataWarehouse:
   scannerImage: astro-atlas-scanner:0.2.0-20261029-fits-wcs-r2
 
 env: []
+networkProxy:
+  enabled: false
+  url: ""
+  noProxy:
+    - localhost
+    - 127.0.0.1
+    - ::1
+    - .svc
+    - .cluster.local
+telemetry:
+  enabled: false
+  endpoint: http://otel-collector.observability.svc:4318
+  serviceName: asa-workspace
+  cluster: zjlab
+  environment: dev
+  metricExportIntervalMs: 15000
+  captureContent: false
+scanner:
+  enabled: false
+  concurrency: 1
+  pollIntervalMs: 5000
+  resources:
+    requests:
+      cpu: 100m
+      memory: 512Mi
+    limits:
+      cpu: "1"
+      memory: 1536Mi
 resources:
   requests:
     cpu: 100m

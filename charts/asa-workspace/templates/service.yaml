@@ -9,6 +9,7 @@ spec:
   selector:
     app.kubernetes.io/name: {{ include "asa-workspace.name" . }}
     app.kubernetes.io/instance: {{ .Release.Name }}
+    asa-workspace-role: api
   ports:
     - name: http
       port: {{ .Values.service.port }}

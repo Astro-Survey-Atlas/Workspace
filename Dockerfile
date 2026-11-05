@@ -67,7 +67,8 @@ RUN apt-get update \
 COPY --from=moc-core /opt/moc-core /usr/local
 COPY --from=build --chown=astro:astro /app/node_modules ./node_modules
 COPY --from=build --chown=astro:astro /app/dist/src ./dist
-COPY --chown=astro:astro src/sky-point-coordinates.py ./dist/sky-point-coordinates.py
+COPY --chown=astro:astro src/sky-point-coordinates.py src/workflow-catalog-fits.py src/workflow-fits-cutout.py ./dist/
+COPY --from=build --chown=astro:astro /app/packages/cli/package.json ./packages/cli/package.json
 COPY --from=build --chown=astro:astro /app/packages/cli/dist ./packages/cli/dist
 COPY --from=build --chown=astro:astro /app/dist/viewer ./viewer
 

@@ -450,6 +450,46 @@ const productionPanel = new ProductionPanel(
 const systemPanel = new SystemPanel((error) => console.error("System settings UI request failed", error), renderSystemSummary);
 const agentDock = new AgentDock((error) => console.error("Agent UI request failed", error));
 let connectorSelectionRequest: string | null = null;
+type ProductionView = "workflow" | "pipelines";
+let productionView: ProductionView = "workflow";
+
+function renderProductionView(): void {
+  const workflowSelected = productionView === "workflow";
+  byId("workflow-stage").hidden = !workflowSelected;
+  byId("production-stage").hidden = workflowSelected;
+  byId("workflow-run-history-section").hidden = !workflowSelected;
+  byId("production-template-sidebar").hidden = workflowSelected;
+  const workflowButton = byId<HTMLButtonElement>("production-view-workflow");
+  const pipelineButton = byId<HTMLButtonElement>("production-view-pipelines");
+  workflowButton.classList.toggle("active", workflowSelected);
+  pipelineButton.classList.toggle("active", !workflowSelected);
+  workflowButton.setAttribute("aria-pressed", String(workflowSelected));
+  pipelineButton.setAttribute("aria-pressed", String(!workflowSelected));
+}
+
+function selectProductionView(view: ProductionView, activate = true): void {
+  productionView = view;
+  renderProductionView();
+  if (!activate || mode !== "workflow") return;
+  if (view === "workflow") {
+    productionPanel.deactivate();
+    void workflowPanel.activate().catch(showFatal);
+  } else {
+    workflowPanel.deactivate();
+    void productionPanel.activate().catch(showFatal);
+  }
+}
+
+function openProductionPipeline(
+  context: ProductionContext | null,
+  pipelineKey?: string,
+  options?: { showDownloadGuide?: boolean },
+): void {
+  productionPanel.setContext(context, pipelineKey, options);
+  selectProductionView("pipelines", false);
+  void activateMode("workflow").catch(showFatal);
+}
+
 const dataCatalogPanel = new DataCatalogPanel((error) => notifyWorkspaceError(error, "用户资产操作失败"), (connectorId) => {
   connectorSelectionRequest = connectorId;
   void activateMode("connectors").catch(showFatal);
@@ -1308,13 +1348,11 @@ function renderSurveyContextMenu(menu: SkyRegionMenu): void {
   buildCrossmatch.title = buildCrossmatch.disabled ? "需要两个已建立 RA / Dec 对象索引的 catalog 资产" : "构建对象交叉匹配任务";
   buildDownload.onclick = () => {
     closeSkyContextMenu();
-    productionPanel.setContext(context, "overlap-download@1", { showDownloadGuide: true });
-    void activateMode("workflow").catch(showFatal);
+    openProductionPipeline(context, "overlap-download@1", { showDownloadGuide: true });
   };
   buildCrossmatch.onclick = () => {
     closeSkyContextMenu();
-    productionPanel.setContext(context, "object-crossmatch@1");
-    void activateMode("workflow").catch(showFatal);
+    openProductionPipeline(context, "object-crossmatch@1");
   };
 }
 
@@ -1764,7 +1802,7 @@ function renderOverlapComponent(component: SurveyLayerOverlapComponent, focus = 
           return;
         }
         if (!downloadSelection) return;
-        productionPanel.setContext({
+        openProductionPipeline({
           nside,
           pixels: selected.cells,
           sourceIds: publicContextSourceIds,
@@ -1772,7 +1810,6 @@ function renderOverlapComponent(component: SurveyLayerOverlapComponent, focus = 
           downloadSelection,
           ...(downloadScopeNote ? { downloadScopeNote } : {}),
         }, "overlap-download@1", { showDownloadGuide: true });
-        void activateMode("workflow").catch(showFatal);
       },
     );
     const previewIcon = document.createElement("i"); previewIcon.dataset.lucide = "download"; previewDownload.prepend(previewIcon);
@@ -2100,8 +2137,7 @@ function renderSurveySelection(selection: SurveyLayerSelection | null): void {
   clearAction.classList.add("secondary");
    const publicSourceIds = publicExecutableSourceIdsForRegion(selection.nside, selection.pixels, selectedSurveyIds, selectionPublicReleaseIds(selection));
    const buildAction = actionButton("交给数据生产", () => {
-     productionPanel.setContext({ nside: selection.nside, pixels: selection.pixels, sourceIds: publicSourceIds, assetIds: selection.assetIds }, "overlap-download@1", { showDownloadGuide: true });
-     void activateMode("workflow").catch(showFatal);
+     openProductionPipeline({ nside: selection.nside, pixels: selection.pixels, sourceIds: publicSourceIds, assetIds: selection.assetIds }, "overlap-download@1", { showDownloadGuide: true });
    });
    buildAction.disabled = publicSourceIds.length === 0;
    buildAction.title = buildAction.disabled
@@ -2481,8 +2517,7 @@ function renderSurveyInspection(inspection: SurveyLayerInspection | null): void 
     ? "当前覆盖只有几何证据，没有具体 sourceId/layerId 可供下载"
     : "把当前数据覆盖区块交给数据生产工作台";
   prepare.addEventListener("click", () => {
-    productionPanel.setContext({ nside: inspection.nside, pixels: [inspection.pixel], sourceIds: publicSourceIds, assetIds: inspection.assetIds }, "overlap-download@1", { showDownloadGuide: true });
-    void activateMode("workflow").catch(showFatal);
+    openProductionPipeline({ nside: inspection.nside, pixels: [inspection.pixel], sourceIds: publicSourceIds, assetIds: inspection.assetIds }, "overlap-download@1", { showDownloadGuide: true });
   });
   nextStep.append(nextCopy, prepare);
   const workspaceSection = renderWorkspaceDataSection(workspaceSummaryForPixel(inspection.pixel, inspection.assetIds));
@@ -4180,11 +4215,12 @@ async function activateMode(nextMode: ViewMode): Promise<void> {
   byId("resource-package-stage").hidden = mode !== "packages";
   byId("connector-stage").hidden = mode !== "connectors";
   byId("scene-stage").hidden = mode === "workflow" || mode === "system" || mode === "catalog" || mode === "connectors" || mode === "packages";
+  byId("data-production-workbench").hidden = mode !== "workflow";
   sceneBackgroundPopover.hidden = true;
   byId("aladin-explorer").hidden = true;
   byId("aladin-controls").hidden = true;
   byId("workflow-stage").hidden = true;
-  byId("production-stage").hidden = mode !== "workflow";
+  byId("production-stage").hidden = true;
   byId("system-stage").hidden = mode !== "system";
   document.querySelectorAll<HTMLElement>(".scene-action").forEach((element) => { element.hidden = mode === "workflow" || mode === "system" || mode === "catalog" || mode === "connectors" || mode === "packages"; });
   byId("scene-legend").hidden = false;
@@ -4280,26 +4316,46 @@ async function activateMode(nextMode: ViewMode): Promise<void> {
     return;
   }
   if (mode === "workflow") {
-    workflowPanel.deactivate();
+    renderProductionView();
     systemPanel.deactivate();
-    byId("inspector-kicker").textContent = "PIPELINE INSPECTOR";
     byId("panel-kicker").textContent = "DATA PRODUCTION";
     byId("panel-dataset-name").textContent = "数据生产";
-    byId("dataset-state").textContent = "多流水线任务与产物已载入";
-    byId("metric-one-label").textContent = "PIPELINES";
-    byId("metric-one").textContent = "3";
-    byId("metric-two-label").textContent = "RUNS";
-    byId("metric-two").textContent = "--";
-    byId("metric-three-label").textContent = "QUEUED";
-    byId("metric-three").textContent = "--";
-    byId("metric-four-label").textContent = "ARTIFACTS";
-    byId("metric-four").textContent = "--";
-    byId("metric-five-label").textContent = "EXECUTORS";
-    byId("metric-five").textContent = "HTTP + MCP";
-    byId("render-status").textContent = "PRODUCTION RUNS";
-    byId("object-status").textContent = "NO ACTIVE RUN";
     loadingIndicator.classList.remove("visible");
-    await productionPanel.activate();
+    if (productionView === "workflow") {
+      productionPanel.deactivate();
+      byId("inspector-kicker").textContent = "WORKFLOW RUN";
+      byId("dataset-state").textContent = "星表 Workflow 与人工筛选记录";
+      byId("metric-one-label").textContent = "STEPS";
+      byId("metric-one").textContent = "--";
+      byId("metric-two-label").textContent = "EUCLID ROWS";
+      byId("metric-two").textContent = "--";
+      byId("metric-three-label").textContent = "CANDIDATES";
+      byId("metric-three").textContent = "--";
+      byId("metric-four-label").textContent = "DESI ROWS";
+      byId("metric-four").textContent = "--";
+      byId("metric-five-label").textContent = "ARTIFACTS";
+      byId("metric-five").textContent = "--";
+      byId("render-status").textContent = "WORKFLOW RUNS";
+      byId("object-status").textContent = "SELECT A RUN";
+      await workflowPanel.activate();
+    } else {
+      workflowPanel.deactivate();
+      byId("inspector-kicker").textContent = "PIPELINE INSPECTOR";
+      byId("dataset-state").textContent = "多流水线任务与产物已载入";
+      byId("metric-one-label").textContent = "PIPELINES";
+      byId("metric-one").textContent = "3";
+      byId("metric-two-label").textContent = "RUNS";
+      byId("metric-two").textContent = "--";
+      byId("metric-three-label").textContent = "QUEUED";
+      byId("metric-three").textContent = "--";
+      byId("metric-four-label").textContent = "ARTIFACTS";
+      byId("metric-four").textContent = "--";
+      byId("metric-five-label").textContent = "EXECUTORS";
+      byId("metric-five").textContent = "HTTP + MCP";
+      byId("render-status").textContent = "PRODUCTION RUNS";
+      byId("object-status").textContent = "NO ACTIVE RUN";
+      await productionPanel.activate();
+    }
     if (window.innerWidth <= 1040) byId("inspector-panel").classList.add("mobile-open");
     return;
   }
@@ -4363,9 +4419,12 @@ async function activateMode(nextMode: ViewMode): Promise<void> {
 
 document.querySelectorAll<HTMLButtonElement>("[data-mode]").forEach((button) => {
   button.addEventListener("click", () => {
+    if (button.dataset.mode === "workflow") selectProductionView("workflow", false);
     void activateMode(button.dataset.mode as ViewMode).catch(showFatal);
   });
 });
+byId<HTMLButtonElement>("production-view-workflow").addEventListener("click", () => selectProductionView("workflow"));
+byId<HTMLButtonElement>("production-view-pipelines").addEventListener("click", () => selectProductionView("pipelines"));
 
 function setupStatusHelp(): void {
   const openEntries = new Map<HTMLButtonElement, HTMLElement>();
@@ -4541,7 +4600,12 @@ window.addEventListener("astro:navigate", (event) => {
   const nextMode = detail?.mode;
   if (nextMode === "layers") void activateMode(nextMode).catch(showFatal);
   if (nextMode === "workflow") {
-    productionPanel.setContext(detail.productionContext ?? null, detail.productionPipeline, { showDownloadGuide: detail.showDownloadGuide });
+    if (detail.productionContext || detail.productionPipeline) {
+      productionPanel.setContext(detail.productionContext ?? null, detail.productionPipeline, { showDownloadGuide: detail.showDownloadGuide });
+      selectProductionView("pipelines", false);
+    } else {
+      selectProductionView("workflow", false);
+    }
     void activateMode(nextMode).catch(showFatal);
   }
   if (nextMode === "system") void activateMode(nextMode).catch(showFatal);

@@ -16,6 +16,8 @@ export class AgentDock {
   private attachedContext: AgentDockContext | undefined;
   private initialized = false;
   private sending = false;
+  private pollTimer: number | undefined;
+  private pollSessionId: string | undefined;
 
   constructor(private readonly onError: (error: unknown) => void) {
     byId<HTMLFormElement>("agent-collapsed-form").addEventListener("submit", (event) => { event.preventDefault(); const input = byId<HTMLInputElement>("agent-collapsed-input"); void this.send(input.value, input).catch((error) => this.fail(error)); });
@@ -77,7 +79,7 @@ export class AgentDock {
     } finally { this.sending = false; this.renderSending(false); }
   }
 
-  private renderSending(sending: boolean): void { byId<HTMLInputElement>("agent-collapsed-input").disabled = sending; }
+  private renderSending(sending: boolean): void { byId<HTMLInputElement>("agent-collapsed-input").disabled = sending || this.session?.status === "running"; }
 
   private render(): void {
     if (!this.session) return;
@@ -86,6 +88,13 @@ export class AgentDock {
     select.value = this.session.id;
     const messages = byId("agent-messages");
     messages.replaceChildren(...this.session.messages.filter((message) => message.role !== "system").map((message) => this.renderMessage(message)));
+    if (this.session.status === "running") {
+      const latest = this.session.events?.at(-1);
+      const activity = document.createElement("article"); activity.className = "agent-message tool";
+      const label = document.createElement("span"); label.textContent = "RUNNING";
+      const copy = document.createElement("p"); copy.textContent = latest?.message ?? "正在处理";
+      activity.append(label, copy); messages.append(activity);
+    }
     messages.scrollTop = messages.scrollHeight;
     const confirmation = byId("agent-confirmation");
     confirmation.hidden = !this.session.pendingTool;
@@ -97,6 +106,8 @@ export class AgentDock {
       confirmation.append(copy, approve, reject);
     }
     this.renderAttachmentState();
+    this.renderSending(this.sending);
+    this.syncPolling();
   }
 
   private renderMessage(message: WorkspaceAgentMessage): HTMLElement {
@@ -113,5 +124,27 @@ export class AgentDock {
   }
 
   private async confirm(approved: boolean): Promise<void> { if (!this.session) return; try { this.session = await workspaceApi.confirmWorkspaceAgentTool(this.session.id, approved); this.sessions = this.sessions.map((session) => session.id === this.session?.id ? this.session! : session); this.render(); } catch (error) { this.fail(error); } }
+
+  private syncPolling(): void {
+    const id = this.session?.id;
+    if (!id || this.session?.status !== "running") {
+      if (this.pollTimer !== undefined) window.clearTimeout(this.pollTimer);
+      this.pollTimer = undefined;
+      this.pollSessionId = undefined;
+      return;
+    }
+    if (this.pollTimer !== undefined && this.pollSessionId === id) return;
+    if (this.pollTimer !== undefined) window.clearTimeout(this.pollTimer);
+    this.pollSessionId = id;
+    this.pollTimer = window.setTimeout(() => {
+      this.pollTimer = undefined;
+      void workspaceApi.workspaceAgentSession(id).then((session) => {
+        this.sessions = this.sessions.map((candidate) => candidate.id === id ? session : candidate);
+        if (this.session?.id === id) this.session = session;
+        this.render();
+      }).catch((error) => this.fail(error));
+    }, 900);
+  }
+
   private fail(error: unknown): void { const message = error instanceof Error ? error.message : String(error); notifyWorkspace("Agent 操作失败", message, { tone: "error" }); this.onError(error); }
 }

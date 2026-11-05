@@ -10,6 +10,8 @@ import type { LocalConnectorRootsPolicy } from "./local-connector-roots.js";
 import { scanLocalCsv, type LocalCsvScanLimits, type LocalScanDocument } from "./local-scan.js";
 import { defaultMocCoreAdapter, type MocCoreAdapter } from "./moc-core-adapter.js";
 import type { UserMocArtifactContext, UserMocArtifactStore } from "./user-moc-artifacts.js";
+import { SpanStatusCode } from "@opentelemetry/api";
+import { activeTraceparent, recordScan, withContinuedSpan } from "./telemetry.js";
 
 export const LOCAL_CSV_SCAN_EXECUTOR = "local-csv";
 
@@ -94,6 +96,7 @@ interface PreparedLocalScan {
   product: string;
   modality: string;
   maxRows?: number;
+  traceparent?: string;
 }
 
 function optionalLimit(value: unknown, name: string): number | undefined {
@@ -291,6 +294,7 @@ export class LocalCsvScanExecutor {
       product,
       modality,
       maxRows: effectiveMaxRows,
+      ...(activeTraceparent() ? { traceparent: activeTraceparent() } : {}),
     });
     return created.run;
   }
@@ -417,6 +421,31 @@ export class LocalCsvScanExecutor {
   }
 
   async #execute(scan: PreparedLocalScan): Promise<ConnectorIngestRunRecord> {
+    const startedAt = performance.now();
+    return withContinuedSpan("scan.run", {
+      "asa.component": "scan",
+      "asa.scan.run_id": scan.run.id,
+      "asa.scan.kind": "local",
+      "asa.scan.files": 1,
+      "asa.scan.bytes": scan.file.size,
+    }, async (span) => {
+      const result = await this.#executeScan(scan);
+      const peakRssBytes = process.memoryUsage().rss;
+      span.setAttribute("asa.scan.peak_rss_bytes", peakRssBytes);
+      span.setAttribute("asa.scan.duration_seconds", (performance.now() - startedAt) / 1000);
+      span.setAttribute("asa.scan.outcome", result.status === "succeeded" ? "ok" : "error");
+      if (result.status !== "succeeded") span.setStatus({ code: SpanStatusCode.ERROR });
+      recordScan("local", {
+        accepted: result.status === "succeeded" ? 1 : 0,
+        failed: result.status === "succeeded" ? 0 : 1,
+        bytes: scan.file.size,
+        peakRssBytes,
+      });
+      return result;
+    }, scan.traceparent);
+  }
+
+  async #executeScan(scan: PreparedLocalScan): Promise<ConnectorIngestRunRecord> {
     const scanSpec = scan.asset.scanSpec;
     if (!scanSpec || scanSpec.format !== "csv") throw new LocalScanPreconditionError("CSV scan requires a CSV scanSpec");
     const baseArtifactContext: UserMocArtifactContext = {

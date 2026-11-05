@@ -1,4 +1,5 @@
-﻿import path from "node:path";
+﻿import "./telemetry-bootstrap.js";
+import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { createReadStream } from "node:fs";
 import { once } from "node:events";
@@ -16,8 +17,9 @@ import { AstroIndexService, ASTRO_FILE_INDEX, ASTRO_OVERVIEW_NSIDE, type AstroCo
 import { DerivedRepairService, imagePointsContainingCoordinate, SKY_DATA_POINT_INDEX } from "./derived-repairs.js";
 import { angularSeparationArcsec, AstroObjectIndexService, coordinateInHealpixRegion, coordinateSearchBbox, type AstroCellsQueryInput, type AstroObjectRecord, type AstroPointDensityQueryInput, type ObjectRegionQueryInput, type SkyDataPointScope } from "./astro-object-index.js";
 import { McpCatalogQueryClient } from "./catalog-mcp-client.js";
+import { CatalogQueryFallbackClient, OfficialArchiveCatalogQueryClient } from "./official-catalog-client.js";
 import { createConnectorCredentialStore, type StoredConnectorCredentials } from "./connector-credentials.js";
-import { ConnectorRegistry, connectorLocationKey, validateConnectorInput, type ConnectorCheckInput, type ConnectorPublicRecord, type ConnectorRecord, type ConnectorRegistrationInput } from "./connectors.js";
+import { ConnectorRegistry, connectorLocationKey, iterateConnectorObjectPages, validateConnectorInput, type ConnectorCheckInput, type ConnectorPublicRecord, type ConnectorRecord, type ConnectorRegistrationInput } from "./connectors.js";
 import { ConnectorIngestRunCatalog, publicConnectorIngestRun, type ConnectorIngestRunFilter, type ConnectorIngestRunRecord, type ConnectorIngestRunStatus } from "./connector-history.js";
 import { WarehouseScanQueue } from "./warehouse-scan-queue.js";
 import { DataStatisticsClient } from "./data-statistics-client.js";
@@ -33,7 +35,11 @@ import { normalizeSurveyFootprintManifest, type SurveyFootprintManifest } from "
 import { surveyCardFor, SurveyRegistry, type SurveyRecord, type SurveyRegistrationInput, type SurveyReleaseRegistrationInput } from "./survey-registry.js";
 import { isConcretePublicSourceId, parsePublicSourceId, publicGeometrySourceIdForFootprint, publicSourceIdForFootprint, publicSourceIdentityForFootprint } from "./public-source-identity.js";
 import { WorkflowEngine } from "./workflow-engine.js";
+import { WorkflowMcpClient } from "./workflow-mcp-client.js";
+import { WorkspaceFitsCutoutService } from "./workflow-fits-cutout.js";
+import { WorkflowInputCatalogReader } from "./workflow-input-catalog.js";
 import { WorkflowStore } from "./workflow-store.js";
+import { workflowRunListItems } from "./workflow.js";
 import { listTags } from "./tags.js";
 import { createMetadataStore, importJsonState } from "./storage/index.js";
 import { SurveyDirectory } from "./survey-directory.js";
@@ -57,12 +63,20 @@ import { SystemConfigStore } from "./system-config.js";
 import type { DownloadSettingsInput } from "./system-config.js";
 import { DownloadWorkerClient } from "./download-worker-client.js";
 import { WorkspaceAgentService } from "./workspace-agent.js";
+import { resolveWorkspaceCli } from "./workspace-cli.js";
+import { shutdownTelemetry, withRootSpan, withSpan } from "./telemetry.js";
 import { AssetsCoverageOverviewClient, AssetsRegionClient, AssetsRegionRateLimitError, assetsLayerIdForIdentity, type AssetsRegionCoverageEvidence, type AssetsRegionFileEvidence, type AssetsRegionLookupSummary, type AssetsRegionScanScope, type AssetsRegionLookupResponse } from "./assets-region-client.js";
 import { regionContainsCell, WorkspaceDirectoryCollector, type WorkspaceDirectory, type WorkspaceFileLocation } from "./workspace-directories.js";
 
 const projectRoot = fileURLToPath(new URL("../", import.meta.url));
 const port = Number(process.env.PORT ?? "3000");
 const host = process.env.HOST ?? "0.0.0.0";
+const processRole = process.env.ASTRO_PROCESS_ROLE ?? "combined";
+if (!["combined", "api", "scanner"].includes(processRole)) throw new RangeError("ASTRO_PROCESS_ROLE must be combined, api, or scanner");
+const workspaceScanPollMs = Number(process.env.ASTRO_WORKSPACE_SCAN_POLL_MS ?? "5000");
+if (!Number.isSafeInteger(workspaceScanPollMs) || workspaceScanPollMs < 1000 || workspaceScanPollMs > 300_000) {
+  throw new RangeError("ASTRO_WORKSPACE_SCAN_POLL_MS must be between 1000 and 300000 milliseconds");
+}
 const stateRoot = path.resolve(process.env.ASTRO_STATE_ROOT
   ?? (process.env.ASTRO_SQLITE_PATH ? path.dirname(process.env.ASTRO_SQLITE_PATH) : path.join(projectRoot, "data")));
 const allowedHosts = (
@@ -74,6 +88,7 @@ const allowedHosts = (
   .filter(Boolean);
 const viewerRoot = process.env.ASTRO_VIEWER_ROOT ?? path.join(projectRoot, "viewer");
 const workflowRoot = process.env.ASTRO_WORKFLOW_ROOT ?? path.join(stateRoot, "workflow-runs");
+const workspaceCli = resolveWorkspaceCli(projectRoot);
 const productionRoot = process.env.ASTRO_PRODUCTION_ROOT ?? path.join(stateRoot, "production");
 const systemConfigRoot = process.env.ASTRO_SYSTEM_CONFIG_ROOT ?? path.join(stateRoot, "system-config");
 const surveyRegistryStatePath = process.env.ASTRO_SURVEY_REGISTRY_STATE ?? path.join(stateRoot, "survey-registrations.json");
@@ -93,6 +108,7 @@ const resourceCatalogAllowedOrigins = (process.env.ASTRO_RESOURCE_CATALOG_ALLOWE
   .filter(Boolean);
 const catalogMcpUrl = process.env.ASTRO_CATALOG_MCP_URL ?? "http://eva24002-entrance.lab.zverse.space:30082/mcp";
 const catalogMcpTimeoutMs = Number(process.env.ASTRO_CATALOG_MCP_TIMEOUT_MS ?? "15000");
+const catalogArchiveTimeoutMs = Number(process.env.ASTRO_CATALOG_ARCHIVE_TIMEOUT_MS ?? "30000");
 const warehouseNamespace = process.env.ASTRO_WAREHOUSE_NAMESPACE ?? process.env.POD_NAMESPACE ?? "asa-workspace";
 const warehousePollMs = Number(process.env.ASTRO_WAREHOUSE_POLL_MS ?? "5000");
 const astroEsUrl = process.env.ASTRO_ES_URL ?? "";
@@ -135,6 +151,8 @@ const localCsvScans = new LocalCsvScanExecutor({
 });
 const workspaceScans = new WorkspaceScanExecutor({
   enabled: workspaceScanningEnabled,
+  workerEnabled: processRole !== "api",
+  maxConcurrency: Number(process.env.ASTRO_WORKSPACE_SCAN_CONCURRENCY ?? "1"),
   root: path.join(stateRoot, "workspace-scans"),
   connectors,
   credentials: connectorCredentials,
@@ -261,6 +279,14 @@ const productionService = new ProductionService({
   ...(warehouseScans.enabled && warehouseIndex.configured ? { warehouseHandoff: warehouseProductionHandoff } : {}),
 });
 const systemConfig = new SystemConfigStore(systemConfigRoot);
+const workflowMcp = new WorkflowMcpClient(systemConfig);
+const workflowFitsCutout = new WorkspaceFitsCutoutService({
+  store: workflowStore,
+  connectors,
+  credentials: connectorCredentials,
+  localRoots: localConnectorRoots,
+  mcp: workflowMcp,
+});
 const assetsRegionClient = new AssetsRegionClient({
   catalogUrl: resourceCatalogUrl,
   getApiKey: () => systemConfig.getAssetsApiKey(),
@@ -270,7 +296,13 @@ const assetsCoverageOverviewClient = new AssetsCoverageOverviewClient({
   catalogUrl: resourceCatalogUrl,
   getApiKey: () => systemConfig.getAssetsApiKey(),
 });
-const workspaceAgent = new WorkspaceAgentService({ root: path.join(stateRoot, "agent"), config: systemConfig, dataCatalog, connectors, production: productionService });
+const workspaceAgent = new WorkspaceAgentService({
+  root: path.join(stateRoot, "agent"),
+  config: systemConfig,
+  cliPath: workspaceCli.entryPath,
+  cliNodeArgs: workspaceCli.nodeArgs,
+  cliBaseUrl: `http://127.0.0.1:${port}`,
+});
 const configBackup = new WorkspaceConfigBackupService({ root: systemConfigRoot, store: metadataStore, credentials: connectorCredentials,
   roots: localConnectorRoots, systemConfig, installation, resourcePackages, surveys, isBusy: async () => {
     if (dataStatistics.busy) return "数据统计刷新";
@@ -280,9 +312,27 @@ const configBackup = new WorkspaceConfigBackupService({ root: systemConfigRoot, 
     if ((await derivedRepairs.list()).some(task => task.status === "queued" || task.status === "running")) return "派生数据任务";
     return undefined;
   } });
-const workflowEngine = new WorkflowEngine(workflowStore, new McpCatalogQueryClient(catalogMcpUrl, catalogMcpTimeoutMs, 1));
+const workflowEngine = new WorkflowEngine(
+  workflowStore,
+  new CatalogQueryFallbackClient(
+    new McpCatalogQueryClient(catalogMcpUrl, catalogMcpTimeoutMs, 1),
+    new OfficialArchiveCatalogQueryClient(catalogArchiveTimeoutMs),
+  ),
+  workflowMcp,
+  new WorkflowInputCatalogReader({ assets: dataCatalog, connectors, credentials: connectorCredentials, localRoots: localConnectorRoots }),
+  workflowFitsCutout,
+);
 const agentService = new AgentService(workflowStore, workflowEngine);
 const app = createMcpExpressApp({ host, allowedHosts });
+if (processRole === "scanner") {
+  app.use((request, response, next) => {
+    if (request.method === "GET" && request.path === "/healthz") {
+      next();
+      return;
+    }
+    response.sendStatus(404);
+  });
+}
 
 function configBackupPassword(request: Request): string {
   const value = request.get("X-Backup-Password");
@@ -432,7 +482,7 @@ async function publicConnector(record: ConnectorRecord): Promise<ConnectorPublic
   const { credentialRef: _credentialRef, ...visible } = record;
   return {
     ...visible,
-    credentials: { accessKeyId: stored?.accessKeyId ?? "", secretConfigured: Boolean(stored?.secretAccessKey) },
+    credentials: { accessKeyConfigured: Boolean(stored?.accessKeyId), secretConfigured: Boolean(stored?.secretAccessKey) },
   };
 }
 
@@ -446,7 +496,13 @@ function credentialText(value: unknown, label: string, maximum: number, required
 function resolvedS3Credentials(input: ConnectorRegistrationInput, existing?: StoredConnectorCredentials): StoredConnectorCredentials {
   const accessKeyId = credentialText(input.credentials?.accessKeyId, "Access Key", 512, !existing?.accessKeyId) || existing?.accessKeyId || "";
   const secretAccessKey = credentialText(input.credentials?.secretAccessKey, "Secret Key", 2048, !existing?.secretAccessKey) || existing?.secretAccessKey || "";
-  return { accessKeyId, secretAccessKey, endpoint: credentialText(input.config?.endpoint, "Endpoint", 2048, false) || existing?.endpoint || "" };
+  const sessionToken = credentialText(input.credentials?.sessionToken, "Session Token", 4096, false) || existing?.sessionToken;
+  return {
+    accessKeyId,
+    secretAccessKey,
+    endpoint: credentialText(input.config?.endpoint, "Endpoint", 2048, false) || existing?.endpoint || "",
+    ...(sessionToken ? { sessionToken } : {}),
+  };
 }
 
 function internalConnectorInput(input: ConnectorRegistrationInput, credentialRef?: string): ConnectorRegistrationInput {
@@ -825,6 +881,42 @@ app.get("/api/connectors", async (_request: Request, response: Response) => {
 app.get("/api/connectors/local-roots", async (_request: Request, response: Response) => {
   try {
     response.json(localConnectorRootsResponse(await connectors.listLocalRoots()));
+  } catch (error) {
+    sendApiError(response, error);
+  }
+});
+
+app.get("/api/connectors/:id/objects", async (request: Request, response: Response) => {
+  try {
+    const connector = await connectors.get(datasetIdFrom(request));
+    if (connector.kind !== "s3") throw new RangeError("Object listing requires an S3/OSS Connector");
+    if (connector.status !== "ready") throw new RangeError("Connector must be ready before listing objects");
+
+    const configuredPrefix = (connector.config.prefix ?? "").replace(/^\/+|\/+$/g, "");
+    const queryPrefix = request.query.prefix;
+    if (queryPrefix !== undefined && typeof queryPrefix !== "string") throw new RangeError("prefix must be a string");
+    const selectedPrefix = typeof queryPrefix === "string" ? queryPrefix.trim().replace(/^\/+|\/+$/g, "") : configuredPrefix;
+    if (selectedPrefix.split("/").some((segment) => segment === "." || segment === "..") || selectedPrefix.includes("\\") || selectedPrefix.includes("\u0000")) {
+      throw new RangeError("prefix contains an invalid path segment");
+    }
+    if (configuredPrefix && selectedPrefix !== configuredPrefix && !selectedPrefix.startsWith(`${configuredPrefix}/`)) {
+      throw new RangeError("prefix must stay inside the Connector's configured Prefix");
+    }
+
+    const rawToken = request.query.continuationToken;
+    if (rawToken !== undefined && (typeof rawToken !== "string" || rawToken.length > 8192)) throw new RangeError("continuationToken must be a string of at most 8192 characters");
+    if (!connector.credentialRef) throw new RangeError("S3 Connector has no saved credentials");
+    const credentials = await connectorCredentials.get(connector.credentialRef);
+    if (!credentials?.accessKeyId || !credentials.secretAccessKey) throw new RangeError("S3 Connector credentials are unavailable");
+    const source: ConnectorRecord = { ...connector, config: { ...connector.config, endpoint: connector.config.endpoint || credentials.endpoint } };
+    const pages = iterateConnectorObjectPages(source, credentials, selectedPrefix, typeof rawToken === "string" ? rawToken : undefined);
+    try {
+      const page = await pages.next();
+      response.set("Cache-Control", "no-store");
+      response.json({ objects: page.value?.objects ?? [], ...(page.value?.continuationToken ? { continuationToken: page.value.continuationToken } : {}) });
+    } finally {
+      await pages.return(undefined);
+    }
   } catch (error) {
     sendApiError(response, error);
   }
@@ -2769,6 +2861,13 @@ app.post("/api/system-config/mcp-servers/:id/test", async (request: Request, res
   catch (error) { sendApiError(response, error); }
 });
 
+app.post("/api/system-config/mcp-servers/:id/tools/:toolName/call", async (request: Request, response: Response) => {
+  try {
+    const body = request.body as { arguments?: unknown } | null;
+    response.json({ result: await systemConfig.callMcpTool(datasetIdFrom(request), String(request.params.toolName ?? ""), body?.arguments ?? {}) });
+  } catch (error) { sendApiError(response, error); }
+});
+
 app.delete("/api/system-config/mcp-servers/:id", async (request: Request, response: Response) => {
   try { await systemConfig.removeMcpServer(datasetIdFrom(request)); response.status(204).end(); }
   catch (error) { sendApiError(response, error); }
@@ -2795,7 +2894,32 @@ app.post("/api/workflow-runs", async (request: Request, response: Response) => {
     const body = request.body as { workflowId?: unknown; input?: unknown };
     const workflowId = String(body?.workflowId ?? "");
     if (!workflowId) throw new RangeError("workflowId is required");
-    response.status(202).json({ run: await workflowEngine.createRun(workflowId, body.input) });
+    response.status(202).json({ run: await workflowEngine.createRun(workflowId, body.input, request.get("X-ASA-Agent-Invocation") === "true") });
+  } catch (error) {
+    sendApiError(response, error);
+  }
+});
+
+app.get("/api/workflow-runs", async (request: Request, response: Response) => {
+  try {
+    const rawLimit = request.query.limit;
+    const limitText = typeof rawLimit === "string" ? rawLimit : undefined;
+    if (rawLimit !== undefined && (!limitText || !/^\d+$/.test(limitText))) {
+      throw new RangeError("limit must be an integer between 1 and 100");
+    }
+    const limit = limitText === undefined ? 20 : Number(limitText);
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) {
+      throw new RangeError("limit must be an integer between 1 and 100");
+    }
+    const rawWorkflowKey = request.query.workflowKey;
+    if (rawWorkflowKey !== undefined && typeof rawWorkflowKey !== "string") {
+      throw new RangeError("workflowKey must be a string");
+    }
+    const runs = workflowRunListItems(await workflowStore.list(), {
+      limit,
+      ...(typeof rawWorkflowKey === "string" ? { workflowKey: rawWorkflowKey } : {}),
+    });
+    response.set("Cache-Control", "private, no-store").json({ runs });
   } catch (error) {
     sendApiError(response, error);
   }
@@ -2828,7 +2952,7 @@ app.get("/api/workflow-runs/:id/artifacts/:name", async (request: Request, respo
       "Content-Length": String(artifact.byteLength),
       "Cache-Control": "private, no-store",
       "X-Content-Type-Options": "nosniff",
-      "Content-Disposition": `${artifact.mediaType.startsWith("text/csv") ? "attachment" : "inline"}; filename="${artifact.name}"`,
+      "Content-Disposition": `${artifact.mediaType.startsWith("text/csv") || artifact.mediaType === "application/fits" ? "attachment" : "inline"}; filename="${artifact.name}"`,
     });
     response.sendFile(filePath);
   } catch (error) {
@@ -2884,13 +3008,49 @@ app.post("/api/agent/workspace-sessions/:id/confirm", async (request: Request, r
   } catch (error) { sendApiError(response, error); }
 });
 
+const workspaceMcpToolNames = new Set([
+  "list_user_assets",
+  "get_user_asset",
+  "euclid_catalog_query",
+  "desi_catalog_query",
+  "execute_cutout_group",
+]);
+const serviceRootMcpToolNames = new Set([
+  "euclid_catalog_query",
+  "desi_catalog_query",
+  "execute_cutout_group",
+]);
+
+function mcpToolCallName(body: unknown): string | undefined {
+  if (!body || typeof body !== "object" || Array.isArray(body)) return undefined;
+  const request = body as { method?: unknown; params?: unknown };
+  if (request.method !== "tools/call") return undefined;
+  const params = request.params && typeof request.params === "object" && !Array.isArray(request.params)
+    ? request.params as { name?: unknown }
+    : undefined;
+  const name = typeof params?.name === "string" ? params.name : "";
+  return workspaceMcpToolNames.has(name) ? name : "other";
+}
+
 app.post("/mcp", async (request: Request, response: Response) => {
-  const server = createAstroMcpServer(dataCatalog);
+  const server = createAstroMcpServer(dataCatalog, {
+    queryCatalog: (side, input) => workflowEngine.queryCatalogForMcp(side, input),
+    executeCutoutGroup: (input) => workflowFitsCutout.executeGroup(input),
+  });
   const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
 
   try {
     await server.connect(transport);
-    await transport.handleRequest(request, response, request.body);
+    const toolName = mcpToolCallName(request.body);
+    if (toolName && !serviceRootMcpToolNames.has(toolName)) {
+      await withRootSpan(`mcp.server.tool ${toolName}`, {
+        "asa.component": "other",
+        "gen_ai.tool.name": toolName,
+        "mcp.method.name": "tools/call",
+      }, async () => transport.handleRequest(request, response, request.body));
+    } else {
+      await transport.handleRequest(request, response, request.body);
+    }
   } catch (error) {
     console.error("MCP request failed", error);
     if (!response.headersSent) {
@@ -2937,23 +3097,38 @@ async function start(): Promise<void> {
   await connectorRuns.initialize();
   await dataStatistics.initialize();
   await systemConfig.initialize();
-  await coverageDownloads.initialize();
-  await productionService.initialize();
-  if (downloadWorker) {
+  if (processRole !== "scanner") {
+    await coverageDownloads.initialize();
+    await productionService.initialize();
+  }
+  if (downloadWorker && processRole !== "scanner") {
     await configureDownloadWorker().catch(() => undefined);
     setInterval(() => void configureDownloadWorker().catch(() => undefined), 30_000).unref();
   }
   await installation.initialize();
-  await workspaceAgent.initialize();
-  await resourcePackages.initialize();
-  await configBackup.initialize();
-  const recoveredLocalScans = await localCsvScans.recoverInterruptedRuns();
-  if (recoveredLocalScans) console.warn(`Marked ${recoveredLocalScans} interrupted local CSV scan(s) as failed`);
-  const recoveredWorkspaceScans = await workspaceScans.recoverInterruptedRuns();
-  if (recoveredWorkspaceScans) console.info(`Resumed ${recoveredWorkspaceScans} interrupted Workspace scan(s)`);
-  warehouseScans.start();
-  await warehouseQueue.initialize();
-  if (warehouseEnabled) derivedRepairs.start();
+  if (processRole !== "scanner") {
+    await workspaceAgent.initialize();
+    await resourcePackages.initialize();
+    await configBackup.initialize();
+  }
+  if (processRole !== "scanner") {
+    const recoveredLocalScans = await localCsvScans.recoverInterruptedRuns();
+    if (recoveredLocalScans) console.warn(`Marked ${recoveredLocalScans} interrupted local CSV scan(s) as failed`);
+  }
+  if (processRole !== "api") {
+    const recoveredWorkspaceScans = await workspaceScans.recoverInterruptedRuns();
+    if (recoveredWorkspaceScans) console.info(`Resumed ${recoveredWorkspaceScans} interrupted Workspace scan(s)`);
+  }
+  if (processRole !== "scanner") {
+    warehouseScans.start();
+    await warehouseQueue.initialize();
+    if (warehouseEnabled) derivedRepairs.start();
+  } else {
+    setInterval(() => void workspaceScans.recoverInterruptedRuns().catch((error) => {
+      console.warn("Unable to poll queued Workspace scans", error instanceof Error ? error.message : error);
+    }), workspaceScanPollMs).unref();
+  }
+  if (processRole !== "scanner") await workflowEngine.restorePendingGates();
 
   httpServer = app.listen(port, host, () => {
     console.log(`asa-workspace listening on http://${host}:${port}`);
@@ -2963,16 +3138,20 @@ async function start(): Promise<void> {
 void start().catch(async (error) => {
   console.error("Failed to start asa-workspace", error);
   await metadataStore.close().catch(() => undefined);
+  await shutdownTelemetry().catch(() => undefined);
   process.exit(1);
 });
 
 async function shutdown(): Promise<void> {
-  warehouseScans.stop();
-  warehouseQueue.stop();
-  derivedRepairs.stop();
+  if (processRole !== "scanner") {
+    warehouseScans.stop();
+    warehouseQueue.stop();
+    derivedRepairs.stop();
+  }
   await dataStatistics.close();
   if (httpServer) await new Promise<void>((resolve) => httpServer!.close(() => resolve()));
   await metadataStore.close();
+  await shutdownTelemetry();
   process.exit(0);
 }
 

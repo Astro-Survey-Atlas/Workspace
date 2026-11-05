@@ -1,0 +1,211 @@
+{{- if .Values.scanner.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "asa-workspace.fullname" . }}-scanner
+  labels:
+    {{- include "asa-workspace.labels" . | nindent 4 }}
+    asa-workspace-role: scanner
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "asa-workspace.name" . }}-scanner
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: {{ include "asa-workspace.name" . }}-scanner
+        app.kubernetes.io/instance: {{ .Release.Name }}
+        app.kubernetes.io/managed-by: {{ .Release.Service }}
+        asa-workspace-role: scanner
+    spec:
+      automountServiceAccountToken: false
+      {{- if gt (len .Values.localData.nodeSelector) 0 }}
+      nodeSelector: {{ toYaml .Values.localData.nodeSelector | nindent 8 }}
+      {{- end }}
+      securityContext: {{ toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: scanner
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: 3000
+          env:
+            - name: HOST
+              value: 0.0.0.0
+            - name: PORT
+              value: "3000"
+            - name: ASTRO_PROCESS_ROLE
+              value: scanner
+            - name: ASTRO_WORKSPACE_SCAN_CONCURRENCY
+              value: {{ .Values.scanner.concurrency | quote }}
+            - name: ASTRO_WORKSPACE_SCAN_POLL_MS
+              value: {{ .Values.scanner.pollIntervalMs | quote }}
+            - name: NODE_OPTIONS
+              value: --max-old-space-size=1024
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: ASTRO_STATE_ROOT
+              value: /state
+            - name: ASTRO_DATA_CATALOG_STATE
+              value: /state/data-catalog.json
+            - name: ASTRO_SURVEY_REGISTRY_STATE
+              value: /state/survey-registrations.json
+            - name: ASTRO_CONNECTOR_STATE
+              value: /state/connectors.json
+            - name: ASTRO_CONNECTOR_RUN_STATE
+              value: /state/connector-ingest-runs.json
+            - name: ASTRO_WORKFLOW_ROOT
+              value: /state/workflow-runs
+            - name: ASTRO_USER_MOC_ROOT
+              value: /state/user-mocs
+            - name: ASTRO_LOCAL_CONNECTOR_ROOTS
+              value: {{ printf "/state/coverage-downloads%s%s" (ternary (printf ":%s" .Values.productionData.mountPath) "" .Values.productionData.enabled) (ternary ":/data/local" "" .Values.localData.enabled) | quote }}
+            - name: ASTRO_WORKSPACE_SCAN_ENABLED
+              value: "true"
+            - name: ASTRO_METADATA_STORE
+              value: postgres
+            {{- if eq .Values.metadataStore.mode "bundled-postgresql" }}
+            - name: ASTRO_DATABASE_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ default (include "asa-workspace.postgresqlFullname" .) .Values.postgresql.auth.existingSecret | quote }}
+                  key: {{ .Values.postgresql.auth.secretKeys.userPasswordKey | quote }}
+            - name: ASTRO_DATABASE_URL
+              value: {{ printf "postgresql://%s:$(ASTRO_DATABASE_PASSWORD)@%s:5432/%s" .Values.postgresql.auth.username (include "asa-workspace.postgresqlFullname" .) .Values.postgresql.auth.database | quote }}
+            {{- else }}
+            - name: ASTRO_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.metadataStore.external.existingSecret | quote }}
+                  key: {{ .Values.metadataStore.external.existingSecretKey | quote }}
+            {{- end }}
+            - name: ASTRO_ES_URL
+              {{- if eq .Values.search.mode "bundled" }}
+              value: {{ include "asa-workspace.elasticsearchUrl" . | quote }}
+              {{- else }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.search.external.existingSecret | quote }}
+                  key: {{ .Values.search.external.existingSecretKey | quote }}
+              {{- end }}
+            - name: ASTRO_ES_OBJECT_INDEX
+              value: {{ .Values.search.index.object | quote }}
+            - name: ASTRO_ES_COVERAGE_INDEX
+              value: {{ .Values.search.index.coverage | quote }}
+            - name: ASTRO_ES_TIMEOUT_MS
+              value: {{ .Values.search.timeoutMs | quote }}
+            - name: ASTRO_DATA_WAREHOUSE_ENABLED
+              value: "false"
+            {{- if .Values.productionData.enabled }}
+            - name: ASTRO_COVERAGE_DOWNLOAD_ROOT
+              value: {{ .Values.productionData.mountPath | quote }}
+            - name: ASTRO_PRODUCTION_DATA_MOUNT
+              value: {{ .Values.productionData.mountPath | quote }}
+            {{- end }}
+            {{- if .Values.telemetry.enabled }}
+            {{- if and .Values.telemetry.captureContent (ne .Values.telemetry.environment "dev") }}{{ fail "telemetry.captureContent is allowed only in dev" }}{{- end }}
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: {{ required "telemetry.endpoint is required when telemetry is enabled" .Values.telemetry.endpoint | quote }}
+            - name: OTEL_EXPORTER_OTLP_PROTOCOL
+              value: http/protobuf
+            - name: OTEL_SERVICE_NAME
+              value: asa-workspace-scanner
+            - name: K8S_POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: OTEL_RESOURCE_ATTRIBUTES
+              value: {{ printf "asa.cluster=%s,deployment.environment=%s,k8s.namespace.name=%s,k8s.pod.name=$(K8S_POD_NAME)" .Values.telemetry.cluster .Values.telemetry.environment .Release.Namespace | quote }}
+            - name: OTEL_TRACES_SAMPLER
+              value: parentbased_always_on
+            - name: OTEL_METRIC_EXPORT_INTERVAL
+              value: {{ .Values.telemetry.metricExportIntervalMs | quote }}
+            - name: OTEL_METRICS_EXPORTER
+              value: otlp
+            - name: OTEL_TRACES_EXPORTER
+              value: otlp
+            - name: OTEL_LOGS_EXPORTER
+              value: none
+            - name: OTEL_NODE_RESOURCE_DETECTORS
+              value: env
+            - name: OTEL_PROPAGATORS
+              value: tracecontext,baggage
+            - name: ASA_OTEL_CAPTURE_CONTENT
+              value: "false"
+            {{- end }}
+            {{- with .Values.env }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          resources:
+            {{- toYaml .Values.scanner.resources | nindent 12 }}
+          securityContext: {{ toYaml .Values.containerSecurityContext | nindent 12 }}
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 6
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 2
+            failureThreshold: 6
+          volumeMounts:
+            - name: state
+              mountPath: /state
+            - name: tmp
+              mountPath: /tmp
+            {{- if .Values.productionData.enabled }}
+            - name: production-data
+              mountPath: {{ .Values.productionData.mountPath | quote }}
+            {{- end }}
+            {{- if .Values.localData.enabled }}
+            - name: local-data
+              mountPath: /data/local
+              readOnly: true
+            {{- end }}
+      volumes:
+        - name: state
+          {{- if .Values.persistence.existingClaim }}
+          persistentVolumeClaim:
+            claimName: {{ .Values.persistence.existingClaim | quote }}
+          {{- else }}
+          persistentVolumeClaim:
+            claimName: {{ include "asa-workspace.fullname" . }}-state
+          {{- end }}
+        - name: tmp
+          emptyDir: {}
+        {{- if .Values.productionData.enabled }}
+        - name: production-data
+          persistentVolumeClaim:
+            claimName: {{ include "asa-workspace.productionDataClaim" . | quote }}
+        {{- end }}
+        {{- if .Values.localData.enabled }}
+        - name: local-data
+          {{- if .Values.localData.existingClaim }}
+          persistentVolumeClaim:
+            claimName: {{ .Values.localData.existingClaim | quote }}
+            readOnly: true
+          {{- else if .Values.localData.nfs.server }}
+          nfs:
+            server: {{ .Values.localData.nfs.server | quote }}
+            path: {{ .Values.localData.nfs.path | quote }}
+            readOnly: true
+          {{- else }}
+          hostPath:
+            path: {{ .Values.localData.hostPath.path | quote }}
+            type: Directory
+          {{- end }}
+        {{- end }}
+{{- end }}

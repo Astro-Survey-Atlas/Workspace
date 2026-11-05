@@ -16,6 +16,7 @@ import type { UserMocArtifactStore } from "./user-moc-artifacts.js";
 import type { WarehouseScanService } from "./warehouse-scan.js";
 import { stageWarehouseInventory } from "./warehouse-inventory.js";
 import { defaultMocCoreAdapter, type MocCoreAdapter } from "./moc-core-adapter.js";
+import { injectActiveTrace, withSpan } from "./telemetry.js";
 
 export const SKY_DATA_POINT_INDEX = "astro_data_point_index_v1";
 export interface DerivedRepair {
@@ -39,21 +40,59 @@ export interface HeaderPoint extends Record<string, unknown> {
   moc_header?: Record<string, unknown>;
   header_scope?: string; selected_hdu_index?: number;
 }
+
+async function runCoordinateScript<T>(mode: "headers" | "contains", input: string, parse: (output: string) => T): Promise<T> {
+  return withSpan("subprocess sky-point-coordinates", { "asa.component": "scan" }, async (span) => new Promise<T>((resolve, reject) => {
+    const script = fileURLToPath(new URL("./sky-point-coordinates.py", import.meta.url));
+    const carrier: Record<string, string> = {};
+    injectActiveTrace(carrier);
+    const environment = { ...process.env };
+    delete environment.TRACEPARENT;
+    delete environment.TRACESTATE;
+    if (carrier.traceparent) environment.TRACEPARENT = carrier.traceparent;
+    if (carrier.tracestate) environment.TRACESTATE = carrier.tracestate;
+    const child = spawn(process.env.ASTRO_PYTHON ?? "python3", [script, ...(mode === "contains" ? ["--contains"] : [])], {
+      stdio: ["pipe", "pipe", "pipe"],
+      env: environment,
+    });
+    let output = "";
+    let errors = "";
+    let timedOut = false;
+    let outputExceeded = false;
+    const timer = setTimeout(() => { timedOut = true; child.kill(); }, 120_000);
+    child.stdout.on("data", (chunk: Buffer) => {
+      output += chunk.toString();
+      if (output.length > 64 * 1024 * 1024) { outputExceeded = true; child.kill(); }
+    });
+    child.stderr.on("data", (chunk: Buffer) => { if (errors.length < 4_000) errors += chunk.toString(); });
+    child.once("error", (error) => {
+      clearTimeout(timer);
+      span.setAttribute("process.exit.code", -1);
+      reject(error);
+    });
+    child.once("close", (code) => {
+      clearTimeout(timer);
+      span.setAttribute("process.exit.code", code ?? -1);
+      if (timedOut) { reject(new Error(mode === "contains" ? "WCS containment check timed out" : "Header coordinate conversion timed out")); return; }
+      if (outputExceeded) { reject(new Error("Coordinate subprocess output exceeded 64 MiB")); return; }
+      if (code !== 0) {
+        const label = mode === "contains" ? "WCS containment check" : "Header coordinate conversion";
+        reject(new Error(`${label} failed (${code}): ${errors.slice(0, 2_000)}`));
+        return;
+      }
+      try { resolve(parse(output)); } catch (error) { reject(error); }
+    });
+    child.stdin.on("error", () => undefined);
+    child.stdin.end(input);
+  }));
+}
+
 export async function convertPositionHeaders(records: unknown[]): Promise<Record<string, unknown>[]> {
   if (!records.length) return [];
-  const script = fileURLToPath(new URL("./sky-point-coordinates.py", import.meta.url));
-  return new Promise((resolve, reject) => {
-    const child = spawn(process.env.ASTRO_PYTHON ?? "python3", [script], { stdio: ["pipe", "pipe", "pipe"] });
-    let output = "", errors = "";
-    const timer = setTimeout(() => child.kill(), 120000);
-    child.stdout.on("data", (chunk: Buffer) => { output += chunk.toString(); if (output.length > 64 * 1024 * 1024) child.kill(); });
-    child.stderr.on("data", (chunk: Buffer) => { if (errors.length < 4000) errors += chunk.toString(); });
-    child.on("error", (error) => { clearTimeout(timer); reject(error); });
-    child.on("close", (code) => { clearTimeout(timer); if (code !== 0) reject(new Error(`Header coordinate conversion failed (${code}): ${errors.slice(0, 2000)}`));
-      else { try { resolve(output.trim() ? output.trim().split("\n").map((line) => JSON.parse(line) as Record<string, unknown>) : []); } catch (error) { reject(error); } } });
-    child.stdin.on("error", () => undefined);
-    child.stdin.end(records.map((record) => JSON.stringify(record)).join("\n") + "\n");
-  });
+  const input = records.map((record) => JSON.stringify(record)).join("\n") + "\n";
+  return runCoordinateScript("headers", input, (output) => output.trim()
+    ? output.trim().split("\n").map((line) => JSON.parse(line) as Record<string, unknown>)
+    : []);
 }
 export function pointDocument(point: HeaderPoint, asset: { id: string; surveyId?: string; releaseId?: string; product?: string }, run: ConnectorIngestRunRecord, sourceId?: string): LocalObjectIndexDocument {
   if (!Number.isFinite(point.ra_deg) || !Number.isFinite(point.dec_deg) || Math.abs(point.dec_deg) > 90 || point.ra_deg < 0 || point.ra_deg >= 360
@@ -96,31 +135,17 @@ export async function imagePointsContainingCoordinate(
   const candidates = points.filter((point) => point.attributes?.position_role === "image_center"
     && typeof point.attributes.header === "string" && Number.isInteger(Number(point.attributes.hdu_index)));
   if (!candidates.length) return [];
-  const script = fileURLToPath(new URL("./sky-point-coordinates.py", import.meta.url));
-  const results = await new Promise<Array<{ id: string; contains: boolean }>>((resolve, reject) => {
-    const child = spawn(process.env.ASTRO_PYTHON ?? "python3", [script, "--contains"], { stdio: ["pipe", "pipe", "pipe"] });
-    let output = "", errors = "", timedOut = false;
-    const timer = setTimeout(() => { timedOut = true; child.kill(); }, 120000);
-    child.stdout.on("data", (chunk: Buffer) => { output += chunk.toString(); if (output.length > 64 * 1024 * 1024) child.kill(); });
-    child.stderr.on("data", (chunk: Buffer) => { if (errors.length < 4000) errors += chunk.toString(); });
-    child.on("error", (error) => { clearTimeout(timer); reject(error); });
-    child.on("close", (code) => {
-      clearTimeout(timer);
-      if (timedOut) { reject(new Error("WCS containment check timed out")); return; }
-      if (code !== 0) { reject(new Error(`WCS containment check failed (${code}): ${errors.slice(0, 2000)}`)); return; }
-      try { resolve(output.trim() ? output.trim().split("\n").map((line) => JSON.parse(line) as { id: string; contains: boolean }) : []); }
-      catch (error) { reject(error); }
-    });
-    child.stdin.on("error", () => undefined);
-    child.stdin.end(candidates.map((point) => JSON.stringify({
+  const input = candidates.map((point) => JSON.stringify({
       id: point.object_id,
       hdu_index: Number(point.attributes.hdu_index),
       header: point.attributes.header,
       ...(point.attributes.primary_header ? { primary_header: point.attributes.primary_header } : {}),
       query_ra: raDeg,
       query_dec: decDeg,
-    })).join("\n") + "\n");
-  });
+  })).join("\n") + "\n";
+  const results = await runCoordinateScript("contains", input, (output) => output.trim()
+    ? output.trim().split("\n").map((line) => JSON.parse(line) as { id: string; contains: boolean })
+    : []);
   const contains = new Set(results.filter((result) => result.contains).map((result) => result.id));
   return candidates.filter((point) => contains.has(point.object_id));
 }

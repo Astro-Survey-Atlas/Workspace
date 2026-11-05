@@ -13,6 +13,7 @@ import {
   resolveSourceInventory, computeInventoryDigest, validateRelativePath,
   type ResolveSourceInventoryOptions, type SourceFileInventory, type SourceInventoryFile, type SourceUnit, type SourceUnitResolution,
 } from "./source-crawler.js";
+import { changeHitlPending, recordHitlWait, withRootSpan } from "./telemetry.js";
 
 export type ProductionRunStatus = "queued" | "resolving" | "awaiting-approval" | "running" | "succeeded" | "partial" | "failed" | "cancelled" | "rejected";
 export type ProductionPipelineAvailability = "available" | "planned";
@@ -510,6 +511,9 @@ export class ProductionService {
           && (run.status === "running" || run.status === "resolving")) run.status = "queued";
         this.#runs.set(run.id, clone(run));
       }
+      for (const run of this.#runs.values()) {
+        if (run.status === "awaiting-approval") changeHitlPending("production_approval", 1);
+      }
       await this.#persist();
       if (this.#downloads.externalDownloads) setImmediate(() => {
         for (const run of this.#runs.values()) {
@@ -698,13 +702,27 @@ export class ProductionService {
       if (typeof planSha256 !== "string" || !/^[0-9a-f]{64}$/.test(planSha256) || planSha256 !== expected) {
         throw new ProductionStateError("清单校验值不匹配；请刷新清单后重试");
       }
-      run.approval = { ...run.approval!, state: "approved", decidedAt: now(), decidedBy };
-      this.appendStepLog(run, "approval", "info", `已批准下载清单 ${planSha256.slice(0, 12)}…`);
-      await this.setStep(run, "approval", "succeeded", "清单已批准");
-      run.status = "queued";
-      await this.#save(run);
-      void this.#execute(run.id);
-      return clone(run);
+      const gateStartedAt = run.steps.find((step) => step.id === "approval")?.startedAt;
+      const parsedStartedAt = gateStartedAt ? Date.parse(gateStartedAt) : NaN;
+      const waitSeconds = Number.isFinite(parsedStartedAt) ? Math.max(0, (Date.now() - parsedStartedAt) / 1000) : 0;
+      return withRootSpan("hitl.production_approval", {
+        "asa.component": "hitl",
+        "asa.production.run_id": run.id,
+        "asa.hitl.gate": "production_approval",
+        "asa.hitl.decision": "approved",
+        "asa.hitl.wait_seconds": waitSeconds,
+        "asa.hitl.state": "resolved",
+      }, async () => {
+        run.approval = { ...run.approval!, state: "approved", decidedAt: now(), decidedBy };
+        this.appendStepLog(run, "approval", "info", `已批准下载清单 ${planSha256.slice(0, 12)}…`);
+        await this.setStep(run, "approval", "succeeded", "清单已批准");
+        run.status = "queued";
+        await this.#save(run);
+        changeHitlPending("production_approval", -1);
+        recordHitlWait("production_approval", "approved", waitSeconds);
+        void this.#execute(run.id);
+        return clone(run);
+      }, undefined, Number.isFinite(parsedStartedAt) ? new Date(parsedStartedAt) : undefined);
     });
   }
 
@@ -715,16 +733,29 @@ export class ProductionService {
       const run = this.#runs.get(text(id, "production run id"));
       if (!run) throw new Error(`Production run not found: ${id}`);
       if (run.status !== "awaiting-approval") throw new ProductionStateError("只有等待审批的生产任务可以拒绝");
-      run.approval = { ...run.approval!, state: "rejected", decidedAt: now() };
-      run.status = "rejected";
-      run.completedAt = now();
       const approvalStep = run.steps.find((step) => step.id === "approval");
-      if (approvalStep) this.updateStep(approvalStep, "cancelled", "用户拒绝下载清单", "warning");
-      run.steps.forEach((step) => {
-        if (step.status === "pending") this.updateStep(step, "skipped", "清单被拒绝，未执行");
-      });
-      await this.#save(run);
-      return clone(run);
+      const parsedStartedAt = approvalStep?.startedAt ? Date.parse(approvalStep.startedAt) : NaN;
+      const waitSeconds = Number.isFinite(parsedStartedAt) ? Math.max(0, (Date.now() - parsedStartedAt) / 1000) : 0;
+      return withRootSpan("hitl.production_approval", {
+        "asa.component": "hitl",
+        "asa.production.run_id": run.id,
+        "asa.hitl.gate": "production_approval",
+        "asa.hitl.decision": "rejected",
+        "asa.hitl.wait_seconds": waitSeconds,
+        "asa.hitl.state": "resolved",
+      }, async () => {
+        run.approval = { ...run.approval!, state: "rejected", decidedAt: now() };
+        run.status = "rejected";
+        run.completedAt = now();
+        if (approvalStep) this.updateStep(approvalStep, "cancelled", "用户拒绝下载清单", "warning");
+        run.steps.forEach((step) => {
+          if (step.status === "pending") this.updateStep(step, "skipped", "清单被拒绝，未执行");
+        });
+        await this.#save(run);
+        changeHitlPending("production_approval", -1);
+        recordHitlWait("production_approval", "rejected", waitSeconds);
+        return clone(run);
+      }, undefined, Number.isFinite(parsedStartedAt) ? new Date(parsedStartedAt) : undefined);
     });
   }
 
@@ -735,6 +766,7 @@ export class ProductionService {
         const live = this.#runs.get(run.id)!;
         if (!live) throw new Error(`Production run not found: ${id}`);
         if (live.status === "running") return this.#cancelRunning(live);
+        const wasAwaitingApproval = live.status === "awaiting-approval";
         live.status = "cancelled";
         live.completedAt = now();
         live.error = "用户取消任务";
@@ -744,6 +776,7 @@ export class ProductionService {
           if (step.status === "pending") this.updateStep(step, "skipped", "任务已取消");
         });
         await this.#save(live);
+        if (wasAwaitingApproval) changeHitlPending("production_approval", -1);
         return clone(live);
       });
     }
@@ -936,6 +969,7 @@ export class ProductionService {
         run.status = "awaiting-approval";
         await this.setStep(run, "approval", "pending", "等待人工审批下载清单");
         await this.#save(run);
+        changeHitlPending("production_approval", 1);
         return "pause";
       });
       if (decision !== "approved") return; // paused or terminated; resumes through approve()
@@ -1104,7 +1138,7 @@ export class ProductionService {
 
   private updateStep(step: ProductionStep, status: ProductionStep["status"], detail?: string, level?: ProductionStepLogEntry["level"]): void {
     const timestamp = now();
-    if (status === "running" && !step.startedAt) step.startedAt = timestamp;
+    if ((status === "running" || (status === "pending" && step.id === "approval")) && !step.startedAt) step.startedAt = timestamp;
     if (["succeeded", "partial", "failed", "cancelled", "skipped"].includes(status)) step.completedAt = timestamp;
     step.status = status;
     if (detail) step.detail = detail;

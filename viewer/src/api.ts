@@ -1,5 +1,5 @@
 import { readJsonResponse, type JsonResponseEvent } from "../../src/json-response-stream";
-import type { AgentSession, ToolDescriptor, WorkflowDefinition, WorkflowRun } from "../../src/workflow";
+import type { AgentSession, ToolDescriptor, WorkflowDefinition, WorkflowRun, WorkflowRunListItem } from "../../src/workflow";
 import type { DataAssetRecord as CoreDataAssetRecord, DataAssetRegistrationInput as CoreDataAssetRegistrationInput } from "../../src/data-catalog";
 import type { ConnectorCheck, ConnectorCheckInput, ConnectorPublicRecord, ConnectorRegistrationInput } from "../../src/connectors";
 import type { ConnectorIngestRun } from "../../src/connector-history";
@@ -677,6 +677,13 @@ export const workspaceApi = {
   },
   async workflows(): Promise<WorkflowDefinition[]> {
     return (await getJson<{ workflows: WorkflowDefinition[] }>("/api/workflows")).workflows;
+  },
+  async workflowRuns(options: { limit?: number; workflowKey?: string } = {}): Promise<WorkflowRunListItem[]> {
+    const query = new URLSearchParams();
+    if (options.limit !== undefined) query.set("limit", String(options.limit));
+    if (options.workflowKey) query.set("workflowKey", options.workflowKey);
+    const suffix = query.toString();
+    return (await getJson<{ runs: WorkflowRunListItem[] }>(`/api/workflow-runs${suffix ? `?${suffix}` : ""}`)).runs;
   },
   async createWorkflowRun(workflowId: string, input: Record<string, unknown>): Promise<WorkflowRun> {
     return (await postJson<{ run: WorkflowRun }>("/api/workflow-runs", { workflowId, input })).run;

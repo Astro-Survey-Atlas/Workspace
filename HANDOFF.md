@@ -1,8 +1,84 @@
 # Workspace handoff
 
-Updated: 2026-11-03, Asia/Shanghai.
+Updated: 2026-11-04, Asia/Shanghai.
 
-## Current work
+## Next session: Workspace Agent workflow and science acceptance
+
+Read [the November 3 session handoff](docs/session-handoff-20261103-agent.md)
+first. It contains the Agent entry points, current deployment, scan recovery,
+validation limits and private evidence locations. The older progress
+notes below are historical and do not override that handoff.
+
+The user committed Workspace changes on `main` as
+`008d1b478a4863f257a5b63ae76ac60b4a8c7a53`. The Workspace worktree was clean
+when the earlier handoff was prepared. The bottom Workspace Agent implementation
+is now present as uncommitted Workspace changes; its service is
+`src/workspace-agent.ts` and its UI controller is `viewer/src/agent-dock.ts`.
+Read the session handoff for current capabilities, validation and live
+acceptance requirements. The sibling Warehouse still has uncommitted
+implementation changes.
+
+The current Dev release is Helm revision **138**, image
+`0.0.1-dev-20261104-agent-r16` (running image digest
+`sha256:79393af82c9d47647f8aeae07002794d4aa618ddba577be4a23e56707cbef1c6`).
+The Workspace Pod is Ready with zero restarts and `/healthz` returns 200; the
+Search initialization Job completed. The Downloader remains on its prior image
+and Pod with zero restarts. The new CLI `workflows runs` command lists the
+three current runs, all waiting at `human_filter`; `cutout` and `export` are
+pending. Two runs have identical inputs with cutouts enabled; the earlier third
+run differs only by disabling cutouts. Two Scanner Jobs were active at the
+post-deployment check. This is deployment and read-only Workflow evidence, not
+full scientific or researcher acceptance; see the latest session-handoff
+section.
+
+The earlier r15 release was Helm revision **137**, image
+`0.0.1-dev-20261104-agent-r15` (digest
+`sha256:388cc6bf3a6258ce92ff51def83b0d70fbf983b868772439c9babec6bc51884d`).
+Its bounded Agent access to registered CSV/JSON Workflow artifacts is included
+in r16.
+
+All three current runs have 46 crossmatch candidates and are still waiting at
+`human_filter`. A read-only check confirmed the matching Euclid tile and DESI
+brick image objects are covered by ready S3 Connectors; none of the runs has
+executed FITS cutout or export.
+
+The deployed r15 image includes bounded Agent access to registered CSV/JSON
+Workflow artifacts through the CLI. The live Agent read `crossmatch.csv` for the
+existing run without making a decision; the run remains at `human_filter` and
+cutout/export remain pending. The source change passed `npm run verify` before
+image publication; see the final section of the session handoff for the live
+acceptance details.
+
+**Scanner result-acceptance blocker repaired and deployed on November 3.**
+Scanner JSON now includes `partitionVersion`; the Operator reads it and accepts
+old JSON only with matching complete legacy evidence. Operator revision **27**
+uses `0.2.0-20261103-partition-summary-r2`; its default Scanner has the same tag.
+The ScanRequest CRD now retains the single-use recovery audit fields.
+
+Seventeen original successful Jobs were explicitly revalidated, preserving
+34,000 accepted files, original request/Job identities and frozen inventories.
+Their failed Workspace child runs resumed normal polling and automatic point
+integration. Public W1 point queries and image-footprint inspection now return
+results (1,370 new points at 14:40); W1 has 18 successful shards / 36,000
+accepted files. Incremental integration is still running. Read the handoff for
+the latest counters and evidence. All four original batches remain in place.
+
+W1/W2/W3/W4 inventories are now all frozen at 356,112 / 365,472 / 188,136 /
+211,824 files. Full scans are ongoing; W2–W4 are waiting for Scanner slots.
+After that recovery snapshot, partition `s000018` failed on a real Warehouse
+Elasticsearch refresh timeout (`BackoffLimitExceeded`). This is a separate
+execution failure; it is retained and is ineligible for summary revalidation.
+Full scans continue. Fresh remote Workspace caller smoke passed; the other
+live suites did not all pass because of ES timeouts and external MOC TLS.
+
+At the time of the CSST repair snapshot, Workspace was at revision 122 /
+`0.0.1-dev-20261103-csst-quality-r3`; that repair changes Warehouse code and
+runtime metadata, with no Workspace product-code changes. The later Agent
+deployment advanced from revision 137/r15 to revision 138/r16. The Agent
+implementation is Workspace-first; live scientific acceptance still depends
+on configured AI Provider and scientific MCP services.
+
+## Earlier deployment and progress notes
 
 The CSST quality repair is deployed to Dev at Workspace Helm revision **122**,
 image `0.0.1-dev-20261103-csst-quality-r3`, with Warehouse Operator revision

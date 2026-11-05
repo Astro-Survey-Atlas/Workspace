@@ -2,12 +2,15 @@ import { randomUUID } from "node:crypto";
 import { mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 
+import { context, SpanKind, SpanStatusCode } from "@opentelemetry/api";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { SSEClientTransport } from "@modelcontextprotocol/sdk/client/sse.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import { suppressTracing } from "@opentelemetry/core";
 
 import { requestAiProviderCompletion } from "./ai-provider-client.js";
 import type { DownloadProxyConfig } from "./download-transport.js";
+import { activeMcpMetadata, classifyError, injectActiveTrace, recordMcpCall, withSpan } from "./telemetry.js";
 
 export interface DownloadSettings {
   proxyEnabled: boolean;
@@ -122,6 +125,54 @@ function publicMcp(record: PersistedConfig["mcp"][number], secrets: SecretState)
 
 function configDefaults(): PersistedConfig { return { version: 1, ai: [], mcp: [] }; }
 function secretDefaults(): SecretState { return { version: 1, values: {} }; }
+
+function boundedMcpServerName(record: PersistedConfig["mcp"][number]): string {
+  const normalized = record.name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+  if (normalized.includes("euclid")) return "euclid-catalog";
+  if (normalized.includes("desi")) return "desi-catalog";
+  if (normalized.includes("cutout") || normalized.includes("fits")) return "fits-cutout";
+  return normalized.includes("astro") ? "astro-all" : "configured";
+}
+
+function boundedMcpToolName(toolName: string): string {
+  return ["es_query", "execute_cutout_group", "euclid_catalog_query", "desi_catalog_query"].includes(toolName) ? toolName : "other";
+}
+
+async function tracedMcpFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
+  const headers = new Headers(input instanceof Request ? input.headers : undefined);
+  new Headers(init?.headers).forEach((value, key) => headers.set(key, value));
+  const carrier: Record<string, string> = {};
+  injectActiveTrace(carrier);
+  for (const [key, value] of Object.entries(carrier)) headers.set(key, value);
+  const active = context.active();
+  // Keep the explicit tools/call context on the wire without adding a fetch CLIENT span between caller and server.
+  return context.with(suppressTracing(active), () => fetch(input, { ...init, headers }));
+}
+
+async function mcpRequestMethod(input: RequestInfo | URL, init?: RequestInit): Promise<string | undefined> {
+  const body = init?.body;
+  const text = typeof body === "string" ? body
+    : body instanceof Uint8Array ? Buffer.from(body).toString("utf8")
+      : input instanceof Request ? await input.clone().text() : undefined;
+  if (!text) return undefined;
+  try {
+    const parsed: unknown = JSON.parse(text);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return undefined;
+    const method = (parsed as { method?: unknown }).method;
+    return typeof method === "string" ? method : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function mcpToolSummary(tool: { name: string; description?: string; inputSchema?: unknown; annotations?: { readOnlyHint?: boolean } }): McpToolSummary {
+  return {
+    name: tool.name,
+    ...(tool.description ? { description: tool.description } : {}),
+    ...(tool.inputSchema && typeof tool.inputSchema === "object" ? { inputSchema: tool.inputSchema as Record<string, unknown> } : {}),
+    readOnly: Boolean(tool.annotations?.readOnlyHint),
+  };
+}
 
 const ASSETS_API_KEY_REF = "assets-api-key";
 
@@ -402,8 +453,8 @@ export class SystemConfigStore {
       const endpoint = new URL(record.url);
       const requestInit = { headers, signal: AbortSignal.timeout(15_000) };
       const transports = record.transport === "sse"
-        ? [new SSEClientTransport(endpoint, { requestInit }), new StreamableHTTPClientTransport(endpoint, { requestInit })]
-        : [new StreamableHTTPClientTransport(endpoint, { requestInit }), new SSEClientTransport(endpoint, { requestInit })];
+        ? [new SSEClientTransport(endpoint, { requestInit, fetch: tracedMcpFetch }), new StreamableHTTPClientTransport(endpoint, { requestInit, fetch: tracedMcpFetch })]
+        : [new StreamableHTTPClientTransport(endpoint, { requestInit, fetch: tracedMcpFetch }), new SSEClientTransport(endpoint, { requestInit, fetch: tracedMcpFetch })];
       let connected = false;
       let lastError: unknown;
       for (const transport of transports) {
@@ -411,12 +462,7 @@ export class SystemConfigStore {
       }
       if (!connected) throw lastError instanceof Error ? lastError : new Error("Unable to connect to MCP server");
       const listed = await client.listTools();
-      record.tools = (listed.tools ?? []).map((tool) => ({
-        name: tool.name,
-        ...(tool.description ? { description: tool.description } : {}),
-        ...(tool.inputSchema && typeof tool.inputSchema === "object" ? { inputSchema: tool.inputSchema as Record<string, unknown> } : {}),
-        readOnly: Boolean((tool as unknown as { annotations?: { readOnlyHint?: boolean } }).annotations?.readOnlyHint),
-      }));
+      record.tools = (listed.tools ?? []).map((tool) => mcpToolSummary(tool as unknown as Parameters<typeof mcpToolSummary>[0]));
       record.lastCheck = { status: "ok", detail: `发现 ${record.tools.length} 个工具`, checkedAt };
       await client.close().catch(() => undefined);
     } catch (error) {
@@ -425,6 +471,101 @@ export class SystemConfigStore {
     record.updatedAt = now();
     await this.#persist();
     return publicMcp(record, this.#secrets);
+  }
+
+  async callMcpTool(idValue: string, toolNameValue: string, argumentsValue: unknown): Promise<unknown> {
+    await this.initialize();
+    const id = requiredText(idValue, "id", 120);
+    const toolName = requiredText(toolNameValue, "toolName", 200);
+    if (!argumentsValue || typeof argumentsValue !== "object" || Array.isArray(argumentsValue)) {
+      throw new RangeError("MCP tool arguments must be an object");
+    }
+    const record = this.#config.mcp.find((candidate) => candidate.id === id);
+    if (!record) throw new Error(`MCP Server not found: ${id}`);
+    if (!record.enabled) throw new RangeError("MCP Server is disabled");
+
+    const token = record.tokenRef ? this.#secrets.values[record.tokenRef] : undefined;
+    const endpoint = new URL(record.url);
+    const timeoutMs = 60_000;
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(new Error("MCP tool call timed out")), timeoutMs);
+    const client = new Client({ name: "asa-workspace", version: "0.0.1" });
+    const requestInit = {
+      headers: token ? { Authorization: `Bearer ${token}` } : undefined,
+      signal: controller.signal,
+    };
+    const started = performance.now();
+    let errorType: string | undefined;
+    let requestId: string | undefined;
+    const fetchWithRequestId = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+      const method = await mcpRequestMethod(input, init);
+      const response = await tracedMcpFetch(input, init);
+      if (method === "tools/call") requestId = response.headers.get("X-Request-ID") ?? undefined;
+      return response;
+    };
+    const tracedTransports = record.transport === "sse"
+      ? [new SSEClientTransport(endpoint, { requestInit, fetch: fetchWithRequestId }), new StreamableHTTPClientTransport(endpoint, { requestInit, fetch: fetchWithRequestId })]
+      : [new StreamableHTTPClientTransport(endpoint, { requestInit, fetch: fetchWithRequestId }), new SSEClientTransport(endpoint, { requestInit, fetch: fetchWithRequestId })];
+    try {
+      return await withSpan(`tools/call ${toolName}`, {
+        "asa.component": "mcp-client",
+        "asa.mcp.server": boundedMcpServerName(record),
+        "gen_ai.tool.name": toolName,
+        "mcp.method.name": "tools/call",
+        "network.protocol.name": "http",
+        "server.address": endpoint.hostname,
+        ...(endpoint.port ? { "server.port": Number(endpoint.port) } : {}),
+      }, async (span) => {
+        let connected = false;
+        let lastError: unknown;
+        for (const transport of tracedTransports) {
+          try {
+            await client.connect(transport);
+            connected = true;
+            break;
+          } catch (error) {
+            lastError = error;
+            if (controller.signal.aborted) throw error;
+          }
+        }
+        if (!connected) throw lastError instanceof Error ? lastError : new Error("Unable to connect to MCP server");
+
+        let tool = record.tools.find((candidate) => candidate.name === toolName);
+        if (!tool) {
+          const listed = await client.listTools();
+          record.tools = (listed.tools ?? []).map((candidate) => mcpToolSummary(candidate as unknown as Parameters<typeof mcpToolSummary>[0]));
+          record.updatedAt = now();
+          await this.#persist();
+          tool = record.tools.find((candidate) => candidate.name === toolName);
+        }
+        if (!tool) throw new RangeError(`MCP tool is not registered: ${toolName}`);
+
+        const serializedArguments = JSON.stringify(argumentsValue);
+        if (Buffer.byteLength(serializedArguments) > 128 * 1024) throw new RangeError("MCP tool arguments exceed 128 KiB");
+        const metadata = activeMcpMetadata();
+        const result = await client.callTool({
+          name: toolName,
+          arguments: argumentsValue as Record<string, unknown>,
+          ...(metadata ? { _meta: metadata } : {}),
+        }, undefined, { signal: controller.signal });
+        if (result.isError) {
+          errorType = "tool_error";
+          span.setStatus({ code: SpanStatusCode.ERROR });
+          span.setAttribute("error.type", errorType);
+        }
+        if (requestId) span.setAttribute("astro.request_id", requestId);
+        const responseLimit = toolName === "read_cutout_artifacts" ? 6 * 1024 * 1024 : 768 * 1024;
+        if (Buffer.byteLength(JSON.stringify(result)) > responseLimit) throw new RangeError("MCP tool response exceeds its configured limit");
+        return result;
+      }, { kind: SpanKind.CLIENT });
+    } catch (error) {
+      errorType = classifyError(controller.signal.aborted ? new Error("MCP tool call timed out") : error);
+      throw error;
+    } finally {
+      clearTimeout(timer);
+      recordMcpCall(boundedMcpServerName(record), (performance.now() - started) / 1000, boundedMcpToolName(toolName), errorType);
+      await client.close().catch(() => undefined);
+    }
   }
 
   async #persist(): Promise<void> {

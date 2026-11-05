@@ -1,0 +1,130 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "agent": {
+    "workspace-operator": {
+      "description": "Operate Astro Survey Atlas Workspace through its CLI and registered Workflows.",
+      "mode": "primary",
+      "prompt": "Use workspace_read for Workspace state and workflow definitions. Route all science work through a registered Workspace Workflow. workspace_action requires user approval. Never bypass a Workflow with direct catalog or FITS cutout MCP calls.",
+      "tools": {
+        "workspace_read": true,
+        "workspace_action": true,
+        "task": true,
+        "bash": false,
+        "edit": false,
+        "write": false,
+        "read": false,
+        "glob": false,
+        "grep": false,
+        "webfetch": false,
+        "websearch": false
+      },
+      "permission": {
+        "workspace_read": "allow",
+        "workspace_action": "ask",
+        "task": "allow",
+        "bash": "deny",
+        "edit": "deny",
+        "write": "deny",
+        "read": "deny",
+        "glob": "deny",
+        "grep": "deny",
+        "webfetch": "deny",
+        "websearch": "deny",
+        "question": "allow"
+      }
+    },
+    "catalog-scientist": {
+      "description": "Review catalog semantics and coordinate choices from Workspace data.",
+      "mode": "subagent",
+      "prompt": "Use only workspace_read. Identify catalog and coordinate assumptions. Do not submit writes, invent missing fields, or replace Workspace matching algorithms.",
+      "tools": {
+        "workspace_read": true,
+        "workspace_action": false,
+        "task": false,
+        "bash": false,
+        "edit": false,
+        "write": false,
+        "read": false,
+        "glob": false,
+        "grep": false,
+        "webfetch": false,
+        "websearch": false
+      },
+      "permission": {
+        "workspace_read": "allow",
+        "workspace_action": "deny",
+        "task": "deny",
+        "bash": "deny",
+        "edit": "deny",
+        "write": "deny",
+        "read": "deny",
+        "glob": "deny",
+        "grep": "deny",
+        "webfetch": "deny",
+        "websearch": "deny"
+      }
+    },
+    "workflow-operator": {
+      "description": "Select and inspect registered Workspace Workflows.",
+      "mode": "subagent",
+      "prompt": "Use only workspace_read to inspect registered Workflow definitions and runs. Never create, decide, retry, or otherwise mutate a run.",
+      "tools": {
+        "workspace_read": true,
+        "workspace_action": false,
+        "task": false,
+        "bash": false,
+        "edit": false,
+        "write": false,
+        "read": false,
+        "glob": false,
+        "grep": false,
+        "webfetch": false,
+        "websearch": false
+      },
+      "permission": {
+        "workspace_read": "allow",
+        "workspace_action": "deny",
+        "task": "deny",
+        "bash": "deny",
+        "edit": "deny",
+        "write": "deny",
+        "read": "deny",
+        "glob": "deny",
+        "grep": "deny",
+        "webfetch": "deny",
+        "websearch": "deny"
+      }
+    },
+    "quality-reviewer": {
+      "description": "Check evidence and artifacts from a Workspace Workflow run.",
+      "mode": "subagent",
+      "prompt": "Use only workspace_read. Report conclusions supported by Workflow state, step results, lineage, and artifact metadata. Do not write or claim an unrun step succeeded.",
+      "tools": {
+        "workspace_read": true,
+        "workspace_action": false,
+        "task": false,
+        "bash": false,
+        "edit": false,
+        "write": false,
+        "read": false,
+        "glob": false,
+        "grep": false,
+        "webfetch": false,
+        "websearch": false
+      },
+      "permission": {
+        "workspace_read": "allow",
+        "workspace_action": "deny",
+        "task": "deny",
+        "bash": "deny",
+        "edit": "deny",
+        "write": "deny",
+        "read": "deny",
+        "glob": "deny",
+        "grep": "deny",
+        "webfetch": "deny",
+        "websearch": "deny"
+      }
+    }
+  }
+}

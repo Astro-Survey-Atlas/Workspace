@@ -5,9 +5,16 @@ import { parseAgentIntent } from "../src/agent.js";
 import {
   angularDistanceArcsec,
   applyResultFilter,
+  availableFilterFields,
+  catalogQueryBody,
+  DESI_CATALOG,
+  EUCLID_CATALOG,
   nearestNeighborCrossmatch,
+  normalizeCatalogRows,
   parseCrossmatchInput,
+  parseFilterSpec,
   raRangeFilter,
+  rowsToCsv,
   type CatalogRecord,
   type CrossmatchRecord,
 } from "../src/scientific-tools.js";
@@ -60,4 +67,52 @@ test("enforces workflow result and radius limits", () => {
     classLabel: "unknown",
   })) satisfies CrossmatchRecord[];
   assert.equal(applyResultFilter(rows).length, 1_000);
+});
+
+test("maps selected nonstandard catalog fields through matching, HITL filtering, and CSV export", () => {
+  const input = parseCrossmatchInput({
+    raDeg: 10,
+    decDeg: 0,
+    catalogFields: {
+      euclid: { redshift: "Z_PHOT", flux_r: "FLUX_R" },
+      desi: { signal_to_noise: "SN_MEDIAN" },
+    },
+  });
+  const request = catalogQueryBody(EUCLID_CATALOG, input);
+  const body = request.body as { _source: string[] };
+  assert.ok(body._source.includes("Z_PHOT"));
+  assert.ok(body._source.includes("FLUX_R"));
+  assert.ok(body._source.includes("RIGHT_ASCENSION"));
+
+  const euclidRows = normalizeCatalogRows("euclid", [{ _source: {
+    OBJECT_ID: "e1", RIGHT_ASCENSION: 10, DECLINATION: 0, Z_PHOT: 0.42, FLUX_R: 128.5,
+  } }], input);
+  const desiRows = normalizeCatalogRows("desi", [{ _source: {
+    TARGETID: "d1", ra: 10.0001, dec: 0, SN_MEDIAN: 11.4,
+  } }], input);
+  const matches = nearestNeighborCrossmatch(euclidRows, desiRows, 1.5);
+  assert.deepEqual(matches[0]?.euclidFields, { redshift: 0.42, flux_r: 128.5 });
+  assert.deepEqual(matches[0]?.desiFields, { signal_to_noise: 11.4 });
+  assert.ok(availableFilterFields(matches[0]!).includes("euclidFields.redshift"));
+
+  const filtered = applyResultFilter(matches, parseFilterSpec({
+    conditions: [{ field: "desiFields.signal_to_noise", op: ">=", value: 10 }],
+  }));
+  assert.equal(filtered.length, 1);
+  const csv = rowsToCsv(filtered);
+  assert.match(csv, /euclid_flux_r,euclid_redshift,desi_signal_to_noise/);
+  assert.match(csv, /128\.5,0\.42,11\.4/);
+});
+
+test("rejects invalid or excessive catalog field mappings", () => {
+  assert.throws(() => parseCrossmatchInput({
+    raDeg: 10,
+    decDeg: 0,
+    catalogFields: { euclid: { "redshift z": "Z_PHOT" } },
+  }), /simple field names/);
+  assert.throws(() => parseCrossmatchInput({
+    raDeg: 10,
+    decDeg: 0,
+    catalogFields: { euclid: Object.fromEntries(Array.from({ length: 17 }, (_, index) => [`field${index}`, `COL_${index}`])) },
+  }), /at most 16 fields/);
 });

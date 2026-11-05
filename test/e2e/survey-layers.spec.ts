@@ -345,7 +345,7 @@ async function mockRemoteCoverageApi(page: Page): Promise<{ assetId: string; req
     releaseId,
     status: "ready",
     origin: "user",
-    credentials: { accessKeyId: "fixture-access-key", secretConfigured: true },
+    credentials: { accessKeyConfigured: true, secretConfigured: true },
     createdAt: "2026-01-01T00:00:00.000Z",
     updatedAt: "2026-01-01T00:00:00.000Z",
   };

@@ -1,3 +1,5 @@
+import { withSpan } from "./telemetry.js";
+
 export type ToolKind = "local" | "mcp";
 export type ToolHealthStatus = "healthy" | "degraded" | "unavailable" | "unknown";
 
@@ -20,6 +22,7 @@ export interface ToolDescriptor {
 export interface ToolInvocationContext {
   runId: string;
   stepId: string;
+  workflowRun?: WorkflowRun;
 }
 
 export type ToolHandler = (input: unknown, context: ToolInvocationContext) => Promise<unknown>;
@@ -56,8 +59,26 @@ export class ToolRegistry {
   async invoke(id: string, input: unknown, context: ToolInvocationContext): Promise<unknown> {
     const registered = this.#tools.get(id);
     if (!registered) throw new Error(`Tool not found: ${id}`);
-    return registered.handler(input, context);
+    return withSpan(`tool ${id}`, {
+      "asa.component": "workflow",
+      "gen_ai.tool.name": id,
+      ...(id === "crossmatch.nearest_spherical" ? { "asa.rows.in": crossmatchInputRows(input) } : {}),
+    }, async (span) => {
+      const result = await registered.handler(input, context);
+      if (id === "crossmatch.nearest_spherical" && Array.isArray(result)) span.setAttribute("asa.rows.out", result.length);
+      return result;
+    });
   }
+}
+
+function crossmatchInputRows(value: unknown): number {
+  if (!value || typeof value !== "object") return 0;
+  const rows = (value as Record<string, unknown>).rows;
+  if (!rows || typeof rows !== "object") return Array.isArray(rows) ? rows.length : 0;
+  const catalogs = rows as Record<string, unknown>;
+  const euclidRows = Array.isArray(catalogs.euclid) ? catalogs.euclid.length : 0;
+  const desiRows = Array.isArray(catalogs.desi) ? catalogs.desi.length : 0;
+  return euclidRows + desiRows;
 }
 
 export type WorkflowStepKind = "tool" | "human_gate" | "export";
@@ -169,8 +190,37 @@ export interface WorkflowArtifact {
   createdAt: string;
 }
 
+export interface WorkflowResumeCheckpoint {
+  kind: "human_filter";
+  action: "apply_filter" | "accept_all";
+  filter?: Record<string, unknown>;
+  decidedAt: string;
+}
+
+export interface WorkflowCutoutGroupCheckpoint {
+  key: string;
+  records: Array<Record<string, unknown>>;
+}
+
 export interface WorkflowLineage {
-  sources: Array<{ catalog: string; querySha256: string; rowCount: number }>;
+  sources: Array<{
+    catalog: string;
+    querySha256: string;
+    rowCount: number;
+    backend?: {
+      provider: "workspace-mcp" | "catalog-mcp" | "esa-tap" | "noirlab-datalab";
+      release: string;
+      table: string;
+      tool?: string;
+    };
+    queryLimit?: number;
+    truncated?: boolean;
+    assetId?: string;
+    sourceSha256?: string;
+    sourceFormat?: "csv" | "fits";
+    sourceBytes?: number;
+    rowsScanned?: number;
+  }>;
   artifacts: Array<{ name: string; sha256: string; rowCount: number }>;
   relatedScanRunIds: string[];
 }
@@ -192,6 +242,10 @@ export interface WorkflowRun {
   preview: Array<Record<string, unknown>>;
   artifacts: WorkflowArtifact[];
   lineage: WorkflowLineage;
+  resume?: WorkflowResumeCheckpoint;
+  cutoutGroups?: WorkflowCutoutGroupCheckpoint[];
+  traceparent?: string;
+  agentInitiated?: boolean;
   waiting?: {
     reason: "filter" | "region_adjust";
     stepId: string;
@@ -199,6 +253,51 @@ export interface WorkflowRun {
     availableFields: string[];
   };
   error?: string;
+}
+
+export interface WorkflowRunListItem {
+  id: string;
+  workflowKey: string;
+  status: WorkflowRunStatus;
+  createdAt: string;
+  updatedAt: string;
+  candidateCount: number;
+  artifactCount: number;
+  waitingReason?: "filter" | "region_adjust";
+}
+
+export function workflowRunListItem(run: WorkflowRun): WorkflowRunListItem {
+  const matchRows = run.summary.matchRows;
+  return {
+    id: run.id,
+    workflowKey: run.workflowKey,
+    status: run.status,
+    createdAt: run.createdAt,
+    updatedAt: run.updatedAt,
+    candidateCount: typeof matchRows === "number" && Number.isFinite(matchRows) ? matchRows : 0,
+    artifactCount: run.artifacts.length,
+    ...(run.waiting ? { waitingReason: run.waiting.reason } : {}),
+  };
+}
+
+export function workflowRunListItems(
+  runs: readonly WorkflowRun[],
+  options: { limit: number; workflowKey?: string },
+): WorkflowRunListItem[] {
+  const statusPriority: Record<WorkflowRunStatus, number> = {
+    waiting_for_input: 0,
+    queued: 1,
+    running: 1,
+    failed: 2,
+    succeeded: 3,
+  };
+  return runs
+    .filter((run) => options.workflowKey === undefined || run.workflowKey === options.workflowKey)
+    .sort((left, right) => statusPriority[left.status] - statusPriority[right.status]
+      || right.updatedAt.localeCompare(left.updatedAt)
+      || right.createdAt.localeCompare(left.createdAt))
+    .slice(0, options.limit)
+    .map(workflowRunListItem);
 }
 
 export interface AgentMessage {

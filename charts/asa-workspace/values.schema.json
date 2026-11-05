@@ -214,6 +214,46 @@
       },
       "required": ["mode", "localScanEnabled", "index", "external", "initJob"]
     },
+    "telemetry": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "endpoint": { "type": "string", "minLength": 1, "pattern": "^https?://[^\\s]+$" },
+        "serviceName": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "cluster": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "environment": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "metricExportIntervalMs": { "type": "integer", "minimum": 1000, "maximum": 300000 },
+        "captureContent": { "type": "boolean" }
+      },
+      "required": ["enabled", "endpoint", "serviceName", "cluster", "environment", "metricExportIntervalMs", "captureContent"]
+    },
+    "networkProxy": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "url": { "type": "string", "maxLength": 512, "pattern": "^$|^https?://[^/\\s@?#]+$" },
+        "noProxy": {
+          "type": "array",
+          "maxItems": 64,
+          "uniqueItems": true,
+          "items": { "type": "string", "minLength": 1, "maxLength": 255, "pattern": "^[^,\\s]+$" }
+        }
+      },
+      "required": ["enabled", "url"]
+    },
+    "scanner": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "concurrency": { "type": "integer", "minimum": 1, "maximum": 2 },
+        "pollIntervalMs": { "type": "integer", "minimum": 1000, "maximum": 300000 },
+        "resources": { "type": "object" }
+      },
+      "required": ["enabled", "concurrency", "pollIntervalMs", "resources"]
+    },
     "dataWarehouse": {
       "type": "object",
       "additionalProperties": false,
@@ -498,7 +538,15 @@
           }
         }
       }
+    },
+    {
+      "if": { "properties": { "networkProxy": { "properties": { "enabled": { "const": true } } } } },
+      "then": { "properties": { "networkProxy": { "properties": { "url": { "minLength": 1 } } } } }
+    },
+    {
+      "if": { "properties": { "telemetry": { "properties": { "captureContent": { "const": true } } } } },
+      "then": { "properties": { "telemetry": { "properties": { "environment": { "const": "dev" } } } } }
     }
   ],
-  "required": ["metadataStore", "persistence", "localData", "productionData", "search", "dataWarehouse", "postgresql", "elasticsearch"]
+  "required": ["metadataStore", "persistence", "localData", "productionData", "search", "telemetry", "scanner", "dataWarehouse", "postgresql", "elasticsearch"]
 }

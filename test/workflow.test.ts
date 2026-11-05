@@ -7,7 +7,7 @@ import test from "node:test";
 import type { CatalogQueryClient } from "../src/catalog-mcp-client.js";
 import { WorkflowEngine, EUCLID_DESI_WORKFLOW } from "../src/workflow-engine.js";
 import { WorkflowStore } from "../src/workflow-store.js";
-import { ToolRegistry, validateWorkflowDefinition, type WorkflowRun } from "../src/workflow.js";
+import { ToolRegistry, validateWorkflowDefinition, workflowRunListItems, type WorkflowRun } from "../src/workflow.js";
 
 class FixtureCatalogClient implements CatalogQueryClient {
   constructor(private readonly mode: "success" | "zero" | "error" | "invalid" = "success") {}
@@ -65,11 +65,29 @@ test("rejects cyclic workflow DAGs", () => {
   }, tools), /cycle/);
 });
 
+test("workflow run summaries put pending human decisions first and omit run inputs", async (t) => {
+  const store = await temporaryStore(t);
+  const completed = await store.create(EUCLID_DESI_WORKFLOW, { raDeg: 10, decDeg: 2, privateNote: "omit me" });
+  completed.status = "succeeded";
+  completed.summary.matchRows = 46;
+  const queued = await store.create(EUCLID_DESI_WORKFLOW, { raDeg: 11, decDeg: 2 });
+  const waiting = await store.create(EUCLID_DESI_WORKFLOW, { raDeg: 12, decDeg: 2 });
+  waiting.status = "waiting_for_input";
+  waiting.waiting = { reason: "filter", stepId: "human_filter", message: "Researcher review", availableFields: ["separationArcsec"] };
+  waiting.summary.matchRows = 12;
+
+  const summaries = workflowRunListItems([completed, queued, waiting], { limit: 2 });
+  assert.deepEqual(summaries.map((run) => run.id), [waiting.id, queued.id]);
+  assert.equal(summaries[0]?.candidateCount, 12);
+  assert.equal(summaries[0]?.waitingReason, "filter");
+  assert.equal("input" in (summaries[0] ?? {}), false);
+});
+
 test("pauses a real-shaped catalog run and resumes after a human decision", async (t) => {
   const store = await temporaryStore(t);
   const engine = new WorkflowEngine(store, new FixtureCatalogClient());
   const created = await engine.createRun("euclid-desi-crossmatch@1", {
-    raDeg: 0, decDeg: 0, queryRadiusArcsec: 10, matchRadiusArcsec: 1.5, limit: 50,
+    raDeg: 0, decDeg: 0, queryRadiusArcsec: 10, matchRadiusArcsec: 1.5, limit: 50, cutoutEnabled: false,
   });
   const waiting = await waitFor(store, created.id, ["waiting_for_input"]);
   assert.equal(waiting.waiting?.reason, "filter");

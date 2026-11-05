@@ -50,12 +50,29 @@ test("managed connector credentials round-trip through the Kubernetes Secret API
     assert.equal(reference, "asa-workspace/astro-connector-12345678-abcd-4abc-8abc-1234567890ab");
     assert.equal(await store.get(reference), undefined);
 
-    await store.put(reference, { accessKeyId: "saved-access", secretAccessKey: "saved-secret", endpoint: "https://s3.example" });
-    assert.deepEqual(await store.get(reference), { accessKeyId: "saved-access", secretAccessKey: "saved-secret", endpoint: "https://s3.example" });
+    await store.put(reference, {
+      accessKeyId: "saved-access",
+      secretAccessKey: "saved-secret",
+      endpoint: "https://s3.example",
+      sessionToken: "saved-session-token",
+    });
+    assert.deepEqual(await store.get(reference), {
+      accessKeyId: "saved-access",
+      secretAccessKey: "saved-secret",
+      endpoint: "https://s3.example",
+      sessionToken: "saved-session-token",
+    });
     assert.ok(!JSON.stringify(secret).includes("saved-secret"));
+    assert.ok(!JSON.stringify(secret).includes("saved-session-token"));
 
-    await store.put(reference, { accessKeyId: "updated-access", secretAccessKey: "updated-secret", endpoint: "https://s3.example" });
+    await store.put(reference, {
+      accessKeyId: "updated-access",
+      secretAccessKey: "updated-secret",
+      endpoint: "https://s3.example",
+      sessionToken: "updated-session-token",
+    });
     assert.equal((await store.get(reference))?.accessKeyId, "updated-access");
+    assert.equal((await store.get(reference))?.sessionToken, "updated-session-token");
     await store.remove(reference);
     assert.equal(await store.get(reference), undefined);
   } finally {

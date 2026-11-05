@@ -21,6 +21,8 @@ import type { UserMocArtifactContext, UserMocArtifactStore } from "./user-moc-ar
 import { readFitsHeaders, type FitsByteSource, type FitsHeaderRecord, FITS_RECORD_BYTES } from "./fits-headers.js";
 import { productionImageSources, registerProductionImageAssets, verifyProductionImageInventory } from "./production-image-assets.js";
 import type { SourceFileInventory } from "./source-crawler.js";
+import { SpanStatusCode } from "@opentelemetry/api";
+import { activeTraceparent, classifyError, recordScan, withContinuedSpan } from "./telemetry.js";
 
 const WORKSPACE_SCAN_EXECUTOR = "workspace";
 const MAX_INVENTORY_FILES = 1_000_000;
@@ -59,6 +61,7 @@ interface WorkspaceScanTask {
   connectorId: string;
   assetId: string;
   createdAt: string;
+  traceparent?: string;
   files: ScanFile[];
   sourceSnapshotSha256: string;
   completedFileIds: string[];
@@ -85,6 +88,8 @@ export function workspaceScanEnabled(value = process.env.ASTRO_WORKSPACE_SCAN_EN
 
 interface WorkspaceScanExecutorOptions {
   enabled: boolean;
+  workerEnabled?: boolean;
+  maxConcurrency?: number;
   root: string;
   connectors: ConnectorRegistry;
   credentials: ConnectorCredentialStore;
@@ -209,10 +214,19 @@ export class WorkspaceScanExecutor {
   readonly #options: WorkspaceScanExecutorOptions;
   readonly #root: string;
   readonly #tasks = new Map<string, Promise<ConnectorIngestRunRecord>>();
+  readonly #queuedSlots: Array<() => void> = [];
+  readonly #workerEnabled: boolean;
+  readonly #maxConcurrency: number;
+  #activeTasks = 0;
 
   constructor(options: WorkspaceScanExecutorOptions) {
     this.#options = options;
     this.#root = path.resolve(options.root);
+    this.#workerEnabled = options.workerEnabled ?? true;
+    this.#maxConcurrency = options.maxConcurrency ?? 2;
+    if (!Number.isSafeInteger(this.#maxConcurrency) || this.#maxConcurrency < 1 || this.#maxConcurrency > 2) {
+      throw new RangeError("Workspace scan concurrency must be 1 or 2");
+    }
   }
 
   async submitAsset(assetId: string, input?: WorkspaceScanInput, connectorId?: string, idempotencyKey?: string): Promise<ConnectorIngestRunRecord> {
@@ -325,6 +339,7 @@ export class WorkspaceScanExecutor {
       connectorId: connector.id,
       assetId: asset.id,
       createdAt: created.run.createdAt,
+      ...(activeTraceparent() ? { traceparent: activeTraceparent() } : {}),
       files,
       sourceSnapshotSha256,
       completedFileIds: [],
@@ -404,9 +419,11 @@ export class WorkspaceScanExecutor {
   }
 
   #schedule(task: WorkspaceScanTask, run: ConnectorIngestRunRecord): void {
+    if (!this.#workerEnabled) return;
     const existing = this.#tasks.get(run.id);
     if (existing) return;
-    const work = this.#execute(task, run).catch(async (error) => {
+    const slot = new Promise<void>((resolve) => this.#queuedSlots.push(resolve));
+    const work = slot.then(() => this.#execute(task, run)).catch(async (error) => {
       const completedAt = new Date().toISOString();
       const message = errorMessage(error);
       const asset = await this.#options.dataCatalog.get(task.assetId).catch(() => undefined);
@@ -424,10 +441,57 @@ export class WorkspaceScanExecutor {
     });
     this.#tasks.set(run.id, work);
     const cleanup = (): void => { if (this.#tasks.get(run.id) === work) this.#tasks.delete(run.id); };
-    void work.then(cleanup, cleanup);
+    void work.then(cleanup, cleanup).finally(() => {
+      this.#activeTasks -= 1;
+      this.#drainQueue();
+    });
+    this.#drainQueue();
+  }
+
+  #drainQueue(): void {
+    while (this.#activeTasks < this.#maxConcurrency && this.#queuedSlots.length) {
+      const start = this.#queuedSlots.shift()!;
+      this.#activeTasks += 1;
+      start();
+    }
   }
 
   async #execute(task: WorkspaceScanTask, originalRun: ConnectorIngestRunRecord): Promise<ConnectorIngestRunRecord> {
+    const totalBytes = task.files.reduce((sum, file) => sum + file.size, 0);
+    const startedAt = performance.now();
+    return withContinuedSpan("scan.run", {
+      "asa.component": "scan",
+      "asa.scan.run_id": task.runId,
+      "asa.scan.kind": "workspace",
+      "asa.scan.files": task.files.length,
+      "asa.scan.bytes": totalBytes,
+    }, async (span) => {
+      try {
+        const result = await this.#executeScan(task, originalRun, span);
+        const peakRssBytes = process.memoryUsage().rss;
+        span.setAttribute("asa.scan.peak_rss_bytes", peakRssBytes);
+        span.setAttribute("asa.scan.outcome", result.status === "succeeded" ? "ok" : "error");
+        if (result.status !== "succeeded") span.setStatus({ code: SpanStatusCode.ERROR });
+        recordScan("workspace", {
+          accepted: task.completedFileIds.length,
+          failed: task.failedFileIds.length,
+          bytes: totalBytes,
+          peakRssBytes,
+        });
+        span.setAttribute("asa.scan.duration_seconds", (performance.now() - startedAt) / 1000);
+        return result;
+      } catch (error) {
+        const peakRssBytes = process.memoryUsage().rss;
+        span.setAttribute("asa.scan.peak_rss_bytes", peakRssBytes);
+        span.setAttribute("asa.scan.outcome", "error");
+        span.setStatus({ code: SpanStatusCode.ERROR });
+        recordScan("workspace", { failed: Math.max(1, task.failedFileIds.length), bytes: totalBytes, peakRssBytes });
+        throw error;
+      }
+    }, task.traceparent);
+  }
+
+  async #executeScan(task: WorkspaceScanTask, originalRun: ConnectorIngestRunRecord, span: import("@opentelemetry/api").Span): Promise<ConnectorIngestRunRecord> {
     const connector = await this.#options.connectors.get(task.connectorId);
     const asset = await this.#options.dataCatalog.get(task.assetId);
     const credentials = connector.kind === "s3" && connector.credentialRef ? await this.#options.credentials.get(connector.credentialRef) : undefined;
@@ -459,6 +523,10 @@ export class WorkspaceScanExecutor {
         if (!task.failedFileIds.includes(file.id)) task.failedFileIds.push(file.id);
         task.errors = task.errors.filter((entry) => entry.fileId !== file.id);
         task.errors.push({ fileId: file.id, message: `${file.name}: ${errorMessage(error)}` });
+        if (task.failedFileIds.length <= 20) {
+          const extension = /\.(?:fits\.gz|fits|fit|csv)$/i.exec(file.name)?.[0]?.toLowerCase() ?? ".other";
+          span.addEvent("scan.file_error", { "error.type": classifyError(error), "file.extension": extension });
+        }
       }
       task.failedFiles = task.failedFileIds.length;
       task.processedFiles = task.completedFileIds.length;

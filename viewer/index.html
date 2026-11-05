@@ -100,7 +100,16 @@
         </div>
 
         <div id="workflow-controls" hidden>
-          <section class="control-section production-template-sidebar">
+          <div class="production-view-switch" role="group" aria-label="数据生产视图">
+            <button id="production-view-workflow" class="active" type="button" aria-pressed="true">星表 Workflow</button>
+            <button id="production-view-pipelines" type="button" aria-pressed="false">其他流水线</button>
+          </div>
+          <section id="workflow-run-history-section" class="control-section workflow-run-history-section">
+            <div class="section-heading"><span>Workflow 执行</span><output id="workflow-run-history-count">0</output><button id="workflow-history-refresh" class="icon-button" type="button" aria-label="刷新 Workflow 执行记录" title="刷新 Workflow 执行记录"><i data-lucide="refresh-cw"></i></button></div>
+            <div id="workflow-run-history" class="workflow-run-history" aria-label="Workflow 执行记录"></div>
+            <div id="workflow-run-history-empty" class="catalog-empty" hidden>暂无 Workflow 执行记录。</div>
+          </section>
+          <section id="production-template-sidebar" class="control-section production-template-sidebar" hidden>
             <div class="section-heading"><span>流水线模板</span><output id="production-template-count">--</output></div>
             <div id="production-template-list" class="production-template-list" aria-label="流水线模板列表"></div>
             <div id="production-template-empty" class="catalog-empty" hidden>暂无可用流水线模板。</div>
@@ -303,25 +312,30 @@
         <div id="loading-indicator" class="loading-indicator visible">载入多巡天索引</div>
       </section>
 
-      <section id="workflow-stage" class="workflow-stage" aria-label="数据生产" hidden>
+      <div id="data-production-workbench" class="data-production-workbench" hidden>
+      <section id="workflow-stage" class="workflow-stage" aria-label="星表交叉匹配 Workflow" hidden>
         <header class="workflow-stage-header">
           <div>
-            <span class="panel-kicker">ASTRO-CODE DATA PRODUCTION</span>
-            <h2 id="workflow-stage-title">交叉匹配 → cutout → 打包</h2>
+            <span class="panel-kicker">WORKSPACE WORKFLOW</span>
+            <h2 id="workflow-stage-title">Euclid × DESI → 筛选 → FITS cutout</h2>
           </div>
-          <div class="stage-primary-actions"><button id="workflow-new" class="primary-command compact-command" type="button"><i data-lucide="plus"></i><span>新建任务</span></button><span id="workflow-status-badge" class="run-status" data-status="idle">IDLE</span></div>
+          <div class="stage-primary-actions"><button id="workflow-new" class="primary-command compact-command" type="button"><i data-lucide="plus"></i><span>新建任务</span></button><span id="workflow-run-id" class="workflow-run-id" title="暂无执行记录">NO RUN</span><span id="workflow-status-badge" class="run-status" data-status="idle">IDLE</span></div>
         </header>
-        <section class="production-track" aria-label="astro-code 生产动作">
-          <div class="section-heading"><span>生产动作</span><span>ASTRO-CODE</span></div>
-          <div class="production-actions" role="group" aria-label="选择数据生产动作">
-            <button type="button" class="production-action active" data-production-action="crossmatch"><strong>01</strong><span>交叉匹配</span><small>RA / Dec 合并星表</small></button>
-            <button type="button" class="production-action" data-production-action="cutout"><strong>02</strong><span>cutout</span><small>按对象裁剪图像</small><em>待接入</em></button>
-            <button type="button" class="production-action" data-production-action="package"><strong>03</strong><span>打包</span><small>组织多模态交付物</small><em>待接入</em></button>
+        <section class="production-track" aria-label="Workspace 工作流阶段">
+          <div class="section-heading"><span>工作流阶段</span><span>WORKSPACE</span></div>
+          <div class="production-actions">
+            <div class="production-action active"><strong>01</strong><span>星表查询与匹配</span><small>Euclid × DESI</small></div>
+            <div class="production-action"><strong>02</strong><span>人工筛选</span><small>人在回路</small></div>
+            <div class="production-action"><strong>03</strong><span>FITS cutout</span><small>MCP 分组执行</small></div>
+            <div class="production-action"><strong>04</strong><span>导出</span><small>数据与血缘</small></div>
           </div>
-          <p id="production-action-copy" class="production-action-copy">当前动作使用真实目录执行球面交叉匹配，并保留结果血缘。cutout 与打包会复用同一选区和对象清单。</p>
+        </section>
+        <section class="workflow-tool-health-section" aria-label="Workflow 工具状态">
+          <div class="section-heading"><span>Workflow 工具</span><span id="workflow-tool-count">0 TOOLS</span></div>
+          <div id="workflow-tool-health" class="tool-health-list"></div>
         </section>
         <section class="pipeline-section" aria-labelledby="pipeline-heading">
-              <div class="section-heading"><span id="pipeline-heading">执行步骤 <button class="status-help" type="button" aria-label="执行步骤状态说明"><i data-lucide="info" aria-hidden="true"></i><span class="sr-only">执行步骤状态说明</span><span class="status-help-tooltip" role="tooltip">未开始：尚未执行。执行中：系统正在运行。等待输入：需要人工决定。完成：步骤成功结束。失败：步骤未完成，可查看错误或重试。</span></button></span><span id="pipeline-progress">0 / 7</span></div>
+              <div class="section-heading"><span id="pipeline-heading">执行步骤 <button class="status-help" type="button" aria-label="执行步骤状态说明"><i data-lucide="info" aria-hidden="true"></i><span class="sr-only">执行步骤状态说明</span><span class="status-help-tooltip" role="tooltip">未开始：尚未执行。执行中：系统正在运行。等待输入：需要人工决定。完成：步骤成功结束。失败：步骤未完成，可查看错误或重试。</span></button></span><span id="pipeline-progress">0 / 8</span></div>
           <ol id="workflow-steps" class="workflow-steps"></ol>
         </section>
         <section id="workflow-gate" class="workflow-gate" hidden>
@@ -349,6 +363,7 @@
             <div class="result-actions">
               <button id="workflow-retry" class="icon-button" type="button" aria-label="重试失败任务" title="重试失败任务" hidden><i data-lucide="refresh-cw"></i></button>
               <a id="workflow-download" class="icon-button" aria-label="下载结果" title="下载结果" hidden><i data-lucide="download"></i></a>
+              <a id="workflow-cutout-download" class="icon-button" aria-label="下载 cutout 索引" title="下载 cutout 索引" hidden><i data-lucide="scan"></i></a>
               <button id="workflow-open-layers" class="icon-button" type="button" aria-label="在巡天球层中查看" title="在巡天球层中查看"><i data-lucide="globe-2"></i></button>
             </div>
           </div>
@@ -359,7 +374,7 @@
         </section>
       </section>
 
-      <section id="production-stage" class="production-stage" aria-label="数据生产" hidden>
+      <section id="production-stage" class="production-stage" aria-label="其他数据生产流水线" hidden>
         <header class="catalog-stage-header">
           <div>
             <span class="panel-kicker">DATA PRODUCTION</span>
@@ -382,6 +397,7 @@
           <section id="production-download-workspace" class="production-download-workspace" aria-label="公开文件预览" hidden></section>
         </div>
       </section>
+      </div>
 
       <section id="system-stage" class="system-stage" aria-label="系统配置" hidden>
         <header class="catalog-stage-header">
@@ -583,7 +599,40 @@
         <form id="workflow-form" class="dialog-form workflow-form">
           <header><div><span class="panel-kicker">NEW PRODUCTION RUN</span><h2>新建数据生产任务</h2></div><button id="workflow-dialog-close" class="icon-button" type="button" aria-label="关闭"><span aria-hidden="true">×</span></button></header>
           <label class="field-label" for="workflow-select">定义</label><select id="workflow-select" class="field-input"></select>
-          <div class="parameter-grid"><label class="field-label" for="workflow-ra">RA</label><input id="workflow-ra" class="field-input" type="number" value="150.1" required /><label class="field-label" for="workflow-dec">Dec</label><input id="workflow-dec" class="field-input" type="number" value="2.2" required /><label class="field-label" for="workflow-query-radius">检索半径</label><div class="input-unit"><input id="workflow-query-radius" class="field-input" type="number" value="600" required /><span>″</span></div><label class="field-label" for="workflow-match-radius">匹配半径</label><div class="input-unit"><input id="workflow-match-radius" class="field-input" type="number" value="1.5" required /><span>″</span></div><label class="field-label" for="workflow-limit">结果上限</label><input id="workflow-limit" class="field-input" type="number" value="500" required /></div>
+          <div class="parameter-grid"><label class="field-label" for="workflow-ra">RA</label><input id="workflow-ra" class="field-input" type="number" value="150.1" required /><label class="field-label" for="workflow-dec">Dec</label><input id="workflow-dec" class="field-input" type="number" value="2.2" required /><label class="field-label" for="workflow-query-radius">检索半径</label><div class="input-unit"><input id="workflow-query-radius" class="field-input" type="number" value="250" required /><span>″</span></div><label class="field-label" for="workflow-match-radius">匹配半径</label><div class="input-unit"><input id="workflow-match-radius" class="field-input" type="number" value="1.5" required /><span>″</span></div><label class="field-label" for="workflow-limit">结果上限</label><input id="workflow-limit" class="field-input" type="number" value="500" required /><label class="field-label" for="workflow-cutout-size">Cutout 尺寸</label><div class="input-unit"><input id="workflow-cutout-size" class="field-input" type="number" min="0.001" max="1" step="0.001" value="0.008" required /><span>deg</span></div></div>
+          <div class="workflow-catalog-source">
+            <div class="catalog-form-grid">
+              <label><span class="field-label">Euclid 星表资产</span><select id="workflow-catalog-source-euclid" class="field-input"><option value="">远程目录</option></select></label>
+              <label><span class="field-label">DESI 星表资产</span><select id="workflow-catalog-source-desi" class="field-input"><option value="">远程目录</option></select></label>
+            </div>
+            <div id="workflow-catalog-columns" class="catalog-form-grid" hidden>
+              <label><span class="field-label">列映射来源</span><select id="workflow-catalog-map-side" class="field-input"></select></label>
+              <label><span class="field-label">RA 列</span><input id="workflow-catalog-ra-column" class="field-input" maxlength="128" /></label>
+              <label><span class="field-label">Dec 列</span><input id="workflow-catalog-dec-column" class="field-input" maxlength="128" /></label>
+              <label><span class="field-label">对象 ID 列</span><input id="workflow-catalog-id-column" class="field-input" maxlength="128" /></label>
+              <label id="workflow-catalog-hdu-field"><span class="field-label">FITS 表 HDU</span><input id="workflow-catalog-hdu" class="field-input" maxlength="80" /></label>
+              <details id="workflow-catalog-extra-fields" class="workflow-catalog-extra">
+                <summary>补充列</summary>
+                <div class="catalog-form-grid">
+                  <label><span class="field-label">测光列</span><input id="workflow-catalog-magnitude-column" class="field-input" maxlength="128" /></label>
+                  <label><span class="field-label">分类列</span><input id="workflow-catalog-class-column" class="field-input" maxlength="128" /></label>
+                  <label><span class="field-label">Tile 列</span><input id="workflow-catalog-tile-column" class="field-input" maxlength="128" /></label>
+                  <label><span class="field-label">Brick 列</span><input id="workflow-catalog-brickname-column" class="field-input" maxlength="128" /></label>
+                  <label><span class="field-label">FITS 路径列</span><input id="workflow-catalog-fits-path-column" class="field-input" maxlength="128" /></label>
+                  <label><span class="field-label">g 图像列</span><input id="workflow-catalog-image-g-column" class="field-input" maxlength="128" /></label>
+                  <label><span class="field-label">r 图像列</span><input id="workflow-catalog-image-r-column" class="field-input" maxlength="128" /></label>
+                  <label><span class="field-label">i 图像列</span><input id="workflow-catalog-image-i-column" class="field-input" maxlength="128" /></label>
+                  <label><span class="field-label">z 图像列</span><input id="workflow-catalog-image-z-column" class="field-input" maxlength="128" /></label>
+                </div>
+              </details>
+            </div>
+            <details id="workflow-catalog-field-mapping" class="workflow-catalog-extra">
+              <summary>补充字段</summary>
+              <label class="field-label" for="workflow-catalog-fields">Euclid / DESI 字段映射</label>
+              <textarea id="workflow-catalog-fields" class="field-input" rows="3" spellcheck="false" placeholder='{"euclid":{"redshift":"Z_PHOT"},"desi":{"snr":"TARGET_SNR"}}'></textarea>
+            </details>
+          </div>
+          <label class="toggle-row"><input id="workflow-cutout-enabled" type="checkbox" checked /><span>执行 FITS cutout</span></label>
           <footer><button class="primary-command" type="submit"><i data-lucide="play"></i><span>运行工作流</span></button></footer>
         </form>
       </dialog>

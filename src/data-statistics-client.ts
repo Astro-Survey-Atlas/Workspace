@@ -17,7 +17,7 @@ export class DataStatisticsClient {
     await this.#starting;
   }
   async #start(): Promise<void> {
-    const extension = import.meta.url.endsWith(".ts") ? "ts" : "js";
+    const extension = import.meta.url.endsWith(".ts") ? "ts" : import.meta.url.endsWith(".mjs") ? "mjs" : "js";
     const entry = new URL(`./data-statistics-worker.${extension}`, import.meta.url);
     const worker = extension === "ts"
       ? new Worker('const { workerData } = require("node:worker_threads"); import("tsx/esm/api").then(({ tsImport }) => tsImport(workerData.entry, workerData.entry));',

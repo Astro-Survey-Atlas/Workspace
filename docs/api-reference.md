@@ -22,6 +22,35 @@
 - Warehouse 的 `ast_*` 索引没有 caller 字段；Workspace 只接受能由本地用户资产、扫描记录或 MOC artifact 关联出的 layer ID。Assets 公共 layer 不会因为 Warehouse 可达而混入用户天球，公共覆盖仍来自已验证的 Resource Package v3。
 - 用户 manifest、normalized scan、任务快照和证据只保存在 Workspace/Warehouse evidence PVC 或对象存储中，不能放入浏览器初始响应。
 
+## Workflow 与 Agent
+
+Workflow 是 Agent 和数据生产界面执行星表处理时共用的确定性流程。两者都通过
+Workspace 管理同一个 run；浏览器和 Agent 不维护各自的任务或产物副本。
+
+```http
+GET /api/workflows
+GET /api/workflows/{workflowKey}
+POST /api/workflow-runs
+GET /api/workflow-runs?limit=50&workflowKey=euclid-desi-crossmatch%401
+GET /api/workflow-runs/{runId}
+POST /api/workflow-runs/{runId}/decisions
+GET /api/workflow-runs/{runId}/artifacts/{artifactName}
+```
+
+`POST /api/workflow-runs` 接受 `{"workflowId":"euclid-desi-crossmatch@1","input":{...}}`，
+异步返回 202 和 run。列表 `limit` 默认为 20，范围为 1–100；`workflowKey` 为可选的精确筛选。
+列表只返回 run ID、Workflow key、状态、创建/更新时间、候选数、产物数和等待原因，不返回
+输入、预览或产物内容；等待人工输入的 run 排在活动 run 和终态记录之前。详细状态与人工筛选
+上下文通过 run 详情读取。列表响应使用 `Cache-Control: private, no-store`。
+
+人工筛选和区域调整通过 `POST /api/workflow-runs/{runId}/decisions` 提交。Agent 的写工具会等待
+会话确认；已有相同归一化输入的 queued、running 或 waiting run 会被复用。Agent 不代替研究者
+提交 Workflow 的人工闸门决策。
+
+CLI 对应命令为 `astro-workspace workflows list|get|runs|run|run-get|decide|artifact|artifact-read`；
+`workflows runs --limit 50 --workflow-key euclid-desi-crossmatch@1` 查询有限摘要。`api` 子命令
+可调用任意 Workspace `/api/...` 路由。
+
 ## Connector
 
 ### 检测连接
@@ -31,6 +60,18 @@ POST /api/connectors/{connectorId}/check
 ```
 
 用于验证当前配置和凭据。成功响应包含 `check.status=ok`；它不是扫描完成证据。
+
+### 列举 Connector 对象
+
+```http
+GET /api/connectors/{connectorId}/objects?prefix=projects%2Fsurvey%2Fcatalog%2F&continuationToken=...
+```
+
+只适用于状态为 `ready` 的 S3/OSS Connector。请求使用 Workspace 保存的凭据，
+每页最多返回 1,000 个对象；可传 `continuationToken` 读取下一页。可选 `prefix`
+必须位于 Connector 配置的 Prefix 之内，省略时列举配置 Prefix。响应只包含对象
+key、字节数、修改时间和 ETag，不返回存储凭据。Workspace CLI 对应命令为
+`astro-workspace connectors objects {connectorId} [--prefix PREFIX] [--continuation-token TOKEN]`。
 
 ### Connector 全量自扫描
 

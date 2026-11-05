@@ -475,7 +475,7 @@ test("local asset registration inspects CSV columns before creating a scan spec"
     createdAt: "2026-08-14T00:00:00.000Z",
     updatedAt: "2026-08-14T00:00:00.000Z",
     origin: "user",
-    credentials: { accessKeyId: "", secretConfigured: false },
+    credentials: { accessKeyConfigured: false, secretConfigured: false },
   };
   const existing = await apiJson<{ connectors: unknown[] }>("/api/connectors");
   let inspectBody: unknown;
@@ -535,7 +535,7 @@ test("workspace notifications share one mobile deck with dedupe, cap, and expiry
     createdAt: "2026-08-14T00:00:00.000Z",
     updatedAt: "2026-08-14T00:00:00.000Z",
     origin: "user",
-    credentials: { accessKeyId: "", secretConfigured: false },
+    credentials: { accessKeyConfigured: false, secretConfigured: false },
   };
   await page.route("**/api/connectors", async (route) => {
     await route.fulfill({ json: { connectors: [localConnector] } });
@@ -775,18 +775,18 @@ test("connector actions and unified scan history expose only supported execution
       id: "connector-s3-fixture", locationKey: "s3://fixture/catalog", displayPath: "s3://fixture/catalog",
       name: "S3 science archive", description: "Fixture S3 connector", kind: "s3", config: { bucket: "fixture", prefix: "catalog", region: "us-east-1" },
       status: "ready", createdAt: now, updatedAt: now, origin: "user",
-      lastCheck: { status: "ok", checkedAt: now, summary: "连接正常" }, credentials: { accessKeyId: "fixture-access", secretConfigured: true },
+      lastCheck: { status: "ok", checkedAt: now, summary: "连接正常" }, credentials: { accessKeyConfigured: true, secretConfigured: true },
     },
     {
       id: "connector-local-fixture", locationKey: "local:///data/catalog", displayPath: "/data/catalog",
       name: "Local mounted catalog", description: "Fixture local connector", kind: "local", config: { rootPath: "/data/catalog" },
       status: "ready", createdAt: now, updatedAt: now, origin: "user",
-      lastCheck: { status: "ok", checkedAt: now, summary: "目录可读" }, credentials: { accessKeyId: "", secretConfigured: false },
+      lastCheck: { status: "ok", checkedAt: now, summary: "目录可读" }, credentials: { accessKeyConfigured: false, secretConfigured: false },
     },
     {
       id: "connector-jdbc-fixture", locationKey: "jdbc:fixture", displayPath: "jdbc:postgresql://db/catalog/public",
       name: "JDBC science database", description: "Fixture JDBC connector", kind: "jdbc", config: { url: "jdbc:postgresql://db/catalog", schema: "public" },
-      status: "ready", createdAt: now, updatedAt: now, origin: "user", credentials: { accessKeyId: "", secretConfigured: false },
+      status: "ready", createdAt: now, updatedAt: now, origin: "user", credentials: { accessKeyConfigured: false, secretConfigured: false },
     },
   ];
   const assets = [{
