@@ -1,88 +1,70 @@
-# Workspace Metadata Migration
+# Workspace local-state migration
 
-This runbook moves the Workspace metadata tables from SQLite to PostgreSQL.
-It does not move files or state stored under `/state`, including Workflow runs,
-artifacts, resource packages, user MOCs, or connector payloads. Keep the existing
-state volume mounted after switching databases. Scanner enablement also requires
-the shared state volume to provide `ReadWriteMany`; PostgreSQL alone is not
-sufficient.
+The supported runtime uses local SQLite (WAL) and owned Elasticsearch. API and
+scanner share one node. Scientific rows live in three v2 indices; large FITS
+headers and catalog attributes live in compressed evidence chunks with bounded
+record references. Workflow outputs and original scientific evidence remain files.
 
-The migration tool copies `connectors`, `data_assets`, `connector_ingest_runs`,
-`survey_identities`, `statistics_snapshots`, `statistics_entries`, and
-`import_markers`. It checks the SQLite schema version and integrity, refuses a
-source with SQLite WAL sidecars, copies in batches inside one PostgreSQL
-transaction, checks row counts, and records the source hash and counts to prevent
-accidental imports from a different source.
+1. Pause Workspace scanning and suspend existing Workspace scan Jobs. Keep
+   Warehouse and Assets unchanged. Retain the original state/search volumes.
+2. Export a consistent SQLite backup. Copy state artifacts to a new local
+   volume. Exclude the obsolete statistics checkpoint and transient files.
+3. Run `scripts/migrate-workspace-search.py --source OWNED_OLD_ES --target
+   OWNED_NEW_ES --metadata COPIED_SQLITE --output STAGING_DIRECTORY`.
+   Use a local disk with room for scientific evidence. Review the receipt:
+   current quality batches and distinct point identities are retained;
+   superseded/unowned records remain in the original index. Never delete the
+   original volume as part of conversion.
+4. Stop API writes, take the final consistent SQLite backup and copy any changed
+   Workflow/Agent/production control files. Copy the generated `workspace-scans`
+   evidence directory into the new state volume. Migrate Connector credentials
+   into the private `connector-credentials.json` file (0600); never print values.
+5. With the pinned MOC Core available, run
+   `npx tsx scripts/migrate-workspace-state.ts --root COPIED_STATE
+   --search-receipt SEARCH_RECEIPT` against the copied state. The tool imports
+   JSON history into SQLite and retains all original files. It publishes verified
+   point-presence cells; original image-extent MOCs remain available as evidence.
+   It keeps scanning paused and marks interrupted old tasks paused.
+6. Deploy the API and independent worker with the new state claim and owned ES.
+   Verify source identities, query points, detail attributes, MOC coverage,
+   historical Workflow FITS and ZIP downloads. Record cold/warm latency before
+   calling the cutover complete. Old tasks without the new checkpoint format
+   remain history; submit a new scan to execute them locally.
 
-## Before the Window
+Only recoverable configuration/catalog snapshots rotate to the latest three.
+Referenced scientific evidence, Workflow outputs and source volumes are retained.
 
-1. Provision an empty PostgreSQL database and a Workspace database URL. Keep the
-   URL in the approved secret manager or a restricted process environment; do
-   not place it in shell arguments, values files, logs, or tickets.
-2. Take a recoverable snapshot of the Workspace state volume and PostgreSQL
-   storage. Record the current Helm values and SQLite database path.
-3. Keep `scanner.enabled=false`. Confirm the planned PostgreSQL schema is not
-   already used by a live Workspace deployment.
-4. Run the commands from a Workspace checkout with Node.js 22.15 or later and
-   the repository dependencies installed. The SQLite file must be readable from
-   that host, such as through a maintenance mount of the existing state PVC.
+## November 6 completed cutover
 
-## Maintenance Window
+Helm revision 150 deploys `0.0.1-dev-20261106-lightweight-r5`. API/worker use
+`asa-workspace-state-local` (20 GiB); ES uses `asa-workspace-search-local` (30 GiB),
+both `local-path` on `zjlab-ubuntu`. Original state, evidence, production and ES
+volumes remain. Old state/evidence/production claims have
+`helm.sh/resource-policy: keep`.
 
-1. Stop all Workspace processes that can write metadata, including the API and
-   any scanner process. Do not start another Workspace instance against either
-   store during the copy.
-2. Checkpoint SQLite after writers have stopped. If `workspace.sqlite-wal` or
-   `workspace.sqlite-shm` remains, do not remove it by hand; use SQLite's
-   checkpoint/journal-mode tools, close all SQLite handles, and confirm the
-   sidecars are gone. The migration script intentionally stops when either file
-   exists.
-3. Set `ASTRO_DATABASE_URL` and optionally `ASTRO_DATABASE_SCHEMA` in the
-   restricted environment. The default schema is `astro_workspace`. Set
-   `ASTRO_SQLITE_PATH` to the stopped source database before previewing and
-   applying the copy.
-4. Create the target schema and tables without copying application records:
+Search conversion retained 3,019,111 positions, 1,298,611 file records,
+1,298,579 footprints and 12 published assets. Evidence copy verified all 746
+files (6,149,925,910 bytes). Control/output verification checked 264 files
+(26,405,504 bytes), with no mismatches. Five Workflow runs, ten Agent sessions,
+four production runs, 22 Connectors and 23 assets remain available. API/worker
+restart retained paused scanning; zero scans are queued/running and three are
+paused. Measurements and test receipts are in the
+[acceptance record](workspace-performance-refactor-20261106.md).
 
-   ```bash
-   npm run migrate:metadata:postgres -- --prepare-target
-   ```
+The host uses Helm 4.2.3, whose `--post-renderer` expects a plugin. For cutover,
+a private temporary chart included an explicit retained-PVC template so the
+three former Helm-managed claims stayed in the release with `keep` annotations.
+Revision 150's stored manifest includes those annotations; subsequent normal
+chart upgrades can omit the old claims and Helm retains them. New local claims
+use `existingClaim` and remain independently owned. Recovery must use a matched
+old state/search pair with scanning paused: revision 149 was an unsuccessful
+intermediate deployment and revision 148 uses the former executors.
 
-5. Preview the source hash and row counts, and confirm the target is empty and
-   ready:
+The final chart explicitly sets `serviceAccountName: default` and disables token
+automount for API/worker/search; this clears a strategic-merge leftover of the
+removed old account. API probes send `Host: localhost` for the MCP Host allowlist.
+Validated local public-catalog cache avoids remote sync in the startup path.
 
-   ```bash
-   npm run migrate:metadata:postgres
-   ```
-
-   Proceed only when the output has `readyToApply: true` and the source counts
-   match the expected maintenance snapshot. A non-empty target is not merged.
-6. Apply the copy:
-
-   ```bash
-   npm run migrate:metadata:postgres -- --apply
-   ```
-
-   The command prints the schema, source hash, and row counts, but never the
-   database URL or record contents. A successful apply verifies all table counts
-   before committing the transaction.
-7. Configure Helm with `metadataStore.mode=external-postgresql` or
-   `metadataStore.mode=bundled-postgresql`, keep the previous state PVC mounted,
-   and start one Workspace instance. Check readiness and read-only access to
-   Connectors, assets, and statistics before restoring normal writes.
-8. Enable Scanner only after the PostgreSQL-backed Workspace is accepted and
-   the configured state PVC is confirmed `ReadWriteMany`.
-
-If the copy fails, its data transaction rolls back. Keep Workspace stopped and
-inspect the error and target counts before retrying. If the marker says the same
-source was already applied, the copy completed previously. A different source
-hash is rejected and needs a deliberate new empty schema.
-
-## Rollback
-
-Before allowing writes to the PostgreSQL-backed Workspace, a failed cutover can
-be rolled back by stopping Workspace and restoring the previous SQLite mode and
-state volume. Keep the original SQLite file unchanged through acceptance.
-
-After PostgreSQL has accepted new writes, switching back to SQLite would lose
-those writes. Stop and preserve both stores, then reconcile or take a new
-planned migration; do not treat a Helm rollback as a data rollback.
+Private receipts: `/tmp/workspace-lightweight-refactor-20261106/`; search and
+evidence-copy receipts: `/home/aaron/.cache/workspace-refactor-20261106/`.
+Keep credential contents and private Helm values out of public records.

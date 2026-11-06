@@ -46,10 +46,10 @@ async function main() {
 
   // 3. Server child process via ELECTRON_RUN_AS_NODE semantics (plain node here)
   const serverEntry = path.join(__dirname, "..", "build", "server.mjs");
-  const statisticsWorkerEntry = path.join(__dirname, "..", "build", "data-statistics-worker.mjs");
+  const scanWorkerEntry = path.join(__dirname, "..", "build", "scan-worker.mjs");
   const workspaceCliEntry = path.join(__dirname, "..", "build", "packages", "cli", "dist", "index.js");
   assert(fs.existsSync(serverEntry), "build/server.mjs exists (run npm run prepare:server)");
-  assert(fs.existsSync(statisticsWorkerEntry), "build/data-statistics-worker.mjs exists (run npm run prepare:server)");
+  assert(fs.existsSync(scanWorkerEntry), "build/scan-worker.mjs exists (run npm run prepare:server)");
   assert(fs.existsSync(workspaceCliEntry), "build/packages/cli/dist/index.js exists (run npm run prepare:server)");
   const handle = startServerProcess({
     electronExecPath: process.execPath,
@@ -63,6 +63,9 @@ async function main() {
   try {
     const { health } = await startWorkspaceServer(handle, { timeoutMs: 30_000 });
     assert(health && health.status === "ok", `server healthy (version ${health && health.version})`);
+    assert(handle.scanner.exitCode === null, "independent scan worker is running");
+    const scanning = await fetch(`${handle.baseUrl}/api/scanning`).then(response => response.json());
+    assert(scanning.scanning.paused === true, "desktop scanning starts paused");
     const cliRuntimeOutput = execFileSync(process.execPath, [workspaceCliEntry, "--json", "--base-url", handle.baseUrl, "system", "runtime"], {
       encoding: "utf8",
       timeout: 15_000,

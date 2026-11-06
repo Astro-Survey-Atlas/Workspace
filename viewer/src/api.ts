@@ -40,8 +40,6 @@ export interface DownloadSettingsView {
 }
 import type { WorkspaceAgentSession } from "../../src/workspace-agent";
 import type {
-  AstroCellsQueryInput,
-  AstroCellsQueryResult,
   ObjectRegionQueryInput,
   AstroObjectQueryResult,
   AstroPointDensityQueryInput,
@@ -54,7 +52,7 @@ import type { RegionDownloadPreview, RegionDownloadPreviewEvent, RegionDownloadS
 export interface WorkspaceCapabilities {
   scanning?: { paused: boolean; reason?: string; updatedAt: string };
   userMocs?: { rootConfigured: boolean; count: number };
-  localScan?: { enabled: boolean; configured: boolean; executor: string; objectIndex: string; coverageIndex: string };
+  localScan?: { enabled: boolean; configured: boolean; executor: string; objectIndex: string; footprintIndex: string };
   metadataStore: { engine: string };
 }
 
@@ -127,7 +125,7 @@ export interface WorkspaceAssetCoverageLayer extends Omit<AstroCoverageLayer, "k
   productId?: string;
   modality?: string;
   coverageRole?: string;
-  source?: "connector" | "asset" | "combined" | "unassigned" | "conflict";
+  source?: "asset";
   nativeOrders?: number[];
   availableOrders?: number[];
   maxOrder?: number;
@@ -213,7 +211,7 @@ export interface RuntimeDataServices {
   workspaceSearch: {
     endpoint: string;
     configured: boolean;
-    indices: { file: string; object: string; coverage: string };
+    indices: { file: string; object: string; footprint: string };
     source: string;
   };
   capabilities?: RuntimeCapability[];
@@ -463,9 +461,7 @@ export const workspaceApi = {
   async skyQuery(input: AstroSkyQueryInput): Promise<AstroSpatialSummary> {
     return postJson<AstroSpatialSummary>("/api/sky/query", input);
   },
-  async skyCellsQuery(input: AstroCellsQueryInput, signal?: AbortSignal): Promise<AstroCellsQueryResult> {
-    return postJson<AstroCellsQueryResult>("/api/sky/cells/query", input, signal);
-  },
+
   async skyPointScopes(sourceIds: string[], signal?: AbortSignal): Promise<{ scopes: import("../../src/astro-object-index").SkyDataPointScope[] }> {
     return postJson("/api/sky/points/scopes", { sourceIds }, signal);
   },
@@ -539,14 +535,7 @@ export const workspaceApi = {
     return (await postJson<{ job: CoverageDownloadJob }>(`/api/coverage-downloads/${encodeURIComponent(id)}/cancel`, {})).job;
   },
   async productionPipelines(): Promise<ProductionPipelineDefinition[]> {
-    const pipelines = (await getJson<{ pipelines: ProductionPipelineDefinition[] }>("/api/production-pipelines")).pipelines;
-    // Keep the viewer compatible with a server rolling out the DAG metadata
-    // one release later than the static bundle.
-    return pipelines.map((pipeline) => ({
-      ...pipeline,
-      dag: Array.isArray(pipeline.dag) ? pipeline.dag : pipeline.inputRequirements.map((requirement, index) => ({ id: `step-${index + 1}`, title: requirement, description: requirement, ...(index ? { dependsOn: [`step-${index}`] } : {}) })),
-      parameters: Array.isArray(pipeline.parameters) ? pipeline.parameters : [],
-    }));
+    return (await getJson<{ pipelines: ProductionPipelineDefinition[] }>("/api/production-pipelines")).pipelines;
   },
   async productionRuns(): Promise<ProductionRun[]> {
     return (await getJson<{ runs: ProductionRun[] }>("/api/production-runs")).runs;

@@ -124,7 +124,6 @@ function renderCoverageMetrics(): void {
   );
   const ownedLayers = [
     ...[...workspaceAssetLayers.values()].filter((layer) => visibleAssetIds.has(layer.assetId) && layer.pixels.length > 0 && layer.status === "ready"),
-    ...legacyWorkspaceLayers.filter((layer) => layer.pixels.length > 0 && layer.status === "ready"),
     ...[...workspaceExtraLayers.entries()].filter(([key, layer]) => visibleWorkspaceLayerKeys.has(key) && layer.pixels.length > 0 && layer.status === "ready").map(([, layer]) => layer),
   ];
   const active = publicSources.size + ownedLayers.length;
@@ -388,13 +387,10 @@ let visibleAssetIds = new Set<string>();
 let assetVisibilityPreferenceRestored = false;
 const workspaceAssetLayers = new Map<string, WorkspaceCoverageLayer & { assetId: string; objectCount?: number; coverageStatus: WorkspaceAssetCoverageResponse["status"] }>();
 const coverageStatusesByAsset = new Map<string, DataAssetOperationalStatusResponse>();
-let legacyWorkspaceLayers: WorkspaceCoverageLayer[] = [];
 const workspaceExtraLayers = new Map<string, WorkspaceCoverageLayer>();
 const userMocArtifacts = new Map<string, UserMocArtifact>();
 let visibleWorkspaceLayerKeys = new Set<string>();
 let workspaceLayerVisibilityPreferenceRestored = false;
-let hasUnassignedWorkspaceCoverage = false;
-let unassignedWorkspaceVisible = false;
 let layerOrder: string[] = [];
 let layerLayoutMode: SurveyLayerLayoutMode = "layers";
 let layerInteractionMode: SurveyLayerInteractionMode = "inspect";
@@ -671,8 +667,6 @@ async function syncResourceCatalog(): Promise<void> {
 }
 
 const LAYER_PREFERENCES_KEY = "astro-workspace:survey-layer-preferences:v4";
-const PREVIOUS_LAYER_PREFERENCES_KEY = "astro-workspace:survey-layer-preferences:v3";
-const LEGACY_LAYER_PREFERENCES_KEY = "astro-workspace:survey-layer-preferences:v1";
 const THEME_PREFERENCE_KEY = "astro-workspace:theme:v1";
 const SCENE_BACKGROUND_PREFERENCE_KEY = "astro-workspace:scene-background:v1";
 const ALADIN_SURVEY_PREFERENCE_KEY = "astro-workspace:aladin-image-survey:v1";
@@ -2766,7 +2760,7 @@ const coverageResultCache = new Map<string, { at: number; value: CoverageResult 
 function selectedCoverageJobKeys(): string[] {
   const ids = [...new Set([...visibleAssetIds, ...(selectedLayerAssetId ? [selectedLayerAssetId] : [])])];
   return [...ids, ...ids.map(id => `status:${id}`),
-    ...(visibleWorkspaceLayerKeys.size || unassignedWorkspaceVisible ? ["@extra"] : []),
+    ...(visibleWorkspaceLayerKeys.size ? ["@extra"] : []),
     ...(visibleSurveyIds.has("euclid") ? ["@overview"] : [])];
 }
 
@@ -2814,10 +2808,7 @@ function applyExtraCoverage(result: Extract<CoverageResult, { kind: "extra" }>, 
   }
   // Loading geometry never opts a user into another layer, including previews.
   workspaceLayerVisibilityPreferenceRestored = true;
-  legacyWorkspaceLayers = (result.coverage?.layers ?? [])
-    .filter(layer => !coverageLayerAssetIds(layer).length && !workspaceExtraLayerKey({ ...layer, nside }))
-    .map(layer => ({ ...layer, nside }));
-  hasUnassignedWorkspaceCoverage = legacyWorkspaceLayers.some(layer => layer.pixels.length > 0 && !layer.surveyId);
+
 }
 
 async function loadWorkspaceAssetCoverage(scannedAssetId?: string): Promise<void> {
@@ -2843,7 +2834,7 @@ async function loadWorkspaceAssetCoverage(scannedAssetId?: string): Promise<void
     coverageRenderFrame = requestAnimationFrame(() => {
       coverageRenderFrame = null;
       if (generation !== coverageLoadGeneration || !layerViewer) return;
-      layerViewer.setWorkspaceCoverageLayers([...workspaceAssetLayers.values(), ...legacyWorkspaceLayers, ...workspaceExtraLayers.values()], nside);
+      layerViewer.setWorkspaceCoverageLayers([...workspaceAssetLayers.values(), ...workspaceExtraLayers.values()], nside);
       const known = knownLayerOrderKeys();
       layerOrder = [...layerOrder.filter(key => known.includes(key)), ...known.filter(key => !layerOrder.includes(key))];
       applyLayerOrder(false);
@@ -3074,7 +3065,6 @@ function knownLayerOrderKeys(): string[] {
     ...userDataAssets().map((asset) => `asset:${asset.id}`),
     ...footprintSurveyIds().map((surveyId) => `public-survey:${surveyId}`),
     ...workspaceExtraLayers.keys(),
-    ...(hasUnassignedWorkspaceCoverage ? ["workspace-unassigned"] : []),
   ];
 }
 
@@ -3092,17 +3082,13 @@ function restoreLayerPreferences(): void {
   const availableAssets = new Set(userDataAssets().map((asset) => asset.id));
   try {
     const current = localStorage.getItem(LAYER_PREFERENCES_KEY);
-    const previous = localStorage.getItem(PREVIOUS_LAYER_PREFERENCES_KEY);
-    const legacy = localStorage.getItem(LEGACY_LAYER_PREFERENCES_KEY);
-    const preferenceValue = current ?? previous ?? legacy;
-    const stored = JSON.parse(preferenceValue ?? "null") as {
+    const stored = JSON.parse(current ?? "null") as {
       schemaVersion?: number;
       visibleSurveyIds?: string[];
       visibleAssetIds?: string[];
       layerOrder?: string[];
       layoutMode?: SurveyLayerLayoutMode;
       interactionMode?: SurveyLayerInteractionMode;
-      unassignedWorkspaceVisible?: boolean;
       visibleWorkspaceLayerKeys?: string[];
     } | null;
     const restored = stored?.visibleSurveyIds?.filter((surveyId) => available.has(surveyId)) ?? [];
@@ -3112,7 +3098,6 @@ function restoreLayerPreferences(): void {
     // Radial expansion is the normal view. G temporarily switches to overlap.
     layerLayoutMode = "layers";
     layerInteractionMode = stored?.interactionMode === "region" ? "region" : "inspect";
-    unassignedWorkspaceVisible = stored?.unassignedWorkspaceVisible === true;
     const storedSchemaVersion = stored?.schemaVersion ?? 0;
     // v3 could have persisted every covered user asset as visible by default.
     // Do not restore that implicit visibility after the layer-selection cutover.
@@ -3130,7 +3115,6 @@ function restoreLayerPreferences(): void {
     visibleSurveyIds = available.has("legacy-surveys") ? new Set(["legacy-surveys"]) : new Set([...available].slice(0, 1));
     layerLayoutMode = "layers";
     layerInteractionMode = "inspect";
-    unassignedWorkspaceVisible = false;
     visibleAssetIds.clear();
     assetVisibilityPreferenceRestored = false;
     visibleWorkspaceLayerKeys.clear();
@@ -3149,7 +3133,6 @@ function persistLayerPreferences(): void {
       layerOrder: string[];
       layoutMode: SurveyLayerLayoutMode;
       interactionMode: SurveyLayerInteractionMode;
-      unassignedWorkspaceVisible: boolean;
     } = {
       // Do not claim that workspace-layer visibility was restored until the
       // first coverage load has populated the extra MOC layers.
@@ -3160,7 +3143,6 @@ function persistLayerPreferences(): void {
       layerOrder: normalizeCurrentLayerOrder(),
       layoutMode: layerLayoutMode,
       interactionMode: layerInteractionMode,
-      unassignedWorkspaceVisible,
     };
     if (workspaceLayerVisibilityPreferenceRestored) preferences.visibleWorkspaceLayerKeys = [...visibleWorkspaceLayerKeys];
     localStorage.setItem(LAYER_PREFERENCES_KEY, JSON.stringify(preferences));
@@ -3501,7 +3483,7 @@ function applyLayerPreferences(): void {
   prioritizeCoverageSelection();
   applyLayerOrder();
   layerViewer?.setLayoutMode(overlapModeActive ? "overlap" : layerLayoutMode);
-  layerViewer?.setVisibleSurveys(new Set([...visibleSurveyIds, ...(unassignedWorkspaceVisible ? ["__unassigned__"] : [])]));
+  layerViewer?.setVisibleSurveys(visibleSurveyIds);
   layerViewer?.setVisibleAssets(visibleAssetIds);
   layerViewer?.setVisibleWorkspaceLayerKeys(visibleWorkspaceLayerKeys);
   layerViewer?.setInteractionMode(layerInteractionMode);
@@ -3525,11 +3507,6 @@ function setAssetVisibility(assetId: string, visible: boolean): void {
   if (visible) visibleAssetIds.add(assetId);
   else visibleAssetIds.delete(assetId);
   if (selectedLayerAssetId === assetId && !visible) selectedLayerAssetId = null;
-  applyLayerPreferences();
-}
-
-function setUnassignedWorkspaceVisibility(visible: boolean): void {
-  unassignedWorkspaceVisible = visible;
   applyLayerPreferences();
 }
 
@@ -3801,7 +3778,7 @@ function buildSurveyList(): void {
   const list = byId("sky-layer-list");
   const publicLayers = new Map(footprintSurveyIds().map((surveyId) => [`public-survey:${surveyId}`, publicSurveyCards.find((survey) => survey.id === surveyId)!]));
   const assetLayers = new Map(userDataAssets().map((asset) => [`asset:${asset.id}`, asset]));
-  if (!publicLayers.size && !assetLayers.size && !workspaceExtraLayers.size && !hasUnassignedWorkspaceCoverage) {
+  if (!publicLayers.size && !assetLayers.size && !workspaceExtraLayers.size) {
     const empty = document.createElement("p");
     empty.className = "survey-list-empty";
     empty.textContent = "暂无可显示的数据覆盖。请应用公开资源或扫描用户资产。";
@@ -3813,8 +3790,7 @@ function buildSurveyList(): void {
     const survey = publicLayers.get(key);
     const asset = assetLayers.get(key);
     const workspaceLayer = workspaceExtraLayers.get(key);
-    const isUnassigned = key === "workspace-unassigned" && hasUnassignedWorkspaceCoverage;
-    if (!survey && !asset && !workspaceLayer && !isUnassigned) return null;
+    if (!survey && !asset && !workspaceLayer) return null;
     const card = document.createElement("article");
     card.className = "survey-card";
     card.dataset.layerKey = key;
@@ -3825,7 +3801,7 @@ function buildSurveyList(): void {
         ? visibleAssetIds.has(asset.id)
         : workspaceLayer
           ? visibleWorkspaceLayerKeys.has(key)
-          : unassignedWorkspaceVisible;
+          : false;
     card.classList.toggle("visible", visible);
     const coveragePhase = asset ? coverageLoader?.phase(asset.id) : undefined;
     if (coveragePhase) card.dataset.coverageLoadState = coveragePhase;
@@ -3833,7 +3809,6 @@ function buildSurveyList(): void {
     card.setAttribute("aria-busy", String(loading));
     if (asset) card.classList.add("workspace-asset-card");
     if (workspaceLayer) card.classList.add("workspace-extra-card");
-    if (isUnassigned) card.classList.add("workspace-unassigned");
 
     const handle = document.createElement("button");
     handle.type = "button";
@@ -3886,7 +3861,6 @@ function buildSurveyList(): void {
       if (survey) setSurveyVisibility(survey.id, checkbox.checked);
       else if (asset) setAssetVisibility(asset.id, checkbox.checked);
       else if (workspaceLayer) setWorkspaceLayerVisibility(key, checkbox.checked);
-      else setUnassignedWorkspaceVisibility(checkbox.checked);
     });
     const swatch = document.createElement("i");
     swatch.style.background = survey ? surveyDisplayColor(survey.id, survey.color) : (asset ? workspaceAssetColor(asset.id) : workspaceLayer ? workspaceAssetColor(key) : "#d69b4e");
@@ -3927,9 +3901,6 @@ function buildSurveyList(): void {
     } else if (workspaceLayer) {
       count.textContent = workspaceLayer.status === "ready" ? `${formatInteger(workspaceLayer.pixels.length)} CELLS` : workspaceLayer.status === "pending" ? "PENDING" : workspaceLayer.status === "error" ? "FAILED" : "UNAVAILABLE";
       metadata.textContent = ["USER MOC", workspaceLayer.surveyId, workspaceLayer.releaseId, workspaceLayer.precision].filter(Boolean).join(" · ");
-    } else {
-      count.textContent = "WORKSPACE";
-      metadata.textContent = "仅显示未设置巡天标签的工作区覆盖";
     }
     body.append(name, count, metadata);
 

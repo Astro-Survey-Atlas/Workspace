@@ -270,6 +270,11 @@ export class ConnectorIngestRunCatalog {
       .map((record) => structuredClone(record));
   }
 
+  async get(id: string): Promise<ConnectorIngestRunRecord | undefined> {
+    const record = await this.#store.getConnectorIngestRun(id);
+    return record ? structuredClone(atlasTaskKindRecord(record)) : undefined;
+  }
+
   async findIdempotent(connectorId: string, idempotencyKey: string): Promise<ConnectorIngestRunRecord | undefined> {
     const keyHash = idempotencyKeyHash(idempotencyKey);
     return (await this.list({ connectorId }))

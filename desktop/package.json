@@ -8,7 +8,7 @@
   "scripts": {
     "prepare:server": "node scripts/prepare-server.cjs",
     "prepare:python": "node scripts/prepare-python.cjs",
-    "smoke": "node scripts/smoke-main.mjs",
+    "smoke": "node scripts/smoke-main.cjs",
     "dev": "electron .",
     "dist:dir": "npm run prepare:server && electron-builder --dir",
     "dist": "npm run prepare:server && electron-builder --win nsis"

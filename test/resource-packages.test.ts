@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { createWriteStream } from "node:fs";
+import { createServer } from "node:http";
 import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -787,6 +788,39 @@ test("an unavailable catalog keeps the last snapshot and active package selectio
     assert.equal(restarted.get("public-legacy-surveys-footprints").active, true);
     assert.equal((await restarted.activeFootprints()).footprints[0]?.surveyId, "legacy-surveys");
   } finally {
+    await rm(paths.directory, { recursive: true, force: true });
+  }
+});
+
+test("restart reads the local public catalog without waiting for a remote sync", async () => {
+  const paths = await fixture();
+  let requests = 0;
+  const server = createServer(() => { requests++; });
+  await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address !== "string");
+  const origin = `http://127.0.0.1:${address.port}`;
+  try {
+    const snapshotRoot = path.join(paths.directory, "snapshot-state");
+    const seeded = new ResourcePackageManager({ catalogUrl: paths.catalogUrl, root: paths.root, statePath: paths.statePath, snapshotRoot });
+    await seeded.initialize();
+    await waitForJob(seeded, seeded.install("public-legacy-surveys-footprints"));
+    await seeded.activate("public-legacy-surveys-footprints");
+    const restarted = new ResourcePackageManager({ catalogUrl: `${origin}/catalog.json`, root: paths.root,
+      statePath: paths.statePath, snapshotRoot, allowedOrigins: [origin], downloadTimeoutMs: 50 });
+    await restarted.initialize();
+    assert.equal(requests, 0, "startup must perform no remote catalog requests");
+    assert.equal(restarted.available, true);
+    assert.equal(restarted.catalogStatus().stale, true);
+    assert.equal(restarted.catalogStatus().lastSyncError, undefined);
+    assert.equal(restarted.get("public-legacy-surveys-footprints").active, true);
+    await assert.rejects(() => restarted.sync(), /Assets catalog sync failed/);
+    assert.equal(requests, 1);
+    assert.ok(restarted.catalogStatus().lastSyncError);
+    assert.equal((await restarted.activeFootprints()).footprints[0]?.surveyId, "legacy-surveys");
+  } finally {
+    server.closeAllConnections();
+    await new Promise<void>(resolve => server.close(() => resolve()));
     await rm(paths.directory, { recursive: true, force: true });
   }
 });

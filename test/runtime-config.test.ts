@@ -39,11 +39,9 @@ test("runtime data services are read-only, sanitized, and the catalog config rou
     HOST: "127.0.0.1",
     PORT: String(apiPort),
     ASTRO_ALLOWED_HOSTS: "127.0.0.1,localhost",
-    ASTRO_DATA_WAREHOUSE_ENABLED: "false",
-    ASTRO_LOCAL_SCAN_ENABLED: "false",
+    ASTRO_WORKSPACE_SCAN_ENABLED: "false",
     ASTRO_ES_URL: "http://esa:secret-pass@127.0.0.1:9200/ignored?token=hush#frag",
     ASTRO_WAREHOUSE_ES_URL: "http://wh:secret@127.0.0.1:9201",
-    ASTRO_METADATA_STORE: "sqlite",
     ASTRO_SQLITE_PATH: path.join(stateRoot, "workspace.sqlite"),
     ASTRO_STATE_ROOT: stateRoot,
     ASTRO_RESOURCE_PACKAGE_ROOT: path.join(stateRoot, "resource-packages"),
@@ -68,8 +66,7 @@ test("runtime data services are read-only, sanitized, and the catalog config rou
   const runtime = await runtimeResponse.json() as {
     readOnly: boolean;
     catalog: { endpoint: string; configured: boolean; available: boolean; source: string };
-    workspaceSearch: { endpoint: string; configured: boolean; indices: { file: string; object: string; coverage: string }; source: string };
-    warehouseSearch: { enabled: boolean; endpoint: string; configured: boolean; indices: { layer: string; file: string; coverage: string } };
+    workspaceSearch: { endpoint: string; configured: boolean; indices: { file: string; object: string; footprint: string }; source: string };
     capabilities?: Array<{ kind: string; key: string; version: number; availability: string; responsibility: string; sourcePath: string }>;
     build?: { commit: string | null; sourceUrl: string; permalinkBase: string | null };
     assetsApi?: { endpoint: string; apiKeyConfigured: boolean };
@@ -83,13 +80,9 @@ test("runtime data services are read-only, sanitized, and the catalog config rou
   assert.equal(runtime.workspaceSearch.endpoint, "http://127.0.0.1:9200/ignored");
   assert.equal(runtime.workspaceSearch.configured, true);
   assert.equal(runtime.workspaceSearch.indices.file, ASTRO_FILE_INDEX);
-  assert.equal(runtime.workspaceSearch.indices.object, "astro_object_index_v1");
-  assert.equal(runtime.workspaceSearch.indices.coverage, "astro_coverage_index_v1");
-  // A stale warehouse endpoint stays hidden while the integration is disabled.
-  assert.equal(runtime.warehouseSearch.enabled, false);
-  assert.equal(runtime.warehouseSearch.endpoint, "");
-  assert.equal(runtime.warehouseSearch.configured, false);
-  assert.equal(runtime.warehouseSearch.indices.layer, "ast_layer_index_v1");
+  assert.equal(runtime.workspaceSearch.indices.object, "astro_position_index_v2");
+  assert.equal(runtime.workspaceSearch.indices.footprint, "astro_image_footprint_index_v2");
+  assert.ok(!("warehouseSearch" in runtime), "Removed integrations cannot leak through runtime settings");
 
   const putResponse = await fetch(`${baseUrl}/api/resource-packages/config`, {
     method: "PUT",
@@ -113,13 +106,14 @@ test("runtime data services are read-only, sanitized, and the catalog config rou
   assert.notEqual(syncResponse.status, 401);
   assert.ok(syncResponse.status === 502 || syncResponse.status === 503, `expected sync to attempt the catalog read, got ${syncResponse.status}`);
 
-  // Capability registry: read-only descriptors with warehouse availability reflecting this deployment.
+  // Capability registry reflects this deployment's local worker.
   const overlap = runtime.capabilities?.find((capability) => capability.key === "overlap-download" && capability.kind === "pipeline");
   assert.ok(overlap);
   assert.equal(overlap.availability, "available");
-  const warehouseScan = runtime.capabilities?.find((capability) => capability.key === "warehouse-scan");
-  assert.ok(warehouseScan);
-  assert.equal(warehouseScan.availability, "unavailable");
+  assert.ok(!runtime.capabilities?.some((capability) => capability.key === "warehouse-scan"));
+  const workspaceScan = runtime.capabilities?.find((capability) => capability.key === "workspace-scan");
+  assert.ok(workspaceScan);
+  assert.equal(workspaceScan.availability, "unavailable");
   const desiTile = runtime.capabilities?.find((capability) => capability.key === "desi-tile");
   assert.ok(desiTile);
   assert.equal(desiTile.kind, "resolver");
@@ -152,69 +146,4 @@ test("runtime data services are read-only, sanitized, and the catalog config rou
   });
   assert.equal(clearResponse.status, 200);
   assert.deepEqual(await clearResponse.json(), { assets: { apiKeyConfigured: false } });
-});
-
-test("warehouse installation view is read-only and reconcile validates intents", async (t) => {
-  const directory = await mkdtemp(path.join(os.tmpdir(), "runtime-installation-"));
-  const catalogPath = path.join(directory, "missing-assets-catalog.json");
-  const port = 32100 + Math.floor(Math.random() * 800);
-  const baseUrl = `http://127.0.0.1:${port}`;
-  const stateRoot = path.join(directory, "state");
-  await rm(path.join(directory, "state"), { recursive: true, force: true }).catch(() => undefined);
-  let logs = "";
-  let apiProcess: ChildProcess | null = null;
-  t.after(async () => {
-    const proc = apiProcess;
-    proc?.kill("SIGTERM");
-    if (proc) await new Promise((resolve) => proc.once("exit", resolve));
-    await rm(directory, { recursive: true, force: true });
-  });
-  apiProcess = spawn(path.resolve("node_modules/.bin/tsx"), ["src/http-server.ts"], {
-    cwd: process.cwd(),
-    env: {
-      ...process.env,
-      HOST: "127.0.0.1",
-      PORT: String(port),
-      ASTRO_ALLOWED_HOSTS: "127.0.0.1,localhost",
-      ASTRO_DATA_WAREHOUSE_ENABLED: "false",
-      ASTRO_LOCAL_SCAN_ENABLED: "false",
-      ASTRO_ES_URL: "",
-      ASTRO_METADATA_STORE: "sqlite",
-      ASTRO_SQLITE_PATH: path.join(stateRoot, "workspace.sqlite"),
-      ASTRO_STATE_ROOT: stateRoot,
-      ASTRO_RESOURCE_PACKAGE_ROOT: path.join(stateRoot, "resource-packages"),
-      ASTRO_RESOURCE_PACKAGE_STATE: path.join(stateRoot, "resource-package-state.json"),
-      ASTRO_RESOURCE_CATALOG_URL: pathToFileURL(catalogPath).href,
-      ASTRO_MOC_CORE_CLI: `${path.resolve("node_modules/.bin/tsx")} ${path.resolve("test/helpers/mock-moc-core-cli.ts")}`,
-      NODE_NO_WARNINGS: "1",
-    },
-    stdio: ["ignore", "pipe", "pipe"],
-  });
-  apiProcess.stdout?.on("data", (chunk) => { logs += String(chunk); });
-  apiProcess.stderr?.on("data", (chunk) => { logs += String(chunk); });
-  await waitForHealth(baseUrl, apiProcess, () => logs);
-
-  const viewResponse = await fetch(`${baseUrl}/api/installation/warehouse`);
-  assert.equal(viewResponse.status, 200);
-  assert.equal(viewResponse.headers.get("cache-control"), "no-store");
-  const view = (await viewResponse.json()) as { installation: { channel: string; observed: { state: string }; actions: Array<{ kind: string; available: boolean }> } };
-  assert.equal(view.installation.channel, "server");
-  assert.equal(view.installation.observed.state, "absent");
-  assert.ok(view.installation.actions.length >= 4);
-
-  const badResponse = await fetch(`${baseUrl}/api/installation/warehouse/reconcile`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ intent: { kind: "connect", elasticsearchUrl: "ftp://warehouse:9200" } }),
-  });
-  assert.equal(badResponse.status, 400);
-
-  const connectResponse = await fetch(`${baseUrl}/api/installation/warehouse/reconcile`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ intent: { kind: "connect", elasticsearchUrl: "http://warehouse-es:9200" } }),
-  });
-  assert.equal(connectResponse.status, 202);
-  const payload = (await connectResponse.json()) as { operation: { status: string; intent: Record<string, unknown> } };
-  assert.equal(payload.operation.status, "failed");
 });

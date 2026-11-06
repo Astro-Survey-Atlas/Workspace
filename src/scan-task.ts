@@ -9,8 +9,10 @@ export interface ScanTask {
   cursor: number;
   processedFiles: number;
   failedFiles: number;
+  skippedFiles: number;
   pointCount: number;
   totalBytes: number;
   mocBatches: number;
+  pointBatches: number;
   errors: string[];
 }

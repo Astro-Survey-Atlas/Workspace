@@ -188,13 +188,37 @@ test("agent dock lifts the full mobile workspace without collapsing the header",
 
 test("light theme keeps the first inspector action readable", async ({ page }) => {
   await proxyApi(page);
+  const assetId = "user-e2e-inspector";
+  await page.route("**/api/**", route => {
+    const url = new URL(route.request().url());
+    if (url.pathname === "/api/data-assets") return route.fulfill({ json: { assets: [{
+      id: assetId, name: "Published catalog", kind: "catalog", modalities: ["catalog"],
+      origin: "user", status: "ready", projectState: "acquired", footprintIds: [],
+      access: { connector: "local", uri: "file:///fixture/catalog.csv", format: "csv" },
+      createdAt: "2026-01-01T00:00:00Z", updatedAt: "2026-01-01T00:00:00Z",
+    }] } });
+    if (url.pathname === "/api/data-assets/status") return route.fulfill({ json: { statuses: [{
+      assetId, coverage: "ready", dataPointCount: 1, dataPointStatus: "succeeded", nextAction: "explore_points",
+    }] } });
+    if (url.pathname === "/api/sky/coverage") {
+      const nside = Number(url.searchParams.get("nside") ?? 16);
+      return route.fulfill({ json: { status: "ready", index: "fixture", nside, pixels: [0], byAsset: [], layers: [{
+        key: `asset:${assetId}`, assetId, assetIds: [assetId], status: "ready", source: "asset",
+        nside, pixels: [0], coverageRole: "object_presence",
+      }] } });
+    }
+    return route.fallback();
+  });
   await page.emulateMedia({ colorScheme: "light" });
   await page.setViewportSize({ width: 1440, height: 900 });
   await page.goto("/?mode=layers");
   await waitForWorkspace(page);
-  const assetBody = page.locator('[data-layer-key^="asset:"] .survey-card-body').first();
-  await expect(assetBody).toBeVisible();
-  await assetBody.click();
+  // An unscanned inventory has no action while scanning is paused. Use a
+  // published point layer so this checks the view action in either scan mode.
+  const assetCard = page.locator(`[data-layer-key="asset:${assetId}"]`);
+  await expect(assetCard).toBeVisible();
+  await expect(assetCard).toContainText("数据点分布 · 1 个已索引数据点");
+  await assetCard.locator(".survey-card-body").click();
   const action = page.locator(".inspector-actions > button:first-child");
   await expect(action).toBeVisible();
   const colors = await action.evaluate((element) => {

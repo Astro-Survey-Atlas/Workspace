@@ -1,0 +1,171 @@
+{{- if eq .Values.search.mode "bundled" }}
+{{- if not .Values.search.bundled.persistence.existingClaim }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "asa-workspace.searchName" . }}-data
+  annotations:
+    helm.sh/resource-policy: keep
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: {{ .Values.search.bundled.persistence.storageClass | quote }}
+  resources:
+    requests:
+      storage: {{ .Values.search.bundled.persistence.size }}
+---
+{{- end }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "asa-workspace.searchName" . }}
+data:
+  my_elasticsearch.yml: 'node.store.allow_mmap: false
+
+    discovery.type: single-node
+
+    '
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "asa-workspace.searchName" . }}
+spec:
+  selector:
+    app: {{ include "asa-workspace.searchName" . }}
+  ports:
+  - name: http
+    port: 9200
+    targetPort: 9200
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "asa-workspace.searchName" . }}
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: {{ include "asa-workspace.searchName" . }}
+  template:
+    metadata:
+      labels:
+        app: {{ include "asa-workspace.searchName" . }}
+    spec:
+      automountServiceAccountToken: false
+      serviceAccountName: default
+      containers:
+      - env:
+        - name: MY_POD_NAME
+          valueFrom:
+            fieldRef:
+              apiVersion: v1
+              fieldPath: metadata.name
+        - name: ELASTICSEARCH_IS_DEDICATED_NODE
+          value: 'no'
+        - name: ELASTICSEARCH_NODE_ROLES
+          value: master,data,ingest
+        - name: ELASTICSEARCH_TRANSPORT_PORT_NUMBER
+          value: '9300'
+        - name: ELASTICSEARCH_HTTP_PORT_NUMBER
+          value: '9200'
+        - name: ELASTICSEARCH_CLUSTER_NAME
+          value: workspace-local
+        - name: ELASTICSEARCH_HEAP_SIZE
+          value: {{ .Values.search.bundled.heapSize | quote }}
+        image: "{{ .Values.search.bundled.image.repository }}:{{ .Values.search.bundled.image.tag }}"
+        imagePullPolicy: {{ .Values.search.bundled.image.pullPolicy }}
+        livenessProbe:
+          failureThreshold: 5
+          initialDelaySeconds: 180
+          periodSeconds: 10
+          successThreshold: 1
+          tcpSocket:
+            port: rest-api
+          timeoutSeconds: 5
+        name: elasticsearch
+        ports:
+        - containerPort: 9200
+          name: rest-api
+          protocol: TCP
+        - containerPort: 9300
+          name: transport
+          protocol: TCP
+        readinessProbe:
+          exec:
+            command:
+            - /opt/bitnami/scripts/elasticsearch/healthcheck.sh
+          failureThreshold: 5
+          initialDelaySeconds: 90
+          periodSeconds: 10
+          successThreshold: 1
+          timeoutSeconds: 5
+        resources: {{ toYaml .Values.search.bundled.resources | nindent 10 }}
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+          privileged: false
+          readOnlyRootFilesystem: true
+          runAsGroup: 1001
+          runAsNonRoot: true
+          runAsUser: 1001
+          seLinuxOptions: {}
+          seccompProfile:
+            type: RuntimeDefault
+        startupProbe:
+          failureThreshold: 30
+          initialDelaySeconds: 10
+          periodSeconds: 10
+          successThreshold: 1
+          tcpSocket:
+            port: rest-api
+          timeoutSeconds: 5
+        terminationMessagePath: /dev/termination-log
+        terminationMessagePolicy: File
+        volumeMounts:
+        - mountPath: /tmp
+          name: empty-dir
+          subPath: tmp-dir
+        - mountPath: /opt/bitnami/elasticsearch/config
+          name: empty-dir
+          subPath: app-conf-dir
+        - mountPath: /opt/bitnami/elasticsearch/tmp
+          name: empty-dir
+          subPath: app-tmp-dir
+        - mountPath: /opt/bitnami/elasticsearch/logs
+          name: empty-dir
+          subPath: app-logs-dir
+        - mountPath: /opt/bitnami/elasticsearch/plugins
+          name: empty-dir
+          subPath: app-plugins-dir
+        - mountPath: /bitnami/elasticsearch
+          name: empty-dir
+          subPath: app-volume-dir
+        - mountPath: /bitnami/elasticsearch/data
+          name: data
+        - mountPath: /opt/bitnami/elasticsearch/config/my_elasticsearch.yml
+          name: config
+          subPath: my_elasticsearch.yml
+      dnsPolicy: ClusterFirst
+      restartPolicy: Always
+      schedulerName: default-scheduler
+      securityContext:
+        fsGroup: 1001
+        fsGroupChangePolicy: Always
+      terminationGracePeriodSeconds: 30
+      volumes:
+      - name: empty-dir
+        emptyDir: {}
+      - name: config
+        configMap:
+          name: {{ include "asa-workspace.searchName" . }}
+      - name: data
+        persistentVolumeClaim:
+          claimName: {{ default (printf "%s-data" (include "asa-workspace.searchName" .)) .Values.search.bundled.persistence.existingClaim | quote }}
+      nodeSelector: {{ toYaml .Values.search.bundled.nodeSelector | nindent 8 }}
+{{- end }}

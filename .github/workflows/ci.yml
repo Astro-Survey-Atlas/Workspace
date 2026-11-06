@@ -63,13 +63,9 @@ jobs:
         run: helm lint charts/asa-workspace --strict
       - name: helm template (bundled modes)
         run: helm template workspace charts/asa-workspace > /dev/null
-      - name: helm template (external modes)
+      - name: helm template (external owned search)
         run: |
           helm template workspace charts/asa-workspace \
-            --set postgresql.enabled=false \
-            --set elasticsearch.enabled=false \
-            --set metadataStore.mode=external-postgresql \
-            --set metadataStore.external.existingSecret=workspace-connections \
             --set search.mode=external \
             --set search.external.existingSecret=workspace-connections \
             > /dev/null

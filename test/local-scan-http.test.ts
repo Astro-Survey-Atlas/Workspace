@@ -1,904 +1,274 @@
 import assert from "node:assert/strict";
-import { createHash } from "node:crypto";
-import { spawn, type ChildProcess } from "node:child_process";
+import { execFile, spawn, type ChildProcess } from "node:child_process";
 import { createServer, type Server } from "node:http";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
-import os from "node:os";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
+import os from "node:os";
 import test from "node:test";
-import { pathToFileURL } from "node:url";
-
+import { ASTRO_OBJECT_INDEX } from "../src/astro-object-index.js";
 import { ASTRO_FILE_INDEX } from "../src/astro-index.js";
-import { ASTRO_IMAGE_FOOTPRINT_INDEX } from "../src/astro-object-index.js";
-import { ASTRO_OBJECT_INDEX as SKY_DATA_POINT_INDEX } from "../src/astro-object-index.js";
-import { UserMocArtifactStore } from "../src/user-moc-artifacts.js";
-
-const FITS_BLOCK_BYTES = 2_880;
-const FITS_CARD_BYTES = 80;
-
-function mocCard(key: string, value: string | number): Buffer {
-  const rendered = typeof value === "number" ? String(value).padStart(20, " ") : `'${value}'`.padEnd(20, " ");
-  return Buffer.from(`${key.padEnd(8, " ")}= ${rendered}`.padEnd(FITS_CARD_BYTES, " "), "ascii");
-}
-
-function mocHeader(cards: Buffer[]): Buffer {
-  const bytes = Buffer.concat([...cards, Buffer.from("END".padEnd(FITS_CARD_BYTES, " "), "ascii")]);
-  return Buffer.concat([bytes, Buffer.alloc(Math.ceil(bytes.length / FITS_BLOCK_BYTES) * FITS_BLOCK_BYTES - bytes.length, 32)]);
-}
-
-function testMocFits(order = 8, pixel = 256): Buffer {
-  const primary = mocHeader([mocCard("SIMPLE", "T"), mocCard("BITPIX", 8), mocCard("NAXIS", 0), mocCard("EXTEND", "T")]);
-  const extension = mocHeader([
-    mocCard("XTENSION", "BINTABLE"), mocCard("BITPIX", 8), mocCard("NAXIS", 2), mocCard("NAXIS1", 8), mocCard("NAXIS2", 1),
-    mocCard("PCOUNT", 0), mocCard("GCOUNT", 1), mocCard("TFIELDS", 1), mocCard("TTYPE1", "UNIQ"), mocCard("TFORM1", "1K"),
-    mocCard("ORDERING", "NUNIQ"), mocCard("COORDSYS", "C"), mocCard("MOCVERS", "2.0"), mocCard("MOCDIM", "SPACE"), mocCard("THEAP", 0),
-  ]);
-  const rows = Buffer.alloc(8);
-  rows.writeBigInt64BE(4n * (4n ** BigInt(order)) + BigInt(pixel), 0);
-  return Buffer.concat([primary, extension, rows, Buffer.alloc(FITS_BLOCK_BYTES - rows.length)]);
-}
-
-interface StoredDocument {
-  id: string;
-  index: string;
-  source: Record<string, unknown>;
-}
+import { DatabaseSync } from "node:sqlite";
+import { promisify } from "node:util";
 
 async function listen(server: Server): Promise<number> {
-  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
   const address = server.address();
-  if (!address || typeof address === "string") throw new Error("server did not bind a TCP port");
+  if (!address || typeof address === "string") throw new Error("No port");
   return address.port;
 }
-
-async function availablePort(): Promise<number> {
-  const server = createServer();
-  const port = await listen(server);
-  await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
-  return port;
-}
-
-async function bodyText(request: import("node:http").IncomingMessage): Promise<string> {
-  const chunks: Buffer[] = [];
-  for await (const chunk of request) chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
-  return Buffer.concat(chunks).toString("utf8");
-}
-
-function termValues(value: unknown, field: string): string[] | undefined {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
-  const record = value as Record<string, unknown>;
-  const terms = record.terms;
-  if (!terms || typeof terms !== "object" || Array.isArray(terms)) return undefined;
-  const result = (terms as Record<string, unknown>)[field];
-  return Array.isArray(result) && result.every((entry) => typeof entry === "string") ? result : undefined;
-}
-
-function rangeBounds(value: unknown, field: string): { gte: number; lte: number } | undefined {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
-  const range = (value as Record<string, unknown>).range;
-  if (!range || typeof range !== "object" || Array.isArray(range)) return undefined;
-  const bounds = (range as Record<string, unknown>)[field];
-  if (!bounds || typeof bounds !== "object" || Array.isArray(bounds)) return undefined;
-  const { gte, lte } = bounds as Record<string, unknown>;
-  return typeof gte === "number" && typeof lte === "number" ? { gte, lte } : undefined;
-}
-
-async function waitForHealth(baseUrl: string, process: ChildProcess, logs: () => string): Promise<void> {
-  const deadline = Date.now() + 15_000;
-  while (Date.now() < deadline) {
-    if (process.exitCode !== null) throw new Error(`workspace exited before health check:\n${logs()}`);
-    try {
-      const response = await fetch(`${baseUrl}/healthz`);
-      if (response.ok) return;
-    } catch {
-      // Server is still starting.
-    }
-    await new Promise((resolve) => setTimeout(resolve, 100));
+function matches(value: Record<string, unknown>, query: any): boolean {
+  if (!query || query.match_all) return true;
+  if (query.match_none) return false;
+  if (query.ids) return query.ids.values.includes(value._id);
+  if (query.term) return Object.entries(query.term).every(([key,item]) => value[key] === item);
+  if (query.terms) return Object.entries(query.terms).every(([key,items]) => (items as unknown[]).includes(value[key]));
+  if (query.range) return Object.entries(query.range).every(([key,range]) => {
+    const r = range as {gte?:number;lte?:number};
+    return (r.gte === undefined || Number(value[key]) >= r.gte) && (r.lte === undefined || Number(value[key]) <= r.lte);
+  });
+  if (query.bool) {
+    const bool=query.bool;
+    return (bool.filter ?? []).every((q: any) => matches(value,q))
+      && (!bool.should || bool.should.filter((q:any) => matches(value,q)).length >= (bool.minimum_should_match ?? 1));
   }
-  throw new Error(`workspace did not become healthy:\n${logs()}`);
+  throw new Error(`Unsupported ES test query: ${JSON.stringify(query)}`);
+}
+async function until(check: () => Promise<boolean>, message: () => string, timeout=20000): Promise<void> {
+  const deadline = Date.now()+timeout;
+  while(Date.now()<deadline) { if(await check()) return; await new Promise(resolve=>setTimeout(resolve,50)); }
+  assert.fail(message());
+}
+async function stop(child?: ChildProcess): Promise<void> {
+  if (!child || child.exitCode !== null || child.signalCode) return;
+  const exit = new Promise<void>(resolve => child.once("exit",()=>resolve()));
+  child.kill("SIGTERM"); await exit;
 }
 
-async function apiJson<T>(baseUrl: string, pathname: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(`${baseUrl}${pathname}`, {
-    ...init,
-    headers: {
-      "Content-Type": "application/json",
-      ...init?.headers,
-    },
-  });
-  const text = await response.text();
-  if (!response.ok) throw new Error(`${init?.method ?? "GET"} ${pathname} returned ${response.status}: ${text}`);
-  return JSON.parse(text) as T;
-}
-
-test("HTTP local CSV scan writes object and coverage documents and serves a multi-survey region query", async () => {
-  const directory = await mkdtemp(path.join(os.tmpdir(), "astro-local-http-"));
-  const sourceRoot = path.join(directory, "catalogs");
-  const stateRoot = path.join(directory, "state");
-  const csvPath = path.join(sourceRoot, "catalog.csv");
-  const documents: StoredDocument[] = [];
-  const searchBodies: Record<string, unknown>[] = [];
-  const coverageSearchBodies: Record<string, unknown>[] = [];
-  const pointSearchBodies: Record<string, unknown>[] = [];
-  const pointDensitySearchBodies: Record<string, unknown>[] = [];
-  let apiProcess: ChildProcess | undefined;
-  let apiLogs = "";
-  let warehouseRequestCount = 0;
-  let ownEsUnavailable = false;
-  let heldCoverage: { started: () => void; closed: () => void; finish: () => void } | undefined;
-
-  await import("node:fs/promises").then(({ mkdir }) => Promise.all([
-    mkdir(sourceRoot, { recursive: true }),
-    mkdir(stateRoot, { recursive: true }),
-  ]));
-  await writeFile(csvPath, [
-    "object_id,ra,dec,flux\n",
-    "euclid-1,10.25,-1.5,4.2\n",
-    "euclid-2,10.75,-1.25,8.4\n",
-  ].join(""), "utf8");
-  const seededMoc = testMocFits();
-  const seededArtifactStore = new UserMocArtifactStore({ root: path.join(stateRoot, "user-mocs") });
-  const seededArtifact = await seededArtifactStore.persist({
-    layerId: "workspace-http-moc",
-    maxOrder: 10,
-    queryOrder: 8,
-    previewOrder: 4,
-    queryPixels: [256],
-    previewPixels: [1],
-    mocSha256: createHash("sha256").update(seededMoc).digest("hex"),
-    artifacts: {
-      moc: seededMoc,
-      query: Buffer.from(JSON.stringify({ schemaVersion: 1, order: 8, ordering: "NESTED", pixels: [256] })),
-      preview: Buffer.from(JSON.stringify({ schemaVersion: 1, order: 4, ordering: "NESTED", pixels: [1] })),
-    },
-  }, {
-    layerId: "workspace-http-moc",
-    scanRunId: "http-run-001",
-    availableOrders: [8],
-    maxOrder: 10,
-    precision: "exact",
-    coverageRole: "object_presence",
-  });
-  const coarseArtifact = await seededArtifactStore.persist({
-    layerId: "workspace-http-coarse-moc", maxOrder: 4, queryOrder: 8, previewOrder: 4,
-    queryPixels: [], previewPixels: [1], artifacts: { moc: testMocFits(4, 1) },
-  }, { layerId: "workspace-http-coarse-moc", scanRunId: "coarse-run-001", availableOrders: [4], maxOrder: 4, precision: "estimated" });
-  const highArtifacts = await Promise.all([4096, 4096].map((pixel, index) => seededArtifactStore.persist({
-    layerId: `workspace-http-high-moc-${index}`, maxOrder: 10, queryOrder: 8, previewOrder: 4,
-    queryPixels: [256], previewPixels: [1], artifacts: { moc: testMocFits(10, pixel) },
-  }, { layerId: `workspace-http-high-moc-${index}`, scanRunId: "high-run-001", availableOrders: [10], maxOrder: 10, precision: "exact" })));
-  const esServer = createServer(async (request, response) => {
-    const pathname = new URL(request.url ?? "/", "http://localhost").pathname;
-    const body = await bodyText(request);
-    response.setHeader("Content-Type", "application/json");
-    if (ownEsUnavailable && request.method === "POST" && pathname.endsWith("/_search")) {
-      response.statusCode = 503;
-      response.end(JSON.stringify({ error: "workspace Elasticsearch unavailable" }));
-      return;
-    }
-    if (request.method === "HEAD" && (pathname === "/astro_object_index_v1" || pathname === `/${SKY_DATA_POINT_INDEX}` || pathname === "/astro_coverage_index_v1"
-      || pathname === `/${ASTRO_IMAGE_FOOTPRINT_INDEX}`)) {
-      response.statusCode = 200;
-      response.end();
-      return;
-    }
-    if (request.method === "POST" && pathname.endsWith("/_mapping")) {
-      response.end(JSON.stringify({ acknowledged: true }));
-      return;
-    }
-    if (request.method === "POST" && pathname === "/_bulk") {
-      const lines = body.trim().split("\n");
-      const items: unknown[] = [];
-      for (let index = 0; index < lines.length; index += 2) {
-        const action = JSON.parse(lines[index]!) as { index: { _index: string; _id: string } };
-        const source = JSON.parse(lines[index + 1]!) as Record<string, unknown>;
-        documents.push({ id: action.index._id, index: action.index._index, source });
-        items.push({ index: { _index: action.index._index, _id: action.index._id, status: 201 } });
-      }
-      response.end(JSON.stringify({ errors: false, items }));
-      return;
-    }
-    const objectIndices = decodeURIComponent(pathname).match(/^\/([^/]+)\/_search$/)?.[1]?.split(",");
-    if (request.method === "POST" && objectIndices?.some(index => index === "astro_object_index_v1" || index === "astro_data_point_index_v1")) {
-      const query = JSON.parse(body) as Record<string, unknown>;
-      if (objectIndices.length === 1 && !query.aggs) searchBodies.push(query);
-      if (objectIndices.length > 1 && !query.aggs) pointSearchBodies.push(query);
-      const bool = (query.query as { bool?: { filter?: unknown[] } } | undefined)?.bool;
-      const filters = bool?.filter ?? [];
-      const surveys = filters.flatMap((filter) => termValues(filter, "survey") ?? []);
-      const assets = JSON.stringify(filters).match(/"asset_id":"([^"]+)"/g)?.map(term => term.split('"')[3]!) ?? [];
-      const dec = filters.map((filter) => rangeBounds(filter, "dec_deg")).find(Boolean);
-      const hits = documents
-        .filter((document) => objectIndices.includes(document.index))
-        .filter((document) => !assets.length || assets.includes(String(document.source.asset_id)))
-        .filter((document) => !surveys.length || surveys.includes(String(document.source.survey)))
-        .filter((document) => !dec || (Number(document.source.dec_deg) >= dec.gte && Number(document.source.dec_deg) <= dec.lte))
-        .map((document) => ({
-          _id: document.id,
-          _source: document.source,
-          sort: [document.source.ra_deg, document.source.dec_deg, document.id],
-        }));
-      if (query.aggs) {
-        const aggregations = query.aggs as Record<string, unknown>;
-        if ("by_cell" in aggregations && "by_layer" in aggregations) {
-          pointDensitySearchBodies.push(query);
-          const layerFilters = ((aggregations.by_layer as { filters: { filters: Record<string, unknown> } }).filters.filters);
-          response.end(JSON.stringify({
-            hits: { total: { value: 7, relation: "eq" }, hits: [] },
-            aggregations: {
-              by_cell: { sum_other_doc_count: 0, buckets: [{ key: 1, doc_count: 7,
-                by_survey: { sum_other_doc_count: 0, buckets: [{ key: "euclid", doc_count: 7 }] } }] },
-              by_layer: { buckets: Object.fromEntries(Object.keys(layerFilters).map((layerId) => [layerId, {
-                by_cell: { sum_other_doc_count: 0, buckets: [{ key: 1, doc_count: 7 }] },
-              }])) },
-            },
-          }));
+test("API and separate worker preserve publication across failure, retry, FITS tables and immutable S3 input", { timeout: 120000 }, async () => {
+  const root=await mkdtemp(path.join(os.tmpdir(),"workspace-http-worker-"));
+  const source=path.join(root,"input"), state=path.join(root,"state");
+  await mkdir(source); await mkdir(state);
+  const sourceCsv=path.join(source,"catalog.csv");
+  await writeFile(sourceCsv,"id,ra,dec,flux\none,10.25,-1.5,42\ntwo,10.75,-1.25,84\n");
+  const documents=new Map<string,Record<string,unknown>>();
+  const requests: string[]=[];
+  let failNextBulk = false;
+  let bulkBarrier: { enter(): void; released: Promise<void> } | undefined;
+  const es=createServer(async (request,response)=>{
+    try {
+      const route=new URL(request.url!,"http://test").pathname;
+      requests.push(`${request.method} ${route}`);
+      let text=""; for await(const chunk of request) text+=chunk;
+      response.setHeader("Content-Type","application/json");
+      if(request.method==="HEAD" || request.method==="PUT") { response.end("{}"); return; }
+      if(route==="/_bulk") {
+        if (bulkBarrier) {
+          const barrier = bulkBarrier;
+          bulkBarrier = undefined;
+          barrier.enter();
+          await barrier.released;
+        }
+        if (failNextBulk) {
+          failNextBulk = false;
+          response.statusCode = 400;
+          response.end(JSON.stringify({ error: "fixture index unavailable" }));
           return;
         }
-        const factor = (query.aggs as { point_cells: { terms: { script: { params: { factor: number } } } } }).point_cells.terms.script.params.factor;
-        const cells = new Map<number, number>();
-        for (const hit of hits) {
-          const pixel = Math.floor(Number(hit._source.healpix_pixel) / factor);
-          cells.set(pixel, (cells.get(pixel) ?? 0) + 1);
+        const lines=text.trim().split("\n");
+        for(let i=0;i<lines.length;i+=2) {
+          const action=JSON.parse(lines[i]!).index;
+          documents.set(`${action._index}/${action._id}`,{...JSON.parse(lines[i+1]!),_id:action._id,_index:action._index});
         }
-        response.end(JSON.stringify({ hits: { total: { value: hits.length, relation: "eq" }, hits: [] },
-          aggregations: { point_cells: { sum_other_doc_count: 0, buckets: [...cells].map(([key, doc_count]) => ({ key, doc_count })) } } }));
-      } else response.end(JSON.stringify({ hits: { total: { value: hits.length, relation: "eq" }, hits } }));
-      return;
-    }
-    if (request.method === "POST" && pathname === `/${ASTRO_FILE_INDEX}/_search`) {
-      response.end(JSON.stringify({
-        aggregations: {
-          coverage_cells: { buckets: [] },
-          by_asset: { buckets: [] },
-        },
-      }));
-      return;
-    }
-    if (request.method === "POST" && pathname === "/astro_coverage_index_v1/_search") {
-      const query = JSON.parse(body) as Record<string, unknown>;
-      coverageSearchBodies.push(query);
-      if (heldCoverage) {
-        const held = heldCoverage;
-        response.once("close", held.closed);
-        held.finish = () => response.end(JSON.stringify({ hits: { total: 0, hits: [] } }));
-        held.started();
-        return;
+        response.end(JSON.stringify({errors:false,items:Array.from({length:lines.length/2},()=>({index:{status:201}}))}));return;
       }
-      const bool = (query.query as { bool?: { filter?: unknown[] } } | undefined)?.bool;
-      const filters = bool?.filter ?? [];
-      const assets = filters.flatMap((filter) => termValues(filter, "asset_id") ?? []);
-      if (assets.includes("es-unavailable")) {
-        response.statusCode = 404;
-        response.end(JSON.stringify({ error: "coverage index unavailable" }));
-        return;
+      if(route.endsWith("/_refresh") || route.endsWith("/_mapping")) {response.end("{}");return;}
+      if(route.endsWith("/_search")) {
+        const body=JSON.parse(text),index=decodeURIComponent(route.split("/")[1]!);
+        const found=[...documents.values()].filter(doc=>doc._index===index && matches(doc,body.query));
+        const hits=found.slice(0,body.size ?? 10).map(doc=>({_id:doc._id,sort:[doc.healpix_pixel,doc.ra_deg,doc.dec_deg,doc.asset_id,doc.source_file_id,doc.object_id],_source:doc}));
+        response.end(JSON.stringify({hits:{total:{value:found.length,relation:"eq"},hits}}));return;
       }
-      const hits = documents
-        .filter((document) => document.index === "astro_coverage_index_v1")
-        .filter((document) => !assets.length || assets.includes(String(document.source.asset_id)))
-        .map((document) => ({ _id: document.id, _source: document.source }));
-      response.end(JSON.stringify({ hits: { total: { value: hits.length, relation: "eq" }, hits } }));
-      return;
-    }
-    response.statusCode = 404;
-    response.end(JSON.stringify({ error: `not found: ${request.method} ${pathname}` }));
+      response.statusCode=404; response.end("{}");
+    } catch(error) {response.statusCode=500;response.end(JSON.stringify({error:String(error)}));}
   });
-  const esPort = await listen(esServer);
-  const staleWarehouseServer = createServer(async (request, response) => {
-    warehouseRequestCount += 1;
-    await bodyText(request);
-    response.statusCode = 503;
-    response.setHeader("Content-Type", "application/json");
-    response.end(JSON.stringify({ error: "stale Warehouse endpoint" }));
-  });
-  const staleWarehousePort = await listen(staleWarehouseServer);
-
+  const esPort=await listen(es),reserve=createServer(),port=await listen(reserve);
+  await new Promise<void>(resolve=>reserve.close(()=>resolve()));
+  const base=`http://127.0.0.1:${port}`;
+  const environment={...process.env,PORT:String(port),HOST:"127.0.0.1",ASTRO_STATE_ROOT:state,
+    ASTRO_SQLITE_PATH:path.join(state,"workspace.sqlite"),ASTRO_LOCAL_CONNECTOR_ROOTS:source,
+    ASTRO_SCANS_PAUSED:"false",ASTRO_WORKSPACE_SCAN_ENABLED:"true",ASTRO_ES_URL:`http://127.0.0.1:${esPort}`,
+    ASTRO_RESOURCE_CATALOG_URL:"file:///not-present/catalog.json",ASTRO_ALLOWED_HOSTS:"127.0.0.1,localhost",
+    ASTRO_MOC_CORE_CLI:process.env.ASTRO_TEST_MOC_CORE_CLI ?? `${process.execPath} --import tsx ${path.resolve("test/helpers/mock-moc-core-cli.ts")}`,
+    OTEL_EXPORTER_OTLP_ENDPOINT:"",ASTRO_VIEWER_ROOT:"/not-present/viewer"};
+  let logs="",api:ChildProcess|undefined,worker:ChildProcess|undefined;
+  const launch=(entry:string)=>{
+    const child=spawn(process.execPath,["--import","tsx",entry],{env:environment,stdio:["ignore","pipe","pipe"]});
+    child.stdout!.on("data",data=>{logs+=data;});child.stderr!.on("data",data=>{logs+=data;});return child;
+  };
+  const json=async (route:string,body?:unknown)=>{
+    const response=await fetch(base+route,{method:body===undefined?"GET":"POST",headers:{"Content-Type":"application/json"},...(body===undefined?{}:{body:JSON.stringify(body)})});
+    const value=await response.json() as any;assert.ok(response.ok,JSON.stringify(value));return value;
+  };
   try {
-    const apiPort = await availablePort();
-    const baseUrl = `http://127.0.0.1:${apiPort}`;
-    const environment = {
-      ...process.env,
-      HOST: "127.0.0.1",
-      PORT: String(apiPort),
-      ASTRO_ALLOWED_HOSTS: "127.0.0.1,localhost",
-      ASTRO_DATA_WAREHOUSE_ENABLED: "false",
-      ASTRO_LOCAL_SCAN_ENABLED: "true",
-      ASTRO_ES_URL: `http://127.0.0.1:${esPort}`,
-      // A stale endpoint must not be consulted while the optional integration
-      // is disabled. Workspace still serves its own ES below.
-      ASTRO_WAREHOUSE_ES_URL: `http://127.0.0.1:${staleWarehousePort}`,
-      ASTRO_METADATA_STORE: "sqlite",
-      ASTRO_SQLITE_PATH: path.join(stateRoot, "workspace.sqlite"),
-      ASTRO_STATE_ROOT: stateRoot,
-      ASTRO_DATA_CATALOG_STATE: path.join(stateRoot, "data-catalog.json"),
-      ASTRO_CONNECTOR_STATE: path.join(stateRoot, "connectors.json"),
-      ASTRO_CONNECTOR_RUN_STATE: path.join(stateRoot, "connector-runs.json"),
-      ASTRO_SURVEY_REGISTRY_STATE: path.join(stateRoot, "survey-registrations.json"),
-      ASTRO_RESOURCE_PACKAGE_ROOT: path.join(stateRoot, "resource-packages"),
-      ASTRO_RESOURCE_PACKAGE_STATE: path.join(stateRoot, "resource-package-state.json"),
-      ASTRO_RESOURCE_CATALOG_URL: pathToFileURL(path.join(directory, "missing-assets-catalog.json")).href,
-      ASTRO_LOCAL_CONNECTOR_ROOTS: sourceRoot,
-      ASTRO_WORKFLOW_ROOT: path.join(stateRoot, "workflow-runs"),
-      ASTRO_CATALOG_MCP_URL: "http://127.0.0.1:9/mcp",
-      ASTRO_MOC_CORE_CLI: `${path.resolve("node_modules/.bin/tsx")} ${path.resolve("test/helpers/mock-moc-core-cli.ts")}`,
-      NODE_NO_WARNINGS: "1",
-    };
-    apiProcess = spawn(path.resolve("node_modules/.bin/tsx"), ["src/http-server.ts"], {
-      cwd: process.cwd(),
-      env: environment,
-      stdio: ["ignore", "pipe", "pipe"],
-    });
-    apiProcess.stdout?.on("data", (chunk) => { apiLogs += String(chunk); });
-    apiProcess.stderr?.on("data", (chunk) => { apiLogs += String(chunk); });
-    await waitForHealth(baseUrl, apiProcess, () => apiLogs);
+    api=launch("src/http-server.ts");
+    await until(async()=>{try{return(await fetch(base+"/healthz")).ok;}catch{return false;}},()=>logs);
+    const {connector}=await json("/api/connectors",{name:"Local fixture",kind:"local",config:{rootPath:source}});
+    await json(`/api/connectors/${connector.id}/check`,{});
+    const {asset}=await json("/api/data-assets",{name:"Fixture catalog",kind:"catalog",product:"catalog",connector:"local",sourceUri:`local://${source}`,connectorIds:[connector.id],scanSpec:{format:"csv",objectIdColumn:"id",raColumn:"ra",decColumn:"dec",coordinateFrame:"ICRS",coordinateUnits:"deg"}});
+    // A missing selected file is accepted while the API only persists the command.
+    const queued=await json(`/api/data-assets/${asset.id}/scan-runs`,{relativePath:"not-there.csv"});
+    assert.equal(queued.run.status,"queued");assert.equal(requests.length,0,"Submission cannot contact ES or enumerate input");
+    await json(`/api/connectors/${connector.id}/ingest-runs/${queued.run.id}/cancel`,{});
+    const {run}=await json(`/api/data-assets/${asset.id}/scan-runs`,{relativePath:"catalog.csv"});
+    assert.equal(run.status,"queued");assert.equal(run.scanTask,undefined,"Internal checkpoint must not enter the public response");
+    await json("/api/scanning/pause",{});
+    worker=launch("src/scan-worker.ts");
+    await until(async()=>logs.includes("scan worker ready"),()=>logs);
+    assert.equal(documents.size,0,"Paused worker must not read sources");
+    await json("/api/scanning/resume",{});
+    let completed:any;
+    await until(async()=>{completed=(await json(`/api/connectors/${connector.id}/ingest-runs`)).runs.find((r:any)=>r.id===run.id);return ["succeeded","failed"].includes(completed?.status);},()=>logs);
+    assert.equal(completed.status,"succeeded",completed.error+logs);
+    assert.equal(completed.pointCount,2);assert.equal(completed.processedFiles,1);
+    const positions=[...documents.values()].filter(doc=>doc._index===ASTRO_OBJECT_INDEX);
+    assert.equal(positions.length,2);
+    assert.ok(positions.every(doc=>!(doc.attributes as any).flux && doc.evidence_ref));
+    const files=[...documents.values()].filter(doc=>doc._index===ASTRO_FILE_INDEX);
+    assert.equal(files.length,1);assert.equal(files[0]!.size_bytes,Buffer.byteLength(await readFile(sourceCsv)));
+    const coverage=await json(`/api/sky/coverage?nside=16&assetIds=${asset.id}`);
+    assert.equal(coverage.status,"ready");assert.ok(coverage.pixels.length>0);
+    const result=await json("/api/sky/points/query",{bbox:{raMin:9,raMax:12,decMin:-3,decMax:0},region:{nside:16,pixels:coverage.pixels,coordinateFrame:"ICRS",ordering:"NESTED"},layerScopes:[{assetId:asset.id}],limit:2000});
+    assert.equal(result.objects.length,2);assert.equal(result.objects[0].attributes.flux,undefined);
+    const detail=await json(`/api/sky/points/${positions[0]!._id}`);
+    assert.equal(detail.point.attributes.flux,"42");
 
-    const capabilities = await apiJson<{
-      dataWarehouse: { enabled: boolean; configured?: boolean };
-      localScan: { enabled: boolean; configured: boolean; executor: string; objectIndex: string; coverageIndex: string };
-    }>(baseUrl, "/api/capabilities");
-    assert.equal(capabilities.dataWarehouse.enabled, false);
-    assert.equal(capabilities.dataWarehouse.configured, false);
-    assert.deepEqual(capabilities.localScan, {
-      enabled: true,
-      configured: true,
-      executor: "workspace",
-      objectIndex: "astro_object_index_v1",
-      coverageIndex: "astro_coverage_index_v1",
-    });
+    const entryRegion = { nside: 1, pixels: Array.from({ length: 12 }, (_, index) => index), coordinateFrame: "ICRS", ordering: "NESTED" };
+    // An unpublished failed generation cannot replace the currently visible one.
+    failNextBulk = true;
+    const failedSubmission = await json(`/api/data-assets/${asset.id}/scan-runs`, { relativePath: "catalog.csv" });
+    await until(async () => {
+      const current = (await json(`/api/connectors/${connector.id}/ingest-runs`)).runs.find((r:any) => r.id === failedSubmission.run.id);
+      return current?.status === "failed";
+    }, () => logs);
+    const unchanged = await json("/api/sky/points/query", { region: entryRegion, bbox: { raMin: 9, raMax: 12, decMin: -3, decMax: 0 }, layerScopes: [{ assetId: asset.id }] });
+    assert.deepEqual(unchanged.objects.map((p:any) => p.id), result.objects.map((p:any) => p.id));
+    assert.deepEqual((await json(`/api/sky/coverage?nside=16&assetIds=${asset.id}`)).pixels, coverage.pixels);
+    await json(`/api/connectors/${connector.id}/ingest-runs/${failedSubmission.run.id}/retry`, {});
+    await until(async () => (await json(`/api/connectors/${connector.id}/ingest-runs`)).runs.some((r:any) => r.id === failedSubmission.run.id && r.status === "succeeded"), () => logs);
+    const replaced = await json("/api/sky/points/query", { region: entryRegion, bbox: { raMin: 9, raMax: 12, decMin: -3, decMax: 0 }, layerScopes: [{ assetId: asset.id }] });
+    assert.equal(replaced.objects.length, 2, "Only the committed generation is visible after retry");
+    assert.ok(replaced.objects.every((p:any) => !positions.some(old => old._id === p.id)));
 
-    const runsBeforeInvalidPublicInput = await apiJson<{ runs: Array<{ id: string }> }>(baseUrl, "/api/production-runs");
-    const invalidProduction = await fetch(`${baseUrl}/api/production-runs`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        pipelineKey: "overlap-download@1",
-        region: {
-          coordinateFrame: "ICRS",
-          ordering: "NESTED",
-          nside: 16,
-          pixels: [1],
-          sourceIds: ["public:desi"],
-        },
-      }),
-    });
-    assert.equal(invalidProduction.status, 400);
-    assert.match(await invalidProduction.text(), /public sourceId/);
+    // Pause during a write, restart, and explicitly resume the uncommitted batch.
+    let writing = false;
+    let releaseBulk = () => {};
+    bulkBarrier = { enter: () => { writing = true; }, released: new Promise<void>(resolve => { releaseBulk = resolve; }) };
+    const interrupted = (await json(`/api/data-assets/${asset.id}/scan-runs`, { relativePath: "catalog.csv" })).run;
+    await until(async () => writing, () => logs);
+    await json(`/api/connectors/${connector.id}/ingest-runs/${interrupted.id}/pause`, {});
+    releaseBulk();
+    await stop(worker);
+    worker = undefined;
+    const pausedRun = (await json(`/api/connectors/${connector.id}/ingest-runs`)).runs.find((r:any) => r.id === interrupted.id);
+    assert.equal(pausedRun.status, "paused");
+    const whilePaused = await json("/api/sky/points/query", { region: entryRegion, bbox: { raMin: 9, raMax: 12, decMin: -3, decMax: 0 }, layerScopes: [{ assetId: asset.id }] });
+    assert.deepEqual(whilePaused.objects.map((p:any) => p.id), replaced.objects.map((p:any) => p.id));
+    worker = launch("src/scan-worker.ts");
+    await json(`/api/connectors/${connector.id}/ingest-runs/${interrupted.id}/resume`, {});
+    await until(async () => (await json(`/api/connectors/${connector.id}/ingest-runs`)).runs.some((r:any) => r.id === interrupted.id && r.status === "succeeded"), () => logs);
 
-    const invalidCoverageDownload = await fetch(`${baseUrl}/api/coverage-downloads`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ files: [], sourceIds: ["geometry:public:euclid:ero:imaging"] }),
-    });
-    assert.equal(invalidCoverageDownload.status, 400);
-    assert.match(await invalidCoverageDownload.text(), /geometry-only/);
+    // FITS tables use exactly the same catalog/index/publication path as CSV.
+    await promisify(execFile)(process.env.ASTRO_PYTHON ?? "python3", ["-c", "from astropy.io import fits; import sys; fits.BinTableHDU.from_columns([fits.Column(name='SOURCE',format='8A',array=['f1']),fits.Column(name='RA',format='D',array=[10.5]),fits.Column(name='DEC',format='D',array=[-1.4]),fits.Column(name='FLUX',format='D',array=[21.0])]).writeto(sys.argv[1])", path.join(source, "table.fits")]);
+    const fitsAsset = (await json("/api/data-assets", { name: "FITS fixture", kind: "catalog", product: "catalog", connector: "local", sourceUri: `local://${source}`, connectorIds: [connector.id], scanSpec: { format: "fits", objectIdColumn: "SOURCE", raColumn: "RA", decColumn: "DEC" } })).asset;
+    const fitsRun = (await json(`/api/data-assets/${fitsAsset.id}/scan-runs`, { relativePath: "table.fits" })).run;
+    await until(async () => {
+      const current = (await json(`/api/connectors/${connector.id}/ingest-runs`)).runs.find((r:any) => r.id === fitsRun.id);
+      if (current?.status === "failed") assert.fail(current.error + logs);
+      return current?.status === "succeeded";
+    }, () => logs);
+    const fitsPoints = await json("/api/sky/points/query", { region: entryRegion, bbox: { raMin: 9, raMax: 12, decMin: -3, decMax: 0 }, layerScopes: [{ assetId: fitsAsset.id }] });
+    assert.equal(fitsPoints.objects.length, 1);
+    assert.equal((await json(`/api/sky/points/${fitsPoints.objects[0].id}`)).point.attributes.FLUX, "21.0");
 
-    const invalidDownloadIdentity = await fetch(`${baseUrl}/api/coverage-downloads`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ files: [{}], requestKey: 42 }),
-    });
-    assert.equal(invalidDownloadIdentity.status, 400);
-    assert.match(await invalidDownloadIdentity.text(), /requestKey is invalid/);
+    const images = path.join(source, "images");
+    await mkdir(images);
+    await promisify(execFile)("python3", ["-c", `
+from astropy.io import fits
+import numpy as np, pathlib, sys
+root=pathlib.Path(sys.argv[1])
+header=fits.Header({"CRPIX1":10.5,"CRPIX2":10.5,"CRVAL1":12.5,"CRVAL2":-3.25,
+ "CTYPE1":"RA---TAN","CTYPE2":"DEC--TAN","CDELT1":-0.001,"CDELT2":0.001,
+ "PIXSCAL1":3.6,"PIXSCAL2":3.6,"RADESYS":"ICRS"})
+fits.PrimaryHDU(np.zeros((20,20),dtype=np.float32),header).writeto(root/"good.fits")
+header["PIXSCAL2"]=3.5
+fits.PrimaryHDU(np.zeros((20,20),dtype=np.float32),header).writeto(root/"bad.fits")
+`, images]);
+    const imageAsset = (await json("/api/data-assets", { name: "Quality-controlled images", kind: "image", product: "imaging",
+      connector: "local", sourceUri: `local://${images}`, connectorIds: [connector.id],
+      scanSpec: { format: "fits", fitsQualityProfile: "csst-wcs-v1" } })).asset;
+    const imageRun = (await json(`/api/data-assets/${imageAsset.id}/scan-runs`, { relativePath: "images" })).run;
+    let imageResult: any;
+    await until(async () => {
+      imageResult = (await json(`/api/connectors/${connector.id}/ingest-runs`)).runs.find((r:any) => r.id === imageRun.id);
+      if (imageResult?.status === "failed") assert.fail(imageResult.error + logs);
+      return imageResult?.status === "succeeded";
+    }, () => logs);
+    assert.equal(imageResult.acceptedFileCount, 1);
+    assert.equal(imageResult.skippedFileCount, 1);
+    assert.equal(imageResult.failedFiles, 0);
+    const imageCoverage = await json(`/api/sky/coverage?nside=16&assetIds=${imageAsset.id}`);
+    assert.equal(imageCoverage.layers[0].coverageRole, "object_presence");
+    const imagePoints = await json("/api/sky/points/query", { region: entryRegion,
+      bbox: { raMin: 12, raMax: 13, decMin: -4, decMax: -3 }, layerScopes: [{ assetId: imageAsset.id }] });
+    assert.equal(imagePoints.objects.length, 1);
+    const imageDetail = await json(`/api/sky/points/${imagePoints.objects[0].id}`);
+    assert.equal(imageDetail.point.attributes.file_name, "good.fits");
+    assert.ok(imageDetail.point.attributes.header.includes("PIXSCAL1"));
+    assert.equal([...documents.values()].filter(doc => doc.asset_id === imageAsset.id && doc._index === ASTRO_FILE_INDEX).length, 1);
+    const badImageRun = (await json(`/api/data-assets/${imageAsset.id}/scan-runs`, { relativePath: "images/bad.fits" })).run;
+    await until(async () => (await json(`/api/connectors/${connector.id}/ingest-runs`)).runs.some((r:any) => r.id === badImageRun.id && r.status === "failed"), () => logs);
+    assert.equal((await json(`/api/data-assets/${imageAsset.id}`)).asset.activeScan.runId, imageRun.id);
 
-    const runsAfterInvalidPublicInput = await apiJson<{ runs: Array<{ id: string }> }>(baseUrl, "/api/production-runs");
-    assert.deepEqual(runsAfterInvalidPublicInput.runs.map((run) => run.id), runsBeforeInvalidPublicInput.runs.map((run) => run.id));
-
-    const coverageWithoutWarehouse = await apiJson<{ status: string; index: string }>(baseUrl, "/api/sky/coverage?nside=16");
-    assert.equal(coverageWithoutWarehouse.status, "ready");
-    assert.equal(coverageWithoutWarehouse.index, ASTRO_FILE_INDEX);
-    assert.equal(warehouseRequestCount, 0);
-
-    const listedMocs = await apiJson<{ artifacts: Array<{ id: string; layerId: string; scanRunId: string; status: string; files: Array<{ name: string; sha256: string }> }> }>(baseUrl, "/api/user-mocs");
-    const listedSeed = listedMocs.artifacts.find((artifact) => artifact.id === seededArtifact.id);
-    assert.ok(listedSeed);
-    assert.equal(listedSeed.status, "ready");
-    assert.ok(listedSeed.files.some((file) => file.name === "moc.fits"));
-    const overlapAtOrder6 = await apiJson<{ order: number; nside: number; availableOrders: number[]; sources: Array<{ id: string; nside: number; pixels: number[] }> }>(baseUrl, "/api/sky/overlap", {
-      method: "POST",
-      body: JSON.stringify({ sourceIds: [`workspace:moc:${seededArtifact.id}`], includePublic: false, nside: 64 }),
+    const remoteCsv = "id,ra,dec,flux\ns3-one,10.6,-1.3,63\n";
+    let objectReads = 0;
+    const s3 = createServer((request, response) => {
+      const url = new URL(request.url!, "http://fixture");
+      if (request.method === "HEAD") { response.end(); return; }
+      if (url.searchParams.has("list-type")) {
+        response.setHeader("Content-Type", "application/xml");
+        response.end(`<ListBucketResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><Name>fixture</Name><IsTruncated>false</IsTruncated><Contents><Key>catalog.csv</Key><Size>${Buffer.byteLength(remoteCsv)}</Size><ETag>"fixture-version-1"</ETag></Contents></ListBucketResult>`);
+        return;
+      }
+      assert.equal(request.headers["if-match"], '"fixture-version-1"');
+      objectReads++;
+      response.writeHead(200, { "Content-Type": "text/csv", "Content-Length": Buffer.byteLength(remoteCsv), ETag: '"fixture-version-1"' });
+      response.end(remoteCsv);
     });
-    assert.equal(overlapAtOrder6.order, 6);
-    assert.equal(overlapAtOrder6.nside, 64);
-    assert.deepEqual(overlapAtOrder6.availableOrders, [0, 1, 2, 3, 4, 5, 6, 7, 8]);
-    assert.deepEqual(overlapAtOrder6.sources.map(source => ({ id: source.id, nside: source.nside, pixels: source.pixels })), [
-      { id: `workspace:moc:${seededArtifact.id}`, nside: 64, pixels: [16] },
-    ]);
-    const unsupportedOverlap = await fetch(`${baseUrl}/api/sky/overlap`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ sourceIds: [`workspace:moc:${seededArtifact.id}`, `workspace:moc:${coarseArtifact.id}`], includePublic: false, nside: 64 }),
-    });
-    assert.equal(unsupportedOverlap.status, 400);
-    assert.match(await unsupportedOverlap.text(), /O4.*O6/);
-    const highOverlap = await apiJson<{ order: number; coverageOrder: number; availableOrders: number[]; pixels: number[]; components: Array<{ cells: number[] }> }>(baseUrl, "/api/sky/overlap", {
-      method: "POST", body: JSON.stringify({ sourceIds: highArtifacts.map(artifact => `workspace:moc:${artifact.id}`), includePublic: false, nside: 1024 }),
-    });
-    assert.equal(highOverlap.order, 10);
-    assert.equal(highOverlap.coverageOrder, 10);
-    assert.equal(highOverlap.availableOrders.at(-1), 10);
-    assert.deepEqual(highOverlap.pixels, [4096]);
-    assert.deepEqual(highOverlap.components[0]!.cells, [4096]);
-    assert.equal(coarseArtifact.files.some(file => file.name === "query-order8.json"), false);
-    const mocResponse = await fetch(`${baseUrl}/api/user-mocs/${encodeURIComponent(seededArtifact.layerId)}/${encodeURIComponent(seededArtifact.scanRunId)}/moc.fits`);
-    assert.equal(mocResponse.status, 200);
-    assert.equal(mocResponse.headers.get("content-type"), "application/fits");
-    assert.equal((await mocResponse.arrayBuffer()).byteLength, seededMoc.length);
-
-    // A replacement scan may be pending while the prior ready MOC remains
-    // the only trustworthy display artifact for this layer.
-    await new Promise((resolve) => setTimeout(resolve, 5));
-    const pendingArtifact = await seededArtifactStore.createPending({
-      layerId: seededArtifact.layerId,
-      scanRunId: "http-run-002",
-      availableOrders: [8],
-      maxOrder: 10,
-      precision: "exact",
-      coverageRole: "object_presence",
-    });
-
-    ownEsUnavailable = true;
-    const coverageFromMoc = await apiJson<{ status: string; index: string; pixels: number[]; layers: Array<{ layerId?: string; key: string; status?: string; pixels: number[]; source?: string; mocStatus?: string; artifactId?: string; latestMocStatus?: string; latestArtifactId?: string }> }>(baseUrl, "/api/sky/coverage?nside=16");
-    assert.equal(coverageFromMoc.status, "ready");
-    assert.equal(coverageFromMoc.index, ASTRO_FILE_INDEX);
-    const mocLayer = coverageFromMoc.layers.find((layer) => layer.layerId === seededArtifact.layerId);
-    assert.ok(mocLayer);
-    assert.equal(mocLayer.status, "ready");
-    assert.equal(mocLayer.mocStatus, "ready");
-    assert.equal(mocLayer.artifactId, seededArtifact.id);
-    assert.equal(mocLayer.latestMocStatus, "pending");
-    assert.equal(mocLayer.latestArtifactId, pendingArtifact.id);
-    assert.deepEqual(mocLayer.pixels, [1]);
-    assert.deepEqual(coverageFromMoc.pixels.includes(1), true);
-    ownEsUnavailable = false;
-
-    // Local registration remains usable while the public catalog is unavailable.
-    const registeredSurvey = await apiJson<{ survey: { releases: Array<Record<string, unknown>> } }>(baseUrl, "/api/surveys/registrations", {
-      method: "POST",
-      body: JSON.stringify({ id: "euclid", name: "Euclid", sourceUrl: "https://example.org/euclid", modalities: ["imaging"] }),
-    });
-    await apiJson(baseUrl, "/api/surveys/euclid/releases", {
-      method: "POST",
-      body: JSON.stringify({ ...registeredSurvey.survey.releases[0], id: "euclid-q1", label: "Q1" }),
-    });
-
-    const connectorResponse = await apiJson<{ connector: { id: string; locationKey: string } }>(baseUrl, "/api/connectors", {
-      method: "POST",
-      body: JSON.stringify({
-        name: "Local HTTP fixture",
-        kind: "local",
-        config: { rootPath: sourceRoot },
-        surveyId: "euclid",
-        releaseId: "euclid-q1",
-      }),
-    });
-    const connectorId = connectorResponse.connector.id;
-    const connectorKey = connectorResponse.connector.locationKey;
-    await apiJson(baseUrl, `/api/connectors/${encodeURIComponent(connectorId)}/check`, { method: "POST", body: "{}" });
-
-    const assetResponse = await apiJson<{ asset: { id: string } }>(baseUrl, "/api/data-assets", {
-      method: "POST",
-      body: JSON.stringify({
-        name: "Local HTTP catalog",
-        description: "HTTP local scan fixture",
-        surveyId: "euclid",
-        releaseId: "euclid-q1",
-        product: "COSMOS prediction catalog",
-        kind: "catalog",
-        modalities: ["photometry"],
-        connector: "local",
-        sourceUri: csvPath,
-        format: "csv",
-        connectorIds: [connectorId],
-        connectorLocationKeys: [connectorKey],
-        status: "ready",
-        projectStates: ["deliverable"],
-        scanSpec: {
-          format: "csv",
-          objectIdColumn: "object_id",
-          raColumn: "ra",
-          decColumn: "dec",
-          coordinateFrame: "ICRS",
-          coordinateUnits: "deg",
-          modality: "photometry",
-          product: "COSMOS prediction catalog",
-        },
-      }),
-    });
-
-    const submitted = await apiJson<{ run: { id: string; status: string; assetIds?: string[] } }>(
-      baseUrl,
-      `/api/connectors/${encodeURIComponent(connectorId)}/local-scan`,
-      {
-        method: "POST",
-        headers: { "Idempotency-Key": "http-local-scan" },
-        body: JSON.stringify({ relativePath: "catalog.csv" }),
-      },
-    );
-    assert.equal(submitted.run.status, "queued");
-    assert.deepEqual(submitted.run.assetIds, [assetResponse.asset.id]);
-
-    let completed: { id: string; status: string; documentCount?: number; fileCount?: number; error?: string } | undefined;
-    const deadline = Date.now() + 10_000;
-    while (Date.now() < deadline) {
-      const history = await apiJson<{ runs: Array<typeof completed & { id: string; status: string }> }>(
-        baseUrl,
-        `/api/connector-ingest-runs?connectorId=${encodeURIComponent(connectorId)}`,
-      );
-      completed = history.runs.find((run) => run?.id === submitted.run.id);
-      if (completed?.status === "succeeded" || completed?.status === "failed") break;
-      await new Promise((resolve) => setTimeout(resolve, 50));
-    }
-    assert.equal(completed?.status, "succeeded", completed?.error);
-    assert.equal(completed?.fileCount, 1);
-    assert.equal(completed?.documentCount, 2);
-    const pointStatuses = await apiJson<{ statuses: Array<{ assetId: string; dataPointCount?: number }> }>(baseUrl, "/api/data-assets/status");
-    assert.equal(pointStatuses.statuses.find(status => status.assetId === assetResponse.asset.id)?.dataPointCount, 2,
-      "catalog rows queryable in Aladin must also be counted on the coverage card");
-
-    const deleteHistory = await fetch(`${baseUrl}/api/connectors/${encodeURIComponent(connectorId)}/ingest-runs/${encodeURIComponent(submitted.run.id)}`, { method: "DELETE" });
-    assert.equal(deleteHistory.status, 405);
-    const historyAfterDeleteAttempt = await apiJson<{ runs: Array<{ id: string }> }>(
-      baseUrl,
-      `/api/connector-ingest-runs?connectorId=${encodeURIComponent(connectorId)}`,
-    );
-    assert.equal(historyAfterDeleteAttempt.runs.some((run) => run.id === submitted.run.id), true);
-
-    const objectDocuments = documents.filter((document) => document.index === "astro_object_index_v1");
-    const coverageDocuments = documents.filter((document) => document.index === "astro_coverage_index_v1");
-    assert.equal(objectDocuments.length, 2);
-    assert.equal(coverageDocuments.length >= 1, true);
-    assert.equal(objectDocuments.every((document) => document.source.survey === "euclid"), true);
-    assert.equal(objectDocuments.every((document) => document.source.release === "euclid-q1"), true);
-    assert.equal(coverageDocuments.every((document) => document.source.release === "euclid-q1"), true);
-    const coarsePixel = Number(coverageDocuments[0]!.source.healpix_pixel);
-    const searchesBeforeFineLookup = coverageSearchBodies.length;
-    const fineLookup = await apiJson<{ workspaceDirectories: Array<{ sourceId: string }>; warnings: string[] }>(baseUrl, "/api/sky/reverse-lookup", {
-      method: "POST", body: JSON.stringify({ sourceIds: [`workspace:asset:${assetResponse.asset.id}`], includePublic: false,
-        nside: 1024, pixels: [coarsePixel * 16] }),
-    });
-    assert.equal(coverageSearchBodies.length, searchesBeforeFineLookup + 1);
-    assert.match(JSON.stringify(coverageSearchBodies.at(-1)), /"healpix_order":8/);
-    assert.equal(fineLookup.warnings.some(warning => warning.includes("coverage nside")), false);
-
-    const secondAssetResponse = await apiJson<{ asset: { id: string } }>(baseUrl, "/api/data-assets", {
-      method: "POST",
-      body: JSON.stringify({
-        name: "Second Local HTTP catalog",
-        description: "Second asset for local-label isolation",
-        surveyId: "euclid",
-        releaseId: "euclid-q1",
-        product: "COSMOS prediction catalog",
-        kind: "catalog",
-        modalities: ["photometry"],
-        connector: "local",
-        sourceUri: csvPath,
-        format: "csv",
-        connectorIds: [connectorId],
-        connectorLocationKeys: [connectorKey],
-        status: "ready",
-        projectStates: ["deliverable"],
-        scanSpec: {
-          format: "csv",
-          objectIdColumn: "object_id",
-          raColumn: "ra",
-          decColumn: "dec",
-          coordinateFrame: "ICRS",
-          coordinateUnits: "deg",
-          modality: "photometry",
-          product: "COSMOS prediction catalog",
-        },
-      }),
-    });
-    documents.push(
-      {
-        id: "second-coverage-one",
-        index: "astro_coverage_index_v1",
-        source: {
-          healpix_order: 8,
-          healpix_pixel: 256,
-          objectCount: 7,
-          survey: "euclid",
-          release: "euclid-q1",
-          product: "COSMOS prediction catalog",
-          modality: "photometry",
-          asset_id: secondAssetResponse.asset.id,
-        },
-      },
-      {
-        id: "second-coverage-two",
-        index: "astro_coverage_index_v1",
-        source: {
-          healpix_order: 8,
-          healpix_pixel: 512,
-          objectCount: 2,
-          survey: "euclid",
-          release: "euclid-q1",
-          product: "COSMOS prediction catalog",
-          modality: "photometry",
-          asset_id: secondAssetResponse.asset.id,
-        },
-      },
-    );
-
-    await apiJson(baseUrl, "/api/surveys/registrations", {
-      method: "POST",
-      body: JSON.stringify({ id: "other-survey", name: "Other survey", sourceUrl: "https://example.org/other", modalities: ["imaging"] }),
-    });
-    await apiJson(baseUrl, "/api/surveys/other-survey/releases", {
-      method: "POST",
-      body: JSON.stringify({ ...registeredSurvey.survey.releases[0], id: "other-release", label: "Other release" }),
-    });
-    const thirdAssetResponse = await apiJson<{ asset: { id: string } }>(baseUrl, "/api/data-assets", {
-      method: "POST",
-      body: JSON.stringify({
-        name: "Mismatched-label catalog",
-        description: "Asset used to verify MOC survey/release filtering",
-        surveyId: "other-survey",
-        releaseId: "other-release",
-        product: "Other catalog",
-        kind: "catalog",
-        modalities: ["photometry"],
-        connector: "local",
-        sourceUri: csvPath,
-        format: "csv",
-        connectorIds: [connectorId],
-        connectorLocationKeys: [connectorKey],
-        status: "ready",
-        projectStates: ["deliverable"],
-      }),
-    });
-    // A CSV can commit object rows before its coverage/MOC publication fails.
-    // Those real rows must still create an entry region and remain queryable.
-    documents.push({ id: "partial-catalog-row", index: "astro_object_index_v1", source: {
-      ...objectDocuments[0]!.source, object_id: "partial-row", asset_id: thirdAssetResponse.asset.id,
-      survey: "other-survey", release: "other-release",
-    } });
-    const partialCoverage = await apiJson<{ layers: Array<{ assetId?: string; pixels: number[]; preview?: boolean; objectCount?: number; mocStatus?: string }> }>(baseUrl,
-      `/api/sky/coverage?nside=16&assetIds=${thirdAssetResponse.asset.id}`);
-    const partialLayer = partialCoverage.layers.find(layer => layer.assetId === thirdAssetResponse.asset.id)!;
-    assert.deepEqual(partialLayer.pixels, [Math.floor(Number(objectDocuments[0]!.source.healpix_pixel) / 256)]);
-    assert.equal(partialLayer.preview, true);
-    assert.equal(partialLayer.objectCount, 1);
-    assert.notEqual(partialLayer.mocStatus, "ready", "a point preview cannot claim complete scientific coverage");
-    const partialPoints = await apiJson<{ total: number; objects: Array<{ object_id: string }> }>(baseUrl, "/api/sky/points/query", {
-      method: "POST", body: JSON.stringify({ region: { nside: 16, pixels: partialLayer.pixels, coordinateFrame: "ICRS", ordering: "NESTED" }, layerScopes: [{ assetId: thirdAssetResponse.asset.id }], limit: 10 }),
-    });
-    assert.equal(partialPoints.total, 1);
-    assert.equal(partialPoints.objects[0]?.object_id, "partial-row");
-    const partialStatuses = await apiJson<{ statuses: Array<{ assetId: string; dataPointCount?: number }> }>(baseUrl, "/api/data-assets/status");
-    assert.equal(partialStatuses.statuses.find(status => status.assetId === thirdAssetResponse.asset.id)?.dataPointCount, 1);
-    documents.splice(documents.findIndex(document => document.id === "partial-catalog-row"), 1);
-    const artifactStore = new UserMocArtifactStore({ root: path.join(stateRoot, "user-mocs") });
-    await artifactStore.createPending({
-      layerId: `workspace-${thirdAssetResponse.asset.id}`,
-      scanRunId: "mismatched-label-run",
-      coverageRole: "object_presence",
-      availableOrders: [4, 8],
-      maxOrder: 8,
-    });
-    await artifactStore.createPending({
-      layerId: "workspace-unassociated-asset",
-      scanRunId: "unassociated-run",
-      coverageRole: "object_presence",
-      availableOrders: [4, 8],
-      maxOrder: 8,
-    });
-    const matchingMoc = (await artifactStore.list()).find((artifact) => artifact.layerId === `workspace-${assetResponse.asset.id}`);
-    assert.ok(matchingMoc);
-    const filteredMocs = await apiJson<{
-      layers: Array<{ layerId?: string; assetId?: string; assetIds: string[] }>;
-    }>(baseUrl, "/api/sky/coverage?nside=16&survey=euclid&release=euclid-q1");
-    const filteredLayerIds = filteredMocs.layers.map((layer) => layer.layerId);
-    assert.ok(filteredLayerIds.includes(matchingMoc.layerId));
-    assert.equal(filteredLayerIds.includes(`workspace-${thirdAssetResponse.asset.id}`), false);
-    assert.equal(filteredLayerIds.includes("workspace-unassociated-asset"), false);
-    const matchingAssetIds = new Set([assetResponse.asset.id, secondAssetResponse.asset.id]);
-    assert.equal(filteredMocs.layers.every((layer) =>
-      (layer.assetId !== undefined && matchingAssetIds.has(layer.assetId))
-      || (layer.assetIds.length > 0 && layer.assetIds.every((id) => matchingAssetIds.has(id)))), true);
-    const searchesBeforeAssetCoverage = coverageSearchBodies.length;
-    const coverage = await apiJson<{
-      status: string;
-      layers: Array<{ key: string; assetId?: string; assetIds: string[]; pixels: number[]; objectCount?: number }>;
-    }>(baseUrl, `/api/sky/coverage?assetIds=${encodeURIComponent(`${assetResponse.asset.id},${secondAssetResponse.asset.id}`)}`);
-    assert.equal(coverage.status, "ready");
-    assert.equal(coverage.layers.length, 2);
-    const firstLayer = coverage.layers.find((layer) => layer.assetId === assetResponse.asset.id);
-    const secondLayer = coverage.layers.find((layer) => layer.assetId === secondAssetResponse.asset.id);
-    assert.ok(firstLayer);
-    assert.ok(secondLayer);
-    assert.equal(firstLayer.key, `asset:${assetResponse.asset.id}`);
-    assert.equal(secondLayer.key, `asset:${secondAssetResponse.asset.id}`);
-    assert.deepEqual(secondLayer.pixels, [1, 2]);
-    assert.equal(secondLayer.objectCount, 9);
-    assert.deepEqual(firstLayer.pixels, [...new Set(coverageDocuments.map((document) => Math.floor(Number(document.source.healpix_pixel) / 256)))].sort((left, right) => left - right));
-    assert.equal(firstLayer.objectCount, coverageDocuments.reduce((sum, document) => sum + Number(document.source.objectCount), 0));
-    assert.equal(coverageSearchBodies.length - searchesBeforeAssetCoverage, 2);
-
-    const searchesBeforeStatus = coverageSearchBodies.length;
-    const selectedStatuses = await apiJson<{ statuses: Array<{ assetId: string }> }>(baseUrl,
-      `/api/data-assets/status?assetIds=${encodeURIComponent(secondAssetResponse.asset.id)}`);
-    assert.deepEqual(selectedStatuses.statuses.map(status => status.assetId), [secondAssetResponse.asset.id]);
-    assert.equal(coverageSearchBodies.length - searchesBeforeStatus, 1, "a selected card must not query other assets' geometry");
-    const unknownStatuses = await apiJson<{ statuses: unknown[] }>(baseUrl, "/api/data-assets/status?assetIds=missing-asset");
-    assert.deepEqual(unknownStatuses.statuses, []);
-    assert.equal(coverageSearchBodies.length - searchesBeforeStatus, 1);
-
-    let startCoverage!: () => void, closeCoverage!: () => void;
-    const coverageStarted = new Promise<void>(resolve => { startCoverage = resolve; });
-    const coverageClosed = new Promise<void>(resolve => { closeCoverage = resolve; });
-    heldCoverage = { started: startCoverage, closed: closeCoverage, finish: () => {} };
-    const controller = new AbortController();
-    const cancelled = fetch(`${baseUrl}/api/sky/coverage?assetIds=${encodeURIComponent(assetResponse.asset.id)}`, { signal: controller.signal });
-    const cancelledResult = assert.rejects(cancelled, { name: "AbortError" });
-    await coverageStarted;
-    let forcedCompletion = false;
-    const fallback = setTimeout(() => { forcedCompletion = true; heldCoverage?.finish(); }, 1000);
+    const s3Port = await listen(s3);
     try {
-      controller.abort();
-      await cancelledResult;
-      await coverageClosed;
-      assert.equal(forcedCompletion, false, "leaving coverage must close its upstream Elasticsearch request");
+      const remote = (await json("/api/connectors", { name: "S3 fixture", kind: "s3", config: { endpoint: `http://127.0.0.1:${s3Port}`, bucket: "fixture", region: "us-east-1" }, credentials: { accessKeyId: "fixture-access", secretAccessKey: "fixture-secret" } })).connector;
+      await json(`/api/connectors/${remote.id}/check`, {});
+      const remoteAsset = (await json("/api/data-assets", { name: "S3 catalog", kind: "catalog", product: "catalog", connector: "s3", sourceUri: "s3://fixture/catalog.csv", connectorIds: [remote.id], scanSpec: { format: "csv", objectIdColumn: "id", raColumn: "ra", decColumn: "dec", coordinateFrame: "ICRS", coordinateUnits: "deg" } })).asset;
+      const remoteRun = (await json(`/api/data-assets/${remoteAsset.id}/scan-runs`, { relativePath: "catalog.csv" })).run;
+      await until(async () => {
+        const current = (await json(`/api/connectors/${remote.id}/ingest-runs`)).runs.find((r:any) => r.id === remoteRun.id);
+        if (current?.status === "failed") assert.fail(current.error + logs);
+        return current?.status === "succeeded";
+      }, () => logs);
+      assert.equal(objectReads, 1);
+      const remotePoints = await json("/api/sky/points/query", { region: entryRegion, bbox: { raMin: 9, raMax: 12, decMin: -3, decMax: 0 }, layerScopes: [{ assetId: remoteAsset.id }] });
+      assert.equal(remotePoints.objects.length, 1);
+      assert.equal((await json(`/api/sky/points/${remotePoints.objects[0].id}`)).point.attributes.flux, "63");
     } finally {
-      clearTimeout(fallback);
-      heldCoverage.finish();
-      heldCoverage = undefined;
+      s3.closeAllConnections();
+      await new Promise<void>(resolve => s3.close(() => resolve()));
     }
-
-    const pointDensity = await apiJson<{
-      status: string;
-      nside: number;
-      total: number;
-      cells: Array<{ pixel: number; count: number; layers: Array<{ id: string; count: number }> }>;
-      layers: Array<{ id: string; count: number }>;
-      indexing: boolean;
-    }>(baseUrl, "/api/sky/points/density", {
-      method: "POST",
-      body: JSON.stringify({
-        region: { nside: 1, pixels: Array.from({ length: 12 }, (_, pixel) => pixel), coordinateFrame: "ICRS", ordering: "NESTED" },
-        boxes: [{ raMin: 0, raMax: 360, decMin: -90, decMax: 90 }],
-        layers: [{ id: "local-catalog", scopes: [{ assetId: assetResponse.asset.id }] }],
-        targetNside: 16,
-      }),
-    });
-    assert.equal(pointDensity.status, "ready");
-    assert.equal(pointDensity.nside, 16);
-    assert.equal(pointDensity.total, 7);
-    assert.deepEqual(pointDensity.cells, [{ pixel: 1, count: 7, layers: [{ id: "local-catalog", count: 7 }], surveys: [{ id: "euclid", count: 7 }] }]);
-    assert.deepEqual(pointDensity.layers, [{ id: "local-catalog", count: 7 }]);
-    assert.equal(pointDensity.indexing, false);
-    assert.equal(pointDensitySearchBodies.length, 1);
-    assert.match(JSON.stringify(pointDensitySearchBodies[0]), new RegExp(assetResponse.asset.id));
-
-    const anchor = await apiJson<{
-      status: string;
-      point: { objectId: string; raDeg: number; decDeg: number } | null;
-      indexing: boolean;
-    }>(baseUrl, "/api/sky/points/anchor", {
-      method: "POST",
-      body: JSON.stringify({
-        region: { nside: 1, pixels: Array.from({ length: 12 }, (_, pixel) => pixel), coordinateFrame: "ICRS", ordering: "NESTED" },
-        layerScopes: [{ assetId: assetResponse.asset.id }],
-      }),
-    });
-    assert.equal(anchor.status, "ready");
-    assert.equal(anchor.point?.objectId, "euclid-1");
-    assert.equal(anchor.point?.raDeg, Number(objectDocuments[0]!.source.ra_deg));
-    assert.equal(anchor.point?.decDeg, Number(objectDocuments[0]!.source.dec_deg));
-    assert.equal(anchor.indexing, false);
-    const anchorQuery = pointSearchBodies.at(-1)!;
-    assert.equal(anchorQuery.size, 1);
-    assert.equal(anchorQuery.track_total_hits, false);
-    assert.equal((anchorQuery._source as string[]).includes("attributes"), false);
-
-    const density = await apiJson<{
-      status: string;
-      parentNside: number;
-      targetNside: number;
-      nativeNside: number;
-      evidence: string;
-      total: number;
-      cells: Array<{ pixel: number; count: number; layers: Array<{ assetId: string; count: number }> }>;
-      layers: Array<{ assetId: string; count: number }>;
-    }>(baseUrl, "/api/sky/cells/query", {
-      method: "POST",
-      body: JSON.stringify({
-        parentNside: 16,
-        parentPixels: [1, 2],
-        targetNside: 16,
-        coordinateFrame: "ICRS",
-        ordering: "NESTED",
-        assetIds: [secondAssetResponse.asset.id],
-        surveyIds: ["euclid"],
-        releaseIds: ["euclid-q1"],
-        products: ["COSMOS prediction catalog"],
-        modalities: ["photometry"],
-      }),
-    });
-    assert.equal(density.status, "ready");
-    assert.equal(density.parentNside, 16);
-    assert.equal(density.targetNside, 16);
-    assert.equal(density.nativeNside, 256);
-    assert.equal(density.evidence, "coverage_facts");
-    assert.equal(density.total, 9);
-    assert.deepEqual(density.cells.map((cell) => [cell.pixel, cell.count]), [[1, 7], [2, 2]]);
-    assert.deepEqual(density.layers.map((layer) => [layer.assetId, layer.count]), [[secondAssetResponse.asset.id, 9]]);
-    const densityFilters = (((coverageSearchBodies.at(-1)?.query as Record<string, unknown>).bool as Record<string, unknown>).filter ?? []) as unknown[];
-    const nativePixels = (densityFilters[0] as { terms?: { healpix_pixel?: number[] } }).terms?.healpix_pixel ?? [];
-    assert.deepEqual(nativePixels, Array.from({ length: 512 }, (_, index) => index + 256));
-
-    const validationResponse = await fetch(`${baseUrl}/api/sky/cells/query`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        parentNside: 16,
-        parentPixels: [1],
-        targetNside: 16,
-        coordinateFrame: "GALACTIC",
-        ordering: "NESTED",
-      }),
-    });
-    assert.equal(validationResponse.status, 400);
-    assert.match(await validationResponse.text(), /coordinateFrame.*ICRS/);
-
-    const unavailable = await apiJson<{ status: string; nativeNside: number; total: number }>(baseUrl, "/api/sky/cells/query", {
-      method: "POST",
-      body: JSON.stringify({
-        parentNside: 16,
-        parentPixels: [1],
-        targetNside: 16,
-        coordinateFrame: "ICRS",
-        ordering: "NESTED",
-        assetIds: ["es-unavailable"],
-      }),
-    });
-    assert.equal(unavailable.status, "unavailable");
-    assert.equal(unavailable.nativeNside, 256);
-    assert.equal(unavailable.total, 0);
-
-    documents.push({
-      id: "sdss-seed",
-      index: "astro_object_index_v1",
-      source: {
-        object_id: "sdss-1",
-        ra_deg: 10.5,
-        dec_deg: -1.4,
-        survey: "sdss",
-        release: "sdss-dr09",
-        product: "DR9 catalog",
-        modality: "photometry",
-        asset_id: "sdss-asset",
-        attributes: {},
-      },
-    });
-    const queried = await apiJson<{
-      status: string;
-      total: number;
-      objects: Array<{ survey: string; object_id: string }>;
-    }>(baseUrl, "/api/sky/objects/query", {
-      method: "POST",
-      body: JSON.stringify({
-        bbox: { raMin: 10, raMax: 11, decMin: -2, decMax: -1 },
-        surveys: ["euclid", "sdss"],
-        limit: 20,
-      }),
-    });
-    assert.equal(queried.status, "ready");
-    assert.equal(queried.total, 3);
-    assert.deepEqual(new Set(queried.objects.map((object) => object.survey)), new Set(["euclid", "sdss"]));
-    assert.equal(searchBodies.length, 1);
-    const searchFilters = ((searchBodies[0]?.query as { bool?: { filter?: unknown[] } })?.bool?.filter ?? []);
-    assert.deepEqual(searchFilters.flatMap((filter) => termValues(filter, "survey") ?? []), ["euclid", "sdss"]);
-  } finally {
-    if (apiProcess && apiProcess.exitCode === null) {
-      apiProcess.kill("SIGTERM");
-      await new Promise<void>((resolve) => {
-        const timer = setTimeout(resolve, 5_000);
-        apiProcess!.once("exit", () => { clearTimeout(timer); resolve(); });
-      });
-    }
-    await new Promise<void>((resolve) => esServer.close(() => resolve()));
-    await new Promise<void>((resolve) => staleWarehouseServer.close(() => resolve()));
-    await rm(directory, { recursive: true, force: true });
-  }
+    await json("/api/scanning/pause",{});
+    const rejected=await fetch(base+`/api/data-assets/${asset.id}/scan-runs`,{method:"POST",headers:{"Content-Type":"application/json"},body:"{}"});
+    assert.equal(rejected.status,409);
+    await stop(worker);worker=undefined;await stop(api);api=undefined;
+    const db=new DatabaseSync(path.join(state,"workspace.sqlite"));
+    assert.equal(JSON.parse(String(db.prepare("SELECT record FROM workspace_state WHERE namespace='scanning'").get()!.record)).paused,true);
+    assert.equal(db.prepare("SELECT count(*) AS n FROM data_assets WHERE json_extract(record,'$.activeScan.runId')=?").get(interrupted.id)!.n,1);db.close();
+  } finally {await stop(worker);await stop(api);es.closeAllConnections();await new Promise<void>(resolve=>es.close(()=>resolve()));await rm(root,{recursive:true,force:true});}
 });

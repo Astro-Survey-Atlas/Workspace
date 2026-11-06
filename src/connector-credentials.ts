@@ -17,22 +17,12 @@ export interface ConnectorCredentialStore {
 }
 
 const MANAGED_SECRET_PREFIX = "astro-connector-";
-const ACCESS_KEY_NAMES = ["access-key", "s3-access-key", "root-user"];
-const SECRET_KEY_NAMES = ["secret-key", "s3-access-secret", "root-password"];
-const ENDPOINT_NAMES = ["s3-endpoint"];
-const SESSION_TOKEN_NAMES = ["session-token", "s3-session-token"];
-
 function parseReference(reference: string): { namespace: string; name: string } {
   const [namespace, name, ...extra] = reference.split("/");
   if (!namespace || !name || extra.length || !/^[a-z0-9]([-a-z0-9]*[a-z0-9])?$/.test(namespace) || !/^[a-z0-9]([-a-z0-9]*[a-z0-9])?$/.test(name)) {
     throw new RangeError("Invalid internal credential reference");
   }
   return { namespace, name };
-}
-
-function decodeFirst(data: Record<string, string>, names: readonly string[]): string {
-  const encoded = names.map((name) => data[name]).find(Boolean);
-  return encoded ? Buffer.from(encoded, "base64").toString("utf8") : "";
 }
 
 function managedSecretName(connectorId: string): string {
@@ -100,9 +90,16 @@ export class FileConnectorCredentialStore implements ConnectorCredentialStore {
   }
 
   async get(reference: string): Promise<StoredConnectorCredentials | undefined> {
-    await this.#initialize();
-    const value = this.#state.values[reference];
-    return value ? structuredClone(value) : undefined;
+    // The API writes credentials; an already-running worker must see those writes.
+    await this.#writes;
+    try {
+      const record = JSON.parse(await readFile(this.#filePath, "utf8")) as FileCredentialState;
+      const value = record.values?.[reference];
+      return value ? structuredClone(value) : undefined;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+      throw error;
+    }
   }
 
   async put(reference: string, credentials: StoredConnectorCredentials): Promise<void> {

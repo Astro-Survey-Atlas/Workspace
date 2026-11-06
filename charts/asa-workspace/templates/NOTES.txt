@@ -1,15 +1,4 @@
-Astro Data Workspace is available at:
-
-  kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "asa-workspace.fullname" . }} {{ .Values.service.port }}:{{ .Values.service.port }}
-
-Metadata store: {{ .Values.metadataStore.mode }}
-Workspace search: {{ .Values.search.mode }} ({{ .Values.search.index.file }}, {{ .Values.search.index.object }}, {{ .Values.search.index.coverage }})
-Warehouse integration: {{ ternary "enabled" "disabled" .Values.dataWarehouse.enabled }}
-{{- if .Values.dataWarehouse.enabled }}
-Warehouse namespace: {{ .Release.Namespace }}
-Evidence claim: {{ include "asa-workspace.warehouseEvidenceClaim" . }}
-{{- end }}
-{{- if .Values.ingress.enabled }}
-Ingress hosts:{{ range .Values.ingress.hosts }}
-  {{ .host }}{{ end }}
-{{- end }}
+Workspace API: kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "asa-workspace.fullname" . }} 3000:{{ .Values.service.port }}
+Metadata: local SQLite (WAL). Scanner: independent process; initially paused={{ .Values.scanner.paused }}.
+Search: {{ .Values.search.mode }}. Only published scan versions are visible.
+State and search volumes are retained on uninstall; keep the filesystem local to one node.

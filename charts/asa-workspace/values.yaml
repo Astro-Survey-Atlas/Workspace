@@ -1,162 +1,100 @@
+# Local SQLite state must be on a local filesystem; API and scanner share one node.
 replicaCount: 1
-
-# Bitnami moved Elasticsearch images to the legacy registry. The bundled
-# dependency intentionally uses that image and must opt into the chart check.
-global:
-  security:
-    allowInsecureImages: true
-
 image:
   repository: ghcr.io/astro-survey-atlas/asa-workspace
-  tag: "0.0.1"
+  tag: 0.0.1
   pullPolicy: IfNotPresent
-
 imagePullSecrets: []
-nameOverride: ""
-fullnameOverride: ""
-
-serviceAccount:
-  create: true
-  name: ""
-
+nameOverride: ''
+fullnameOverride: ''
 service:
   type: ClusterIP
   port: 3000
-
 ingress:
   enabled: false
-  className: ""
+  className: ''
   annotations: {}
   hosts:
-    - host: asa-workspace.local
-      paths:
-        - path: /
-          pathType: Prefix
+  - host: asa-workspace.local
+    paths:
+    - path: /
+      pathType: Prefix
   tls: []
-
 persistence:
   enabled: true
-  storageClass: ""
+  storageClass: local-path
   accessModes:
-    - ReadWriteOnce
-  size: 1Gi
-  existingClaim: ""
-
-# Local connector data is opt-in. The service sees one controlled parent
-# directory and never receives a writable local-data mount.
+  - ReadWriteOnce
+  size: 20Gi
+  existingClaim: ''
 localData:
   enabled: false
-  existingClaim: ""
+  existingClaim: ''
   nfs:
-    server: ""
-    path: ""
+    server: ''
+    path: ''
   hostPath:
-    path: ""
+    path: ''
     type: Directory
   nodeSelector: {}
-
-# Dedicated writable storage for production download plans. Every approved
-# run stages files under this mount and registers a local Connector there.
-# When dataWarehouse is enabled, its scanner mounts the selected run subpath
-# read-only under scannerMountPath. ReadWriteMany is required; equal mount paths
-# preserve local file URIs across both runtimes.
 productionData:
   enabled: false
-  existingClaim: ""
-  storageClass: ""
+  existingClaim: ''
+  storageClass: ''
   accessModes:
-    - ReadWriteMany
+  - ReadWriteMany
   size: 20Gi
   mountPath: /data/production
-  scannerMountPath: /data/production
-
 downloads:
   enabled: false
   image:
     repository: ghcr.io/astro-survey-atlas/asa-workspace-downloader
-    tag: "aria2-1.37.0"
+    tag: aria2-1.37.0
     pullPolicy: IfNotPresent
-  existingSecret: ""
+  existingSecret: ''
   secretKey: token
   resources:
     requests:
       cpu: 100m
       memory: 128Mi
     limits:
-      cpu: "1"
+      cpu: '1'
       memory: 512Mi
-
-# Search is required independently of the optional data warehouse. In external
-# mode, the Secret value is the complete Elasticsearch base URL, including any
-# URL-encoded basic-auth credentials.
 search:
   mode: bundled
-  localScanEnabled: true
-  index:
-    file: astro_file_index_v1
-    object: astro_object_index_v1
-    coverage: astro_coverage_index_v1
-  timeoutMs: 30000
+  timeoutMs: 2500
   external:
-    existingSecret: ""
+    url: ''
+    existingSecret: ''
     existingSecretKey: elasticsearch-url
-  initJob:
+  bundled:
     image:
-      repository: curlimages/curl
-      tag: "8.14.1"
+      repository: docker.io/bitnamilegacy/elasticsearch
+      tag: 8.18.0-debian-12-r2
       pullPolicy: IfNotPresent
-    maxAttempts: 60
-    retryIntervalSeconds: 5
+    heapSize: 512m
+    persistence:
+      storageClass: local-path
+      size: 30Gi
+      existingClaim: ''
+    nodeSelector: {}
     resources:
       requests:
-        cpu: 10m
-        memory: 32Mi
+        cpu: 250m
+        memory: 1Gi
       limits:
-        cpu: 100m
-        memory: 64Mi
-
-metadataStore:
-  mode: sqlite
-  sqlite:
-    path: /state/workspace.sqlite
-  external:
-    existingSecret: ""
-    existingSecretKey: database-url
-
-dataWarehouse:
-  # Optional remote execution/status provider. Workspace search and metadata
-  # remain local when this is false, so Warehouse is never a hard dependency.
-  enabled: false
-  # ScanRequest, its short-lived source Secret, and evidence PVC are all
-  # namespace-local. Keep this equal to the Helm release namespace.
-  namespace: ""
-  pollIntervalMs: 5000
-  elasticsearch:
-    url: ""
-    existingSecret: ""
-    existingSecretKey: elasticsearch-url
-    layerIndex: ast_layer_index_v1
-    fileIndex: ast_file_index_v1
-    coverageIndex: ast_coverage_index_v1
-  evidence:
-    existingClaim: ""
-    storageClass: ""
-    accessModes:
-      - ReadWriteMany
-    size: 5Gi
-    mountPath: /var/lib/atlas-evidence
-  scannerImage: astro-atlas-scanner:0.2.0-20261029-fits-wcs-r2
-
+        cpu: '2'
+        memory: 2Gi
 env: []
 networkProxy:
   enabled: false
-  url: ""
+  url: ''
   noProxy:
-    - localhost
-    - 127.0.0.1
-    - ::1
-    - .svc
-    - .cluster.local
+  - localhost
+  - 127.0.0.1
+  - ::1
+  - .svc
+  - .cluster.local
 telemetry:
   enabled: false
   endpoint: http://otel-collector.observability.svc:4318
@@ -166,96 +104,22 @@ telemetry:
   metricExportIntervalMs: 15000
   captureContent: false
 scanner:
-  enabled: false
-  concurrency: 1
-  pollIntervalMs: 5000
+  enabled: true
+  paused: true
   resources:
     requests:
       cpu: 100m
-      memory: 512Mi
+      memory: 256Mi
     limits:
-      cpu: "1"
+      cpu: '1'
       memory: 1536Mi
 resources:
   requests:
     cpu: 100m
     memory: 128Mi
   limits:
-    cpu: "1"
+    cpu: '1'
     memory: 2Gi
-
-postgresql:
-  enabled: false
-  nameOverride: ""
-  fullnameOverride: ""
-  architecture: standalone
-  auth:
-    database: astro
-    username: astro
-    existingSecret: ""
-    secretKeys:
-      userPasswordKey: password
-
-# Optional dependency selected by search.mode through the strict
-# elasticsearch.enabled guard. Its PVC is separate from workspace state.
-elasticsearch:
-  enabled: true
-  nameOverride: ""
-  fullnameOverride: ""
-  clusterName: astro-search
-  image:
-    registry: docker.io
-    repository: bitnamilegacy/elasticsearch
-    tag: 8.18.0-debian-12-r2
-    pullPolicy: IfNotPresent
-  security:
-    enabled: false
-  extraConfig:
-    node:
-      store:
-        allow_mmap: false
-  master:
-    masterOnly: false
-    replicaCount: 1
-    pdb:
-      create: false
-    heapSize: 512m
-    resourcesPreset: none
-    resources:
-      requests:
-        cpu: 250m
-        memory: 768Mi
-      limits:
-        cpu: "1"
-        memory: 1Gi
-    persistence:
-      enabled: true
-      storageClass: ""
-      existingClaim: ""
-      accessModes:
-        - ReadWriteOnce
-      size: 20Gi
-    networkPolicy:
-      enabled: false
-    startupProbe:
-      enabled: true
-      initialDelaySeconds: 10
-      periodSeconds: 10
-      timeoutSeconds: 5
-      successThreshold: 1
-      failureThreshold: 30
-  data:
-    replicaCount: 0
-  coordinating:
-    replicaCount: 0
-  ingest:
-    enabled: false
-    replicaCount: 0
-  sysctlImage:
-    enabled: false
-  volumePermissions:
-    enabled: false
-
 podSecurityContext:
   fsGroup: 10001
   fsGroupChangePolicy: OnRootMismatch
@@ -264,9 +128,11 @@ podSecurityContext:
 containerSecurityContext:
   allowPrivilegeEscalation: false
   capabilities:
-    drop: [ALL]
+    drop:
+    - ALL
   readOnlyRootFilesystem: true
   runAsNonRoot: true
   runAsUser: 10001
   seccompProfile:
     type: RuntimeDefault
+nodeSelector: {}

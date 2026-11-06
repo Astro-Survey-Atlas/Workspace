@@ -1,7 +1,7 @@
 import { parseElasticsearchEndpoint } from "./es-endpoint.js";
 import { regionContainsCell, regionPixelFilter, type WorkspaceFileLocation } from "./workspace-directories.js";
 
-export const ASTRO_FILE_INDEX = "astro_file_index_v1";
+export const ASTRO_FILE_INDEX = "astro_file_index_v2";
 export const ASTRO_HEALPIX_ORDER = 8;
 export const ASTRO_OVERVIEW_NSIDE = 16;
 
@@ -87,7 +87,7 @@ export interface AstroCoverageLayer {
   byAsset: AstroBreakdown[];
   objectCount?: number;
   status?: AstroIndexStatus;
-  source?: "connector" | "asset" | "warehouse" | "combined" | "unassigned" | "conflict";
+  source?: "asset";
   nativeOrders?: number[];
   availableOrders?: number[];
   maxOrder?: number;
@@ -111,6 +111,14 @@ export interface AstroCoverageResponse {
   byAsset: AstroBreakdown[];
   layers?: AstroCoverageLayer[];
   message?: string;
+}
+
+export interface AstroFileDocument {
+  _id: string;
+  file_id: string; asset_id: string; scan_run_id: string; data_batch_id: string;
+  source_uri: string; survey: string; release: string; product: string; modality: string;
+  size_bytes?: number; coverage_cells: number[]; spatial_status: "known" | "unknown";
+  precision: "estimated" | "exact";
 }
 
 interface ElasticsearchTotal {
@@ -151,6 +159,7 @@ interface AstroIndexOptions {
   index?: string;
   timeoutMs?: number;
   cacheTtlMs?: number;
+  dataBatches?: (assetIds?: readonly string[]) => Promise<ReadonlyMap<string, string>>;
 }
 
 class AstroIndexUnavailableError extends Error {
@@ -307,9 +316,11 @@ export class AstroIndexService {
   readonly #timeoutMs: number;
   readonly #cacheTtlMs: number;
   readonly #authorization?: string;
+  readonly #dataBatches?: AstroIndexOptions["dataBatches"];
   readonly #overviewCache = new Map<string, { expiresAt: number; value: AstroOverviewResponse }>();
 
   constructor(options: AstroIndexOptions = {}) {
+    this.#dataBatches = options.dataBatches;
     const endpoint = parseElasticsearchEndpoint(options.baseUrl ?? process.env.ASTRO_ES_URL ?? "");
     this.#baseUrl = endpoint.url ?? "";
     this.#authorization = endpoint.authorization;
@@ -515,6 +526,13 @@ export class AstroIndexService {
 
   async #request(body: Record<string, unknown>, signal?: AbortSignal): Promise<ElasticsearchSearchResponse> {
     signal?.throwIfAborted();
+    if (this.#dataBatches) {
+      const batches = await this.#dataBatches();
+      const visible = batches.size ? { bool: { should: [...batches].map(([asset, batch]) => ({ bool: { filter: [
+        { term: { asset_id: asset } }, { term: { data_batch_id: batch } },
+      ] } })), minimum_should_match: 1 } } : { match_none: {} };
+      body = { ...body, query: { bool: { filter: [body.query ?? { match_all: {} }, visible] } } };
+    }
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), this.#timeoutMs);
     try {
@@ -546,7 +564,9 @@ export class AstroIndexService {
         }
         throw new Error(message);
       }
-      return await response.json() as ElasticsearchSearchResponse;
+      const result = await response.json() as ElasticsearchSearchResponse & { timed_out?: boolean; _shards?: { failed?: number } };
+      if (result.timed_out || Number(result._shards?.failed) > 0) throw new Error("File query did not complete");
+      return result;
     } catch (error) {
       signal?.throwIfAborted();
       if (error instanceof Error && error.name === "AbortError") throw new Error("Elasticsearch request timed out");

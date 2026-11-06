@@ -28,7 +28,7 @@ async function prepareAladinFixture(page: Page, queryOverride?: (route: Route) =
     });
 
     if (request.method() === "GET") {
-      if (url.pathname === "/api/surveys" || url.pathname === "/api/public-surveys") return fulfill({ surveys: [] });
+      if (url.pathname === "/api/surveys" || url.pathname === "/api/public-surveys") return fulfill({ surveys: [], records: [] });
       if (url.pathname === "/api/survey-footprints") return fulfill({
         schemaVersion: 1, generatedAt: "2026-10-30T00:00:00Z", coordinateFrame: "ICRS", nside: 16, footprints: [],
       });
@@ -203,9 +203,10 @@ test("image coverage without image centers explains the region and offers coordi
   await page.setViewportSize({ width: 390, height: 844 });
   await page.locator("#aladin-fullscreen").click();
   await expect(page.locator("#aladin-region-status")).toBeVisible();
-  const notice = (await page.locator("#aladin-region-status").boundingBox())!;
-  expect(notice.x).toBeGreaterThanOrEqual(0);
-  expect(notice.x + notice.width).toBeLessThanOrEqual(390);
+  await expect.poll(async () => {
+    const notice = await page.locator("#aladin-region-status").boundingBox();
+    return Boolean(notice && notice.width > 0 && notice.x >= 0 && notice.x + notice.width <= 390);
+  }).toBe(true);
   await page.screenshot({ path: testInfo.outputPath("image-coverage-mobile-status.png") });
   expect(anchorRequests).toBe(1);
 });
@@ -407,6 +408,10 @@ test("panning interrupts old pagination and loads the current viewport first", a
       ...(!input.cursor && requests.length === 1 ? { nextCursor: ["old-slow-page"] } : {}),
     }) });
   });
+  // Keep entry navigation stationary so this test isolates pagination cancellation.
+  await page.route("**/api/sky/points/anchor", route => route.fulfill({
+    json: { status: "ready", point: null, indexing: false },
+  }));
   try {
     const aladin = await enterFixtureAladin(page);
     await expect.poll(() => requests.some(request => request.cursor?.[0] === "old-slow-page")).toBe(true);

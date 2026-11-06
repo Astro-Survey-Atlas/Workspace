@@ -1,14 +1,9 @@
 import { createHash } from "node:crypto";
-import { execFile } from "node:child_process";
-import { createReadStream } from "node:fs";
-import os from "node:os";
-import { promisify } from "node:util";
-import { streamWarehouseEvidence } from "./warehouse-evidence-stream.js";
-import { mkdir, mkdtemp, open, readdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, readdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 import type { CoverageDataOrigin, CoverageSourceTier } from "./assets-core.js";
-import type { MocCoreAdapter, MocCoreCatalogResult } from "./moc-core-adapter.js";
+import type { MocCoreCatalogResult } from "./moc-core-adapter.js";
 import { MAX_OVERLAP_ORDER, type HealpixRange } from "./healpix-ranges.js";
 import { nativeMocHealpixRanges } from "./native-moc-ranges.js";
 
@@ -42,10 +37,6 @@ export interface UserMocArtifact {
 export interface UserMocArtifactContext {
   layerId: string;
   scanRunId: string;
-  /** ScanRequest evidence uses the Warehouse batch/plan id, not the local run id. */
-  evidenceScanRunId?: string;
-  /** Optional expected layer identity from the evidence document. */
-  evidenceLayerId?: string;
   coverageRole?: string;
   dataOrigin?: CoverageDataOrigin;
   sourceTier?: CoverageSourceTier;
@@ -98,7 +89,7 @@ function objectValue(value: unknown): Record<string, unknown> {
 
 /**
  * MOC Core records the generated cells input, while the Workspace owns the
- * user-facing scan identity and the source snapshot returned by Warehouse.
+ * user-facing scan identity and immutable source inventory.
  * Keep both pieces of provenance explicit in the artifact without exposing
  * the evidence payload itself through the browser API.
  */
@@ -110,7 +101,7 @@ function enrichProvenance(
   scanRunId: string,
   sourceSnapshotSha256: string | undefined,
 ): Uint8Array | undefined {
-  const needsWorkspaceProvenance = sourceSnapshotSha256 !== undefined || context.evidenceScanRunId !== undefined;
+  const needsWorkspaceProvenance = sourceSnapshotSha256 !== undefined;
   const bytes = value ?? (fallback === undefined
     ? (needsWorkspaceProvenance ? jsonBytes({}) : undefined)
     : jsonBytes(fallback));
@@ -127,14 +118,7 @@ function enrichProvenance(
   }
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return bytes;
 
-  const evidenceScanRunId = context.evidenceScanRunId
-    ? safePart(context.evidenceScanRunId, "evidenceScanRunId")
-    : undefined;
-  const evidenceLayerId = context.evidenceLayerId
-    ? safePart(context.evidenceLayerId, "evidenceLayerId")
-    : layerId;
   const existingSnapshot = objectValue((parsed as Record<string, unknown>).snapshot);
-  const existingEvidence = objectValue((parsed as Record<string, unknown>).evidence);
   const enriched: Record<string, unknown> = {
     ...(parsed as Record<string, unknown>),
     layerId,
@@ -143,15 +127,7 @@ function enrichProvenance(
       sourceSnapshotSha256,
       snapshot: { ...existingSnapshot, sha256: sourceSnapshotSha256 },
     } : {}),
-    ...(evidenceScanRunId ? {
-      evidenceScanRunId,
-      evidence: {
-        ...existingEvidence,
-        layerId: evidenceLayerId,
-        scanRunId: evidenceScanRunId,
-        ...(sourceSnapshotSha256 ? { sourceSnapshotSha256 } : {}),
-      },
-    } : {}),
+
   };
   return jsonBytes(enriched);
 }
@@ -190,15 +166,6 @@ function optionalOrder(value: unknown, label: string): number | undefined {
     throw new Error(`${label} must be an integer between 0 and 29`);
   }
   return result;
-}
-
-function declaredOrders(values: unknown, label: string): number[] {
-  if (!Array.isArray(values)) throw new Error(`${label} must be an array of HEALPix orders`);
-  const orders = values.map((value) => Number(value));
-  if (orders.some((value) => !Number.isSafeInteger(value) || value < 0 || value > 29)) {
-    throw new Error(`${label} contains an invalid HEALPix order`);
-  }
-  return [...new Set(orders)].sort((left, right) => left - right);
 }
 
 function normalizePixels(values: unknown, order: number): number[] {
@@ -508,171 +475,6 @@ export class UserMocArtifactStore {
     artifact.createdAt = existing?.createdAt ?? now;
     await this.#writeMetadata(artifact);
     return cloneArtifact(artifact);
-  }
-
-  async importEvidence(directoryPath: string, context: UserMocArtifactContext, mocCore?: MocCoreAdapter, sources?: Array<{ directory: string; layerId: string; scanRunId: string; coverageLayerId: string; sha256: string }>): Promise<UserMocArtifact> {
-    const directory = path.resolve(directoryPath);
-    const layerId = safePart(context.layerId, "layerId");
-    const scanRunId = safePart(context.scanRunId, "scanRunId");
-    const names = (await readdir(directory, { withFileTypes: true }).catch(() => [])).filter((entry) => entry.isFile()).map((entry) => entry.name);
-    const readOptional = async (predicate: (name: string) => boolean): Promise<Uint8Array | undefined> => {
-      const name = names.find(predicate);
-      return name ? readFile(path.join(directory, name)) : undefined;
-    };
-    const query = await readOptional((name) => name === "query-order8.json");
-    const preview = await readOptional((name) => name === "preview-order4.json");
-    const statistics = await readOptional((name) => name === "statistics.json" || name === "run-statistics.json");
-    const provenance = await readOptional((name) => name === "provenance.json");
-    const moc = await readOptional((name) => name.endsWith(".moc.fits") || name === "moc.fits");
-    const work = await mkdtemp(path.join(os.tmpdir(), "workspace-evidence-moc-"));
-    let result: MocCoreCatalogResult;
-    try {
-      const parse = (value: Uint8Array | undefined): Record<string, unknown> => {
-        if (!value) return {};
-        const parsed = JSON.parse(Buffer.from(value).toString("utf8")) as unknown;
-        if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("MOC evidence JSON must be an object");
-        return parsed as Record<string, unknown>;
-      };
-      if (!sources && !names.includes("normalized-scan.json")) throw new Error("Warehouse evidence is missing normalized-scan.json");
-      const expectedLayerId = safePart(context.evidenceLayerId ?? context.layerId, "layerId");
-      const cellOrdersSet = new Set<number>();
-      let evidencePrecision: UserMocPrecision = context.precision ?? "exact";
-      const rawPath = path.join(work, "cells.rows");
-      const spool = await open(rawPath, "w");
-      let pending = "";
-      let normalized: Record<string, unknown> = {};
-      try {
-        const selected = sources ?? [{ directory, layerId: expectedLayerId, scanRunId: context.evidenceScanRunId ?? context.scanRunId,
-          coverageLayerId: expectedLayerId, sha256: context.sourceSnapshotSha256 }];
-        const allOrders = new Set<number>();
-        for (const source of selected) {
-        const metadata = await streamWarehouseEvidence(path.join(source.directory, "normalized-scan.json"), (kind, row) => {
-          if (kind !== "coverage") return;
-          const rowLayerId = row.layer_id ?? row.layerId;
-          if (rowLayerId !== undefined && (typeof rowLayerId !== "string" || safePart(rowLayerId, "coverage layer id") !== source.coverageLayerId)) throw new Error("Warehouse coverage entry belongs to another layer");
-          if ((row.coordinate_frame ?? row.coordinateFrame) !== "ICRS") throw new Error("Warehouse coverage entry must use ICRS");
-          if ((row.nesting ?? row.ordering) !== "NESTED") throw new Error("Warehouse coverage entry must use NESTED ordering");
-          const order = Number(row.healpix_order ?? row.order);
-          const ipix = Number(row.healpix_cell ?? row.healpix_pixel ?? row.ipix ?? row.pixel);
-          if (!Number.isSafeInteger(order) || !Number.isSafeInteger(ipix) || order < 0 || order > 29 || ipix < 0 || ipix >= 12 * 4 ** order) throw new Error("Warehouse coverage entry contains an invalid NESTED HEALPix cell");
-          cellOrdersSet.add(order);
-          const precision = row.precision ?? row.coverage_precision;
-          if (precision !== undefined) {
-            if (precision !== "exact" && precision !== "estimated" && precision !== "entrypoint-only") throw new Error("Warehouse coverage precision is invalid");
-            evidencePrecision = lessPrecise(evidencePrecision, precision);
-          }
-          pending += `${order},${ipix}\n`;
-        }, async () => { if (pending) { await spool.write(pending); pending = ""; } });
-        if (sources && (metadata.phase !== "COMPLETED" || metadata.layerId !== source.layerId || metadata.scanRunId !== source.scanRunId
-          || source.sha256 && (metadata.sourceSnapshot as { sha256?: string } | undefined)?.sha256 !== source.sha256)) throw new Error("Partition evidence identity mismatch");
-        for (const order of (metadata.sourceSnapshot as { availableOrders?: number[] } | undefined)?.availableOrders ?? []) allOrders.add(order);
-        normalized = metadata;
-        }
-        if (sources) normalized = { phase: "COMPLETED", layerId: expectedLayerId, scanRunId: context.evidenceScanRunId ?? context.scanRunId,
-          sourceSnapshot: { sha256: context.sourceSnapshotSha256, availableOrders: [...allOrders] } };
-
-      } finally { await spool.close(); }
-      const cellsPath = path.join(work, "cells.csv");
-      const sorted = path.join(work, "cells.sorted");
-      await promisify(execFile)("sort", ["-t,", "-k1,1n", "-k2,2n", "-u", "-S", "32M", "-T", work, "-o", sorted, rawPath], { env: { ...process.env, LC_ALL: "C" } });
-      const csv = await open(cellsPath, "w");
-      try {
-        await csv.write("order,ipix\n");
-        for await (const chunk of createReadStream(sorted)) await csv.write(chunk);
-      } finally { await csv.close(); }
-      const normalizedPhase = typeof normalized.phase === "string" ? normalized.phase.trim().toUpperCase() : undefined;
-      if (normalizedPhase !== "COMPLETED") {
-        throw new Error(`Warehouse evidence is not complete (phase=${normalizedPhase})`);
-      }
-      const normalizedLayerId = typeof normalized.layerId === "string" ? safePart(normalized.layerId, "normalized layerId") : undefined;
-      if (!normalizedLayerId || normalizedLayerId !== expectedLayerId) throw new Error("Warehouse evidence layer identity does not match the Workspace asset");
-      const expectedScanRunId = safePart(context.evidenceScanRunId ?? context.scanRunId, "scanRunId");
-      const normalizedScanRunId = typeof normalized.scanRunId === "string" ? safePart(normalized.scanRunId, "normalized scanRunId") : undefined;
-      if (!normalizedScanRunId || normalizedScanRunId !== expectedScanRunId) throw new Error("Warehouse evidence scan identity does not match the Workspace run");
-      const sourceSnapshot = normalized.sourceSnapshot;
-      if (!sourceSnapshot || typeof sourceSnapshot !== "object" || Array.isArray(sourceSnapshot)) throw new Error("Warehouse evidence source snapshot is missing");
-      const evidenceSnapshotHash = normalizedSha256((sourceSnapshot as Record<string, unknown>).sha256);
-      if (!evidenceSnapshotHash) throw new Error("Warehouse evidence source snapshot SHA-256 is invalid");
-      const summarySnapshotHash = normalizedSha256(context.sourceSnapshotSha256);
-      if (summarySnapshotHash && summarySnapshotHash !== evidenceSnapshotHash) throw new Error("Warehouse evidence source snapshot SHA-256 does not match the ScanRequest summary");
-      const sourceOrders = Object.prototype.hasOwnProperty.call(sourceSnapshot, "availableOrders")
-        ? declaredOrders((sourceSnapshot as Record<string, unknown>).availableOrders, "Warehouse evidence sourceSnapshot.availableOrders")
-        : undefined;
-      const parseProjection = (value: Uint8Array | undefined, fallbackOrder: number, label: string): { order: number; pixels: number[] } => {
-        if (!value) return { order: fallbackOrder, pixels: [] };
-        const parsed = parse(value);
-        const rawOrder = Number(parsed.order ?? fallbackOrder);
-        if (!Number.isInteger(rawOrder) || rawOrder < 0 || rawOrder > 29 || parsed.ordering !== "NESTED" || !Array.isArray(parsed.pixels)) {
-          throw new Error(`${label} projection has an invalid order, ordering, or pixel list`);
-        }
-        if (parsed.pixels.some((pixel) => !Number.isSafeInteger(Number(pixel)) || Number(pixel) < 0 || Number(pixel) >= 12 * 4 ** rawOrder)) {
-          throw new Error(`${label} projection contains an invalid HEALPix pixel`);
-        }
-        return { order: rawOrder, pixels: normalizePixels(parsed.pixels, rawOrder) };
-      };
-      const queryProjection = parseProjection(query, 8, "query");
-      const previewProjection = parseProjection(preview, 4, "preview");
-      const cellOrders = [...cellOrdersSet].sort((left, right) => left - right);
-      const nativeOrders = sourceOrders ?? (cellOrders.length ? cellOrders : normalizeOrders(context.availableOrders));
-      if (sourceOrders && cellOrders.some((order) => !sourceOrders.includes(order))) throw new Error("Warehouse coverage orders do not match sourceSnapshot.availableOrders");
-      const statisticsObject = parse(statistics);
-      const statisticsMaxOrder = optionalOrder(
-        statisticsObject.maxOrder ?? statisticsObject.max_order,
-        "Warehouse evidence statistics.maxOrder",
-      );
-      let generated: MocCoreCatalogResult | undefined;
-      // Warehouse normally emits only normalized coverage evidence. Generate
-      // the fixed-order projections (and the FITS MOC when absent) through the
-      // pinned Assets Core adapter. If a raw MOC was supplied, keep its bytes
-      // authoritative while still filling missing projections.
-      if ((!moc || !query || !preview) && (mocCore?.buildNestedHealpixFile || mocCore?.buildNestedHealpix)) {
-        const input = {
-          layerId,
-          coverageRole: context.coverageRole === "image_extent" || context.coverageRole === "footprint_extent" ? context.coverageRole : "object_presence",
-          dataOrigin: context.dataOrigin ?? "catalog",
-          sourceTier: context.sourceTier ?? "user_file_derived",
-          maxOrder: context.maxOrder ?? (nativeOrders.length ? Math.max(...nativeOrders) : 10),
-          queryOrder: 8,
-          previewOrder: 4,
-        } as const;
-        if (mocCore.buildNestedHealpixFile) generated = await mocCore.buildNestedHealpixFile({ ...input, inputPath: cellsPath });
-        else {
-          // Compatibility with small injected/legacy adapters; production always consumes the file.
-          if ((await stat(cellsPath)).size > 256 * 1024) throw new Error("MOC adapter must support streamed cell-file input");
-          const cells = (await readFile(cellsPath, "utf8")).trim().split("\n").slice(1).filter(Boolean).map((line) => {
-            const [order, ipix] = line.split(",").map(Number); return { order: order!, ipix: ipix! };
-          });
-          generated = await mocCore.buildNestedHealpix!({ ...input, cells });
-        }
-      }
-      const effectiveQuery = generated?.artifacts?.query ? parseProjection(generated.artifacts.query, 8, "query") : queryProjection;
-      const effectivePreview = generated?.artifacts?.preview ? parseProjection(generated.artifacts.preview, 4, "preview") : previewProjection;
-      result = {
-        layerId,
-        maxOrder: optionalOrder(context.maxOrder, "maxOrder")
-          ?? optionalOrder(generated?.maxOrder, "MOC Core maxOrder")
-          ?? statisticsMaxOrder
-          ?? (nativeOrders.length ? Math.max(...nativeOrders) : 10),
-        queryOrder: effectiveQuery.order, previewOrder: effectivePreview.order,
-        queryPixels: effectiveQuery.pixels,
-        previewPixels: effectivePreview.pixels,
-        artifacts: {
-          ...((generated?.artifacts?.moc ?? moc) ? { moc: generated?.artifacts?.moc ?? moc } : {}),
-          ...((generated?.artifacts?.query ?? query) ? { query: generated?.artifacts?.query ?? query } : {}),
-          ...((generated?.artifacts?.preview ?? preview) ? { preview: generated?.artifacts?.preview ?? preview } : {}),
-          ...((generated?.artifacts?.statistics ?? statistics) ? { statistics: generated?.artifacts?.statistics ?? statistics } : {}),
-          ...((generated?.artifacts?.provenance ?? provenance) ? { provenance: generated?.artifacts?.provenance ?? provenance } : {}),
-        },
-      };
-      return this.persist(result, {
-        ...context,
-        availableOrders: nativeOrders,
-        precision: evidencePrecision,
-        sourceSnapshotSha256: evidenceSnapshotHash,
-      });
-    } catch (error) {
-      return this.fail(context, errorText(error));
-    } finally { await rm(work, { recursive: true, force: true }); }
   }
 
   async fail(context: UserMocArtifactContext, error: unknown, status: "failed" | "unavailable" = "failed"): Promise<UserMocArtifact> {

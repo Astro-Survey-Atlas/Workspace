@@ -580,7 +580,7 @@ export class AladinExplorer {
         this.pointDetailController?.abort();
         const controller = new AbortController();
         this.pointDetailController = controller;
-        void workspaceApi.skyPointDetail(record.object_id, controller.signal).then(({ point }) => { if (!controller.signal.aborted && !this.disposed && this.host.dataset.objectSelected === point.object_id) this.callbacks.onObject(this.toObjectPoint(point)); }).catch(() => undefined);
+        void workspaceApi.skyPointDetail(record.id ?? record.object_id, controller.signal).then(({ point }) => { if (!controller.signal.aborted && !this.disposed && this.host.dataset.objectSelected === point.object_id) this.callbacks.onObject(this.toObjectPoint(point)); }).catch(() => undefined);
         this.host.dataset.objectSelected = record.object_id;
         this.callbacks.onObject(this.toObjectPoint(record, source?.data?.overlap ? {
           overlapCount: Number(source.data.overlapCount) || undefined,

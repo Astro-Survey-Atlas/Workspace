@@ -46,9 +46,8 @@ function serverEnvironment({ stateRoot, port, esUrl, pythonCli, pythonHome, pyth
     ASTRO_STATE_ROOT: stateRoot,
     ASTRO_SQLITE_PATH: path.join(stateRoot, "workspace.sqlite"),
     ASTRO_ES_URL: esUrl || "",
-    ASTRO_WAREHOUSE_ES_URL: "",
-    ASTRO_DATA_WAREHOUSE_ENABLED: "false",
-    ASTRO_INSTALL_CHANNEL: "desktop"
+    ASTRO_SCANS_PAUSED: "true",
+    ASTRO_WORKSPACE_SCAN_ENABLED: "true"
   };
   if (pythonCli) env.ASTRO_MOC_CORE_CLI = pythonCli;
   if (pythonHome) env.PYTHONHOME = pythonHome;
@@ -59,6 +58,7 @@ function serverEnvironment({ stateRoot, port, esUrl, pythonCli, pythonHome, pyth
 function startServerProcess({ electronExecPath, serverEntry, viewerRoot, logFile, ...options }) {
   const port = options.port;
   const env = serverEnvironment(options);
+  env.ASTRO_VIEWER_ROOT = viewerRoot;
   fs.mkdirSync(path.dirname(logFile), { recursive: true });
   const logStream = fs.openSync(logFile, "a");
   const child = spawn(electronExecPath, [serverEntry], {
@@ -66,12 +66,21 @@ function startServerProcess({ electronExecPath, serverEntry, viewerRoot, logFile
     stdio: ["ignore", logStream, logStream],
     windowsHide: true
   });
+  const scanner = spawn(electronExecPath, [path.join(path.dirname(serverEntry), "scan-worker.mjs")], {
+    env: { ...env, OTEL_SERVICE_NAME: "asa-workspace-scanner", NODE_OPTIONS: "--max-old-space-size=1024" },
+    stdio: ["ignore", logStream, logStream],
+    windowsHide: true
+  });
+  fs.closeSync(logStream);
+  child.once("exit", () => scanner.kill());
   const baseUrl = `http://127.0.0.1:${port}`;
   return {
     child,
+    scanner,
     baseUrl,
     stop: () => {
       try { child.kill(); } catch { /* already gone */ }
+      try { scanner.kill(); } catch { /* already gone */ }
     }
   };
 }

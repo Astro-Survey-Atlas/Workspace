@@ -6,6 +6,7 @@ Run with API dispatch paused. Review the receipt before changing ASTRO_ES_URL.
 """
 import argparse
 import collections
+import gzip
 import hashlib
 import json
 import math
@@ -20,6 +21,7 @@ parser.add_argument('--source', required=True)
 parser.add_argument('--target', required=True)
 parser.add_argument('--metadata', required=True)
 parser.add_argument('--output', required=True)
+parser.add_argument('--finalize-only', action='store_true', help='Complete receipts/refresh after a successful copy; never recopy evidence')
 args = parser.parse_args()
 opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 root = pathlib.Path(args.output)
@@ -136,13 +138,14 @@ def archive(source):
     payload = (json.dumps({'attributes': attributes, 'originalSource': original}, ensure_ascii=False, separators=(',', ':')) + '\n').encode()
     if len(payload) > 4 * 1024 * 1024:
         raise RuntimeError('Evidence record exceeds bounded detail read size')
+    payload = gzip.compress(payload, compresslevel=1, mtime=0)
     if chunk is None or chunk_size + len(payload) > 8 * 1024 * 1024:
         if chunk:
             chunk.close()
-        chunk = open(evidence_root / ('part-%06d.ndjson' % chunk_number), 'wb')
+        chunk = open(evidence_root / ('part-%06d.ndjson.gz' % chunk_number), 'wb')
         chunk_number += 1
         chunk_size = 0
-    reference = '%s/part-%06d.ndjson@%d:%d' % (version, chunk_number - 1, chunk_size, len(payload))
+    reference = '%s/part-%06d.ndjson.gz@%d:%d' % (version, chunk_number - 1, chunk_size, len(payload))
     chunk.write(payload)
     chunk_size += len(payload)
     return reference
@@ -150,72 +153,73 @@ def archive(source):
 
 counts = collections.Counter()
 started = time.monotonic()
-for old_index in ['astro_object_index_v1', 'astro_data_point_index_v1']:
-    for hit in scroll(old_index):
+if not args.finalize_only:
+    for old_index in ['astro_object_index_v1', 'astro_data_point_index_v1']:
+        for hit in scroll(old_index):
+            source = hit['_source']
+            asset = source.get('asset_id')
+            if asset not in assets:
+                counts['unownedArchivedInSource'] += 1
+                continue
+            if asset in quality and source.get('data_batch_id') != quality[asset]:
+                counts['supersededArchivedInSource'] += 1
+                continue
+            ra, dec = source.get('ra_deg'), source.get('dec_deg')
+            if not isinstance(ra, (float, int)) or not isinstance(dec, (float, int)) or not math.isfinite(ra + dec) or not (0 <= ra < 360 and -90 <= dec <= 90):
+                raise RuntimeError('Invalid persisted ICRS position; migration stopped')
+            document = {key: value for key, value in source.items() if key in position_fields}
+            document['data_batch_id'] = version
+            document['evidence_ref'] = archive(source)
+            attributes = source.get('attributes', {})
+            document['attributes'] = {key: str(value) for key, value in attributes.items() if key in ['source_uri', 'file_name', 'position_role', 'source_id', 'hdu_index']}
+            index_document('astro_position_index_v2', hit['_id'], document)
+            file_id = source.get('source_file_id')
+            uri = attributes.get('source_uri', '')
+            old_run = runs.get(source.get('scan_run_id'), {})
+            if not uri and old_run.get('fileCount') == 1:
+                uri = old_run.get('sourcePath') or old_run.get('target', {}).get('uri', '')
+            pixel = source.get('healpix_pixel')
+            file_db.execute('INSERT OR REPLACE INTO positions VALUES(?,?,?)', (hit['_id'], asset, pixel))
+            if file_id and uri:
+                file_db.execute('INSERT OR REPLACE INTO files VALUES(?,?,?,?)', (asset, file_id, uri, source.get('scan_run_id')))
+                if pixel is not None:
+                    file_db.execute('INSERT OR IGNORE INTO cells VALUES(?,?,?)', (asset, file_id, pixel))
+            counts[old_index] += 1
+            if sum(counts[key] for key in ['astro_object_index_v1', 'astro_data_point_index_v1']) % 10000 == 0:
+                file_db.commit()
+                print(json.dumps({'stage': old_index, 'copied': counts[old_index], 'elapsedSeconds': round(time.monotonic()-started)}), flush=True)
+        flush()
+        file_db.commit()
+    if chunk:
+        chunk.close()
+
+    for hit in scroll('astro_data_image_footprint_index_v1'):
         source = hit['_source']
         asset = source.get('asset_id')
-        if asset not in assets:
-            counts['unownedArchivedInSource'] += 1
+        if asset not in assets or asset in quality and source.get('data_batch_id') != quality[asset]:
             continue
-        if asset in quality and source.get('data_batch_id') != quality[asset]:
-            counts['supersededArchivedInSource'] += 1
+        if not file_db.execute('SELECT 1 FROM positions WHERE id=?', (source['point_id'],)).fetchone():
+            counts['orphanFootprintsArchivedInSource'] += 1
             continue
-        ra, dec = source.get('ra_deg'), source.get('dec_deg')
-        if not isinstance(ra, (float, int)) or not isinstance(dec, (float, int)) or not math.isfinite(ra + dec) or not (0 <= ra < 360 and -90 <= dec <= 90):
-            raise RuntimeError('Invalid persisted ICRS position; migration stopped')
-        document = {key: value for key, value in source.items() if key in position_fields}
+        document = {key: value for key, value in source.items() if key in footprint_fields}
         document['data_batch_id'] = version
-        document['evidence_ref'] = archive(source)
-        attributes = source.get('attributes', {})
-        document['attributes'] = {key: str(value) for key, value in attributes.items() if key in ['source_uri', 'file_name', 'position_role', 'source_id', 'hdu_index']}
-        index_document('astro_position_index_v2', hit['_id'], document)
-        file_id = source.get('source_file_id')
-        uri = attributes.get('source_uri', '')
-        old_run = runs.get(source.get('scan_run_id'), {})
-        if not uri and old_run.get('fileCount') == 1:
-            uri = old_run.get('sourcePath') or old_run.get('target', {}).get('uri', '')
-        pixel = source.get('healpix_pixel')
-        file_db.execute('INSERT OR REPLACE INTO positions VALUES(?,?,?)', (hit['_id'], asset, pixel))
-        if file_id and uri:
-            file_db.execute('INSERT OR REPLACE INTO files VALUES(?,?,?,?)', (asset, file_id, uri, source.get('scan_run_id')))
-            if pixel is not None:
-                file_db.execute('INSERT OR IGNORE INTO cells VALUES(?,?,?)', (asset, file_id, pixel))
-        counts[old_index] += 1
-        if sum(counts[key] for key in ['astro_object_index_v1', 'astro_data_point_index_v1']) % 10000 == 0:
-            file_db.commit()
-            print(json.dumps({'stage': old_index, 'copied': counts[old_index], 'elapsedSeconds': round(time.monotonic()-started)}), flush=True)
+        index_document('astro_image_footprint_index_v2', hit['_id'], document)
+        counts['footprints'] += 1
+        if counts['footprints'] % 20000 == 0:
+            print(json.dumps({'stage': 'footprints', 'copied': counts['footprints']}), flush=True)
     flush()
-    file_db.commit()
-if chunk:
-    chunk.close()
 
-for hit in scroll('astro_data_image_footprint_index_v1'):
-    source = hit['_source']
-    asset = source.get('asset_id')
-    if asset not in assets or asset in quality and source.get('data_batch_id') != quality[asset]:
-        continue
-    if not file_db.execute('SELECT 1 FROM positions WHERE id=?', (source['point_id'],)).fetchone():
-        counts['orphanFootprintsArchivedInSource'] += 1
-        continue
-    document = {key: value for key, value in source.items() if key in footprint_fields}
-    document['data_batch_id'] = version
-    index_document('astro_image_footprint_index_v2', hit['_id'], document)
-    counts['footprints'] += 1
-    if counts['footprints'] % 20000 == 0:
-        print(json.dumps({'stage': 'footprints', 'copied': counts['footprints']}), flush=True)
-flush()
-
-for asset_id, file_id, uri, scan in file_db.execute('SELECT asset,id,uri,scan FROM files'):
-    asset = assets[asset_id]
-    cells = [row[0] for row in file_db.execute('SELECT pixel FROM cells WHERE asset=? AND id=?', (asset_id, file_id))]
-    document = {'file_id': file_id, 'asset_id': asset_id, 'scan_run_id': scan, 'data_batch_id': version, 'source_uri': uri,
-                'survey': asset.get('surveyId', 'user'), 'release': asset.get('releaseId', 'user'), 'product': asset.get('product', ''),
-                'modality': (asset.get('modalities') or ['other'])[0], 'spatial_status': 'known' if cells else 'unknown',
-                'coverage_cells': cells, 'precision': 'estimated'}
-    identifier = hashlib.sha256((asset_id + '\n' + file_id).encode()).hexdigest()
-    index_document('astro_file_index_v2', identifier, document)
-    counts['files'] += 1
-flush()
+    for asset_id, file_id, uri, scan in file_db.execute('SELECT asset,id,uri,scan FROM files'):
+        asset = assets[asset_id]
+        cells = [row[0] for row in file_db.execute('SELECT pixel FROM cells WHERE asset=? AND id=?', (asset_id, file_id))]
+        document = {'file_id': file_id, 'asset_id': asset_id, 'scan_run_id': scan, 'data_batch_id': version, 'source_uri': uri,
+                    'survey': asset.get('surveyId', 'user'), 'release': asset.get('releaseId', 'user'), 'product': asset.get('product', ''),
+                    'modality': (asset.get('modalities') or ['other'])[0], 'spatial_status': 'known' if cells else 'unknown',
+                    'coverage_cells': cells, 'precision': 'estimated'}
+        identifier = hashlib.sha256((asset_id + '\n' + file_id).encode()).hexdigest()
+        index_document('astro_file_index_v2', identifier, document)
+        counts['files'] += 1
+    flush()
 
 summaries = {}
 for asset_id, count in file_db.execute('SELECT asset,count(*) FROM positions GROUP BY asset'):
@@ -226,7 +230,7 @@ for asset_id, count in file_db.execute('SELECT asset,count(*) FROM positions GRO
                            'pointCoverageRef': version + '/' + destination.name}
 for name in ['astro_position_index_v2', 'astro_image_footprint_index_v2', 'astro_file_index_v2']:
     request(args.target, '/' + name + '/_settings', {'index': {'refresh_interval': '5s'}}, 'PUT')
-    request(args.target, '/' + name + '/_refresh', {})
+    request(args.target, '/' + name + '/_refresh')
     counts[name] = request(args.target, '/' + name + '/_count', {'query': {'match_all': {}}})['count']
 receipt = {'version': version, 'counts': dict(counts), 'assets': summaries, 'elapsedSeconds': round(time.monotonic()-started)}
 (root / 'search-migration-receipt.json').write_text(json.dumps(receipt, indent=2))

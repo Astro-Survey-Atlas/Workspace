@@ -107,7 +107,7 @@ test("astro index extracts URL credentials before querying external Elasticsearc
   assert.ok(address && typeof address === "object");
   const service = new AstroIndexService({ baseUrl: `http://atlas-user:p%40ss@127.0.0.1:${address.port}` });
   await service.coverage({ nside: 16 });
-  assert.equal(requestUrl, "/astro_file_index_v1/_search");
+  assert.equal(requestUrl, "/astro_file_index_v2/_search");
   assert.equal(authorization, `Basic ${Buffer.from("atlas-user:p@ss", "utf8").toString("base64")}`);
   await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
 });

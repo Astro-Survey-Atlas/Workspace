@@ -1,3 +1,4 @@
+import { LocalState } from "../src/local-state.js";
 import assert from "node:assert/strict";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import os from "node:os";
@@ -69,7 +70,10 @@ test("confirmed region tasks store only chosen files and retry the original inve
     assert.equal(completed.approval?.reused, true);
     assert.equal(completed.outputConnectorId, "downloaded-connector");
     assert.equal(completed.steps.find((step) => step.id === "download")?.status, "succeeded");
-    const saved = JSON.parse(await readFile(path.join(root, "production-runs.json"), "utf8"));
+    const state = new LocalState(path.join(root, "control.sqlite"));
+    await state.initialize();
+    const saved = { runs: state.list<{ input: { publicDownload: object } }>("production-runs") };
+    state.close();
     assert.equal(saved.runs.every((run: { input: { publicDownload: object } }) => !("selection" in run.input.publicDownload)), true);
   } finally { await rm(root, { recursive: true, force: true }); }
 });

@@ -183,6 +183,7 @@ test("cancelling a download run records a cancelled node log", async () => {
   };
   try {
     const service = createService(directory, {
+      sourceResolver: fixtureResolver,
       downloads: {
         submit: async () => ({ ...download }),
         get: async () => ({ ...download }),
@@ -192,10 +193,11 @@ test("cancelling a download run records a cancelled node log", async () => {
     const submitted = await service.submit({
       pipelineKey: "overlap-download@1",
       region,
-      files: [{ url: "https://example.test/file.csv", name: "file.csv" }],
       crawlerId: "builtin-http",
       concurrency: 1,
     });
+    const awaiting = await waitForStatus(service, submitted.id, ["awaiting-approval"]);
+    await service.approve(submitted.id, awaiting.approval!.planSha256);
     for (let attempt = 0; attempt < 100; attempt += 1) {
       const run = await service.getRun(submitted.id);
       if (run.summary.downloadJobId) break;
@@ -211,38 +213,6 @@ test("cancelling a download run records a cancelled node log", async () => {
   }
 });
 
-test("legacy production runs drop preset references and synthesize node logs", async () => {
-  const directory = await mkdtemp(path.join(os.tmpdir(), "astro-production-legacy-"));
-  try {
-    await mkdir(directory, { recursive: true });
-    const timestamp = new Date().toISOString();
-    await writeFile(path.join(directory, "production-runs.json"), `${JSON.stringify([{
-      id: "legacy-run",
-      pipelineKey: "object-crossmatch@1",
-      pipelinePresetId: "legacy-preset",
-      status: "failed",
-      createdAt: timestamp,
-      updatedAt: timestamp,
-      completedAt: timestamp,
-      input: { pipelineKey: "object-crossmatch@1", region },
-      steps: [{ id: "query", title: "读取两个对象索引", status: "failed", detail: "legacy failure", completedAt: timestamp }],
-      artifacts: [],
-      summary: {},
-    }], null, 2)}\n`, "utf8");
-
-    const service = createService(directory);
-    const run = await service.getRun("legacy-run");
-    assert.equal("pipelinePresetId" in run, false);
-    assert.equal(run.steps[0]?.logs.length, 1);
-    assert.equal(run.steps[0]?.logs[0]?.level, "error");
-    assert.equal(run.steps[0]?.logs[0]?.message, "legacy failure");
-    const persisted = JSON.parse(await readFile(path.join(directory, "production-runs.json"), "utf8")) as { schemaVersion: number; runs: Array<Record<string, unknown>> };
-    assert.equal(persisted.schemaVersion, 2);
-    assert.equal("pipelinePresetId" in persisted.runs[0]!, false);
-  } finally {
-    await rm(directory, { recursive: true, force: true, maxRetries: 20, retryDelay: 20 });
-  }
-});
 
 function completedDownload() {
   const timestamp = new Date().toISOString();
@@ -307,6 +277,8 @@ test("resolves the plan inside the run and waits for approval before any transfe
         cancel: async () => { throw new Error("cancel not expected"); },
       },
     });
+    await assert.rejects(() => service.submit({ pipelineKey: "overlap-download@1", region,
+      files: [{ url: "https://example.test/file.csv", name: "file.csv" }] }), /source resolution/);
     const submitted = await service.submit({
       pipelineKey: "overlap-download@1",
       region,
@@ -341,7 +313,7 @@ test("resolves the plan inside the run and waits for approval before any transfe
     assert.equal(submissions[0]?.outputPrefix, submitted.id);
     assert.ok(typeof submissions[0]?.files[0]?.relativePath === "string");
     assert.ok(completed.artifacts.some((artifact) => artifact.name === "download-manifest.json"));
-    assert.equal(completed.steps.find((step) => step.id === "warehouse")?.status, "skipped");
+    assert.equal(completed.steps.find((step) => step.id === "scan")?.status, "skipped");
   } finally {
     await rm(directory, { recursive: true, force: true, maxRetries: 20, retryDelay: 20 });
   }
@@ -395,7 +367,7 @@ test("rejecting a pending plan skips the remaining steps and locks the run", asy
     assert.equal(rejected.status, "rejected");
     assert.equal(rejected.approval?.state, "rejected");
     assert.equal(rejected.steps.find((step) => step.id === "approval")?.status, "cancelled");
-    for (const stepId of ["download", "connector", "warehouse"]) {
+    for (const stepId of ["download", "connector", "scan"]) {
       assert.equal(rejected.steps.find((step) => step.id === stepId)?.status, "skipped");
     }
     assert.equal(submissions.length, 0);

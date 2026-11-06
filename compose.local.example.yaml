@@ -1,15 +1,14 @@
-# Copy this file to compose.local.yaml and set ASTRO_LOCAL_DATA_ROOT to an
-# existing parent directory before starting the service.
+# Add the same read-only source to API and worker.
 services:
-  workspace:
+  workspace: &id001
     environment:
-      ASTRO_LOCAL_SCAN_ENABLED: "true"
       ASTRO_LOCAL_CONNECTOR_ROOTS: /data/local:/state/coverage-downloads
       ASTRO_COVERAGE_DOWNLOAD_ROOT: /state/coverage-downloads
     volumes:
-      - type: bind
-        source: ${ASTRO_LOCAL_DATA_ROOT}
-        target: /data/local
-        read_only: true
-        bind:
-          create_host_path: false
+    - type: bind
+      source: ${ASTRO_LOCAL_DATA_ROOT}
+      target: /data/local
+      read_only: true
+      bind:
+        create_host_path: false
+  scanner: *id001

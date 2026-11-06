@@ -13,8 +13,11 @@ files:
 extraResources:
   - from: build/server.mjs
     to: server.mjs
-  - from: build/data-statistics-worker.mjs
-    to: data-statistics-worker.mjs
+  - from: build/scan-worker.mjs
+    to: scan-worker.mjs
+  - from: build
+    to: .
+    filter: ["*.py"]
   - from: build/packages/cli
     to: packages/cli
   - from: build/viewer

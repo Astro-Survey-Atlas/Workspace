@@ -3,6 +3,8 @@ apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
   name: {{ include "asa-workspace.fullname" . }}-state
+  annotations:
+    helm.sh/resource-policy: keep
   labels:
     {{- include "asa-workspace.labels" . | nindent 4 }}
 spec:
@@ -20,6 +22,8 @@ apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
   name: {{ include "asa-workspace.productionDataClaim" . }}
+  annotations:
+    helm.sh/resource-policy: keep
   labels:
     {{- include "asa-workspace.labels" . | nindent 4 }}
     atlas.zhejianglab.org/scanner-source: "true"
@@ -29,24 +33,6 @@ spec:
     requests:
       storage: {{ .Values.productionData.size }}
   {{- with .Values.productionData.storageClass }}
-  storageClassName: {{ . | quote }}
-  {{- end }}
-{{- end }}
-{{- if and .Values.dataWarehouse.enabled (not .Values.dataWarehouse.evidence.existingClaim) }}
----
-apiVersion: v1
-kind: PersistentVolumeClaim
-metadata:
-  name: {{ include "asa-workspace.warehouseEvidenceClaim" . }}
-  labels:
-    {{- include "asa-workspace.labels" . | nindent 4 }}
-    atlas.zhejianglab.org/evidence: "true"
-spec:
-  accessModes: {{ toYaml .Values.dataWarehouse.evidence.accessModes | nindent 4 }}
-  resources:
-    requests:
-      storage: {{ .Values.dataWarehouse.evidence.size }}
-  {{- with .Values.dataWarehouse.evidence.storageClass }}
   storageClassName: {{ . | quote }}
   {{- end }}
 {{- end }}

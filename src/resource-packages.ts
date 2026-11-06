@@ -868,8 +868,10 @@ export class ResourcePackageManager {
   }
 
   async initialize(): Promise<void> {
-    let catalog: ResourcePackageCatalogDocument | undefined;
-    try {
+    // Startup uses the last validated local catalog. Remote refresh is an
+    // explicit command and cannot block health, Workflow, or Agent startup.
+    let catalog = this.#catalogUrl.protocol === "file:" ? undefined : await this.#loadCatalogSnapshot();
+    if (!catalog) try {
       const catalogBytes = await readUrl(this.#catalogUrl, this.#downloadTimeoutMs);
       const parsed = parseCatalog(JSON.parse(catalogBytes.toString("utf8")) as unknown);
       catalog = parsed;
@@ -882,18 +884,7 @@ export class ResourcePackageManager {
     } catch (error) {
       this.#catalogError = error instanceof Error ? error : new Error(String(error));
       this.#lastSyncError = this.#catalogError.message;
-      if (this.#snapshotRoot) {
-        try {
-          const snapshotBytes = await readFile(path.join(this.#snapshotRoot, "assets-current", "catalog.json"));
-          catalog = parseCatalog(JSON.parse(snapshotBytes.toString("utf8")) as unknown);
-          await this.#loadSurveySnapshot();
-          this.#catalogError = undefined;
-          this.#catalogSha256 = createHash("sha256").update(snapshotBytes).digest("hex");
-          this.#catalogSyncedAt = undefined;
-        } catch {
-          catalog = undefined;
-        }
-      }
+      catalog = await this.#loadCatalogSnapshot();
     }
     this.#catalog = catalog ?? { schemaVersion: CATALOG_SCHEMA_VERSION, version: PACKAGE_FORMAT_VERSION, generatedAt: "", packages: [] };
     await mkdir(path.join(this.#root, "downloads"), { recursive: true });
@@ -930,7 +921,7 @@ export class ResourcePackageManager {
     return {
       catalogUrl: this.#catalogUrl.href,
       available: this.available,
-      stale: this.#lastSyncError !== undefined,
+      stale: this.#catalogSyncedAt === undefined || this.#lastSyncError !== undefined,
       ...(this.#lastSyncError ? { lastSyncError: this.#lastSyncError } : {}),
       ...(this.#catalogError ? { unavailableReason: this.#catalogError.message } : {}),
       ...(this.#catalogSha256 ? { catalogSha256: this.#catalogSha256 } : {}),
@@ -991,6 +982,22 @@ export class ResourcePackageManager {
       this.#surveyCatalog = [];
       this.#surveyCatalogBytes = undefined;
       return false;
+    }
+  }
+
+  async #loadCatalogSnapshot(): Promise<ResourcePackageCatalogDocument | undefined> {
+    if (!this.#snapshotRoot) return undefined;
+    try {
+      const bytes = await readFile(path.join(this.#snapshotRoot, "assets-current", "catalog.json"));
+      const catalog = parseCatalog(JSON.parse(bytes.toString("utf8")) as unknown);
+      await this.#loadSurveySnapshot();
+      await this.#writeSnapshot(bytes);
+      this.#catalogError = undefined;
+      this.#catalogSha256 = createHash("sha256").update(bytes).digest("hex");
+      this.#catalogSyncedAt = undefined;
+      return catalog;
+    } catch {
+      return undefined;
     }
   }
 

@@ -4,6 +4,7 @@ import { parse } from "csv-parse/sync";
 import { Healpix, Hploc } from "healpixjs";
 
 interface BuildSpec {
+  mode: string;
   input: string;
   recipe: { raColumn: string; decColumn: string };
   maxOrder: number;
@@ -99,7 +100,13 @@ const command = process.argv[2];
 if (command === "build") {
   const spec = JSON.parse(await readFile(argument("--spec"), "utf8")) as BuildSpec;
   const output = argument("--output");
-  const rows = parse(await readFile(spec.input, "utf8"), { columns: true, skip_empty_lines: true, trim: true }) as Array<Record<string, string>>;
+  const input = await readFile(spec.input, "utf8");
+  // This fixture projects image centers only; scientific extent checks run
+  // separately against the pinned Python MOC Core.
+  const rows = spec.mode === "fits-wcs"
+    ? (JSON.parse(input).headers as Array<Record<string, unknown>>).map(header => ({ ra: String(header.CRVAL1), dec: String(header.CRVAL2) }))
+    : parse(input, { columns: true, skip_empty_lines: true, trim: true }) as Array<Record<string, string>>;
+  if (spec.mode === "fits-wcs") spec.recipe = { raColumn: "ra", decColumn: "dec" };
   const queryPixels = pixels(rows, spec);
   const previewPixels = [...new Set(queryPixels.map((pixel) => Math.floor(pixel / 2 ** (2 * (spec.queryOrder - spec.previewOrder)))))].sort((left, right) => left - right);
   const factor = 4 ** (spec.maxOrder - spec.queryOrder);

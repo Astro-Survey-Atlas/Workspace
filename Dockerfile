@@ -35,14 +35,10 @@ ENV NODE_ENV=production \
     HOST=0.0.0.0 \
     PORT=3000 \
     ASTRO_BUILD_COMMIT=${ASTRO_BUILD_COMMIT} \
-    ASTRO_DATA_WAREHOUSE_ENABLED=false \
-    ASTRO_LOCAL_SCAN_ENABLED=false \
-    ASTRO_METADATA_STORE=sqlite \
+    ASTRO_SCANS_PAUSED=true \
+    ASTRO_WORKSPACE_SCAN_ENABLED=true \
     ASTRO_SQLITE_PATH=/state/workspace.sqlite \
     ASTRO_STATE_ROOT=/state \
-    ASTRO_DATA_CATALOG_STATE=/state/data-catalog.json \
-    ASTRO_CONNECTOR_STATE=/state/connectors.json \
-    ASTRO_CONNECTOR_RUN_STATE=/state/connector-ingest-runs.json \
     ASTRO_WORKFLOW_ROOT=/state/workflow-runs \
     ASTRO_RESOURCE_CATALOG_URL=file:///state/assets-current/catalog.json \
     ASTRO_RESOURCE_SNAPSHOT_ROOT=/state \
@@ -68,7 +64,7 @@ RUN apt-get update \
 COPY --from=moc-core /opt/moc-core /usr/local
 COPY --from=build --chown=astro:astro /app/node_modules ./node_modules
 COPY --from=build --chown=astro:astro /app/dist/src ./dist
-COPY --chown=astro:astro src/sky-point-coordinates.py src/workflow-catalog-fits.py src/workflow-fits-cutout.py ./dist/
+COPY --chown=astro:astro src/sky-point-coordinates.py src/workflow-catalog-fits.py src/workflow-fits-cutout.py src/scan-fits-catalog.py src/workflow_catalog_helpers.py ./dist/
 COPY --from=build --chown=astro:astro /app/packages/cli/package.json ./packages/cli/package.json
 COPY --from=build --chown=astro:astro /app/packages/cli/dist ./packages/cli/dist
 COPY --from=build --chown=astro:astro /app/dist/viewer ./viewer

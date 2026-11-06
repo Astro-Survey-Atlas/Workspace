@@ -6,6 +6,7 @@ from astropy.io import fits
 from astropy.wcs import WCS
 from astropy.coordinates import SkyCoord
 import astropy.units as u
+import numpy as np
 
 AUXILIARY = {"ERR", "ERROR", "DQ", "MASK", "WHT", "WEIGHT", "VAR", "VARIANCE", "CONTEXT", "CTX"}
 
@@ -21,7 +22,7 @@ def header_for(record):
     return header, primary
 
 def image_position(record):
-    header, _ = header_for(record)
+    header, primary = header_for(record)
     if str(header.get("EXTNAME", "")).upper().strip() in AUXILIARY:
         return None
     if "TABLE" in str(header.get("XTENSION", "")).upper():
@@ -37,11 +38,26 @@ def image_position(record):
     width, height = int(shape[0]), int(shape[1])
     if width <= 0 or height <= 0:
         return None
+    if record.get("quality_profile") == "csst-wcs-v1":
+        nominal = [float(header.get(key, primary.get(key, float("nan")))) for key in ("PIXSCAL1", "PIXSCAL2")]
+        if not all(math.isfinite(value) and value > 0 for value in nominal):
+            raise ValueError("missing or invalid PIXSCAL1/2")
+        matrix = np.asarray(wcs.pixel_scale_matrix, dtype=float)
+        if matrix.shape != (2, 2) or not np.all(np.isfinite(matrix)):
+            raise ValueError("celestial WCS matrix is invalid")
+        scales = np.linalg.norm(matrix, axis=0)
+        if np.any(scales <= 0) or np.linalg.det(matrix) == 0:
+            raise ValueError("celestial WCS matrix is singular")
+        errors = np.abs(scales * 3600 / nominal - 1)
+        cosine = float(np.dot(matrix[:, 0], matrix[:, 1]) / np.prod(scales))
+        angle = math.degrees(math.acos(max(-1.0, min(1.0, cosine))))
+        if float(max(errors)) > 0.01 + 1e-12 or abs(angle - 90) > 1 + 1e-10:
+            raise ValueError("CSST WCS scale or axis-angle tolerance exceeded")
     center_pixel = ((width - 1) / 2, (height - 1) / 2)
     center = wcs.pixel_to_world(*center_pixel).icrs
     if "validated_ra_deg" in record:
         if abs(((float(center.ra.deg) - float(record["validated_ra_deg"]) + 180) % 360) - 180) > 1e-8 or abs(float(center.dec.deg) - float(record["validated_dec_deg"])) > 1e-8:
-            raise ValueError("Warehouse validated center does not match retained header")
+            raise ValueError("Validated center does not match retained header")
     samples = max(64, min(4096, math.ceil(2 * (width + height) / 32)))
     edge = [i / samples for i in range(samples + 1)]
     x = [t * (width - 1) for t in edge] + [width - 1] * samples + [(1 - t) * (width - 1) for t in edge] + [0] * samples

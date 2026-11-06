@@ -11,8 +11,8 @@ import type { CoverageDownloadFile, CoverageDownloadJob, CoverageDownloadService
 import type { RegionDownloadConfirmation } from "./region-download-plan.js";
 import { MAX_OVERLAP_ORDER } from "./healpix-ranges.js";
 import {
-  resolveSourceInventory, computeInventoryDigest, validateRelativePath,
-  type ResolveSourceInventoryOptions, type SourceFileInventory, type SourceInventoryFile, type SourceUnit, type SourceUnitResolution,
+  resolveSourceInventory,
+  type ResolveSourceInventoryOptions, type SourceFileInventory, type SourceUnit,
 } from "./source-crawler.js";
 import { changeHitlPending, recordHitlWait, withRootSpan } from "./telemetry.js";
 
@@ -90,7 +90,7 @@ export interface ProductionApproval {
   state: "pending" | "approved" | "rejected";
   planSha256: string;
   decidedAt?: string;
-  decidedBy?: "user" | "system-legacy" | "agent";
+  decidedBy?: "user" | "agent";
   /** True when a retry reused a previously approved inventory unchanged. */
   reused?: boolean;
 }
@@ -120,8 +120,6 @@ export interface ProductionRun {
 export interface ProductionRunInput {
   pipelineKey: string;
   region?: unknown;
-  /** @deprecated Pre-expanded file list; bypasses in-run resolution and approval. */
-  files?: readonly CoverageDownloadFile[];
   /** A user-confirmed subset of an authenticated, transient region preview. */
   publicDownload?: RegionDownloadConfirmation;
   exportFormat?: "json" | "csv";
@@ -350,47 +348,6 @@ function assetSupportsObjects(asset: DataAssetRecord): boolean {
     && scan.coordinateFrame === "ICRS" && scan.coordinateUnits === "deg";
 }
 
-/** Build the canonical inventory from pre-expanded legacy files without I/O. */
-function directFilesInventory(files: readonly CoverageDownloadFile[]): SourceFileInventory {
-  const entries: SourceInventoryFile[] = files.map((file, index) => {
-    const relativePath = validateRelativePath(file.relativePath ?? file.name);
-    return {
-      sourceId: file.sourceId ?? "direct",
-      unitId: file.unitId ?? `direct-${index}`,
-      resolver: "direct-file@1",
-      relativePath,
-      url: file.url,
-      ...(file.sizeBytes !== undefined ? { sizeBytes: file.sizeBytes } : {}),
-      ...(file.sha256 ? { sha256: file.sha256 } : {}),
-      ...(file.etag ? { etag: file.etag } : {}),
-      ...(file.lastModified ? { lastModified: file.lastModified } : {}),
-    };
-  });
-  const seen = new Set<string>();
-  entries.forEach((entry) => {
-    if (seen.has(entry.relativePath)) throw new RangeError(`清单相对路径冲突: ${entry.relativePath}`);
-    seen.add(entry.relativePath);
-  });
-  entries.sort((left, right) => left.relativePath.localeCompare(right.relativePath));
-  const counts = new Map<string, number>();
-  entries.forEach((entry) => counts.set(entry.unitId, (counts.get(entry.unitId) ?? 0) + 1));
-  const unitKeys = new Map(entries.map((entry) => [entry.unitId, entry]));
-  const units: SourceUnitResolution[] = [...unitKeys.values()].map((entry) => ({
-    sourceId: entry.sourceId,
-    unitId: entry.unitId,
-    resolver: entry.resolver,
-    status: "resolved",
-    fileCount: counts.get(entry.unitId) ?? 0,
-  }));
-  return {
-    schemaVersion: 1,
-    inventorySha256: computeInventoryDigest(entries, units),
-    files: entries,
-    units,
-    truncated: false,
-  };
-}
-
 interface ProductionServiceOptions {
   state?: LocalState;
   root: string;
@@ -403,11 +360,6 @@ interface ProductionServiceOptions {
   sourceResolveOptions?: ResolveSourceInventoryOptions;
   confirmPublicDownload?: (confirmation: RegionDownloadConfirmation) => Promise<SourceFileInventory>;
   workspaceHandoff?: ProductionScanHandoff;
-}
-
-interface PersistedState {
-  schemaVersion: 2;
-  runs: ProductionRun[];
 }
 
 export class ProductionService {
@@ -486,7 +438,7 @@ export class ProductionService {
       for (const run of this.#runs.values()) {
         if (run.status === "awaiting-approval") changeHitlPending("production_approval", 1);
       }
-      await this.#persist();
+      for (const run of this.#runs.values()) this.#state.put("production-runs", run.id, run);
       if (this.#downloads.externalDownloads) setImmediate(() => {
         for (const run of this.#runs.values()) {
           if ((run.status === "running" || run.status === "queued") && run.summary.downloadJobId) void this.#execute(run.id);
@@ -524,9 +476,9 @@ export class ProductionService {
     for (const [id, run] of this.#runs) {
       if (run.status !== "failed" || this.#executing.has(id)) continue;
       this.#runs.delete(id);
+      this.#state.delete("production-runs", id);
       removed += 1;
     }
-    if (removed) await this.#persist();
     return removed;
   }
 
@@ -555,10 +507,8 @@ export class ProductionService {
     let initialStatus: ProductionRunStatus = "queued";
     let confirmedInventory: SourceFileInventory | undefined;
     if (pipeline.id === "overlap-download") {
-      const hasLegacyFiles = Array.isArray(input.files) && input.files.length > 0;
-      if (input.files !== undefined && !hasLegacyFiles) throw new RangeError("overlap-download files must be a non-empty array when provided");
+      if ("files" in input) throw new RangeError("Use region source resolution or publicDownload confirmation to submit downloads");
       if (input.publicDownload !== undefined) {
-        if (hasLegacyFiles) throw new RangeError("publicDownload cannot be combined with legacy files");
         if (reuse) {
           normalized.publicDownload = clone(input.publicDownload);
         } else {
@@ -587,7 +537,6 @@ export class ProductionService {
       const crawlerId = input.crawlerId === undefined ? "builtin-http" : text(input.crawlerId, "crawlerId");
       const concurrency = input.concurrency === undefined ? 2 : input.concurrency;
       if (!Number.isSafeInteger(concurrency) || concurrency < 1 || concurrency > 16) throw new RangeError("concurrency must be an integer between 1 and 16");
-      if (hasLegacyFiles) normalized.files = clone(input.files);
       normalized.exportFormat = exportFormat;
       normalized.crawlerId = crawlerId;
       normalized.concurrency = concurrency;
@@ -596,9 +545,8 @@ export class ProductionService {
       if (scanExecutor !== "workspace" && scanExecutor !== "none") throw new RangeError("scanExecutor must be workspace or none");
       if (scanExecutor === "workspace" && !this.#workspaceHandoff) throw new RangeError("Workspace scan executor is not configured");
       normalized.scanExecutor = scanExecutor;
-      // Runs without pre-expanded files resolve their source units inside the
-      // run and pause at a human approval gate before any transfer.
-      if (!hasLegacyFiles && !confirmedInventory && !reuse) initialStatus = "resolving";
+      // Resolve source units inside the run and approve the inventory before transfer.
+      if (!confirmedInventory && !reuse) initialStatus = "resolving";
     } else {
       if (region.nside > 256) throw new RangeError("对象交叉匹配目前支持至 O8，请选择较粗的天区。");
       if (!input.leftAssetId || !input.rightAssetId) throw new RangeError("object-crossmatch requires two assets");
@@ -652,7 +600,7 @@ export class ProductionService {
       this.appendStepLog(run, "resolve", "info", `复用来源运行 ${reuse.originId} 的已审批清单`);
     }
     this.#runs.set(run.id, run);
-    await this.#persist();
+    this.#state.put("production-runs", run.id, run);
     void this.#execute(run.id);
     return clone(run);
   }
@@ -770,7 +718,7 @@ export class ProductionService {
     const input = clone(run.input);
     // Reuse the previously approved inventory and staging when it exists so a
     // retry never re-resolves or re-downloads verified bytes.
-    if (run.inventory && run.approval?.state === "approved" && !input.files) {
+    if (run.inventory && run.approval?.state === "approved") {
       return this.#submitValidated(input, { inventory: run.inventory, approval: run.approval, originId: run.retryOfRunId ?? run.id });
     }
     return this.#submitValidated(input);
@@ -847,11 +795,9 @@ export class ProductionService {
     // --- resolve ---
     const resolveStep = run.steps.find((step) => step.id === "resolve");
     if (resolveStep?.status !== "succeeded" && !run.inventory) {
-      await this.setStep(run, "resolve", "running", run.input.files ? "直接文件输入，构造清单" : "解析区域来源单元");
+      await this.setStep(run, "resolve", "running", "解析区域来源单元");
       let inventory: SourceFileInventory;
-      if (Array.isArray(run.input.files)) {
-        inventory = directFilesInventory(run.input.files as CoverageDownloadFile[]);
-      } else if (run.retryOfRunId) {
+      if (run.retryOfRunId) {
         throw new Error("重试运行缺少可复用的清单；请重新提交任务");
       } else if (this.#sourceResolver) {
         const resolution = await this.#sourceResolver.resolve(region);
@@ -906,11 +852,6 @@ export class ProductionService {
     // --- approval ---
     if (run.approval?.state === "approved") {
       await this.setStep(run, "approval", "succeeded", run.approval.reused ? "复用先前审批的清单" : "清单已批准");
-    } else if (Array.isArray(run.input.files)) {
-      // Legacy pre-expanded input is treated as pre-approved by the caller.
-      run.approval = { state: "approved", planSha256: inventory.inventorySha256, decidedAt: now(), decidedBy: "system-legacy" };
-      this.appendStepLog(run, "approval", "info", "直接文件输入按兼容策略视为已审批");
-      await this.setStep(run, "approval", "succeeded", "直接文件输入（免审批）");
     } else {
       // Critical section: either record the pending decision, or adopt a
       // concurrent approve()/reject()/cancel() decision that landed while the
@@ -1141,7 +1082,7 @@ export class ProductionService {
   async #save(run: ProductionRun): Promise<void> {
     run.updatedAt = now();
     this.#runs.set(run.id, clone(run));
-    await this.#persist();
+    this.#state.put("production-runs", run.id, run);
   }
 
   /**
@@ -1157,11 +1098,7 @@ export class ProductionService {
     return result;
   }
 
-  async #persist(): Promise<void> {
-    for (const run of this.#runs.values()) this.#state.put("production-runs", run.id, run);
-    const ids = new Set(this.#runs.keys());
-    for (const run of this.#state.list<ProductionRun>("production-runs", 100_000)) if (!ids.has(run.id)) this.#state.delete("production-runs", run.id);
-  }
+
 
 }
 

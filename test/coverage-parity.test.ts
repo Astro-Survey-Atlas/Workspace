@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -104,11 +104,10 @@ function artifactMocSha256(artifact: UserMocArtifact): string | undefined {
   return artifact.files.find((file) => file.name === "moc.fits")?.sha256;
 }
 
-test("local CSV and Warehouse normalized evidence produce the same user MOC contract", async () => {
+test("CSV parsing and explicit NESTED cells produce the same user MOC contract", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "astro-coverage-parity-"));
   const localRoot = path.join(root, "local");
   const remoteRoot = path.join(root, "remote");
-  const evidenceRoot = path.join(root, "evidence");
   const csv = [
     "object_id,ra,dec,flux\n",
     "object-a,0,0,1.2\n",
@@ -135,45 +134,27 @@ test("local CSV and Warehouse normalized evidence produce the same user MOC cont
     assert.ok(local.moc);
     const sourceSnapshotSha256 = createHash("sha256").update(csv).digest("hex");
     assert.equal(local.summary.sourceSnapshotSha256, sourceSnapshotSha256);
-    const cells = local.coverageDocuments.map((document) => ({ order: document.healpix_order, ipix: document.healpix_pixel }));
+    const cells = local.moc.queryPixels.map(ipix => ({ order: 8, ipix }));
     assert.ok(cells.length > 0);
     // The positive equatorial boundary must be counted in the same cell that
     // Assets Core returns; a routing-only trig approximation would emit zero
     // for the MOC cell and leave the local coverage fact internally broken.
-    assert.equal(local.coverageDocuments.find((document) => document.healpix_pixel === 311296)?.objectCount, 2);
+    assert.equal(local.pointCells.find((document) => document.pixel === 311296)?.count, 2);
 
     const localStore = new UserMocArtifactStore({ root: localRoot });
     const localArtifact = await localStore.persist(local.moc, context({ sourceSnapshotSha256 }), {
       provenance: { schemaVersion: 1, coordinateFrame: "ICRS", ordering: "NESTED" },
     });
 
-    await mkdir(evidenceRoot, { recursive: true });
-    await writeFile(path.join(evidenceRoot, "normalized-scan.json"), `${JSON.stringify({
-      schemaVersion: 1,
-      phase: "COMPLETED",
-      scanRunId: "warehouse-batch-parity",
-      layerId: "workspace-user-parity",
-      sourceSnapshot: { sha256: sourceSnapshotSha256, fileCount: 1, coverageCount: cells.length, errorCount: 0, availableOrders: [8] },
-      files: [],
-      coverage: cells.map(({ order, ipix }) => ({
-        layer_id: "workspace-user-parity",
-        source_file_id: "file-parity",
-        source_uri: "s3://user/catalog.csv",
-        healpix_order: order,
-        healpix_cell: ipix,
-        coordinate_frame: "ICRS",
-        nesting: "NESTED",
-        coverage_role: "object_presence",
-        precision: "exact",
-      })),
-    })}\n`, "utf8");
-
     const remoteStore = new UserMocArtifactStore({ root: remoteRoot });
-    const remoteArtifact = await remoteStore.importEvidence(evidenceRoot, context({
-      scanRunId: "remote-run",
-      evidenceScanRunId: "warehouse-batch-parity",
-      sourceSnapshotSha256,
-    }), parityMocCore);
+    const rebuilt = await parityMocCore.buildNestedHealpix!({
+      layerId: "workspace-user-parity", cells,
+      coverageRole: "object_presence", dataOrigin: "catalog", sourceTier: "user_file_derived",
+      maxOrder: 10,
+    });
+    const remoteArtifact = await remoteStore.persist(rebuilt, context({
+      scanRunId: "rebuilt-run", sourceSnapshotSha256,
+    }));
 
     assert.equal(localArtifact.status, "ready");
     assert.equal(remoteArtifact.status, "ready");
@@ -198,9 +179,7 @@ test("local CSV and Warehouse normalized evidence produce the same user MOC cont
 
     const remoteProvenance = JSON.parse(Buffer.from(await readFile((await remoteStore.filePath(remoteArtifact.layerId, remoteArtifact.scanRunId, "provenance.json")).filePath)).toString("utf8")) as Record<string, unknown>;
     assert.equal(remoteProvenance.sourceSnapshotSha256, sourceSnapshotSha256);
-    assert.equal(remoteProvenance.evidenceScanRunId, "warehouse-batch-parity");
     assert.equal((remoteProvenance.snapshot as Record<string, unknown>).sha256, sourceSnapshotSha256);
-    assert.equal((remoteProvenance.evidence as Record<string, unknown>).scanRunId, "warehouse-batch-parity");
   } finally {
     await rm(root, { recursive: true, force: true });
   }

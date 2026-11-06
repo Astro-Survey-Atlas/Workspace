@@ -1,5 +1,6 @@
 import { mkdir, open, type FileHandle } from 'node:fs/promises';
 import path from 'node:path';
+import { gzipSync, gunzipSync } from 'node:zlib';
 
 const CHUNK_BYTES = 8 * 1024 * 1024;
 const MAX_RECORD_BYTES = 4 * 1024 * 1024;
@@ -12,11 +13,12 @@ export class ScanEvidenceWriter {
   #name = '';
   constructor(readonly root: string, readonly prefix: string) {}
   async write(value: unknown): Promise<string> {
-    const bytes = Buffer.from(JSON.stringify(value) + '\n');
-    if (bytes.length > MAX_RECORD_BYTES) throw new RangeError('Scientific evidence record exceeds 4 MiB');
+    const raw = Buffer.from(JSON.stringify(value) + '\n');
+    if (raw.length > MAX_RECORD_BYTES) throw new RangeError('Scientific evidence record exceeds 4 MiB');
+    const bytes = gzipSync(raw, { level: 1 });
     if (!this.#handle || this.#offset + bytes.length > CHUNK_BYTES) {
       await this.close();
-      this.#name = `${this.prefix}-${this.#chunk++}.ndjson`;
+      this.#name = `${this.prefix}-${this.#chunk++}.ndjson.gz`;
       const filename = safeEvidencePath(this.root, this.#name);
       await mkdir(path.dirname(filename), { recursive: true });
       this.#handle = await open(filename, 'w');
@@ -42,12 +44,12 @@ export async function readScanEvidence(root: string, reference: string): Promise
   if (!match) throw new RangeError('Invalid evidence reference');
   const offset = Number(match[2]);
   const length = Number(match[3]);
-  if (!Number.isSafeInteger(offset) || !Number.isSafeInteger(length) || length < 1 || length > MAX_RECORD_BYTES) throw new RangeError('Invalid evidence bounds');
+  if (!Number.isSafeInteger(offset) || !Number.isSafeInteger(length) || length < 1 || length > MAX_RECORD_BYTES + 2048) throw new RangeError('Invalid evidence bounds');
   const file = await open(safeEvidencePath(root, match[1]!), 'r');
   try {
     const bytes = Buffer.alloc(length);
     const { bytesRead } = await file.read(bytes, 0, length, offset);
     if (bytesRead !== length) throw new Error('Scientific evidence is incomplete');
-    return JSON.parse(bytes.toString('utf8')) as Record<string, unknown>;
+    return JSON.parse(gunzipSync(bytes, { maxOutputLength: MAX_RECORD_BYTES }).toString('utf8')) as Record<string, unknown>;
   } finally { await file.close(); }
 }

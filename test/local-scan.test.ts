@@ -10,9 +10,8 @@ import {
   LocalCsvScanConfigurationError,
   LocalCsvScanHeaderError,
   scanLocalCsv,
-  stableCoverageDocumentId,
   stableObjectDocumentId,
-  type LocalScanDocument,
+  type LocalObjectIndexDocument,
 } from "../src/local-scan.js";
 import { mockMocCore } from "./helpers/mock-moc-core.js";
 
@@ -51,7 +50,7 @@ test("streams object documents to a sink with stable IDs and filtered attributes
     "source-1,360,12.5,4.2,alpha\n",
     "source-2,10,-12.5,8.4,beta\n",
   ].join(""), async (filePath) => {
-    const streamed: LocalScanDocument[] = [];
+    const streamed: LocalObjectIndexDocument[] = [];
     const first = await scanLocalCsv(filePath, options(), (document) => {
       streamed.push(document);
     });
@@ -63,7 +62,7 @@ test("streams object documents to a sink with stable IDs and filtered attributes
     assert.equal(first.summary.invalidRowCount, 0);
     assert.equal(first.summary.healpix_order, LOCAL_SCAN_HEALPIX_ORDER);
     assert.equal(objects.length, 2);
-    assert.equal(streamed.length, 4);
+    assert.equal(streamed.length, 2);
     assert.deepEqual(streamed.slice(0, 2), objects);
     assert.equal(objects[0]?.object_id, "source-1");
     assert.equal(objects[0]?.ra_deg, 0);
@@ -108,14 +107,10 @@ test("skips invalid and malformed rows and aggregates valid coverage facts", asy
     assert.equal(result.summary.objectCount, 2);
     assert.equal(result.summary.invalidRowCount, 4);
     assert.equal(result.summary.csvErrorCount, 1);
-    assert.equal(result.coverageDocuments.length, 1);
-    assert.equal(result.coverageDocuments[0]?.objectCount, 2);
-    assert.equal(result.coverageDocuments[0]?.healpix_order, 8);
-    assert.equal(result.coverageDocuments[0]?.healpix_pixel, objects[0]?.healpix_pixel);
-    assert.equal(result.coverageDocuments[0]?.healpix_pixel, objects[1]?.healpix_pixel);
-    assert.equal(result.coverageDocuments[0]?.asset_id, "asset-a");
-    assert.equal(result.coverageDocuments[0]?.source_file_id, "file-a");
-    assert.equal(result.coverageDocuments[0]?.scan_run_id, "run-a");
+    assert.equal(result.pointCells.length, 1);
+    assert.equal(result.pointCells[0]?.count, 2);
+    assert.equal(result.pointCells[0]?.pixel, objects[0]?.healpix_pixel);
+    assert.equal(result.pointCells[0]?.pixel, objects[1]?.healpix_pixel);
   });
 });
 
@@ -151,12 +146,4 @@ test("records the SHA-256 of the exact local CSV bytes consumed by the scan", as
     const result = await scanLocalCsv(filePath, options());
     assert.equal(result.summary.sourceSnapshotSha256, createHash("sha256").update(Buffer.from(content, "utf8")).digest("hex"));
   });
-});
-
-test("coverage identities are stable across scan runs for the same source cell", () => {
-  const first = stableCoverageDocumentId("asset-a", "file-a", 8, 42);
-  const repeated = stableCoverageDocumentId("asset-a", "file-a", 8, 42);
-  const anotherSource = stableCoverageDocumentId("asset-a", "file-b", 8, 42);
-  assert.equal(first, repeated);
-  assert.notEqual(first, anotherSource);
 });

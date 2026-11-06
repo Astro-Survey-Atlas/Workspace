@@ -14,10 +14,11 @@ import type { NextFunction, Request, Response } from "express";
 
 import { AgentService } from "./agent.js";
 import { responseCancellation } from "./http-request-cancellation.js";
+import { PointPresence } from "./point-presence.js";
 import { AstroIndexService, ASTRO_FILE_INDEX, ASTRO_OVERVIEW_NSIDE, type AstroCoverageLayer, type AstroSkyQueryInput } from "./astro-index.js";
 import { imagePointsContainingCoordinate } from "./fits-positions.js";
 import { readScanEvidence } from "./scan-evidence.js";
-import { angularSeparationArcsec, AstroObjectIndexService, coordinateInHealpixRegion, coordinateSearchBbox, type AstroCellsQueryInput, type AstroObjectRecord, type AstroPointDensityQueryInput, type ObjectRegionQueryInput, type SkyDataPointScope } from "./astro-object-index.js";
+import { angularSeparationArcsec, AstroObjectIndexService, coordinateInHealpixRegion, coordinateSearchBbox, type AstroObjectRecord, type AstroPointDensityQueryInput, type ObjectRegionQueryInput, type SkyDataPointScope } from "./astro-object-index.js";
 import { McpCatalogQueryClient } from "./catalog-mcp-client.js";
 import { CatalogQueryFallbackClient, OfficialArchiveCatalogQueryClient } from "./official-catalog-client.js";
 import { createConnectorCredentialStore, type StoredConnectorCredentials } from "./connector-credentials.js";
@@ -85,9 +86,6 @@ const workspaceCli = resolveWorkspaceCli(projectRoot);
 const productionRoot = process.env.ASTRO_PRODUCTION_ROOT ?? path.join(stateRoot, "production");
 const systemConfigRoot = process.env.ASTRO_SYSTEM_CONFIG_ROOT ?? path.join(stateRoot, "system-config");
 const surveyRegistryStatePath = process.env.ASTRO_SURVEY_REGISTRY_STATE ?? path.join(stateRoot, "survey-registrations.json");
-const dataCatalogStatePath = process.env.ASTRO_DATA_CATALOG_STATE ?? path.join(stateRoot, "data-catalog.json");
-const connectorStatePath = process.env.ASTRO_CONNECTOR_STATE ?? path.join(stateRoot, "connectors.json");
-const connectorRunStatePath = process.env.ASTRO_CONNECTOR_RUN_STATE ?? path.join(stateRoot, "connector-ingest-runs.json");
 const localConnectorRoots = LocalConnectorRootsPolicy.fromEnvironment();
 const coverageDownloadRoot = path.resolve(process.env.ASTRO_COVERAGE_DOWNLOAD_ROOT ?? path.join(stateRoot, "coverage-downloads"));
 const coverageDownloadStatePath = path.resolve(process.env.ASTRO_COVERAGE_DOWNLOAD_STATE ?? path.join(stateRoot, "coverage-download-jobs.json"));
@@ -116,12 +114,13 @@ const dataCatalog = new DataCatalogRegistry(metadataStore);
 const connectors = new ConnectorRegistry(metadataStore, localConnectorRoots);
 const connectorCredentials = createConnectorCredentialStore();
 const connectorRuns = new ConnectorIngestRunCatalog(metadataStore);
+const pointPresence = new PointPresence(path.join(stateRoot, "workspace-scans"));
 const userMocs = new UserMocArtifactStore({ root: userMocRoot });
 const dataStatistics = new DataStatisticsClient({ store: metadataStore });
 const currentDataBatches = async (assetIds?: readonly string[]): Promise<ReadonlyMap<string, string>> => {
   const assets = assetIds === undefined ? await dataCatalog.list()
     : (await Promise.all([...new Set(assetIds)].map(id => metadataStore.getDataAsset(id)))).filter(asset => asset !== undefined);
-  return new Map(assets.map(asset => [asset.id, asset.activeScan?.runId ?? "unpublished"]));
+  return new Map(assets.map(asset => [asset.id, asset.activeScan?.dataBatchId ?? "unpublished"]));
 };
 const astroObjectIndex = new AstroObjectIndexService({ baseUrl: astroEsUrl, dataBatches: currentDataBatches });
 const workspaceScans = new WorkspaceScanExecutor({
@@ -137,7 +136,7 @@ const workspaceScans = new WorkspaceScanExecutor({
   artifacts: userMocs,
 });
 const resourcePackages = new ResourcePackageManager({ catalogUrl: resourceCatalogUrl, root: resourcePackageRoot, statePath: resourcePackageStatePath, snapshotRoot: resourceSnapshotRoot, allowedOrigins: resourceCatalogAllowedOrigins });
-const astroIndex = new AstroIndexService({ baseUrl: astroEsUrl });
+const astroIndex = new AstroIndexService({ baseUrl: astroEsUrl, dataBatches: currentDataBatches });
 const downloadWorker = process.env.ASTRO_DOWNLOAD_WORKER_URL ? new DownloadWorkerClient(
   process.env.ASTRO_DOWNLOAD_WORKER_URL, process.env.ASTRO_DOWNLOAD_WORKER_TOKEN ?? "", () => systemConfig.downloadProxy()) : undefined;
 const coverageDownloads = new CoverageDownloadService({
@@ -246,7 +245,7 @@ const workspaceAgent = new WorkspaceAgentService({
 const configBackup = new WorkspaceConfigBackupService({ root: systemConfigRoot, store: metadataStore, credentials: connectorCredentials,
   roots: localConnectorRoots, systemConfig, resourcePackages, surveys, isBusy: async () => {
     if (dataStatistics.busy) return "数据统计刷新";
-    if ((await connectorRuns.list()).some(run => run.status === "queued" || run.status === "running")) return "扫描任务";
+    if ((await connectorRuns.list({ status: "running" })).length) return "扫描任务";
     if ((await coverageDownloads.list()).some(job => job.status === "queued" || job.status === "running")) return "下载任务";
     if ((await productionService.listRuns()).some(run => ["queued", "resolving", "awaiting-approval", "running"].includes(run.status))) return "生产任务";
     return undefined;
@@ -304,7 +303,7 @@ app.post("/api/scanning/pause", (_request, response) => {
 });
 app.post("/api/scanning/resume", (_request, response) => response.json({ scanning: scanControl.setPaused(false) }));
 app.use("/api", (request, response, next) => {
-  if (request.method === "POST" && (/(?:scan-runs|workspace-scan|local-scan|remote-scan|derived-repairs)(?:\/|$)/.test(request.path)
+  if (request.method === "POST" && (/scan-runs(?:\/|$)/.test(request.path)
     || /ingest-runs\/[^/]+\/retry$/.test(request.path))) {
     try { scanControl.assertRunning(); } catch (error) { sendApiError(response, error); return; }
   }
@@ -352,7 +351,7 @@ app.get("/api/capabilities", async (_request: Request, response: Response) => {
       configured: astroObjectIndex.configured,
       executor: "workspace",
       objectIndex: astroObjectIndex.objectIndex,
-      coverageIndex: astroObjectIndex.coverageIndex,
+      footprintIndex: astroObjectIndex.imageFootprintIndex,
     },
     metadataStore: { engine: metadataStoreEngine },
   });
@@ -1053,12 +1052,12 @@ app.get("/api/system-config/runtime", async (_request: Request, response: Respon
       indices: {
         file: process.env.ASTRO_ES_ASTRO_INDEX ?? ASTRO_FILE_INDEX,
         object: astroObjectIndex.objectIndex,
-        coverage: astroObjectIndex.coverageIndex,
+        footprint: astroObjectIndex.imageFootprintIndex,
       },
       source: "environment",
     },
     // Read-only production capability registry pinned to this build.
-    capabilities: listProductionCapabilities(),
+    capabilities: listProductionCapabilities({ scanningEnabled: workspaceScanningEnabled }),
     build: buildProvenance(),
     assetsApi: {
       endpoint: sanitizeEndpointForDisplay(resourceCatalogUrl),
@@ -1279,17 +1278,9 @@ app.post("/api/sky/query", async (request: Request, response: Response) => {
   }
 });
 
-app.post("/api/sky/cells/query", async (request: Request, response: Response) => {
-  try {
-    response.json(await astroObjectIndex.queryCells(request.body as AstroCellsQueryInput));
-  } catch (error) {
-    sendApiError(response, error);
-  }
-});
-
 async function isIndexing(scopes?: readonly SkyDataPointScope[]): Promise<boolean> {
   const ids = new Set(scopes?.map(scope => scope.assetId));
-  return (await connectorRuns.list()).some(run => ["queued", "running"].includes(run.status) && run.assetId && ids.has(run.assetId));
+  return (await connectorRuns.list({ assetIds: [...ids].filter((id): id is string => !!id) })).some(run => ["queued", "running"].includes(run.status) && run.assetId && ids.has(run.assetId));
 }
 async function hydratePoint(point: AstroObjectRecord): Promise<AstroObjectRecord> {
   if (!point.evidence_ref) return point;
@@ -1539,10 +1530,14 @@ async function overlapSources(context: OverlapSourceContext): Promise<SkyOverlap
   for (const asset of assets) {
     const artifact = artifacts.find(artifact => artifact.id === asset.activeScan?.artifactId && artifact.status === "ready");
     if (!artifact) continue;
-    const ranges = await userMocs.projectionRanges(artifact.layerId, artifact.scanRunId, Math.log2(context.nside));
+    const order = Math.log2(context.nside);
+    // Published map cells describe real indexed positions at O8. Native image
+    // extent MOCs retain their own resolution in the scan's downloadable evidence.
+    const presence = order <= 8 ? await pointPresence.pixels(asset.activeScan!.pointCoverageRef, order) : new Set<number>();
+    const ranges = [...presence].map(pixel => ({ start: pixel, end: pixel + 1 }));
     accept({ id: overlapSourceIdForAsset(asset.id), label: asset.name, kind: "workspace", nside: context.nside,
       pixels: [], ranges, assetId: asset.id, surveyId: asset.surveyId, releaseId: asset.releaseId, product: asset.product,
-      modality: asset.modalities[0], availableOrders: privateOverlapOrders(artifact.availableOrders), layerIds: [workspaceLayerIdForAsset(asset.id)] });
+      modality: asset.modalities[0], availableOrders: privateOverlapOrders([8]), layerIds: [workspaceLayerIdForAsset(asset.id)] });
   }
   return [...result.values()].sort((left, right) => left.id.localeCompare(right.id));
 }
@@ -1946,11 +1941,11 @@ function coverageStatus(value: string | undefined): WorkspaceCoverageStatus {
 async function artifactCoverageLayer(
   artifact: UserMocArtifact,
   nside: number,
-  asset?: DataAssetRecord,
+  asset: DataAssetRecord,
   latestArtifact: UserMocArtifact = artifact,
 ): Promise<AstroCoverageLayer> {
   const order = nsideOrderForCoverage(nside);
-  const projection = await userMocs.projection(artifact.layerId, artifact.scanRunId, order).catch(() => ({ order, pixels: [] }));
+  const pixels = [...await pointPresence.pixels(asset.activeScan!.pointCoverageRef, order)].sort((a, b) => a - b);
   const status: WorkspaceCoverageStatus = artifact.status === "ready" ? "ready" : artifact.status === "failed" ? "error" : artifact.status === "pending" ? "pending" : "unavailable";
   const messages = [artifact.error, latestArtifact.id === artifact.id ? undefined : latestArtifact.error].filter((value): value is string => Boolean(value));
   return {
@@ -1961,11 +1956,11 @@ async function artifactCoverageLayer(
     source: "asset",
     ...(messages.length ? { message: [...new Set(messages)].join("; ") } : {}),
     nside,
-    pixels: projection.pixels,
-    availableOrders: artifact.availableOrders,
-    ...(artifact.maxOrder === undefined ? {} : { maxOrder: artifact.maxOrder }),
-    precision: artifact.precision,
-    ...(artifact.coverageRole ? { coverageRole: artifact.coverageRole } : {}),
+    pixels,
+    availableOrders: [8],
+    maxOrder: 8,
+    precision: "estimated",
+    coverageRole: "object_presence",
     mocStatus: artifact.status,
     artifactId: artifact.id,
     latestMocStatus: latestArtifact.status,

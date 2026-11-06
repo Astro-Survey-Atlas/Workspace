@@ -1,15 +1,13 @@
 import {
-  LOCAL_COVERAGE_INDEX,
   LOCAL_OBJECT_INDEX,
-  type LocalScanDocument,
+  type LocalObjectIndexDocument,
 } from "./local-scan.js";
 import { Healpix, Hploc } from "healpixjs";
-import { COVERAGE_ROLES, DATA_ORIGINS, SOURCE_TIERS, type CoverageDataOrigin, type CoverageRole, type CoverageSourceTier } from "./assets-core.js";
+import { ASTRO_FILE_INDEX, type AstroFileDocument } from "./astro-index.js";
 import { parseElasticsearchEndpoint } from "./es-endpoint.js";
 import { regionPixelFilter } from "./workspace-directories.js";
 
 export const ASTRO_OBJECT_INDEX = LOCAL_OBJECT_INDEX;
-export const ASTRO_COVERAGE_INDEX = LOCAL_COVERAGE_INDEX;
 export const ASTRO_IMAGE_FOOTPRINT_INDEX = "astro_image_footprint_index_v2";
 export const ASTRO_OBJECT_NATIVE_ORDER = 8;
 export const ASTRO_OBJECT_NATIVE_NSIDE = 2 ** ASTRO_OBJECT_NATIVE_ORDER;
@@ -185,113 +183,9 @@ export interface SkyCoordinateBbox {
   decMax: number;
 }
 
-export interface AstroCoverageFact {
-  healpix_order: number;
-  healpix_pixel: number;
-  objectCount: number;
-  survey: string;
-  release: string;
-  product: string;
-  modality: string;
-  asset_id: string;
-  source_file_id?: string;
-  scan_run_id?: string;
-  coverage_role?: CoverageRole;
-  data_origin?: CoverageDataOrigin;
-  source_tier?: CoverageSourceTier;
-  max_order?: number;
-  query_order?: number;
-  preview_order?: number;
-}
-
-export interface AstroCoverageFactQueryInput {
-  nside: number;
-  surveys?: string[];
-  surveyIds?: string[];
-  releases?: string[];
-  releaseIds?: string[];
-  products?: string[];
-  modalities?: string[];
-  assetIds?: string[];
-  cells?: number[];
-  preserveSources?: boolean;
-}
-
-export interface AstroCoverageFactQueryResult {
-  status: AstroObjectQueryStatus;
-  index: string;
-  nside: number;
-  facts: AstroCoverageFact[];
-  pixels: number[];
-  message?: string;
-}
-
-/** Occupied cells from real positions, for a preview while full coverage is incomplete. */
-export interface AstroPointCoverageResult {
-  status: AstroObjectQueryStatus;
-  index: string;
-  nside: number;
-  pixels: number[];
-  total: number;
-  truncated: boolean;
-  message?: string;
-}
-
-export interface AstroCellsQueryInput {
-  parentNside?: number;
-  parentPixels?: readonly number[];
-  pixels?: readonly number[];
-  /** Alias for clients that send the selected parent cell list as cells. */
-  cells?: readonly number[] | ObjectRegionSelectionInput;
-  /** Alias for parentNside when cells is an array. */
-  nside?: number;
-  targetNside?: number;
-  coordinateFrame?: string;
-  ordering?: string;
-  assetIds?: string[];
-  surveyIds?: string[];
-  releaseIds?: string[];
-  products?: string[];
-  modalities?: string[];
-}
-
-export interface AstroDensityLayer {
-  key: string;
-  assetId: string;
-  surveyId: string;
-  releaseId: string;
-  product: string;
-  modality: string;
-  count: number;
-}
-
-export interface AstroDensityCell {
-  nside: number;
-  pixel: number;
-  count: number;
-  layers: AstroDensityLayer[];
-}
-
-export interface AstroCellsQueryResult {
-  status: AstroObjectQueryStatus;
-  index: string;
-  coordinateFrame: typeof ASTRO_HEALPIX_COORDINATE_FRAME;
-  ordering: typeof ASTRO_HEALPIX_ORDERING;
-  parentNside: number;
-  parentPixels: number[];
-  targetNside: number;
-  nativeNside: typeof ASTRO_OBJECT_NATIVE_NSIDE;
-  evidence: "coverage_facts";
-  cells: AstroDensityCell[];
-  layers: AstroDensityLayer[];
-  total: number;
-  message?: string;
-}
-
 export interface AstroObjectIndexOptions {
   baseUrl?: string;
   objectIndex?: string;
-  coverageIndex?: string;
   timeoutMs?: number;
   dataBatches?: (assetIds?: readonly string[]) => Promise<ReadonlyMap<string, string>>;
 }
@@ -302,10 +196,7 @@ const MAX_SEARCH_AFTER_VALUES = 100;
 const MAX_FILTER_VALUES = 1_000;
 const MAX_FILTER_VALUE_LENGTH = 512;
 const MAX_HEALPIX_PARENT_PIXELS = 4_096;
-const MAX_HEALPIX_TARGET_CELLS = 4_096;
 const MAX_HEALPIX_TERMS = 4_096;
-const MAX_COVERAGE_AGGREGATION_PAGES = 1_000;
-const COVERAGE_AGGREGATION_SIZE = 10_000;
 const MAX_BULK_DOCUMENTS = 500;
 const MAX_BULK_BYTES = 2 * 1024 * 1024;
 const DEFAULT_TIMEOUT_MS = 2_500;
@@ -334,25 +225,6 @@ const OBJECT_SOURCE_FIELDS = [
 const OBJECT_POINT_SOURCE_FIELDS = [
   "object_id", "ra_deg", "dec_deg", "asset_id", "survey", "release", "product", "modality",
   "attributes.position_role", "attributes.source_id",
-] as const;
-
-const COVERAGE_SOURCE_FIELDS = [
-  "healpix_order",
-  "healpix_pixel",
-  "objectCount",
-  "survey",
-  "release",
-  "product",
-  "modality",
-  "asset_id",
-  "source_file_id",
-  "scan_run_id",
-  "coverage_role",
-  "data_origin",
-  "source_tier",
-  "max_order",
-  "query_order",
-  "preview_order",
 ] as const;
 
 interface ElasticsearchSearchHit {
@@ -399,16 +271,12 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
 
-function isObjectDocument(document: LocalScanDocument): boolean {
-  return isRecord(document) && "object_id" in document && "ra_deg" in document && "dec_deg" in document;
-}
-
 function nonEmptyText(value: unknown, name: string): string {
   if (typeof value !== "string" || !value.trim()) throw new TypeError(`${name} must be a non-empty string`);
   return value;
 }
 
-function sourceFor(document: LocalScanDocument): Record<string, unknown> {
+function sourceFor(document: LocalObjectIndexDocument): Record<string, unknown> {
   const source: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(document)) {
     if (key !== "_index" && key !== "_id") source[key] = value;
@@ -416,7 +284,7 @@ function sourceFor(document: LocalScanDocument): Record<string, unknown> {
   return source;
 }
 
-function bulkLinesFor(document: LocalScanDocument, targetIndex?: string): string {
+function bulkLinesFor(document: LocalObjectIndexDocument, targetIndex?: string): string {
   const index = targetIndex ?? nonEmptyText(document._index, "document._index");
   const id = nonEmptyText(document._id, "document._id");
   const action = JSON.stringify({ index: { _index: index, _id: id } });
@@ -746,107 +614,12 @@ function validateQueryInput(input: ObjectRegionQueryInput): NormalizedObjectRegi
   };
 }
 
-function validateCoverageInput(input: AstroCoverageFactQueryInput): AstroCoverageFactQueryInput {
-  if (!isRecord(input)) throw new TypeError("coverage fact query input is required");
-  const nside = input.nside;
-  if (typeof nside !== "number" || !Number.isSafeInteger(nside) || nside < 1 || nside > 256 || (nside & (nside - 1)) !== 0) {
-    throw new RangeError("coverage nside must be a power of two between 1 and 256");
-  }
-  return {
-    nside,
-    surveys: mergedFilterValues(input.surveys, input.surveyIds, "surveys"),
-    releases: mergedFilterValues(input.releases, input.releaseIds, "releases"),
-    products: validateFilterValues(input.products, "products"),
-    modalities: validateFilterValues(input.modalities, "modalities"),
-    assetIds: validateFilterValues(input.assetIds, "assetIds"),
-    ...(input.cells ? { cells: input.cells } : {}),
-    ...(input.preserveSources ? { preserveSources: true } : {}),
-  };
-}
-
-function coverageQueryBody(input: AstroCoverageFactQueryInput): Record<string, unknown> {
-  const filters: unknown[] = [];
-  for (const [field, values] of [
-    ["release", input.releases],
-    ["product", input.products],
-    ["modality", input.modalities],
-  ] as const) {
-    if (values?.length) filters.push({ terms: { [field]: values } });
-  }
-  const visibility = layerVisibilityFilter(input.surveys, input.assetIds);
-  if (visibility) filters.push(visibility);
-  if (input.cells?.length) {
-    const queryOrder = Math.log2(input.nside);
-    filters.push({ bool: { should: Array.from({ length: 9 - queryOrder }, (_, index) => {
-      const actualOrder = queryOrder + index;
-      return { bool: { filter: [{ term: { healpix_order: actualOrder } }, regionPixelFilter("healpix_pixel", actualOrder, queryOrder, input.cells!)] } };
-    }), minimum_should_match: 1 } });
-  }
-  return {
-    track_total_hits: true,
-    size: 10_000,
-    _source: [...COVERAGE_SOURCE_FIELDS],
-    query: filters.length ? { bool: { filter: filters } } : { match_all: {} },
-    sort: [{ healpix_pixel: "asc" }, { asset_id: "asc" }, { release: "asc" }, { product: "asc" }],
-  };
-}
-
 function layerVisibilityFilter(surveys?: readonly string[], assetIds?: readonly string[]): Record<string, unknown> | undefined {
   const should: Record<string, unknown>[] = [];
   if (surveys?.length) should.push({ terms: { survey: surveys } });
   if (assetIds?.length) should.push({ terms: { asset_id: assetIds } });
   if (!should.length) return undefined;
   return should.length === 1 ? should[0]! : { bool: { should, minimum_should_match: 1 } };
-}
-
-function coverageFactFromHit(hit: ElasticsearchSearchHit, targetNside: number): AstroCoverageFact | undefined {
-  if (!isRecord(hit._source)) return undefined;
-  const source = hit._source;
-  const order = typeof source.healpix_order === "number" ? source.healpix_order : 8;
-  const pixel = typeof source.healpix_pixel === "number" ? source.healpix_pixel : NaN;
-  const objectCount = typeof source.objectCount === "number" ? source.objectCount : 0;
-  if (!Number.isSafeInteger(order) || !Number.isSafeInteger(pixel) || pixel < 0 || objectCount < 0) return undefined;
-  const sourceNside = 2 ** order;
-  if (sourceNside < targetNside || sourceNside > 256 || targetNside > sourceNside) return undefined;
-  const ratio = sourceNside / targetNside;
-  const targetPixel = Math.floor(pixel / (ratio * ratio));
-  const text = (name: string): string => typeof source[name] === "string" ? source[name] as string : "";
-  const assetId = text("asset_id");
-  const survey = text("survey");
-  const release = text("release");
-  const product = text("product");
-  const modality = text("modality");
-  if (!assetId || !survey || !release || !product || !modality) return undefined;
-  const coverageRole = (COVERAGE_ROLES as readonly unknown[]).includes(source.coverage_role)
-    ? source.coverage_role as CoverageRole
-    : undefined;
-  const dataOrigin = (DATA_ORIGINS as readonly unknown[]).includes(source.data_origin)
-    ? source.data_origin as CoverageDataOrigin
-    : undefined;
-  const sourceTier = (SOURCE_TIERS as readonly unknown[]).includes(source.source_tier)
-    ? source.source_tier as CoverageSourceTier
-    : undefined;
-  const maxOrder = typeof source.max_order === "number" && Number.isSafeInteger(source.max_order) ? source.max_order : undefined;
-  const queryOrder = typeof source.query_order === "number" && Number.isSafeInteger(source.query_order) ? source.query_order : undefined;
-  const previewOrder = typeof source.preview_order === "number" && Number.isSafeInteger(source.preview_order) ? source.preview_order : undefined;
-  return {
-    healpix_order: Math.log2(targetNside),
-    healpix_pixel: targetPixel,
-    objectCount,
-    survey,
-    release,
-    product,
-    modality,
-    asset_id: assetId,
-    ...(typeof source.source_file_id === "string" ? { source_file_id: source.source_file_id } : {}),
-    ...(typeof source.scan_run_id === "string" ? { scan_run_id: source.scan_run_id } : {}),
-    ...(coverageRole === undefined ? {} : { coverage_role: coverageRole }),
-    ...(dataOrigin === undefined ? {} : { data_origin: dataOrigin }),
-    ...(sourceTier === undefined ? {} : { source_tier: sourceTier }),
-    ...(maxOrder === undefined ? {} : { max_order: maxOrder }),
-    ...(queryOrder === undefined ? {} : { query_order: queryOrder }),
-    ...(previewOrder === undefined ? {} : { preview_order: previewOrder }),
-  };
 }
 
 function rangeFilter(input: NonNullable<NormalizedObjectRegionQuery["bbox"]>): Record<string, unknown> {
@@ -872,14 +645,6 @@ const OBJECT_SORT = [
   { source_file_id: "asc" },
   { object_id: "asc" },
 ] as const;
-
-const LEGACY_OBJECT_SORT = [{ ra_deg: "asc" }, { dec_deg: "asc" }, { _id: "asc" }] as const;
-
-function objectSort(input: NormalizedObjectRegionQuery): readonly Record<string, string>[] {
-  // Preserve cursors issued before the mapped tuple was introduced. New
-  // requests, including every HEALPix-region query, never sort on _id.
-  return !input.region && input.searchAfter?.length === LEGACY_OBJECT_SORT.length ? LEGACY_OBJECT_SORT : OBJECT_SORT;
-}
 
 function validateLayerScopes(value: unknown): SkyDataPointScope[] {
   if (!Array.isArray(value) || value.length > 512) throw new RangeError("layerScopes must be an array of at most 512 scopes");
@@ -922,7 +687,7 @@ function queryBody(input: NormalizedObjectRegionQuery): Record<string, unknown> 
     size: input.limit,
     _source: [...(input.includeAttributes ? OBJECT_SOURCE_FIELDS : OBJECT_POINT_SOURCE_FIELDS)],
     query: { bool: { filter: filters } },
-    sort: [...objectSort(input)],
+    sort: [...OBJECT_SORT],
     ...(input.searchAfter === undefined ? {} : { search_after: input.searchAfter }),
   };
 }
@@ -1034,6 +799,7 @@ function pointFromHit(hit: ElasticsearchSearchHit): AstroObjectRecord {
   return {
     ...Object.fromEntries(OBJECT_POINT_SOURCE_FIELDS.filter(field => !field.startsWith("attributes.") && source[field] !== undefined)
       .map(field => [field, source[field]])),
+    ...(typeof hit._id === "string" ? { id: hit._id } : {}),
     attributes: Object.fromEntries(["position_role", "source_id"].filter(field => attributes[field] !== undefined)
       .map(field => [field, attributes[field]])),
   } as unknown as AstroObjectRecord;
@@ -1086,266 +852,9 @@ function bulkResponseError(response: unknown): Error | undefined {
   return undefined;
 }
 
-function bulkTargetIndex(document: LocalScanDocument, objectIndex: string, coverageIndex: string): string {
-  const documentIndex = nonEmptyText(document._index, "document._index");
-  const defaultIndex = isObjectDocument(document) ? ASTRO_OBJECT_INDEX : ASTRO_COVERAGE_INDEX;
-  return documentIndex === defaultIndex
-    ? (isObjectDocument(document) ? objectIndex : coverageIndex)
-    : documentIndex;
-}
-
-interface NormalizedCellsQuery {
-  parentNside: number;
-  parentPixels: number[];
-  targetNside: number;
-  targetPixels: number[];
-  nativeRanges: NestedPixelRange[];
-  surveys?: string[];
-  releases?: string[];
-  products?: string[];
-  modalities?: string[];
-  assetIds?: string[];
-}
-
-function normalizeCellsQuery(input: AstroCellsQueryInput): NormalizedCellsQuery {
-  if (!isRecord(input)) throw new TypeError("sky cell query input is required");
-  const cells = input.cells;
-  const cellRecord = isRecord(cells) ? cells : undefined;
-  const parentNside = validateHealpixNside(input.parentNside ?? input.nside ?? cellRecord?.nside ?? cellRecord?.parentNside, "parentNside");
-  const parentPixels = validatePixelList(
-    input.parentPixels ?? input.pixels ?? (Array.isArray(cells) ? cells : cellRecord?.pixels ?? cellRecord?.parentPixels),
-    "parentPixels",
-    parentNside,
-  );
-  const targetNside = validateHealpixNside(input.targetNside, "targetNside");
-  if (targetNside < parentNside) throw new RangeError("targetNside must be at least parentNside");
-  const coordinateFrame = input.coordinateFrame ?? cellRecord?.coordinateFrame;
-  const ordering = input.ordering ?? cellRecord?.ordering;
-  if (coordinateFrame !== ASTRO_HEALPIX_COORDINATE_FRAME) {
-    throw new RangeError(`coordinateFrame must be ${ASTRO_HEALPIX_COORDINATE_FRAME}`);
-  }
-  if (ordering !== ASTRO_HEALPIX_ORDERING) throw new RangeError(`ordering must be ${ASTRO_HEALPIX_ORDERING}`);
-
-  const targetCellCount = parentPixels.length * 4 ** (Math.log2(targetNside) - Math.log2(parentNside));
-  if (targetCellCount > MAX_HEALPIX_TARGET_CELLS) {
-    throw new RangeError(`selected HEALPix region contains more than ${MAX_HEALPIX_TARGET_CELLS} target cells`);
-  }
-  return {
-    parentNside,
-    parentPixels,
-    targetNside,
-    targetPixels: nestedDescendantPixels(parentNside, parentPixels, targetNside),
-    nativeRanges: nestedDescendantRanges(parentNside, parentPixels),
-    surveys: validateFilterValues(input.surveyIds, "surveyIds"),
-    releases: validateFilterValues(input.releaseIds, "releaseIds"),
-    products: validateFilterValues(input.products, "products"),
-    modalities: validateFilterValues(input.modalities, "modalities"),
-    assetIds: validateFilterValues(input.assetIds, "assetIds"),
-  };
-}
-
-function densityQueryBody(input: NormalizedCellsQuery, after?: Record<string, string | number>): Record<string, unknown> {
-  const filters: unknown[] = [
-    healpixFilterFromRanges(input.nativeRanges),
-    { term: { healpix_order: ASTRO_OBJECT_NATIVE_ORDER } },
-  ];
-  for (const [field, values] of [
-    ["release", input.releases],
-    ["product", input.products],
-    ["modality", input.modalities],
-  ] as const) {
-    if (values?.length) filters.push({ terms: { [field]: values } });
-  }
-  const visibility = layerVisibilityFilter(input.surveys, input.assetIds);
-  if (visibility) filters.push(visibility);
-  const composite: Record<string, unknown> = {
-    size: COVERAGE_AGGREGATION_SIZE,
-    sources: [
-      { healpix_pixel: { terms: { field: "healpix_pixel" } } },
-      { asset_id: { terms: { field: "asset_id" } } },
-      { survey: { terms: { field: "survey" } } },
-      { release: { terms: { field: "release" } } },
-      { product: { terms: { field: "product" } } },
-      { modality: { terms: { field: "modality" } } },
-    ],
-    ...(after ? { after } : {}),
-  };
-  return {
-    size: 0,
-    track_total_hits: true,
-    query: { bool: { filter: filters } },
-    aggs: {
-      by_native_pixel_layer: {
-        composite,
-        aggs: { object_count: { sum: { field: "objectCount" } } },
-      },
-    },
-  };
-}
-
-function aggregateNumber(value: unknown): number {
-  const raw = isRecord(value) ? value.value : value;
-  return typeof raw === "number" && Number.isFinite(raw) && raw >= 0 ? raw : 0;
-}
-
-interface DensityAccumulatorCell {
-  count: number;
-  layers: Map<string, AstroDensityLayer>;
-}
-
-interface DensityAccumulator {
-  cells: Map<number, DensityAccumulatorCell>;
-}
-
-function densityLayer(
-  assetId: string,
-  surveyId: string,
-  releaseId: string,
-  product: string,
-  modality: string,
-  count: number,
-): AstroDensityLayer | undefined {
-  if (!assetId || !surveyId || !releaseId || !product || !modality || count <= 0) return undefined;
-  return {
-    key: [assetId, surveyId, releaseId, product, modality].join("\n"),
-    assetId,
-    surveyId,
-    releaseId,
-    product,
-    modality,
-    count,
-  };
-}
-
-function addDensityCount(
-  accumulator: DensityAccumulator,
-  targetPixels: ReadonlySet<number>,
-  nativePixel: number,
-  targetNside: number,
-  values: { assetId: string; surveyId: string; releaseId: string; product: string; modality: string },
-  count: number,
-): void {
-  if (!Number.isSafeInteger(nativePixel) || nativePixel < 0 || count <= 0) return;
-  const childCount = (ASTRO_OBJECT_NATIVE_NSIDE / targetNside) ** 2;
-  const targetPixel = Math.floor(nativePixel / childCount);
-  if (!targetPixels.has(targetPixel)) return;
-  const cell = accumulator.cells.get(targetPixel) ?? { count: 0, layers: new Map<string, AstroDensityLayer>() };
-  cell.count += count;
-  const layer = densityLayer(values.assetId, values.surveyId, values.releaseId, values.product, values.modality, count);
-  if (layer) {
-    const existing = cell.layers.get(layer.key);
-    if (existing) existing.count += layer.count;
-    else cell.layers.set(layer.key, layer);
-  }
-  accumulator.cells.set(targetPixel, cell);
-}
-
-function compositeBuckets(response: ElasticsearchSearchResponse): {
-  buckets: Record<string, unknown>[];
-  after?: Record<string, string | number>;
-} | undefined {
-  if (!isRecord(response.aggregations)) return undefined;
-  const aggregation = response.aggregations.by_native_pixel_layer;
-  if (!isRecord(aggregation) || !Array.isArray(aggregation.buckets)) return undefined;
-  const buckets = aggregation.buckets.filter(isRecord);
-  const rawAfter = aggregation.after_key;
-  let after: Record<string, string | number> | undefined;
-  if (isRecord(rawAfter)) {
-    const entries = Object.entries(rawAfter).filter(([, value]) => typeof value === "string" || typeof value === "number");
-    if (entries.length) after = Object.fromEntries(entries) as Record<string, string | number>;
-  }
-  return { buckets, ...(after ? { after } : {}) };
-}
-
-function addCompositeDensityBuckets(
-  response: ElasticsearchSearchResponse,
-  input: NormalizedCellsQuery,
-  accumulator: DensityAccumulator,
-): void {
-  const page = compositeBuckets(response);
-  if (!page) return;
-  const targetPixels = new Set(input.targetPixels);
-  for (const bucket of page.buckets) {
-    if (!isRecord(bucket.key)) continue;
-    const nativePixel = typeof bucket.key.healpix_pixel === "number" ? bucket.key.healpix_pixel : Number(bucket.key.healpix_pixel);
-    if (!Number.isSafeInteger(nativePixel)) continue;
-    addDensityCount(accumulator, targetPixels, nativePixel, input.targetNside, {
-      assetId: typeof bucket.key.asset_id === "string" ? bucket.key.asset_id : "",
-      surveyId: typeof bucket.key.survey === "string" ? bucket.key.survey : "",
-      releaseId: typeof bucket.key.release === "string" ? bucket.key.release : "",
-      product: typeof bucket.key.product === "string" ? bucket.key.product : "",
-      modality: typeof bucket.key.modality === "string" ? bucket.key.modality : "",
-    }, aggregateNumber(bucket.object_count));
-  }
-}
-
-function addHitDensityFacts(
-  response: ElasticsearchSearchResponse,
-  input: NormalizedCellsQuery,
-  accumulator: DensityAccumulator,
-): void {
-  const targetPixels = new Set(input.targetPixels);
-  for (const hit of hitsFromResponse(response)) {
-    if (!isRecord(hit._source)) continue;
-    const source = hit._source;
-    const nativePixel = typeof source.healpix_pixel === "number" ? source.healpix_pixel : NaN;
-    const count = typeof source.objectCount === "number" ? source.objectCount : 0;
-    if (!Number.isSafeInteger(nativePixel) || count <= 0) continue;
-    addDensityCount(accumulator, targetPixels, nativePixel, input.targetNside, {
-      assetId: typeof source.asset_id === "string" ? source.asset_id : "",
-      surveyId: typeof source.survey === "string" ? source.survey : "",
-      releaseId: typeof source.release === "string" ? source.release : "",
-      product: typeof source.product === "string" ? source.product : "",
-      modality: typeof source.modality === "string" ? source.modality : "",
-    }, count);
-  }
-}
-
-function cellsResult(
-  index: string,
-  input: NormalizedCellsQuery,
-  status: AstroObjectQueryStatus,
-  accumulator?: DensityAccumulator,
-  message?: string,
-): AstroCellsQueryResult {
-  const cells = input.targetPixels.map((pixel) => {
-    const accumulated = accumulator?.cells.get(pixel);
-    return {
-      nside: input.targetNside,
-      pixel,
-      count: accumulated?.count ?? 0,
-      layers: [...(accumulated?.layers.values() ?? [])].sort((left, right) => left.key.localeCompare(right.key)),
-    } satisfies AstroDensityCell;
-  });
-  const layersByKey = new Map<string, AstroDensityLayer>();
-  for (const cell of cells) {
-    for (const layer of cell.layers) {
-      const existing = layersByKey.get(layer.key);
-      if (existing) existing.count += layer.count;
-      else layersByKey.set(layer.key, { ...layer });
-    }
-  }
-  return {
-    status,
-    index,
-    coordinateFrame: ASTRO_HEALPIX_COORDINATE_FRAME,
-    ordering: ASTRO_HEALPIX_ORDERING,
-    parentNside: input.parentNside,
-    parentPixels: [...input.parentPixels],
-    targetNside: input.targetNside,
-    nativeNside: ASTRO_OBJECT_NATIVE_NSIDE,
-    evidence: "coverage_facts",
-    cells,
-    layers: [...layersByKey.values()].sort((left, right) => left.key.localeCompare(right.key)),
-    total: cells.reduce((sum, cell) => sum + cell.count, 0),
-    ...(message ? { message } : {}),
-  };
-}
-
 export class AstroObjectIndexService {
   readonly #baseUrl: string;
   readonly #objectIndex: string;
-  readonly #coverageIndex: string;
   readonly #timeoutMs: number;
   readonly #authorization?: string;
   readonly #dataBatches?: AstroObjectIndexOptions["dataBatches"];
@@ -1361,11 +870,6 @@ export class AstroObjectIndexService {
       "objectIndex",
       ASTRO_OBJECT_INDEX,
     );
-    this.#coverageIndex = normalizeIndex(
-      options.coverageIndex ?? process.env.ASTRO_ES_COVERAGE_INDEX,
-      "coverageIndex",
-      ASTRO_COVERAGE_INDEX,
-    );
     this.#timeoutMs = normalizeTimeout(
       options.timeoutMs ?? Number(process.env.ASTRO_ES_TIMEOUT_MS ?? DEFAULT_TIMEOUT_MS),
       DEFAULT_TIMEOUT_MS,
@@ -1380,10 +884,6 @@ export class AstroObjectIndexService {
     return this.#objectIndex;
   }
 
-  get coverageIndex(): string {
-    return this.#coverageIndex;
-  }
-
   get imageFootprintIndex(): string {
     return ASTRO_IMAGE_FOOTPRINT_INDEX;
   }
@@ -1391,7 +891,7 @@ export class AstroObjectIndexService {
   async getPoint(id: string, readIndices: readonly string[], signal?: AbortSignal): Promise<AstroObjectRecord | undefined> {
     if (!id || id.length > 512) throw new RangeError("Invalid point identity");
     const indices = readIndices.map((index) => normalizeIndex(index, "readIndex", this.#objectIndex));
-    const result = await this.#requestJson(`/${indices.map(encodeURIComponent).join(",")}/_search?ignore_unavailable=true`, JSON.stringify({ size: 1, query: { term: { object_id: id } } }), "application/json", signal) as ElasticsearchSearchResponse;
+    const result = await this.#requestJson(`/${indices.map(encodeURIComponent).join(",")}/_search?ignore_unavailable=true`, JSON.stringify({ size: 1, query: { ids: { values: [id] } } }), "application/json", signal) as ElasticsearchSearchResponse;
     return hitsFromResponse(result).map((hit) => objectFromHit(hit)).find((value) => value !== undefined);
   }
 
@@ -1445,6 +945,10 @@ export class AstroObjectIndexService {
         dec_max: { type: "double" },
       },
     });
+    await this.#ensureIndex(ASTRO_FILE_INDEX, { dynamic: "strict", properties: {
+      ...Object.fromEntries(["file_id", "asset_id", "scan_run_id", "data_batch_id", "source_uri", "survey", "release", "product", "modality", "spatial_status", "precision"].map(key => [key, { type: "keyword" }])),
+      size_bytes: { type: "long" }, coverage_cells: { type: "integer" },
+    } });
     if (this.#dataBatches && !this.#batchMappingsReady) {
       for (const index of new Set([this.#objectIndex, this.imageFootprintIndex])) {
         await this.#requestJson(`/${encodeURIComponent(index)}/_mapping`, JSON.stringify({ properties: { data_batch_id: { type: "keyword" } } }), "application/json");
@@ -1454,7 +958,7 @@ export class AstroObjectIndexService {
   }
 
   async refresh(): Promise<void> {
-    await this.#requestJson(`/${this.#objectIndex},${this.imageFootprintIndex}/_refresh`, "{}", "application/json");
+    await this.#requestJson(`/${this.#objectIndex},${this.imageFootprintIndex},${ASTRO_FILE_INDEX}/_refresh`, "", "application/json");
   }
 
   async bulkImageFootprints(documents: AstroImageFootprintDocument[]): Promise<number> {
@@ -1524,13 +1028,22 @@ export class AstroObjectIndexService {
     return { pointIds, total, truncated: total > pointIds.length };
   }
 
-  async bulk(documents: LocalScanDocument[]): Promise<{ objectCount: number; coverageCount: number }> {
+  async bulkFiles(documents: AstroFileDocument[]): Promise<void> {
+    for (const document of documents) {
+      const { _id, ...source } = document;
+      if (!/^[a-f0-9]{64}$/.test(_id) || !document.data_batch_id || !document.asset_id) throw new RangeError("Invalid file identity");
+      const payload = JSON.stringify({ index: { _index: ASTRO_FILE_INDEX, _id } }) + "\n" + JSON.stringify(source) + "\n";
+      if (Buffer.byteLength(payload) > 8 * 1024 * 1024) throw new RangeError("File coverage exceeds 8 MiB");
+      await this.#writeBulk(payload);
+    }
+  }
+
+  async bulk(documents: LocalObjectIndexDocument[]): Promise<{ objectCount: number }> {
     if (!this.configured) throw new Error("ASTRO_ES_URL is not configured; cannot bulk index local scan documents");
     if (!Array.isArray(documents)) throw new TypeError("documents must be an array");
-    if (!documents.length) return { objectCount: 0, coverageCount: 0 };
+    if (!documents.length) return { objectCount: 0 };
 
     let objectCount = 0;
-    let coverageCount = 0;
     let lines: string[] = [];
     let documentCount = 0;
     let bytes = 0;
@@ -1545,12 +1058,8 @@ export class AstroObjectIndexService {
 
     for (const document of documents) {
       if (!isRecord(document)) throw new TypeError("bulk documents must be objects");
-      if (!isObjectDocument(document)) {
-        if (!("healpix_pixel" in document) || !("objectCount" in document)) {
-          throw new TypeError("bulk document is neither an object nor a coverage document");
-        }
-      }
-      const payload = bulkLinesFor(document, bulkTargetIndex(document, this.#objectIndex, this.#coverageIndex));
+      if (!("object_id" in document)) throw new TypeError("bulk requires position documents");
+      const payload = bulkLinesFor(document, this.#objectIndex);
       const payloadBytes = Buffer.byteLength(payload, "utf8");
       if (payloadBytes > MAX_BULK_BYTES) {
         throw new RangeError(`bulk document ${document._id} exceeds the ${MAX_BULK_BYTES} byte request limit`);
@@ -1561,151 +1070,10 @@ export class AstroObjectIndexService {
       lines.push(payload);
       documentCount += 1;
       bytes += payloadBytes;
-      if (isObjectDocument(document)) objectCount += 1;
-      else coverageCount += 1;
+      objectCount += 1;
     }
     await flush();
-    return { objectCount, coverageCount };
-  }
-
-  async queryCoverageFacts(input: AstroCoverageFactQueryInput, signal?: AbortSignal): Promise<AstroCoverageFactQueryResult> {
-    signal?.throwIfAborted();
-    const normalized = validateCoverageInput(input);
-    if (!this.configured) {
-      return {
-        status: "unavailable",
-        index: this.#coverageIndex,
-        nside: normalized.nside,
-        facts: [],
-        pixels: [],
-        message: "ASTRO_ES_URL is not configured",
-      };
-    }
-
-    try {
-      const response = await this.#requestJson(
-        `/${encodeURIComponent(this.#coverageIndex)}/_search`,
-        JSON.stringify(coverageQueryBody(normalized)),
-        "application/json",
-        signal,
-      ) as ElasticsearchSearchResponse;
-      const merged = new Map<string, AstroCoverageFact>();
-      for (const hit of hitsFromResponse(response)) {
-        const nativeOrder = isRecord(hit._source) ? hit._source.healpix_order : undefined;
-        const fact = coverageFactFromHit(hit, normalized.preserveSources && typeof nativeOrder === "number" ? 2 ** nativeOrder : normalized.nside);
-        if (!fact) continue;
-        const key = [fact.asset_id, fact.survey, fact.release, fact.product, fact.modality, fact.healpix_pixel,
-          ...(normalized.preserveSources ? [fact.source_file_id, fact.scan_run_id] : [])].join("\n");
-        const existing = merged.get(key);
-        if (existing) existing.objectCount += fact.objectCount;
-        else merged.set(key, fact);
-      }
-      const facts = [...merged.values()].sort((left, right) =>
-        left.asset_id.localeCompare(right.asset_id)
-        || left.healpix_pixel - right.healpix_pixel
-        || left.release.localeCompare(right.release)
-        || left.product.localeCompare(right.product));
-      return {
-        status: "ready",
-        index: this.#coverageIndex,
-        nside: normalized.nside,
-        facts,
-        pixels: [...new Set(facts.map((fact) => fact.healpix_pixel))].sort((left, right) => left - right),
-        ...(hitsFromResponse(response).length === 10_000 ? { message: "Local coverage metadata reached its 10,000 record limit; directory results may be incomplete." } : {}),
-      };
-    } catch (error) {
-      signal?.throwIfAborted();
-      const message = error instanceof Error ? error.message : String(error);
-      return {
-        status: error instanceof ElasticsearchUnavailableError ? "unavailable" : "error",
-        index: this.#coverageIndex,
-        nside: normalized.nside,
-        facts: [],
-        pixels: [],
-        message,
-      };
-    }
-  }
-
-  async queryCells(input: AstroCellsQueryInput): Promise<AstroCellsQueryResult> {
-    const normalized = normalizeCellsQuery(input);
-    if (!this.configured) {
-      return cellsResult(
-        this.#coverageIndex,
-        normalized,
-        "unavailable",
-        undefined,
-        "ASTRO_ES_URL is not configured",
-      );
-    }
-
-    try {
-      const accumulator: DensityAccumulator = { cells: new Map() };
-      let after: Record<string, string | number> | undefined;
-      let exhausted = false;
-      for (let pageNumber = 0; pageNumber < MAX_COVERAGE_AGGREGATION_PAGES; pageNumber += 1) {
-        const response = await this.#requestJson(
-          `/${encodeURIComponent(this.#coverageIndex)}/_search`,
-          JSON.stringify(densityQueryBody(normalized, after)),
-          "application/json",
-        ) as ElasticsearchSearchResponse;
-        const page = compositeBuckets(response);
-        if (!page) {
-          // A small compatibility fallback handles ES-compatible test doubles
-          // and older coverage indices that do not support composite aggs.
-          addHitDensityFacts(response, normalized, accumulator);
-          exhausted = true;
-          break;
-        }
-        addCompositeDensityBuckets(response, normalized, accumulator);
-        if (!page.after || !page.buckets.length) {
-          exhausted = true;
-          break;
-        }
-        after = page.after;
-      }
-      if (!exhausted) throw new Error(`coverage aggregation exceeded ${MAX_COVERAGE_AGGREGATION_PAGES} pages`);
-      return cellsResult(this.#coverageIndex, normalized, "ready", accumulator);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      return cellsResult(
-        this.#coverageIndex,
-        normalized,
-        error instanceof ElasticsearchUnavailableError ? "unavailable" : "error",
-        undefined,
-        message,
-      );
-    }
-  }
-
-  async queryPointCoverage(input: { assetId: string; nside: number }, readIndices: readonly string[] = [this.#objectIndex], signal?: AbortSignal): Promise<AstroPointCoverageResult> {
-    signal?.throwIfAborted();
-    validateCoverageInput({ nside: input.nside });
-    if (!input.assetId.trim()) throw new RangeError("Point coverage requires an assetId");
-    const index = readIndices.map(value => normalizeIndex(value, "readIndex", this.#objectIndex)).join(",");
-    const empty = { index, nside: input.nside, pixels: [], total: 0, truncated: false };
-    if (!this.configured) return { ...empty, status: "unavailable", message: "ASTRO_ES_URL is not configured" };
-    try {
-      const response = await this.#requestJson(`/${encodeURIComponent(index)}/_search?ignore_unavailable=true`, JSON.stringify({
-        size: 0, track_total_hits: true,
-        query: { bool: { filter: [{ term: { asset_id: input.assetId } }, { term: { healpix_order: ASTRO_OBJECT_NATIVE_ORDER } }] } },
-        aggs: { point_cells: { terms: {
-          script: { source: "doc['healpix_pixel'].value / params.factor", params: { factor: (ASTRO_OBJECT_NATIVE_NSIDE / input.nside) ** 2 } },
-          size: Math.min(10_000, 12 * input.nside ** 2),
-        } } },
-      }), "application/json", signal) as ElasticsearchSearchResponse;
-      if (response.timed_out || (isRecord(response._shards) && Number(response._shards.failed) > 0)) throw new Error("Point coverage query did not complete");
-      const cells = isRecord(response.aggregations) && isRecord(response.aggregations.point_cells) ? response.aggregations.point_cells : undefined;
-      if (!cells || !Array.isArray(cells.buckets)) throw new Error("Point coverage aggregation is missing");
-      const pixels = cells.buckets.map(bucket => isRecord(bucket) ? Number(bucket.key) : NaN)
-        .filter(pixel => Number.isSafeInteger(pixel) && pixel >= 0 && pixel < 12 * input.nside ** 2).sort((a, b) => a - b);
-      const truncated = Number(cells.sum_other_doc_count) > 0;
-      return { index, nside: input.nside, pixels, total: totalFromHits(response.hits?.total), status: "ready", truncated,
-        ...(truncated ? { message: "数据点预览仅显示部分已索引区域" } : {}) };
-    } catch (error) {
-      signal?.throwIfAborted();
-      return { ...empty, status: error instanceof ElasticsearchUnavailableError ? "unavailable" : "error", message: error instanceof Error ? error.message : String(error) };
-    }
+    return { objectCount };
   }
 
   async queryPointDensity(input: AstroPointDensityQueryInput, readIndices: readonly string[] = [this.#objectIndex], signal?: AbortSignal): Promise<AstroPointDensityResult> {
@@ -1950,4 +1318,4 @@ export class AstroObjectIndexService {
   }
 }
 
-export type { LocalScanDocument } from "./local-scan.js";
+export type { LocalObjectIndexDocument } from "./local-scan.js";

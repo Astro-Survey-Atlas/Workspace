@@ -4,7 +4,6 @@ import test from "node:test";
 import { Healpix, Hploc } from "healpixjs";
 
 import {
-  ASTRO_COVERAGE_INDEX,
   ASTRO_IMAGE_FOOTPRINT_INDEX,
   ASTRO_OBJECT_INDEX,
   ASTRO_OBJECT_NATIVE_NSIDE,
@@ -19,7 +18,7 @@ import {
   type AstroPointDensityQueryInput,
   type ObjectRegionQueryInput,
 } from "../src/astro-object-index.js";
-import type { LocalScanDocument } from "../src/local-scan.js";
+import type { LocalObjectIndexDocument } from "../src/local-scan.js";
 import { responseCancellation } from "../src/http-request-cancellation.js";
 
 async function requestBody(request: IncomingMessage): Promise<string> {
@@ -32,13 +31,18 @@ async function withServer(
   handler: (request: IncomingMessage, response: ServerResponse) => void | Promise<void>,
   callback: (baseUrl: string) => Promise<void>,
 ): Promise<void> {
-  const server = createServer(handler);
+  const failures: unknown[] = [];
+  const server = createServer((request, response) => { void Promise.resolve(handler(request, response)).catch(error => {
+    failures.push(error); response.statusCode = 500; response.end(JSON.stringify({error: String(error)}));
+  }); });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   const address = server.address();
   assert.ok(address && typeof address === "object");
   try {
     await callback(`http://127.0.0.1:${address.port}`);
+    if (failures.length) throw failures[0];
   } finally {
+    server.closeAllConnections();
     await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
   }
 }
@@ -60,7 +64,7 @@ test("viewport results exclude file metadata and duplicate coordinates while ret
     const result = await index.queryObjects({ bbox: { raMin: 0, raMax: 20, decMin: 0, decMax: 5 }, layerScopes: [{ assetId: "w2" }], includeAttributes: false, trackTotalHits: false });
     assert.equal(result.status, "ready");
     assert.deepEqual(scopedAssets, ["w2"]);
-    assert.deepEqual(result.objects, [{ object_id: "target", ra_deg: 10, dec_deg: 2, asset_id: "w2", survey: "csst", release: "w2", product: "image", modality: "imaging", attributes: { source_id: "source", position_role: "image_center" } }]);
+    assert.deepEqual(result.objects, [{ id: "duplicate-es-id", object_id: "target", ra_deg: 10, dec_deg: 2, asset_id: "w2", survey: "csst", release: "w2", product: "image", modality: "imaging", attributes: { source_id: "source", position_role: "image_center" } }]);
     assert.deepEqual(result.nextCursor, [123, 10, 2, "w2", "file", "target"]);
     assert.equal(result.total, 1);
   });
@@ -103,27 +107,8 @@ test("disconnecting a viewport client closes its Elasticsearch request", async (
   });
 });
 
-test("point preview aggregates real indexed positions even when coverage facts have not been published", async () => {
-  await withServer(async (request, response) => {
-    assert.equal(decodeURIComponent(request.url!), "/astro_object_index_v1,astro_data_point_index_v1/_search?ignore_unavailable=true");
-    const body = JSON.parse(await requestBody(request));
-    assert.deepEqual(body.query.bool.filter, [{ term: { asset_id: "cosmos" } }, { term: { healpix_order: 8 } }]);
-    assert.equal(body.size, 0, "coverage must aggregate, never download the full catalog");
-    assert.equal(body.aggs.point_cells.terms.script.params.factor, 256);
-    response.setHeader("Content-Type", "application/json");
-    response.end(JSON.stringify({ hits: { total: { value: 1720500, relation: "eq" } },
-      aggregations: { point_cells: { sum_other_doc_count: 0, buckets: [{ key: 1640, doc_count: 1720500 }] } } }));
-  }, async baseUrl => {
-    const index = new AstroObjectIndexService({ baseUrl });
-    const result = await index.queryPointCoverage({ assetId: "cosmos", nside: 16 }, [ASTRO_OBJECT_INDEX, "astro_data_point_index_v1"]);
-    assert.equal(result.status, "ready");
-    assert.equal(result.total, 1720500);
-    assert.deepEqual(result.pixels, [1640]);
-    assert.equal(result.truncated, false);
-  });
-});
 
-function objectDocument(id: string, survey = "survey-a"): LocalScanDocument {
+function objectDocument(id: string, survey = "survey-a"): LocalObjectIndexDocument {
   return {
     _index: ASTRO_OBJECT_INDEX,
     _id: `object-${id}`,
@@ -141,23 +126,6 @@ function objectDocument(id: string, survey = "survey-a"): LocalScanDocument {
     source_file_id: "file-1",
     scan_run_id: "run-1",
     attributes: { flux: "4.2", label: "source" },
-  };
-}
-
-function coverageDocument(): LocalScanDocument {
-  return {
-    _index: ASTRO_COVERAGE_INDEX,
-    _id: "coverage-1",
-    healpix_order: 8,
-    healpix_pixel: 123,
-    objectCount: 1,
-    survey: "survey-a",
-    release: "release-1",
-    product: "catalog",
-    modality: "optical",
-    asset_id: "asset-survey-a",
-    source_file_id: "file-1",
-    scan_run_id: "run-1",
   };
 }
 
@@ -218,8 +186,8 @@ test("bulk sends object and coverage documents as action/source NDJSON", async (
     }));
   }, async (baseUrl) => {
     const service = new AstroObjectIndexService({ baseUrl });
-    const result = await service.bulk([objectDocument("one"), coverageDocument()]);
-    assert.deepEqual(result, { objectCount: 1, coverageCount: 1 });
+    const result = await service.bulk([objectDocument("one")]);
+    assert.deepEqual(result, { objectCount: 1 });
   });
 
   assert.equal(requests.length, 1);
@@ -227,15 +195,10 @@ test("bulk sends object and coverage documents as action/source NDJSON", async (
   assert.match(requests[0]?.contentType ?? "", /^application\/x-ndjson/);
   const lines = requests[0]?.lines ?? [];
   assert.deepEqual(lines[0], { index: { _index: ASTRO_OBJECT_INDEX, _id: "object-one" } });
-  assert.deepEqual(lines[2], { index: { _index: ASTRO_COVERAGE_INDEX, _id: "coverage-1" } });
   assert.ok(lines[1] && typeof lines[1] === "object");
-  assert.ok(lines[3] && typeof lines[3] === "object");
   assert.equal("_index" in (lines[1] as Record<string, unknown>), false);
   assert.equal("_id" in (lines[1] as Record<string, unknown>), false);
-  assert.equal("_index" in (lines[3] as Record<string, unknown>), false);
-  assert.equal("_id" in (lines[3] as Record<string, unknown>), false);
   assert.equal((lines[1] as Record<string, unknown>).object_id, "one");
-  assert.equal((lines[3] as Record<string, unknown>).objectCount, 1);
 });
 
 test("ensureIndices creates strict object and coverage mappings when absent", async () => {
@@ -253,14 +216,14 @@ test("ensureIndices creates strict object and coverage mappings when absent", as
   }, async (baseUrl) => {
     await new AstroObjectIndexService({ baseUrl }).ensureIndices();
   });
-  assert.deepEqual(created.map((request) => request.url), [`/${ASTRO_OBJECT_INDEX}`, `/${ASTRO_COVERAGE_INDEX}`, `/${ASTRO_IMAGE_FOOTPRINT_INDEX}`]);
+  assert.deepEqual(created.map((request) => request.url), [`/${ASTRO_OBJECT_INDEX}`, `/${ASTRO_IMAGE_FOOTPRINT_INDEX}`, `/astro_file_index_v2`]);
   const objectMappings = created[0]?.body.mappings as { dynamic?: unknown; properties?: Record<string, { type?: string }> };
   assert.equal(objectMappings.dynamic, "strict");
   assert.equal(objectMappings.properties?.sky_position?.type, "geo_point");
   assert.equal(objectMappings.properties?.attributes?.type, "flattened");
-  const coverageMappings = created[1]?.body.mappings as { properties?: Record<string, { type?: string }> };
-  assert.equal(coverageMappings.properties?.healpix_pixel?.type, "integer");
-  const footprintMappings = created[2]?.body.mappings as { dynamic?: unknown; properties?: Record<string, { type?: string }> };
+  const coverageMappings = created[2]?.body.mappings as { properties?: Record<string, { type?: string }> };
+  assert.equal(coverageMappings.properties?.coverage_cells?.type, "integer");
+  const footprintMappings = created[1]?.body.mappings as { dynamic?: unknown; properties?: Record<string, { type?: string }> };
   assert.equal(footprintMappings.dynamic, "strict");
   assert.equal(footprintMappings.properties?.source_id?.type, "keyword");
   assert.equal(footprintMappings.properties?.ra_min?.type, "double");
@@ -279,12 +242,12 @@ test("query builds a wrapped bbox with deduplicated multi-survey filters and sea
           {
             _id: "object-one",
             _source: { ...objectDocument("one", "survey-a"), _index: "ignored", _id: "ignored" },
-            sort: [359, -3.25, "object-one"],
+            sort: [500, 359, -3.25, "asset-survey-a", "file-1", "one"],
           },
           {
             _id: "object-two",
             _source: { ...objectDocument("two", "survey-b"), _index: "ignored", _id: "ignored" },
-            sort: [3, -2, "object-two"],
+            sort: [501, 3, -2, "asset-survey-b", "file-1", "two"],
           },
         ],
       },
@@ -298,22 +261,22 @@ test("query builds a wrapped bbox with deduplicated multi-survey filters and sea
       products: ["catalog"],
       assetIds: ["asset-survey-a", "asset-survey-b"],
       limit: 25,
-      searchAfter: [350, -5, "previous-id"],
+      searchAfter: [499, 350, -5, "asset-survey-a", "file-1", "previous-id"],
     });
 
     assert.equal(result.status, "ready");
     assert.equal(result.index, ASTRO_OBJECT_INDEX);
     assert.equal(result.total, 2);
     assert.equal(result.limit, 25);
-    assert.deepEqual(result.searchAfter, [3, -2, "object-two"]);
+    assert.deepEqual(result.searchAfter, [501, 3, -2, "asset-survey-b", "file-1", "two"]);
     assert.deepEqual(result.objects.map((object) => object.survey), ["survey-a", "survey-b"]);
     assert.equal(result.objects[0]?.id, "object-one");
     assert.deepEqual(result.objects[0]?.attributes, { flux: "4.2", label: "source" });
     assert.equal("_index" in (result.objects[0] ?? {}), false);
   });
 
-  assert.deepEqual(queryBody?.sort, [{ ra_deg: "asc" }, { dec_deg: "asc" }, { _id: "asc" }]);
-  assert.deepEqual(queryBody?.search_after, [350, -5, "previous-id"]);
+  assert.deepEqual(queryBody?.sort, [{ healpix_pixel: "asc" }, { ra_deg: "asc" }, { dec_deg: "asc" }, { asset_id: "asc" }, { source_file_id: "asc" }, { object_id: "asc" }]);
+  assert.deepEqual(queryBody?.search_after, [499, 350, -5, "asset-survey-a", "file-1", "previous-id"]);
   assert.equal(queryBody?.size, 25);
   assert.deepEqual(queryBody?._source, [
     "object_id",
@@ -329,7 +292,7 @@ test("query builds a wrapped bbox with deduplicated multi-survey filters and sea
     "asset_id",
     "source_file_id",
     "scan_run_id",
-    "attributes",
+    "attributes", "evidence_ref",
   ]);
   const filters = ((queryBody?.query as Record<string, unknown>).bool as Record<string, unknown>).filter as unknown[];
   assert.deepEqual(filters[0], {
@@ -429,94 +392,7 @@ test("large NESTED regions use exact mapped ranges and validate coordinate metad
   }), /coordinateFrame.*ICRS/);
 });
 
-test("queryCells returns every target cell and aggregates coverage facts by layer", async () => {
-  let queryBody: Record<string, unknown> | undefined;
-  await withServer(async (request, response) => {
-    queryBody = JSON.parse(await requestBody(request)) as Record<string, unknown>;
-    response.setHeader("Content-Type", "application/json");
-    response.end(JSON.stringify({
-      aggregations: {
-        by_native_pixel_layer: {
-          buckets: [
-            {
-              key: { healpix_pixel: 256, asset_id: "asset-a", survey: "survey-a", release: "release-1", product: "catalog", modality: "optical" },
-              doc_count: 1,
-              object_count: { value: 7 },
-            },
-            {
-              key: { healpix_pixel: 512, asset_id: "asset-a", survey: "survey-a", release: "release-1", product: "catalog", modality: "optical" },
-              doc_count: 2,
-              object_count: { value: 2 },
-            },
-            {
-              key: { healpix_pixel: 512, asset_id: "asset-b", survey: "survey-b", release: "release-2", product: "spectra", modality: "spectroscopy" },
-              doc_count: 1,
-              object_count: { value: 4 },
-            },
-          ],
-        },
-      },
-    }));
-  }, async (baseUrl) => {
-    const result = await new AstroObjectIndexService({ baseUrl }).queryCells({
-      parentNside: 16,
-      parentPixels: [1, 2],
-      targetNside: 16,
-      coordinateFrame: "ICRS",
-      ordering: "NESTED",
-      assetIds: ["asset-a", "asset-b"],
-      surveyIds: ["survey-a", "survey-b"],
-      releaseIds: ["release-1", "release-2"],
-      products: ["catalog", "spectra"],
-      modalities: ["optical", "spectroscopy"],
-    });
-    assert.equal(result.status, "ready");
-    assert.equal(result.nativeNside, 256);
-    assert.equal(result.evidence, "coverage_facts");
-    assert.equal(result.total, 13);
-    assert.deepEqual(result.cells.map((cell) => ({ pixel: cell.pixel, count: cell.count, layers: cell.layers.map((layer) => [layer.assetId, layer.count]) })), [
-      { pixel: 1, count: 7, layers: [["asset-a", 7]] },
-      { pixel: 2, count: 6, layers: [["asset-a", 2], ["asset-b", 4]] },
-    ]);
-    assert.deepEqual(result.layers.map((layer) => [layer.assetId, layer.count]), [["asset-a", 9], ["asset-b", 4]]);
-  });
 
-  assert.equal(queryBody?.size, 0);
-  const filters = ((queryBody?.query as Record<string, unknown>).bool as Record<string, unknown>).filter as unknown[];
-  assert.deepEqual(filters[0], { terms: { healpix_pixel: Array.from({ length: 512 }, (_, index) => index + 256) } });
-  assert.deepEqual(filters[1], { term: { healpix_order: 8 } });
-  assert.deepEqual(filters[2], { terms: { release: ["release-1", "release-2"] } });
-  assert.deepEqual(filters[3], { terms: { product: ["catalog", "spectra"] } });
-  assert.deepEqual(filters[4], { terms: { modality: ["optical", "spectroscopy"] } });
-  assert.deepEqual(filters[5], {
-    bool: {
-      should: [
-        { terms: { survey: ["survey-a", "survey-b"] } },
-        { terms: { asset_id: ["asset-a", "asset-b"] } },
-      ],
-      minimum_should_match: 1,
-    },
-  });
-});
-
-test("queryCells validates ICRS/NESTED and reports an unavailable ES index", async () => {
-  const input = {
-    parentNside: 16,
-    parentPixels: [2],
-    targetNside: 32,
-    coordinateFrame: "ICRS",
-    ordering: "NESTED",
-  } as const;
-  const unavailable = await new AstroObjectIndexService({ baseUrl: "" }).queryCells(input);
-  assert.equal(unavailable.status, "unavailable");
-  assert.equal(unavailable.nativeNside, 256);
-  assert.equal(unavailable.total, 0);
-  assert.deepEqual(unavailable.cells, Array.from({ length: 4 }, (_, index) => ({ nside: 32, pixel: 8 + index, count: 0, layers: [] })));
-  await assert.rejects(() => new AstroObjectIndexService({ baseUrl: "http://127.0.0.1:1" }).queryCells({
-    ...input,
-    ordering: "RING",
-  }), /ordering.*NESTED/);
-});
 
 test("query rejects invalid bbox, limits, filters, and search_after before HTTP", async () => {
   const service = new AstroObjectIndexService({ baseUrl: "http://127.0.0.1:1" });
@@ -528,97 +404,7 @@ test("query rejects invalid bbox, limits, filters, and search_after before HTTP"
   await assert.rejects(() => service.queryObjects(validQuery({ searchAfter: Array.from({ length: 101 }, (_, index) => index) })), /searchAfter/);
 });
 
-test("queryCoverageFacts filters, downsamples, merges, and sorts coverage facts", async () => {
-  let queryBody: Record<string, unknown> | undefined;
-  await withServer(async (request, response) => {
-    assert.equal(request.url, `/${encodeURIComponent(ASTRO_COVERAGE_INDEX)}/_search`);
-    queryBody = JSON.parse(await requestBody(request)) as Record<string, unknown>;
-    response.setHeader("Content-Type", "application/json");
-    response.end(JSON.stringify({
-      hits: {
-        total: { value: 4, relation: "eq" },
-        hits: [
-          {
-            _source: {
-              healpix_order: 8, healpix_pixel: 256, objectCount: 2,
-              survey: "survey-a", release: "release-1", product: "catalog", modality: "optical", asset_id: "asset-a",
-            },
-          },
-          {
-            _source: {
-              healpix_order: 8, healpix_pixel: 256, objectCount: 3,
-              survey: "survey-a", release: "release-1", product: "catalog", modality: "optical", asset_id: "asset-a",
-            },
-          },
-          {
-            _source: {
-              healpix_order: 8, healpix_pixel: 512, objectCount: 1,
-              survey: "survey-a", release: "release-1", product: "catalog", modality: "optical", asset_id: "asset-a",
-            },
-          },
-          {
-            _source: {
-              healpix_order: 8, healpix_pixel: 768, objectCount: 4,
-              survey: "survey-a", release: "release-1", product: "catalog", modality: "optical", asset_id: "asset-b",
-            },
-          },
-        ],
-      },
-    }));
-  }, async (baseUrl) => {
-    const result = await new AstroObjectIndexService({ baseUrl }).queryCoverageFacts({
-      nside: 16,
-      surveys: [" survey-a ", "survey-a"],
-      releases: ["release-1"],
-      products: ["catalog"],
-      assetIds: ["asset-a", "asset-b"],
-    });
 
-    assert.equal(result.status, "ready");
-    assert.equal(result.nside, 16);
-    assert.deepEqual(result.pixels, [1, 2, 3]);
-    assert.deepEqual(result.facts.map((fact) => ({ asset: fact.asset_id, pixel: fact.healpix_pixel, count: fact.objectCount })), [
-      { asset: "asset-a", pixel: 1, count: 5 },
-      { asset: "asset-a", pixel: 2, count: 1 },
-      { asset: "asset-b", pixel: 3, count: 4 },
-    ]);
-    assert.equal(result.facts.every((fact) => fact.healpix_order === 4), true);
-  });
-
-  assert.equal(queryBody?.track_total_hits, true);
-  assert.equal(queryBody?.size, 10_000);
-  assert.deepEqual(queryBody?._source, [
-    "healpix_order", "healpix_pixel", "objectCount", "survey", "release", "product", "modality", "asset_id", "source_file_id", "scan_run_id",
-    "coverage_role", "data_origin", "source_tier", "max_order", "query_order", "preview_order",
-  ]);
-  assert.deepEqual(queryBody?.sort, [
-    { healpix_pixel: "asc" }, { asset_id: "asc" }, { release: "asc" }, { product: "asc" },
-  ]);
-  const filters = ((queryBody?.query as Record<string, unknown>).bool as Record<string, unknown>).filter as unknown[];
-  assert.deepEqual(filters, [
-    { terms: { release: ["release-1"] } },
-    { terms: { product: ["catalog"] } },
-    {
-      bool: {
-        should: [
-          { terms: { survey: ["survey-a"] } },
-          { terms: { asset_id: ["asset-a", "asset-b"] } },
-        ],
-        minimum_should_match: 1,
-      },
-    },
-  ]);
-});
-
-test("unconfigured coverage facts report unavailable", async () => {
-  const result = await new AstroObjectIndexService({ baseUrl: "" }).queryCoverageFacts({ nside: 16 });
-  assert.equal(result.status, "unavailable");
-  assert.equal(result.index, ASTRO_COVERAGE_INDEX);
-  assert.deepEqual(result.facts, []);
-  assert.deepEqual(result.pixels, []);
-  assert.match(result.message ?? "", /ASTRO_ES_URL/);
-  await assert.rejects(() => new AstroObjectIndexService({ baseUrl: "http://127.0.0.1:1" }).queryCoverageFacts({ nside: 3 }), /power of two/);
-});
 
 test("bulk rejects Elasticsearch item errors", async () => {
   await withServer(async (request, response) => {
@@ -643,7 +429,7 @@ test("a transient index write retries the same stable IDs before advancing scan 
     response.end(JSON.stringify({ errors: false, items: [{ index: { status: 200 } }] }));
   }, async baseUrl => {
     const service = new AstroObjectIndexService({ baseUrl });
-    assert.deepEqual(await service.bulk([objectDocument("retry")]), { objectCount: 1, coverageCount: 0 });
+    assert.deepEqual(await service.bulk([objectDocument("retry")]), { objectCount: 1 });
     assert.equal(bodies.length, 2);
     assert.equal(bodies[0], bodies[1], "ambiguous writes are idempotent, including their provenance");
   });
@@ -838,13 +624,12 @@ test("current batch filters every point, footprint and coverage search and chang
   }, async baseUrl => {
     const index = new AstroObjectIndexService({ baseUrl, dataBatches: async () => new Map([["w1", batch]]) });
     await index.queryObjects({ bbox: { raMin: 0, raMax: 360, decMin: -90, decMax: 90 }, layerScopes: [{ assetId: "w1" }] });
-    await index.queryPointCoverage({ assetId: "w1", nside: 16 });
     await index.queryImageFootprints({ raDeg: 20, decDeg: 10, layerScopes: [{ assetId: "w1" }] });
     await index.getPoint("old-object", ["astro_data_point_index_v1"]);
-    assert.equal(queries.length, 4);
+    assert.equal(queries.length, 3);
     for (const query of queries) {
       assert.match(JSON.stringify(query.query), /"data_batch_id":"new-batch"/);
-      assert.match(JSON.stringify(query.query), /"must_not"/);
+      assert.doesNotMatch(JSON.stringify(query.query), /"must_not"/);
     }
     batch = "replacement-batch";
     await index.queryObjects({ bbox: { raMin: 0, raMax: 360, decMin: -90, decMax: 90 }, layerScopes: [{ assetId: "w1" }] });

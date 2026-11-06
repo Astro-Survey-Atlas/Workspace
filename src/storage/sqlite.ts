@@ -107,7 +107,7 @@ const MIGRATIONS = [{
     CREATE INDEX connector_ingest_runs_status_idx ON connector_ingest_runs(status);
     CREATE UNIQUE INDEX connector_ingest_runs_idempotency_idx ON connector_ingest_runs(connector_id,idempotency_key_hash) WHERE idempotency_key_hash IS NOT NULL;
   `,
-}];
+}, { version: 6, sql: "DROP TABLE IF EXISTS statistics_entries; DROP TABLE IF EXISTS statistics_snapshots;" }];
 
 type SqliteRow = Record<string, unknown>;
 

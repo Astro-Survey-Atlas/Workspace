@@ -54,7 +54,7 @@ async function proxyAndStubWorkflowApi(page: Page): Promise<void> {
       return;
     }
     if (requestUrl.pathname === "/api/surveys" || requestUrl.pathname === "/api/public-surveys") {
-      await route.fulfill({ json: { surveys: [] } });
+      await route.fulfill({ json: { surveys: [], records: [] } });
       return;
     }
     if (requestUrl.pathname === "/api/survey-footprints") {
@@ -66,7 +66,7 @@ async function proxyAndStubWorkflowApi(page: Page): Promise<void> {
       return;
     }
     if (requestUrl.pathname === "/api/capabilities") {
-      await route.fulfill({ json: { dataWarehouse: { enabled: false }, userMocs: { rootConfigured: false, count: 0 }, metadataStore: { engine: "sqlite" } } });
+      await route.fulfill({ json: { localScanner: { enabled: true, paused: true }, userMocs: { rootConfigured: false, count: 0 }, metadataStore: { engine: "sqlite" } } });
       return;
     }
     if (requestUrl.pathname === "/api/agent/workspace-sessions") {

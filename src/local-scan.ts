@@ -8,13 +8,11 @@ import { once } from "node:events";
 import { CsvError, parse } from "csv-parse";
 import { Healpix, Hploc } from "healpixjs";
 
-import type { CoverageDataOrigin, CoverageRole, CoverageSourceTier } from "./assets-core.js";
 import { defaultMocCoreAdapter, MOC_CORE_DEFAULT_MAX_ORDER, MOC_CORE_PREVIEW_ORDER, MOC_CORE_QUERY_ORDER, type MocCoreAdapter } from "./moc-core-adapter.js";
 
 export const LOCAL_SCAN_HEALPIX_ORDER = 8;
 export const LOCAL_SCAN_HEALPIX_NSIDE = 2 ** LOCAL_SCAN_HEALPIX_ORDER;
 export const LOCAL_OBJECT_INDEX = "astro_position_index_v2";
-export const LOCAL_COVERAGE_INDEX = "astro_coverage_index_v1";
 
 const DEFAULT_MAX_COLUMNS = 10_000;
 const DEFAULT_MAX_RECORD_SIZE = 8 * 1024 * 1024;
@@ -60,7 +58,6 @@ export interface LocalCsvScanOptions {
   /** The workspace scan contract uses HEALPix order 8 (NSIDE 256, NESTED ordering). */
   healpixOrder?: number;
   objectIndex?: string;
-  coverageIndex?: string;
   limits?: LocalCsvScanLimits;
   /** Collect object documents in the result; disabled by default for large files. */
   collectObjects?: boolean;
@@ -93,29 +90,7 @@ export interface LocalObjectIndexDocument {
   attributes: Record<string, string>;
 }
 
-export interface LocalCoverageFactDocument {
-  _index: string;
-  _id: string;
-  healpix_order: number;
-  healpix_pixel: number;
-  objectCount: number;
-  survey: string;
-  release: string;
-  product: string;
-  modality: string;
-  asset_id: string;
-  source_file_id: string;
-  scan_run_id: string;
-  coverage_role?: CoverageRole;
-  data_origin?: CoverageDataOrigin;
-  source_tier?: CoverageSourceTier;
-  max_order?: number;
-  query_order?: number;
-  preview_order?: number;
-}
-
-export type LocalScanDocument = LocalObjectIndexDocument | LocalCoverageFactDocument;
-export type LocalCsvDocumentSink = (document: LocalScanDocument) => Awaitable<void>;
+export type LocalCsvDocumentSink = (document: LocalObjectIndexDocument) => Awaitable<void>;
 export type LocalScanSink = LocalCsvDocumentSink;
 
 export interface LocalCsvFileSummary {
@@ -141,9 +116,9 @@ export interface LocalCsvFileSummary {
 
 export interface LocalCsvScanResult {
   summary: LocalCsvFileSummary;
-  coverageDocuments: LocalCoverageFactDocument[];
+  pointCells: Array<{ pixel: number; count: number }>;
   objectDocuments?: LocalObjectIndexDocument[];
-  /** The authoritative MOC Core output used to produce coverageDocuments. */
+  /** The authoritative MOC Core output used to publish coverage. */
   moc?: import("./moc-core-adapter.js").MocCoreCatalogResult;
 }
 
@@ -186,7 +161,6 @@ interface NormalizedOptions {
   scanRunId: string;
   healpixOrder: number;
   objectIndex: string;
-  coverageIndex: string;
   limits: NormalizedLimits;
   collectObjects: boolean;
   sink?: LocalCsvDocumentSink;
@@ -267,7 +241,6 @@ function normalizeOptions(input: LocalCsvScanOptions): NormalizedOptions {
     scanRunId: requiredText(options.scanRunId, "scanRunId"),
     healpixOrder,
     objectIndex: optionalIndexName(options.objectIndex, "objectIndex", LOCAL_OBJECT_INDEX),
-    coverageIndex: optionalIndexName(options.coverageIndex, "coverageIndex", LOCAL_COVERAGE_INDEX),
     limits: normalizedLimits,
     collectObjects: options.collectObjects ?? false,
     sink: options.sink,
@@ -346,14 +319,6 @@ export function stableObjectDocumentId(assetId: string, sourceFileId: string, ob
 }
 
 /** Stable identity for one provenance-specific coverage fact. */
-export function stableCoverageDocumentId(
-  assetId: string,
-  sourceFileId: string,
-  healpixOrder: number,
-  healpixPixel: number,
-): string {
-  return digestTuple(["coverage", assetId, sourceFileId, healpixOrder, healpixPixel]);
-}
 
 function invalidCoordinateOrField(row: Record<string, unknown>, options: NormalizedOptions, headers: string[]): boolean {
   const objectId = String(row[options.objectIdColumn] ?? "").trim();
@@ -409,11 +374,6 @@ function limitError(name: string, value: number, limit: number): RangeError {
   return new RangeError(`${name} limit exceeded: ${value} > ${limit}`);
 }
 
-/**
- * Stream a local CSV into object and coverage documents. The source file is
- * never read into one in-memory string; backpressure also includes async sink
- * work because each document is awaited before the next row is consumed.
- */
 export async function scanLocalCsv(
   filePath: string | URL,
   input: LocalCsvScanOptions,
@@ -541,30 +501,7 @@ export async function scanLocalCsv(
     queryOrder: MOC_CORE_QUERY_ORDER,
     previewOrder: MOC_CORE_PREVIEW_ORDER,
   });
-  const coverageDocuments = moc.queryPixels.map((pixel): LocalCoverageFactDocument => ({
-      _index: options.coverageIndex,
-      _id: stableCoverageDocumentId(options.assetId, options.sourceFileId, options.healpixOrder, pixel),
-      healpix_order: options.healpixOrder,
-      healpix_pixel: pixel,
-      objectCount: coverageCounts.get(pixel) ?? 0,
-      survey: options.surveyId,
-      release: options.releaseId,
-      product: options.product,
-      modality: options.modality,
-      asset_id: options.assetId,
-      source_file_id: options.sourceFileId,
-      scan_run_id: options.scanRunId,
-      coverage_role: "object_presence",
-      data_origin: "catalog",
-      source_tier: "user_file_derived",
-      max_order: 10,
-      query_order: 8,
-      preview_order: 4,
-    }));
-
-  for (const document of coverageDocuments) {
-    if (documentSink) await documentSink(document);
-  }
+  const pointCells = [...coverageCounts].map(([pixel, count]) => ({ pixel, count }));
 
   const summary: LocalCsvFileSummary = {
     filePath: sourcePath,
@@ -583,11 +520,11 @@ export async function scanLocalCsv(
     objectCount,
     invalidRowCount,
     csvErrorCount,
-    coveragePixelCount: coverageDocuments.length,
+    coveragePixelCount: moc.queryPixels.length,
   };
   return {
     summary,
-    coverageDocuments,
+    pointCells,
     ...(options.collectObjects ? { objectDocuments } : {}),
     moc,
   };

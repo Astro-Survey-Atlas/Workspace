@@ -1,67 +1,52 @@
 # Astro Survey Atlas (Workspace)
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Node: >=22.13](https://img.shields.io/badge/Node->=22.13-brightgreen.svg)](package.json)
+[![Node: >=22.15](https://img.shields.io/badge/Node->=22.15-brightgreen.svg)](package.json)
 [![Vite: ^8.1.5](https://img.shields.io/badge/Vite-^8.1.5-blueviolet.svg)](package.json)
 
 > **Atlas** is the user-facing interactive data exploration workspace in the Astro Survey Atlas ecosystem. It provides the central sky-mapping dashboard, local asset registration, credential management, file connectors, and task orchestration.
 
 ---
 
-## 🗺️ System Integration & Boundaries
+## Runtime
 
-The Astro Survey Atlas ecosystem consists of three sibling repositories designed around a **deterministic-first** rule. Scientific calculations (catalog parsing, coordinate validation, HEALPix cell rasterization, and MOC generation) are handled entirely in tested TypeScript/Python code, completely decoupled from LLMs.
+Workspace runs independently with one API, one scan worker, local SQLite and
+its own Elasticsearch. It reads public survey packages from Assets. Warehouse
+is a separate application and is not a runtime dependency.
 
-```
-       +-----------------------------------------------+
-       |          Astro-Survey-Atlas-Assets            |
-       |  (Public Survey metadata & coverage packages) |
-       +-----------------------------------------------+
-                               |
-                               |  1. Synchronizes Resource Package v3
-                               |     (manifests, hash verifications, MOCs)
-                               v
-+--------------------------------------------------------------+
-|                  Astro-Survey-Atlas-Workspace                |
-|                    (Atlas - This Repository)                 |
-+--------------------------------------------------------------+
-|  - React/TS & Aladin Lite v3 Sky Dashboard                   |
-|  - Local Catalog registry, Connectors (S3/Local/JDBC)        |
-|  - Local scan engine & Workspace-owned Elasticsearch (ES)    |
-|  - Task history tracker & SQLite/Postgres metadata store     |
-+--------------------------------------------------------------+
-            ^                                      |
-            |                                      | 2. Submits K8s ScanRequest
-            | 4. Imports Evidence                  |    (ScanPlan v2)
-            |    (MOC, pixel counts, run logs)      |
-            |                                      v
-       +-----------------------------------------------+
-       |          Astro-Survey-Atlas-Warehouse         |
-       |  (K8s Operator & high-throughput S3 scanner)  |
-       +-----------------------------------------------+
+```text
+Assets public packages → Workspace API / Viewer / Agent / CLI
+                              ↕                  ↕
+                         local SQLite     owned Elasticsearch
+                              ↕                  ↑
+                         one scan worker ────────┘
+                              ↓
+                      local / S3 / OSS CSV and FITS
 ```
 
-### Component Responsibility Matrix
+The API records scan commands without enumerating directories or reading
+scientific files. The worker freezes the file inventory, validates source
+versions, writes bounded batches and checkpoints progress. Positions, file
+references and MOC must all succeed before the new version is published. Failed
+or paused scans leave the previously published version available.
 
-| Feature / Responsibility | **Assets** 📦 | **Warehouse** ⚙️ | **Workspace (Atlas)** 🖥️ |
-|:---|:---:|:---:|:---:|
-| **Public Survey Coverage & Metadata** | **Authoritative Owner** | ❌ None | Read-only Sync (v3 Packages) |
-| **User Asset Registry & Metadata** | ❌ None | ❌ None | **Authoritative Owner** |
-| **Local Scanning & local ES indexing** | ❌ None | ❌ None | **Authoritative Owner** |
-| **Remote S3/OSS High-throughput Scan** | ❌ None | **Execution & Operator** | Task Submission & Evidence Import |
-| **天球 UI (Aladin Lite v3 Explorer)** | ❌ None | ❌ None | **Authoritative Owner** |
-| **Credentials & Secrets Management** | ❌ None | Short-term token consumer | Secure secret store & delegation |
-| **Agent / MCP Server Integration** | ❌ None | ❌ None | **Authoritative Owner** |
+SQLite stores control records: assets, Connectors, scan status, Workflow runs,
+Agent sessions and human decisions. Large scientific attributes and outputs stay
+in referenced files. Elasticsearch contains only the position, file and image
+footprint indices; it is not a second control-state store.
 
----
+Startup uses the validated local public-catalog cache. Refresh it explicitly
+with catalog sync; an unavailable Assets endpoint does not block a cached
+Workspace from starting. Catalog/configuration snapshots retain the latest
+three versions. Scientific evidence and Workflow artifacts are retained separately.
 
 ## ✨ Features
 
 * **🌌 interactive Celestial Explorer**: Integrates **Aladin Lite v3** for viewing celestial coordinates (ICRS), overlaying HEALPix grids, and visualizing MOC (Multi-Order Coverage) layers from both public catalogs and user assets.
 * **📂 User Asset Registry**: Add, inspect, filter, edit, and delete private data assets (星表, 图像, 光谱, Cube, 时序) with normalized survey/release labels.
 * **🔌 Flexible Connectors**: Register data sources (Local filesystem, Amazon S3, Ali OSS, JDBC) and run structural sanity/connection checks.
-* **🔍 Deterministic Local Scanner**: Parse CSV files locally, validate RA/Dec coordinates, build nesting HEALPix indexes, and generate IVOA FITS MOC files via a pinned Python MOC Core wrapper.
-* **⚡ Optional Warehouse Remote Scan**: Delegate massive S3/OSS catalog scans to Warehouse via a custom `ScanRequest` CRD, importing file evidences and MOC projections upon completion.
+* **🔍 Deterministic Local Scanner**: Read CSV, FITS tables and FITS image headers from local or S3/OSS sources, validate RA/Dec coordinates, build nesting HEALPix indexes, and generate IVOA FITS MOC files via a pinned Python MOC Core wrapper.
+* **⏸️ Durable Scan Control**: Pause/resume/cancel/retry via the same API, UI and CLI. Scanning starts paused; interrupted runs require an explicit resume.
 * **🤖 Agent & MCP Support**: Exposes workspace APIs as Model Context Protocol (MCP) tools, allowing LLM agents to inspect data assets and query coordinate boundaries.
 * **🔔 Unified Toast Notifications**: A global notification deck (`#workspace-notification-deck`) that provides real-time progress for package sync, connector validation, scans, and system errors.
 
@@ -79,7 +64,7 @@ The Astro Survey Atlas ecosystem consists of three sibling repositories designed
 │   ├── coverage-jobs.ts    # MOC compilation and geometry tasks
 │   ├── http-server.ts      # Main Express application entry point
 │   ├── local-scan.ts       # Local file scanner (CSV parsing, coordinate validation)
-│   └── storage/            # Metadata persistence (SQLite / Postgres)
+│   └── storage/            # Local SQLite metadata persistence
 ├── test/                   # Comprehensive unit, integration, and e2e tests
 ├── vendor/moc-core/        # Pinned Python moc-core adapter distribution
 └── viewer/                 # Frontend client (Vite, TS, Aladin Lite v3)
@@ -96,10 +81,10 @@ The Astro Survey Atlas ecosystem consists of three sibling repositories designed
 
 ### 1. Prerequisites
 Ensure you have the following installed on your Linux machine:
-* **Node.js**: `>= 22.13` (API server uses modern ESM features)
+* **Node.js**: `>= 22.15` (API server uses modern ESM features)
 * **Python**: `3.10+` with `pip` (required by the scientific MOC Core CLI wheel)
 * **Elasticsearch**: `8.x` (Workspace-owned search plane)
-* **SQLite / PostgreSQL** (SQLite is configured by default)
+* **Local disk** for SQLite WAL and Elasticsearch; source files can remain on remote storage
 
 ### 2. Installation & Build
 Clone the repository and install dependencies:
@@ -118,7 +103,10 @@ Start the Express backend and the Vite development server in watch mode:
 # In Terminal 1: Run the backend API server (listens on 127.0.0.1:3000)
 npm run dev
 
-# In Terminal 2: Run the Vite frontend server (proxies /api to port 3000)
+# In Terminal 2: Run the separate scan worker after building
+npm run scan:worker
+
+# In Terminal 3: Run the Vite frontend server (proxies /api to port 3000)
 npm run dev:viewer
 ```
 Open `http://localhost:5173` in your browser.
@@ -201,44 +189,29 @@ docker compose -f compose.yaml -f compose.local.yaml up -d
 
 ## ⎈ Helm
 
-The chart under `charts/asa-workspace` is published to GHCR OCI on every
-release tag and supports three metadata-store modes (`sqlite`, `bundled-postgresql`,
-`external-postgresql`) and bundled or external Elasticsearch:
+The chart installs one API, one worker and one owned Elasticsearch. Defaults
+use `local-path` storage and keep scanning paused. API and worker share the same
+node for SQLite WAL.
 
 ```bash
-# Install into a clean namespace (bundled SQLite + bundled Elasticsearch)
-helm install workspace oci://ghcr.io/astro-survey-atlas/charts/asa-workspace \
-  --namespace astro-workspace --create-namespace
-
-# Watch the rollout, then check health
-kubectl -n astro-workspace rollout status deployment/workspace-asa-workspace
-kubectl -n astro-workspace port-forward svc/workspace-asa-workspace 3000:3000
+helm install asa ./charts/asa-workspace \
+  --namespace asa-workspace --create-namespace
+kubectl -n asa-workspace rollout status deployment/asa-workspace
+kubectl -n asa-workspace port-forward svc/asa-workspace 3000:3000
 curl http://127.0.0.1:3000/healthz
 ```
 
-External dependencies (managed PostgreSQL / Elasticsearch) are wired via
-`metadataStore.mode=external-postgresql` and `search.mode=external` with
-`existingSecret` references — see `charts/asa-workspace/README.md` and
-`values.schema.json` for the full contract.
+For an existing installation, follow [the migration procedure](docs/workspace-metadata-migration.md).
+Keep original volumes until queries and historical downloads have been checked.
+Chart options are documented in [the chart README](charts/asa-workspace/README.md).
 
 ---
 
 ## ☸️ Kubernetes (k3s) Deployment
 
-The production deployment manifest targets k3s under the `asa-workspace` namespace.
-
-```bash
-# 1. Build the Docker image
-docker build -t ay-dev/asa-workspace:latest .
-
-# 2. Apply the manifest
-kubectl apply -f deploy/k3s.yaml
-
-# 3. Wait for the roll-out to complete
-kubectl -n asa-workspace rollout status deployment/asa-workspace
-```
-* **Ingress endpoint**: `http://astro.workspace.dev.72602.space:32080/`
-* **Direct NodePort access**: Port `32082` (maps directly to container port `3000`)
+Build and deploy the same chart to k3s; [the chart README](charts/asa-workspace/README.md)
+describes local storage, mounts and the optional download worker. The dev endpoint
+is `http://astro.workspace.dev.72602.space:32080/`.
 
 For a local Viewer preview on port `4173`, point the Vite proxy at the k3s API
 instead of its local default:

@@ -195,7 +195,7 @@ export class WorkspaceAgentService {
     await this.initialize();
     const createdAt = now();
     const session: WorkspaceAgentSession = { id: `wag_${randomUUID()}`, createdAt, updatedAt: createdAt, status: "idle", events: [], messages: [{ id: randomUUID(), role: "assistant", content: "Workspace Agent 已就绪。可以查询数据、检查 Workflow，并在确认后执行任务。", createdAt }] };
-    this.#sessions.set(session.id, session); await this.#persist(); return clone(session);
+    this.#sessions.set(session.id, session); this.#state.put("workspace-agent-sessions", session.id, session); return clone(session);
   }
 
   async getSession(id: string): Promise<WorkspaceAgentSession> {
@@ -730,11 +730,9 @@ export class WorkspaceAgentService {
     for (const resolve of waiters) resolve();
   }
 
-  async #save(session: WorkspaceAgentSession): Promise<void> { session.updatedAt = now(); session.messages = session.messages.slice(-100); this.#sessions.set(session.id, clone(session)); await this.#persist(); }
+  async #save(session: WorkspaceAgentSession): Promise<void> { session.updatedAt = now(); session.messages = session.messages.slice(-100); this.#sessions.set(session.id, clone(session)); this.#state.put("workspace-agent-sessions", session.id, session); }
 
-  async #persist(): Promise<void> {
-    for (const session of this.#sessions.values()) this.#state.put("workspace-agent-sessions", session.id, session);
-  }
+
 
 }
 

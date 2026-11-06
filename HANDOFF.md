@@ -2,28 +2,58 @@
 
 Updated: 2026-11-06, Asia/Shanghai.
 
-## Lightweight local refactor in progress (November 6)
+## Current Dev state: lightweight local runtime (November 6)
 
-User approved a clean Workspace-only rewrite: local scanner, Workspace-owned ES,
-SQLite, Workflow/Agent/CLI; remove Warehouse runtime integration, duplicate
-executors, compatibility routes, PostgreSQL and obsolete recovery paths. Do not
-change Warehouse or Assets code/deployments/ES. See
-[active implementation record](docs/workspace-performance-refactor-20261106.md).
+Workspace has been cut over to its independent local runtime at Helm revision
+**150**, status **deployed**, image `0.0.1-dev-20261106-lightweight-r5`. API, the
+single scan worker and owned ES are Ready on `zjlab-ubuntu`, with zero restarts.
+The existing downloader is retained.
+URL: `http://astro.workspace.dev.72602.space:32080`.
 
-Workspace dispatch was stopped on November 6 at approximately 07:57 UTC. Both
-Workspace-owned running Scanner Jobs were suspended and verified with active=0.
-Their CRs, evidence and logs remain. New image
-`0.0.1-dev-20261106-lightweight-pause-r1` adds a persistent global pause, disables
-Warehouse and local execution for maintenance, and replaces the statistics
-worker with metadata summaries. Deployment is being restored; verify rollout
-and `/api/scanning` before assuming availability. Never automatically resume
-large scans during this refactor.
+Runtime: API + independent scan worker + local SQLite + three scientific ES
+indices. Warehouse execution, Kubernetes scan dispatch, PostgreSQL and the large
+statistics checkpoint are removed from the active path. Public catalog startup
+uses the validated local cache; sync is explicit. Warehouse and Assets code,
+deployments and search stores were not changed by this refactor.
+
+**All real scanning remains paused.** `/api/scanning` reports paused and scan
+submission returns 409 after API/worker restart. There are no running or queued
+local scans; three interrupted records are paused. Both old Scanner Jobs remain
+suspended, with total active Jobs=0. Never automatically resume them.
+
+New `local-path` claims: `asa-workspace-state-local` (20 GiB),
+`asa-workspace-search-local` (30 GiB). Original state, evidence, production and
+search volumes are retained. The three old Helm-managed claims have
+`helm.sh/resource-policy: keep`. Configuration/catalog snapshots retain the latest
+**three**; scientific evidence and referenced outputs do not rotate with them.
+
+Published science data: **3,019,111 positions**, **1,298,611 file records** and
+**1,298,579 image footprints**. SQLite retains 22 Connectors, 23 assets, five
+Workflow runs, ten Agent sessions and four production runs. All 746 migrated
+evidence files (6,149,925,910 bytes) pass SHA-256 verification; all 264 checked
+control/artifact files also match.
+
+Final r5 HTTP acceptance: the original 2,000-point query returns 2,000 points in
+157 ms on its first request after API restart (ES already warm); 20 subsequent
+requests have p50 **132 ms**, p95 **154 ms**. The earlier measurement immediately
+after ES restart was **1.33 s**. Sixty control requests have p95 **13.34 ms**.
+W2 HEALPix 2071 returns 2,000 real points. The historical 215-FITS ZIP downloads
+in **0.96 s**; all 218 contained file hashes match. Empty selection still succeeds
+without an archive. Full attributes load on demand from evidence chunks.
+
+Build/type/service/chart verification passed: 340 tests, 337 passed, three skipped,
+zero failures. Isolated CSV/FITS/S3 worker integration also passed against the
+container's pinned real science dependencies. Desktop prepare/smoke passed.
+See the [implementation and acceptance record](docs/workspace-performance-refactor-20261106.md)
+and [migration procedure](docs/workspace-metadata-migration.md) for browser checks,
+deployment details and remaining scope.
 
 The original source baseline is `6c99df0`. The old plan's PostgreSQL and
-Warehouse changes have been superseded. Private operational receipts are in
-`/tmp/workspace-lightweight-refactor-20261106/` (not credentials for copying).
+Warehouse changes have been superseded. The image includes working-tree changes;
+do not claim they have all been committed. Private operational receipts are in
+`/tmp/workspace-lightweight-refactor-20261106/`; do not copy credential values.
 
-## Current Dev state
+## Historical Dev state (November 5; superseded by revision 150)
 
 Workspace is deployed at Helm revision **148**, image
 `0.0.1-dev-20261105-download-perf-r3`, registry digest
@@ -157,7 +187,10 @@ deployed HTML referenced the new Viewer bundle. Viewer typecheck/build and
 `git diff --check` passed. The browser runtime reported no available browser,
 so this turn did not perform a visual Aladin interaction check.
 
-## Next session: Workspace Agent workflow and science acceptance
+## Historical session context: Workspace Agent workflow and science acceptance
+
+The deployments and next-session instructions below describe earlier sessions.
+Use the November 6 current-state section above for runtime and scan control.
 
 Read the [session handoff](docs/session-handoff-20261103-agent.md) for Agent
 entry points, current deployment, scan recovery, validation limits and private

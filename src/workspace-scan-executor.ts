@@ -1,7 +1,7 @@
 import { propagation, ROOT_CONTEXT, trace } from "@opentelemetry/api";
 import { createHash } from "node:crypto";
 import { createReadStream, createWriteStream } from "node:fs";
-import { mkdir, open, opendir, rename, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, open, opendir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { createGunzip } from "node:zlib";
 import { createInterface } from "node:readline";
 import path from "node:path";
@@ -67,6 +67,7 @@ function sourceId(connector: ConnectorRecord, file: Omit<ScanFile, "id">): strin
   return sha256(JSON.stringify([connector.locationKey, file.objectKey ?? file.localPath, file.size, file.mtimeMs, file.etag]));
 }
 class ScanInterrupted extends Error {}
+class RejectedFitsSource extends Error {}
 
 class GzipRangeSource implements FitsByteSource {
   readonly size: number;
@@ -180,7 +181,8 @@ export class WorkspaceScanExecutor {
 
 
   async #run(id: string, connectorId?: string): Promise<ConnectorIngestRunRecord> {
-    const run = (await this.#options.runs.list(connectorId ? { connectorId } : undefined)).find(run => run.id === id);
+    const candidate = await this.#options.runs.get(id);
+    const run = candidate && (!connectorId || candidate.connectorId === connectorId) ? candidate : undefined;
     if (!run || run.executor !== WORKSPACE_SCAN_EXECUTOR || run.scanTask?.version !== 2) throw Object.assign(new RangeError("This record has no local resumable checkpoint; submit a new scan"), { statusCode: 409 });
     return run;
   }
@@ -200,8 +202,8 @@ export class WorkspaceScanExecutor {
   async retry(connectorId: string, id: string): Promise<ConnectorIngestRunRecord> {
     this.#options.control.assertRunning();
     const run = await this.#run(id, connectorId);
-    const task = { ...run.scanTask!, cursor: 0, processedFiles: 0, failedFiles: 0, pointCount: 0, mocBatches: 0, errors: [] };
-    return this.#options.runs.update(id, { scanTask: task, status: "queued", error: undefined, completedAt: undefined, processedFiles: 0, failedFiles: 0, pointCount: 0, mocStatus: "pending" }, ["failed"]);
+    const task = { ...run.scanTask!, cursor: 0, processedFiles: 0, failedFiles: 0, skippedFiles: 0, pointCount: 0, mocBatches: 0, pointBatches: 0, errors: [] };
+    return this.#options.runs.update(id, { scanTask: task, status: "queued", error: undefined, completedAt: undefined, processedFiles: 0, failedFiles: 0, skippedFileCount: 0, pointCount: 0, mocStatus: "pending" }, ["failed"]);
   }
   /** A restarted worker requires an explicit resume for in-flight runs. */
   async recoverInterruptedRuns(): Promise<number> {
@@ -229,7 +231,7 @@ export class WorkspaceScanExecutor {
           await this.#options.runs.update(run.id, { status: "failed", completedAt: new Date().toISOString(), error: errorMessage(error), mocStatus: "failed" }, ["running"]);
           throw error;
         }
-      }, run.scanTask!.traceparent ? trace.getSpanContext(propagation.extract(ROOT_CONTEXT, { traceparent: run.scanTask!.traceparent })) : undefined).catch(error => console.warn("Workspace scan failed", { runId: run.id, error: errorMessage(error) }));
+      }, run.scanTask!.traceparent ? trace.getSpanContext(propagation.extract(ROOT_CONTEXT, { traceparent: run.scanTask!.traceparent })) : undefined).catch(error => console.warn("Workspace scan failed", { runId: run.id, errorType: error instanceof Error ? error.name : "Error" }));
       return true;
     } finally { this.#busy = false; }
   }
@@ -244,7 +246,7 @@ export class WorkspaceScanExecutor {
     if (!hasCurrentSuccessfulConnectorCheck(connector)) throw new RangeError("Check the Connector before scanning");
     if (!this.#options.objectIndex.configured) throw new RangeError("Workspace Elasticsearch is not configured");
     if (!asset.scanSpec && !taskFits(asset)) throw new RangeError("Configure catalog coordinate columns before scanning");
-    const task: ScanTask = { version: 2, ...input, sourceConfigSha256: configDigest(connector, asset, input.relativePath), traceparent: activeTraceparent(), inventoryReady: false, cursor: 0, processedFiles: 0, failedFiles: 0, pointCount: 0, totalBytes: 0, mocBatches: 0, errors: [] };
+    const task: ScanTask = { version: 2, ...input, sourceConfigSha256: configDigest(connector, asset, input.relativePath), traceparent: activeTraceparent(), inventoryReady: false, cursor: 0, processedFiles: 0, failedFiles: 0, skippedFiles: 0, pointCount: 0, totalBytes: 0, mocBatches: 0, pointBatches: 0, errors: [] };
     // No directory enumeration, object-store requests, or scientific work here.
     return (await this.#options.runs.create(connector.locationKey, {
       connectorId: connector.id, connectorName: connector.name, connectorKind: connector.kind,
@@ -346,27 +348,41 @@ export class WorkspaceScanExecutor {
     await this.#check(run.id);
     await this.#options.runs.update(run.id, { phase: "indexing" });
     await this.#options.objectIndex.refresh();
+    const presence = new Set<number>();
+    for (let index = 0; index < task.pointBatches; index++) {
+      for (const pixel of JSON.parse(await readFile(path.join(this.#root, run.id, `point-cells-${index}.json`), "utf8")) as number[]) presence.add(pixel);
+    }
+    const pointCoverageRef = `${run.id}/point-cells.json`;
+    await writeFile(path.join(this.#root, pointCoverageRef), JSON.stringify([...presence].sort((a,b) => a-b)));
     await this.#check(run.id);
-    await this.#options.runs.activate(run.id, { phase: "complete", artifactId: artifact.id, mocStatus: "ready", availableOrders: artifact.availableOrders, maxOrder: artifact.maxOrder, precision: artifact.precision, coverageRole: artifact.coverageRole }, { runId: run.id, artifactId: artifact.id, pointCount: task.pointCount, fileCount: task.processedFiles, totalBytes: task.totalBytes, activatedAt: new Date().toISOString() });
-    recordScan("workspace", { accepted: task.processedFiles, failed: task.failedFiles, bytes: task.totalBytes, peakRssBytes: process.memoryUsage().rss });
+    await this.#options.runs.activate(run.id, { phase: "complete", artifactId: artifact.id, mocStatus: "ready", availableOrders: artifact.availableOrders, maxOrder: artifact.maxOrder, precision: artifact.precision, coverageRole: artifact.coverageRole }, { runId: run.id, dataBatchId: run.id, pointCoverageRef, artifactId: artifact.id, pointCount: task.pointCount, fileCount: task.processedFiles, totalBytes: task.totalBytes, activatedAt: new Date().toISOString() });
   }
   async #batch(run: ConnectorIngestRunRecord, task: ScanTask, asset: DataAssetRecord, connector: ConnectorRecord, files: ScanFile[], nextCursor: number): Promise<void> {
     const next = structuredClone(task);
     const writer = new ScanEvidenceWriter(this.#root, `${run.id}/evidence/batch-${task.cursor}`);
     const wcs: Record<string, unknown>[] = [];
+    const presence = new Set<number>();
     const credentials = connector.credentialRef ? await this.#options.credentials.get(connector.credentialRef) : undefined;
     try {
       for (const file of files) {
         await this.#check(run.id);
         try {
           await this.#assertSourceVersion(file);
-          if (taskFits(asset)) await this.#scanFits(file, run, asset, connector, credentials, next, writer, wcs);
-          else await this.#scanCatalog(file, run, asset, connector, credentials, next, writer);
+          const cells = taskFits(asset)
+            ? await this.#scanFits(file, run, asset, connector, credentials, next, writer, wcs)
+            : await this.#scanCatalog(file, run, asset, connector, credentials, next, writer);
+          for (const pixel of cells) presence.add(pixel);
+          await this.#options.objectIndex.bulkFiles([{ _id: sha256(`${run.id}\n${asset.id}\n${file.id}`),
+            file_id: file.id, asset_id: asset.id, scan_run_id: run.id, data_batch_id: run.id, source_uri: file.uri,
+            size_bytes: file.size, coverage_cells: cells, spatial_status: cells.length ? "known" : "unknown", precision: "estimated",
+            survey: asset.surveyId ?? "user", release: asset.releaseId ?? "user", product: asset.product,
+            modality: asset.modalities[0] ?? "other" }]);
           await this.#assertSourceVersion(file);
           next.processedFiles++;
         } catch (error) {
           if (error instanceof ScanInterrupted) throw error;
-          next.failedFiles++;
+          if (error instanceof RejectedFitsSource) next.skippedFiles++;
+          else next.failedFiles++;
           if (next.errors.length < 20) next.errors.push(`${file.name}: ${errorMessage(error)}`);
         }
       }
@@ -380,8 +396,12 @@ export class WorkspaceScanExecutor {
         await this.#saveMoc(run.id, next, built);
       }
       await this.#check(run.id);
+      await writeFile(path.join(this.#root, run.id, `point-cells-${next.pointBatches++}.json`), JSON.stringify([...presence].sort((a,b) => a-b)));
       next.cursor = nextCursor;
-      await this.#options.runs.update(run.id, { scanTask: next, processedFiles: next.processedFiles, failedFiles: next.failedFiles, pointCount: next.pointCount, documentCount: next.pointCount, phase: "reading" });
+      await this.#options.runs.update(run.id, { scanTask: next, processedFiles: next.processedFiles, failedFiles: next.failedFiles, skippedFileCount: next.skippedFiles, acceptedFileCount: next.processedFiles, pointCount: next.pointCount, documentCount: next.pointCount, phase: "reading" });
+      recordScan("workspace", { accepted: next.processedFiles - task.processedFiles,
+        skipped: next.skippedFiles - task.skippedFiles, failed: next.failedFiles - task.failedFiles,
+        bytes: files.reduce((sum, file) => sum + file.size, 0), peakRssBytes: process.memoryUsage().rss });
       Object.assign(task, next);
     } finally { await writer.close(); }
   }
@@ -394,7 +414,7 @@ export class WorkspaceScanExecutor {
     const attributes = Object.fromEntries(Object.entries(document.attributes).filter(([key]) => ["source_uri", "file_name", "source_id", "position_role", "hdu_index"].includes(key)));
     return { ...document, evidence_ref, attributes };
   }
-  async #scanCatalog(file: ScanFile, run: ConnectorIngestRunRecord, asset: DataAssetRecord, connector: ConnectorRecord, credentials: Awaited<ReturnType<ConnectorCredentialStore["get"]>>, task: ScanTask, writer: ScanEvidenceWriter): Promise<void> {
+  async #scanCatalog(file: ScanFile, run: ConnectorIngestRunRecord, asset: DataAssetRecord, connector: ConnectorRecord, credentials: Awaited<ReturnType<ConnectorCredentialStore["get"]>>, task: ScanTask, writer: ScanEvidenceWriter): Promise<number[]> {
     const spec = asset.scanSpec;
     if (!spec) throw new Error("Catalog coordinate columns are required");
     const staged = file.localPath ?? path.join(this.#root, run.id, "catalog-source");
@@ -403,6 +423,7 @@ export class WorkspaceScanExecutor {
     const fitsTable = spec.format === "fits";
     if (fitsTable) { csv = path.join(this.#root, run.id, "catalog.csv"); await this.#fitsTableToCsv(staged, csv, spec); }
     let docs: LocalObjectIndexDocument[] = [], bytes = 0, points = 0;
+    const cells = new Set<number>();
     const flush = async (): Promise<void> => {
       if (!docs.length) return;
       await this.#check(run.id);
@@ -419,7 +440,7 @@ export class WorkspaceScanExecutor {
           const compact = await this.#compact({ ...document, _id: sha256(`${run.id}\n${document._id}`), data_batch_id: run.id, attributes: { ...document.attributes, source_uri: file.uri, file_name: file.name, position_role: "catalog_row" } }, writer);
           const size = Buffer.byteLength(JSON.stringify(compact));
           if (docs.length && (docs.length >= 500 || bytes + size > 2 * 1024 * 1024)) await flush();
-          docs.push(compact); bytes += size; points++;
+          docs.push(compact); bytes += size; points++; cells.add(compact.healpix_pixel);
         },
       });
       await flush();
@@ -427,6 +448,7 @@ export class WorkspaceScanExecutor {
       if (!points) throw new Error("Catalog contains no usable positions");
       await this.#saveMoc(run.id, task, indexed.moc!);
       task.pointCount += points;
+      return [...cells].sort((a,b) => a-b);
     } finally { if (!file.localPath) await rm(staged, { force: true }); if (fitsTable) await rm(csv, { force: true }); }
   }
   async #fitsTableToCsv(source: string, output: string, spec: import("./data-catalog.js").DataAssetFitsScanSpec): Promise<void> {
@@ -442,7 +464,7 @@ export class WorkspaceScanExecutor {
       child.stdin.end(JSON.stringify({ id: spec.objectIdColumn, ra: spec.raColumn, dec: spec.decColumn }));
     });
   }
-  async #scanFits(file: ScanFile, run: ConnectorIngestRunRecord, asset: DataAssetRecord, connector: ConnectorRecord, credentials: Awaited<ReturnType<ConnectorCredentialStore["get"]>>, task: ScanTask, writer: ScanEvidenceWriter, wcs: Record<string, unknown>[]): Promise<void> {
+  async #scanFits(file: ScanFile, run: ConnectorIngestRunRecord, asset: DataAssetRecord, connector: ConnectorRecord, credentials: Awaited<ReturnType<ConnectorCredentialStore["get"]>>, task: ScanTask, writer: ScanEvidenceWriter, wcs: Record<string, unknown>[]): Promise<number[]> {
     let headers: FitsHeaderRecord[];
     if (file.name.toLowerCase().endsWith(".fits.gz")) {
       let local: NodeJS.ReadableStream;
@@ -479,9 +501,12 @@ export class WorkspaceScanExecutor {
       }
     }
 
-    const positions = (await convertPositionHeaders(headers)) as HeaderPoint[];
+    const qualityProfile = asset.scanSpec?.format === "fits" ? asset.scanSpec.fitsQualityProfile : undefined;
+    const positions = (await convertPositionHeaders(headers.map(header => ({ ...header, ...(qualityProfile ? { quality_profile: qualityProfile } : {}) })))) as HeaderPoint[];
+    const invalidWcs = positions.find(point => point.error);
+    if (invalidWcs) throw new RejectedFitsSource(String(invalidWcs.error));
     const valid = positions.filter(point => point.position_role === "image_center" && point.moc_header);
-    if (!valid.length) throw new Error("No two-dimensional celestial WCS found");
+    if (!valid.length) throw new RejectedFitsSource("No two-dimensional celestial WCS found");
     const documents: LocalObjectIndexDocument[] = [];
     for (const point of valid) documents.push(await this.#compact(pointDocument(point, asset, run), writer));
     await this.#options.objectIndex.bulk(documents);
@@ -489,6 +514,7 @@ export class WorkspaceScanExecutor {
     task.pointCount += documents.length;
     for (const point of valid) wcs.push({ ...point.moc_header!, NAXIS: 2 });
     if (Buffer.byteLength(JSON.stringify(wcs)) > 8 * 1024 * 1024) throw new Error("FITS WCS batch exceeds 8 MiB");
+    return [...new Set(documents.map(document => document.healpix_pixel))].sort((a,b) => a-b);
   }
   async #merge(count: number, asset: DataAssetRecord, runId: string): Promise<MocCoreCatalogResult> {
     const core = this.#options.mocCore ?? defaultMocCoreAdapter;
