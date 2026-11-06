@@ -123,6 +123,12 @@ class PostgresTransaction implements MetadataTransaction {
     add("connector_id", filter.connectorId);
     add("connector_kind", filter.connectorKind);
     add("status", filter.status);
+    if (filter.assetIds !== undefined) {
+      values.push(JSON.stringify(filter.assetIds));
+      const ids = `ARRAY(SELECT jsonb_array_elements_text($${values.length}::jsonb))`;
+      clauses.push(`(record->>'assetId' = ANY(${ids}) OR COALESCE(record->'assetIds', '[]'::jsonb) ?| ${ids})`);
+    }
+    if (filter.qualityOnly) clauses.push("record->>'parentRunId' IS NULL AND record->>'fitsQualityProfile' IS NOT NULL");
     const where = clauses.length ? ` WHERE ${clauses.join(" AND ")}` : "";
     return this.records<ConnectorIngestRunRecord>(`SELECT record FROM ${this.schema}.connector_ingest_runs${where} ORDER BY created_at DESC, id DESC`, values);
   }

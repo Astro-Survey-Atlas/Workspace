@@ -60,7 +60,7 @@ import { AgentDock } from "./agent-dock";
 import { DataCatalogPanel } from "./data-catalog-panel";
 import { ConnectorPanel, type ConnectorMetrics } from "./connector-panel";
 import { ResourcePackagePanel, type ResourcePackageSelectionCallbacks } from "./resource-package-panel";
-import { AladinExplorer, type AladinAssetTarget, type AladinExplorerSnapshot, type AladinExplorerStatus } from "./aladin-explorer";
+import type { AladinExplorer, AladinAssetTarget, AladinExplorerSnapshot, AladinExplorerStatus } from "./aladin-explorer";
 import { nestedSkyRegion } from "./sky-region";
 import { summarizeCoverageEvidence, summarizeCoverageMatches, summarizeScanScopes } from "./reverse-lookup-summary";
 import { normalizeLayerOrder } from "./layer-order";
@@ -375,6 +375,8 @@ let surveyCards: SurveyCard[] = [];
 let publicSurveyCards: SurveyCard[] = [];
 let surveyFootprints: SurveyFootprintManifest | null = null;
 let publicCatalogUnavailable = false;
+let publicCatalogInitialization: Promise<void> | null = null;
+let modeActivationGeneration = 0;
 let selectedSurvey: SurveyRecord | null = null;
 let selectedLayerAssetId: string | null = null;
 const localSurveyRecordsById = new Map<string, SurveyRecord>();
@@ -1218,6 +1220,8 @@ async function enterAladinExplorer(menu: SkyRegionMenu): Promise<void> {
   closeSkyContextMenu();
   renderSurveyHover(null);
 
+  const { AladinExplorer } = await import("./aladin-explorer");
+  if (profileAbort.signal.aborted || generation !== aladinEntryGeneration) return;
   aladinEntryAbort = null;
   aladinExplorer = new AladinExplorer(host, snapshot, {
     resolveSurvey: (id) => {
@@ -3201,14 +3205,13 @@ function emptySurveyFootprintManifest(): SurveyFootprintManifest {
 async function refreshPublicCatalogData(): Promise<void> {
   const [footprintsResult, surveysResult] = await Promise.allSettled([
     workspaceApi.surveyFootprints(),
-    workspaceApi.publicSurveys(),
+    workspaceApi.publicSurveyDirectory(),
   ]);
   surveyFootprints = footprintsResult.status === "fulfilled" ? footprintsResult.value : emptySurveyFootprintManifest();
   if (surveysResult.status === "fulfilled") {
-    publicSurveyCards = surveysResult.value;
-    const records = await Promise.allSettled(publicSurveyCards.map((survey) => workspaceApi.publicSurvey(survey.id)));
+    publicSurveyCards = surveysResult.value.surveys;
     publicSurveyRecordsById.clear();
-    records.forEach((result) => { if (result.status === "fulfilled") publicSurveyRecordsById.set(result.value.id, result.value); });
+    surveysResult.value.records.forEach(record => publicSurveyRecordsById.set(record.id, record));
   } else {
     publicSurveyCards = [];
     publicSurveyRecordsById.clear();
@@ -4197,6 +4200,11 @@ async function selectSurvey(id: string, scope: "local" | "public" = "local"): Pr
 }
 
 async function activateMode(nextMode: ViewMode): Promise<void> {
+  const generation = ++modeActivationGeneration;
+  if (nextMode === "layers" && publicCatalogInitialization) {
+    await publicCatalogInitialization;
+    if (generation !== modeActivationGeneration) return;
+  }
   if (nextMode === "layers" && !surveyFootprints) throw new Error("Survey footprint catalog is not configured");
   mode = nextMode;
   if (nextMode !== "connectors") connectorPanel.deactivate();
@@ -4640,38 +4648,41 @@ declare global {
 }
 
 async function start(): Promise<void> {
-  const [surveysResult, publicSurveysResult, footprintsResult, assetsResult, catalogConfigResult, capabilitiesResult, connectorsResult] = await Promise.allSettled([
-    workspaceApi.surveys(),
-    workspaceApi.publicSurveys(),
+  const initialQuery = new URL(window.location.href).searchParams;
+  const requestedMode = initialQuery.get("mode");
+  surveyFootprints = emptySurveyFootprintManifest();
+  const publicReady = Promise.allSettled([
+    workspaceApi.publicSurveyDirectory(),
     workspaceApi.surveyFootprints(),
-    workspaceApi.dataAssets(),
     workspaceApi.resourceCatalogConfig(),
+  ]).then(([publicSurveysResult, footprintsResult, catalogConfigResult]) => {
+    publicSurveyCards = publicSurveysResult.status === "fulfilled" ? publicSurveysResult.value.surveys : [];
+    publicSurveyRecordsById.clear();
+    if (publicSurveysResult.status === "fulfilled") publicSurveysResult.value.records.forEach(record => publicSurveyRecordsById.set(record.id, record));
+    surveyFootprints = footprintsResult.status === "fulfilled" ? footprintsResult.value : emptySurveyFootprintManifest();
+    publicCatalogUnavailable = footprintsResult.status === "rejected" || publicSurveysResult.status === "rejected" || catalogConfigResult.status === "rejected";
+    if (catalogConfigResult.status === "fulfilled") resourcePackagePanel.setCatalogStatus(catalogConfigResult.value);
+    if (footprintsResult.status === "rejected") {
+      notifyWorkspace("公开覆盖目录读取失败", footprintsResult.reason instanceof Error ? footprintsResult.reason.message : String(footprintsResult.reason), { tone: "warning", dedupeMs: 5_000 });
+    }
+  });
+  publicCatalogInitialization = publicReady;
+  const [surveysResult, assetsResult, capabilitiesResult, connectorsResult] = await Promise.allSettled([
+    workspaceApi.surveyDirectory(),
+    workspaceApi.dataAssets(),
     workspaceApi.capabilities(),
     workspaceApi.connectors(),
   ]);
-  const surveys = surveysResult.status === "fulfilled" ? surveysResult.value : [];
-  const publicSurveys = publicSurveysResult.status === "fulfilled" ? publicSurveysResult.value : [];
-  const footprints = footprintsResult.status === "fulfilled" ? footprintsResult.value : emptySurveyFootprintManifest();
-  const assets = assetsResult.status === "fulfilled" ? assetsResult.value : [];
   workspaceCapabilities = capabilitiesResult.status === "fulfilled" ? capabilitiesResult.value : null;
   workspaceConnectors = connectorsResult.status === "fulfilled" ? connectorsResult.value : [];
-  publicCatalogUnavailable = footprintsResult.status === "rejected" || publicSurveysResult.status === "rejected" || catalogConfigResult.status === "rejected";
-  if (footprintsResult.status === "rejected") {
-    notifyWorkspace("公开覆盖目录读取失败", footprintsResult.reason instanceof Error ? footprintsResult.reason.message : String(footprintsResult.reason), { tone: "warning", dedupeMs: 5_000 });
-    console.warn("Public coverage is unavailable until Assets catalog sync", footprintsResult.reason);
-  }
-  surveyCards = surveys;
-  publicSurveyCards = publicSurveys;
-  surveyFootprints = footprints;
-  dataAssets = assets;
-  if (catalogConfigResult.status === "fulfilled") resourcePackagePanel.setCatalogStatus(catalogConfigResult.value);
-  const surveyResults = await Promise.allSettled(surveys.map((survey) => workspaceApi.survey(survey.id)));
+  surveyCards = surveysResult.status === "fulfilled" ? surveysResult.value.surveys : [];
+  dataAssets = assetsResult.status === "fulfilled" ? assetsResult.value : [];
   localSurveyRecordsById.clear();
-  surveyResults.forEach((result) => { if (result.status === "fulfilled") localSurveyRecordsById.set(result.value.id, result.value); });
-  const publicSurveyResults = await Promise.allSettled(publicSurveys.map((survey) => workspaceApi.publicSurvey(survey.id)));
-  publicSurveyRecordsById.clear();
-  publicSurveyResults.forEach((result) => { if (result.status === "fulfilled") publicSurveyRecordsById.set(result.value.id, result.value); });
-  restoreLayerPreferences();
+  if (surveysResult.status === "fulfilled") surveysResult.value.records.forEach(record => localSurveyRecordsById.set(record.id, record));
+  const needsPublic = !["workflow", "catalog", "system", "connectors"].includes(requestedMode ?? "");
+  if (needsPublic) await publicReady;
+  else void publicReady.then(() => { restoreLayerPreferences(); buildSurveyList(); });
+  if (needsPublic) restoreLayerPreferences();
 
   byId("dataset-name").textContent = "";
   byId("panel-dataset-name").textContent = "Atlas workspace";
@@ -4695,9 +4706,8 @@ async function start(): Promise<void> {
     ...systemPanel.debugState(),
     ...agentDock.debugState(),
   });
-  const initialQuery = new URL(window.location.href).searchParams;
-  await agentDock.initialize();
-  await activateMode(initialQuery.get("mode") === "packages" ? "packages" : initialQuery.get("mode") === "catalog" ? "catalog" : initialQuery.get("mode") === "workflow" ? "workflow" : initialQuery.get("mode") === "system" ? "system" : publicCatalogUnavailable ? "packages" : "layers");
+  void agentDock.initialize().catch(error => console.warn("Agent initialization failed", error));
+  await activateMode(requestedMode === "packages" ? "packages" : requestedMode === "catalog" ? "catalog" : requestedMode === "workflow" ? "workflow" : requestedMode === "system" ? "system" : requestedMode === "connectors" ? "connectors" : publicCatalogUnavailable ? "packages" : "layers");
   void resumeCoverageDownloads();
 }
 

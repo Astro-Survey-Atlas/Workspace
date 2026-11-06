@@ -129,6 +129,9 @@ export interface ConnectorIngestRunInternalInput extends ConnectorIngestRunInput
 }
 
 export interface ConnectorIngestRunFilter {
+  /** Internal query scope; avoids loading unrelated scan history. */
+  assetIds?: readonly string[];
+  qualityOnly?: boolean;
   locationKey?: string;
   connectorId?: string;
   connectorKind?: ConnectorKind;

@@ -19,6 +19,7 @@ ARG NPM_REGISTRY=https://registry.npmjs.org
 ARG ASTRO_BUILD_COMMIT=""
 WORKDIR /app
 COPY package.json package-lock.json ./
+COPY packages/cli/package.json ./packages/cli/package.json
 RUN npm ci --registry=${NPM_REGISTRY}
 
 COPY tsconfig.json tsconfig.viewer.json vite.config.ts ./

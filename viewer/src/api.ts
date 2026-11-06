@@ -10,6 +10,7 @@ import type { PublicResourcePackage, ResourceCatalogStatus, ResourcePackageJob, 
 import type { AstroCoverageLayer, AstroOverviewResponse, AstroSkyQueryInput, AstroSpatialSummary } from "../../src/astro-index";
 import type { UserMocArtifact } from "../../src/user-moc-artifacts";
 import type { WarehouseTaskLogs } from "../../src/warehouse-scan";
+import type { WorkflowCutoutDownloads } from "../../src/workflow-downloads-http";
 
 export type { WarehouseTaskLogs };
 import type { CoverageJobSpec } from "../../src/coverage-jobs";
@@ -439,6 +440,9 @@ export const workspaceApi = {
   async surveys(): Promise<SurveyCard[]> {
     return (await getJson<{ surveys: SurveyCard[] }>("/api/surveys")).surveys;
   },
+  async surveyDirectory(): Promise<{ surveys: SurveyCard[]; records: SurveyRecord[] }> {
+    return getJson("/api/surveys?includeRecords=true");
+  },
   async surveyIdentities(): Promise<import("../../src/storage/types").SurveyIdentityRecord[]> {
     return (await getJson<{ identities: import("../../src/storage/types").SurveyIdentityRecord[] }>("/api/survey-identities")).identities;
   },
@@ -450,6 +454,9 @@ export const workspaceApi = {
   },
   async publicSurveys(): Promise<SurveyCard[]> {
     return (await getJson<{ surveys: SurveyCard[] }>("/api/public-surveys")).surveys;
+  },
+  async publicSurveyDirectory(): Promise<{ surveys: SurveyCard[]; records: SurveyRecord[] }> {
+    return getJson("/api/public-surveys?includeRecords=true");
   },
   async publicSurvey(id: string): Promise<SurveyRecord> {
     return (await getJson<{ survey: SurveyRecord }>(`/api/public-surveys/${encodeURIComponent(id)}`)).survey;
@@ -690,6 +697,9 @@ export const workspaceApi = {
   },
   async workflowRun(id: string): Promise<WorkflowRun> {
     return (await getJson<{ run: WorkflowRun }>(`/api/workflow-runs/${encodeURIComponent(id)}`)).run;
+  },
+  async workflowCutouts(id: string, signal?: AbortSignal): Promise<WorkflowCutoutDownloads> {
+    return getJson(`/api/workflow-runs/${encodeURIComponent(id)}/cutouts`, signal);
   },
   async decideWorkflowRun(id: string, decision: Record<string, unknown>): Promise<WorkflowRun> {
     return (await postJson<{ run: WorkflowRun }>(`/api/workflow-runs/${encodeURIComponent(id)}/decisions`, decision)).run;

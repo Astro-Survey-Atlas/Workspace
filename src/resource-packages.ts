@@ -850,6 +850,7 @@ export class ResourcePackageManager {
   #catalogSyncedAt?: string;
   #surveyCatalog: AssetsSurveyRecord[] = [];
   #surveyCatalogBytes?: Buffer;
+  #surveyRecordsCache?: { catalog: ResourcePackageCatalogDocument; surveys: AssetsSurveyRecord[]; state: ResourcePackageState; records: SurveyRecord[] };
 
   constructor(options: ResourcePackageManagerOptions) {
     this.#allowedOrigins = normalizeAllowedOrigins(options.allowedOrigins);
@@ -1031,6 +1032,16 @@ export class ResourcePackageManager {
       const update = this.#hasUpdate(entry, installed);
       return [this.#toPublic(entry, installed, update)];
     });
+  }
+
+  /** Catalog projections change only when the trusted catalog or installation changes. */
+  surveyRecords(): SurveyRecord[] {
+    this.#assertAvailable();
+    const cached = this.#surveyRecordsCache;
+    if (cached?.catalog === this.#catalog && cached.surveys === this.#surveyCatalog && cached.state === this.#state) return structuredClone(cached.records);
+    const records = resourcePackageSurveyRecords(this.list());
+    this.#surveyRecordsCache = { catalog: this.#catalog, surveys: this.#surveyCatalog, state: this.#state, records };
+    return structuredClone(records);
   }
 
   activeSelection(): ResourcePackageLoad[] {

@@ -31,6 +31,7 @@ export class SurveyDirectory {
         const existing = identities.find((entry) => entry.source === "assets" && entry.sourceId === survey.id);
         const id = existing?.id ?? (identities.some((entry) => entry.id === survey.id) ? `assets-${randomUUID()}` : survey.id);
         const cachedSurvey = existing ? { ...survey, releases: [...survey.releases, ...existing.survey.releases.filter((release) => !survey.releases.some((current) => current.id === release.id))] } : survey;
+        if (existing && JSON.stringify(existing.survey) === JSON.stringify(cachedSurvey)) continue;
         const entry: SurveyIdentityRecord = existing ? { ...existing, survey: cachedSurvey } : { id, source: "assets", sourceId: survey.id, survey, localReleases: [], history: [] };
         await tx.putSurveyIdentity(entry);
         if (!existing) identities.push(entry);

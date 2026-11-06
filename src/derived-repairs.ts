@@ -356,7 +356,7 @@ export class DerivedRepairService {
   async isIndexing(scopes: readonly SkyDataPointScope[]): Promise<boolean> {
     if (!scopes.length) return false;
     const assetIds = new Set(scopes.map((scope) => scope.assetId));
-    const runs = await this.#options.runs.list();
+    const runs = await this.#options.runs.list({ assetIds: [...assetIds] });
     const currentBatches = new Map([...assetIds].map(id => [id, currentQualityBatch(id, runs)?.id]));
     const currentRun = (assetId: string, run: ConnectorIngestRunRecord | undefined) => !currentBatches.get(assetId)
       || run && dataBatchForRun(run) === currentBatches.get(assetId);

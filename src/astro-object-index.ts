@@ -292,7 +292,7 @@ export interface AstroObjectIndexOptions {
   objectIndex?: string;
   coverageIndex?: string;
   timeoutMs?: number;
-  dataBatches?: () => Promise<ReadonlyMap<string, string>>;
+  dataBatches?: (assetIds?: readonly string[]) => Promise<ReadonlyMap<string, string>>;
 }
 
 const DEFAULT_LIMIT = 500;
@@ -330,7 +330,10 @@ const OBJECT_SOURCE_FIELDS = [
   "attributes",
 ] as const;
 
-const OBJECT_POINT_SOURCE_FIELDS: readonly string[] = [...OBJECT_SOURCE_FIELDS.filter((field) => field !== "attributes"), "attributes.position_role", "attributes.position_method", "attributes.file_name", "attributes.hdu_index", "attributes.source_id"];
+const OBJECT_POINT_SOURCE_FIELDS = [
+  "object_id", "ra_deg", "dec_deg", "asset_id", "survey", "release", "product", "modality",
+  "attributes.position_role", "attributes.source_id",
+] as const;
 
 const COVERAGE_SOURCE_FIELDS = [
   "healpix_order",
@@ -1024,6 +1027,17 @@ function objectFromHit(hit: ElasticsearchSearchHit): AstroObjectRecord {
   return source as unknown as AstroObjectRecord;
 }
 
+function pointFromHit(hit: ElasticsearchSearchHit): AstroObjectRecord {
+  const source = isRecord(hit._source) ? hit._source : {};
+  const attributes = stringAttributes(source.attributes);
+  return {
+    ...Object.fromEntries(OBJECT_POINT_SOURCE_FIELDS.filter(field => !field.startsWith("attributes.") && source[field] !== undefined)
+      .map(field => [field, source[field]])),
+    attributes: Object.fromEntries(["position_role", "source_id"].filter(field => attributes[field] !== undefined)
+      .map(field => [field, attributes[field]])),
+  } as unknown as AstroObjectRecord;
+}
+
 function hitsFromResponse(response: ElasticsearchSearchResponse): ElasticsearchSearchHit[] {
   const hits = response.hits?.hits;
   if (!Array.isArray(hits)) return [];
@@ -1333,7 +1347,7 @@ export class AstroObjectIndexService {
   readonly #coverageIndex: string;
   readonly #timeoutMs: number;
   readonly #authorization?: string;
-  readonly #dataBatches?: () => Promise<ReadonlyMap<string, string>>;
+  readonly #dataBatches?: AstroObjectIndexOptions["dataBatches"];
   #batchMappingsReady = false;
 
   constructor(options: AstroObjectIndexOptions = {}) {
@@ -1730,6 +1744,7 @@ export class AstroObjectIndexService {
           JSON.stringify(pointDensityQueryBody(normalized, nside)),
           "application/json",
           signal,
+          normalized.layers.flatMap(layer => layer.scopes.map(scope => scope.assetId)),
         ) as ElasticsearchSearchResponse;
         if (response.timed_out || (isRecord(response._shards) && Number(response._shards.failed) > 0)) {
           throw new Error("Point density aggregation did not complete");
@@ -1830,11 +1845,12 @@ export class AstroObjectIndexService {
         JSON.stringify(queryBody(normalized)),
         "application/json",
         signal,
+        normalized.layerScopes?.map(scope => scope.assetId) ?? normalized.assetIds,
       ) as ElasticsearchSearchResponse;
       const hits = hitsFromResponse(response);
       const reportedTotal = totalFromHits(response.hits?.total);
       return queryResult(this.#objectIndex, normalized, "ready", {
-        objects: hits.map(objectFromHit),
+        objects: hits.map(normalized.includeAttributes ? objectFromHit : pointFromHit),
         total: normalized.trackTotalHits ? reportedTotal : Math.max(reportedTotal, hits.length),
         totalRelation: normalized.trackTotalHits ? "eq" : "gte",
         searchAfter: nextSearchAfter(hits),
@@ -1868,10 +1884,10 @@ export class AstroObjectIndexService {
     }
   }
 
-  async #requestJson(path: string, body: string, contentType: string, signal?: AbortSignal): Promise<unknown> {
+  async #requestJson(path: string, body: string, contentType: string, signal?: AbortSignal, assetIds?: readonly string[]): Promise<unknown> {
     signal?.throwIfAborted();
     if (this.#dataBatches && /\/_search(?:\?|$)/.test(path)) {
-      const batches = await this.#dataBatches();
+      const batches = await this.#dataBatches(assetIds);
       if (batches.size) {
         const request = JSON.parse(body) as Record<string, unknown>;
         const visible = { bool: { should: [

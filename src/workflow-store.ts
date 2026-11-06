@@ -258,6 +258,26 @@ export class WorkflowStore {
     return readFile(artifact.filePath, "utf8");
   }
 
+  async artifactPaths(runId: string, names: readonly string[]): Promise<Array<{ artifact: WorkflowArtifact; filePath: string }>> {
+    const run = await this.get(runId);
+    const byName = new Map(run.artifacts.map(artifact => [artifact.name, artifact]));
+    const files: Array<{ artifact: WorkflowArtifact; filePath: string }> = [];
+    for (const name of names) {
+      assertId(name, "artifact name");
+      const artifact = byName.get(name);
+      if (!artifact) throw new Error(`Workflow artifact not found: ${runId}/${name}`);
+      const filePath = path.join(this.root, run.id, name);
+      files.push({ artifact, filePath });
+    }
+    for (let offset = 0; offset < files.length; offset += 16) {
+      await Promise.all(files.slice(offset, offset + 16).map(async ({ artifact, filePath }) => {
+        const details = await stat(filePath);
+        if (!details.isFile() || details.size !== artifact.byteLength) throw new Error(`Workflow artifact size mismatch: ${artifact.name}`);
+      }));
+    }
+    return files;
+  }
+
   async createSession(workflowKey: string): Promise<AgentSession> {
     const createdAt = now();
     const session: AgentSession = {

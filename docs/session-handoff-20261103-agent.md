@@ -1,13 +1,68 @@
 # Session 交接：Workspace Agent 实现与 CSST 扫描
 
-更新时间：2026-11-05，Asia/Shanghai；最新 Dev 部署为 Workspace Helm revision **145**。
+更新时间：2026-11-05，Asia/Shanghai；最新 Dev 部署为 Workspace Helm revision **148**。
 
 Workspace 运行镜像为
-`0.0.1-dev-20261105-aladin-fast-r3`，digest
-`sha256:3dcf2e6b30732c7b701d40db14dd7a17a465d426bb3aa109a510d8a48118814f`。
-Pod `asa-workspace-5df48b48-285jg` Ready、零重启，`/healthz` 返回 HTTP 200。
+`0.0.1-dev-20261105-download-perf-r3`，registry digest
+`sha256:525ae2450dee5c20b91aeb5fdc4f4b17ea36deb7de9231f596aa68f020024b8b`。
+Pod `asa-workspace-778fd684b8-srg5p` Ready、零重启。
 Helm 在代理绕过列表中加入展开后的 `KUBERNETES_SERVICE_HOST`；当前值为
 `10.43.0.1`。Pod 内 Kubernetes Secret API 只读请求返回 HTTP 200、18 ms。
+
+## 2026-11-05 FITS 下载与性能发布
+
+本轮增加 `GET /api/workflow-runs/:id/cutouts` 和 `/:id/cutouts.zip`。
+Workflow 结果下方显示目标、巡天、波段、大小、单文件和 ZIP 下载，每页 50 项。
+CLI 共用 API：`workflows cutouts RUN_ID [--output cutouts.zip]`。
+成功记录 `wfr_20261105012541_6572797f` 的 215 个 FITS 下载与 SHA-256 校验通过；
+ZIP 包含 219 项，其中 218 项配套校验，另有 manifest。空筛选列表为 0，ZIP 为 400。
+没有生成新的科学数据或重新执行 cutout；仍未增加 PNG/JPEG 预览。
+
+点位 API 默认精简字段并支持 gzip，用户的 2,000 点样本约 477 KB 原始 JSON、
+43–46 KB 实际传输。区域、asset/source 过滤、cursor 与总数下界语义保留。
+质量批次与扫描状态只读所选资产，状态检查与 ES 并行。主 JS 从约 3.41 MB 降为
+988 KB，HTTP gzip 约 305 KB；Aladin 进入时才加载。两类巡天目录均批量返回完整记录，
+Workflow 初始化不等待公开目录或 Agent。公开巡天投影缓存、无变化目录同步跳过写入；
+DR9 补充覆盖校验后缓存五分钟、并发去重、后台预热，API key 变化后刷新。
+
+revision 146 发布下载与资源调整；147 加覆盖缓存；148 补完整公开目录批量读取和
+ZIP 文件检查的有限并发。复用实际 release 的 chart 和 `--reuse-values`，只调整
+Workspace 镜像、Workspace/ES 资源和 ES heap。后两次只更新 Workspace 镜像，
+原 Downloader 和 W2 Scanner 继续工作。Workspace limit 为 2 CPU / 3 GiB，
+ES 为 2 CPU / 4 GiB、heap 1 GiB；可选配置已记录在 chart README。
+
+**性能验收仍有限制：** 同参数点查询出现过 0.759 秒、4.698 秒、冷请求 16–18 秒，
+也出现过 30 秒 ES 超时；独立 ES 请求 `took=14050 ms`。ZIP 测到过 5.571 秒和
+101.045 秒，最终增加了并发文件检查，但没有证明稳定吞吐。所有相关 PVC 为
+`nfs-data`，ES 节点 I/O pressure `full avg10=43.50`，节点 CPU 约 7%。共享存储等待
+仍是明确待办，不得把加资源或一次快响应记作持续性能达标。没有迁移或删除卷。
+
+验证：完整 build、server/viewer/CLI 类型编译、Helm lint/template、diff check 通过；
+下载、对象查询、SQLite storage、巡天和资源目录定向集为 72 passed、1 skipped；
+Assets region/overview 回归为 9 passed。Postgres 因缺少测试数据库跳过。
+headless 浏览器实际验证列表、分页、单 FITS 和完整 ZIP、空结果及延迟公开目录时的
+Workflow 初始化；没有页面/API 错误，Workflow 页面没有请求 Aladin chunk。
+
+详细实测及范围：[下载与性能改进记录](workspace-download-performance-20261105.md)。
+私有 receipt：`/tmp/workspace-download-perf-20261105-cv_fv5iz/`，指针
+`/tmp/workspace-download-perf-receipt-path`。r1/r2 为完整 Dockerfile 构建；r3 在 r2
+上覆盖已通过完整本地构建的 `http-server.js`、`workflow-store.js` 和完整 Viewer。
+当前工作树未提交，HEAD 为 `e22c940`。r3 首次镜像推送卡在本机 HTTP 代理，取消后
+去除本次 push 的代理环境变量直连成功；没有修改 Workspace 运行时代理配置。
+
+### revision 148 最终复验
+
+Helm 为 deployed；线上两个覆盖模块、下载模块和 Viewer JS 的 SHA-256 与本地构建
+一致。最终升级仅变更 Workspace 镜像；Workspace、ES、Downloader 均 Ready、零重启。
+最终 HTTP 脚本通过全部断言，CLI 列出 215 个 FITS；浏览器再次下载有效单 FITS 和
+215 文件 ZIP，分页 50/50/50/50/15，空结果不显示下载按钮，无页面/API 错误。
+
+本轮最终样本：点查询 **15.382 秒 / 45,890 字节**、W2 **16.310 秒**、ZIP **74.136 秒**、
+预热覆盖接口 **0.009 秒**。健康检查曾为 17.682 秒，复查 0.025 秒；Pod 内主线程
+等待采样为 `rpc_wait_bit_killable`，与 NFS RPC 等待一致。浏览器默认首页初始化
+0.333 秒；延迟公开目录的 Workflow 初始化 11.136 秒，没有加载 Aladin chunk。
+不得用一次快响应覆盖这些慢样本。最终 API 记录位于 receipt 的
+`r3/live-verification.json`，浏览器结果为 `browser-verification.json`。
 
 ## 2026-11-05 Aladin HEALPix 2071 查询与空视野修复
 

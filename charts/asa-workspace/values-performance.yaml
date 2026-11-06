@@ -1,0 +1,19 @@
+# Opt-in profile for workspaces with millions of indexed points and active scans.
+# Leave filesystem/page-cache headroom alongside the Elasticsearch JVM heap.
+resources:
+  requests:
+    cpu: 500m
+    memory: 512Mi
+  limits:
+    cpu: "2"
+    memory: 3Gi
+elasticsearch:
+  master:
+    heapSize: 1g
+    resources:
+      requests:
+        cpu: 500m
+        memory: 2Gi
+      limits:
+        cpu: "2"
+        memory: 4Gi

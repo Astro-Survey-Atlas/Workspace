@@ -43,6 +43,29 @@ async function withServer(
   }
 }
 
+test("viewport results exclude file metadata and duplicate coordinates while retaining layer identity and cursor", async () => {
+  let scopedAssets: readonly string[] | undefined;
+  await withServer(async (request, response) => {
+    const body = JSON.parse(await requestBody(request));
+    assert.equal(body.track_total_hits, false);
+    for (const field of ["sky_position", "healpix_order", "healpix_pixel", "source_file_id", "scan_run_id", "attributes.file_name"]) assert.ok(!body._source.includes(field));
+    response.setHeader("Content-Type", "application/json");
+    response.end(JSON.stringify({ hits: { hits: [{ _id: "duplicate-es-id", sort: [123, 10, 2, "w2", "file", "target"], _source: {
+      object_id: "target", ra_deg: 10, dec_deg: 2, asset_id: "w2", survey: "csst", release: "w2", product: "image", modality: "imaging",
+      sky_position: { lon: 10, lat: 2 }, source_file_id: "file", scan_run_id: "run", healpix_order: 8, healpix_pixel: 123,
+      attributes: { source_id: "source", position_role: "image_center", file_name: "large-metadata.fits", source_uri: "s3://private/path" },
+    } }] } }));
+  }, async baseUrl => {
+    const index = new AstroObjectIndexService({ baseUrl, dataBatches: async assetIds => { scopedAssets = assetIds; return new Map(); } });
+    const result = await index.queryObjects({ bbox: { raMin: 0, raMax: 20, decMin: 0, decMax: 5 }, layerScopes: [{ assetId: "w2" }], includeAttributes: false, trackTotalHits: false });
+    assert.equal(result.status, "ready");
+    assert.deepEqual(scopedAssets, ["w2"]);
+    assert.deepEqual(result.objects, [{ object_id: "target", ra_deg: 10, dec_deg: 2, asset_id: "w2", survey: "csst", release: "w2", product: "image", modality: "imaging", attributes: { source_id: "source", position_role: "image_center" } }]);
+    assert.deepEqual(result.nextCursor, [123, 10, 2, "w2", "file", "target"]);
+    assert.equal(result.total, 1);
+  });
+});
+
 test("disconnecting a viewport client closes its Elasticsearch request", async () => {
   let start: () => void = () => {};
   const started = new Promise<void>(resolve => { start = resolve; });

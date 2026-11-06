@@ -507,6 +507,8 @@ export class AssetsCoverageOverviewClient {
   readonly #getApiKey: () => Promise<string | undefined>;
   readonly #fetch: typeof fetch;
   readonly #timeoutMs: number;
+  #cached?: { key: string; expiresAt: number; footprints: SurveyFootprint[] };
+  #pending?: { key: string; promise: Promise<SurveyFootprint[]> };
 
   constructor(options: AssetsCoverageOverviewClientOptions) {
     try {
@@ -525,8 +527,21 @@ export class AssetsCoverageOverviewClient {
   async legacyDr9Footprints(): Promise<SurveyFootprint[]> {
     if (!this.#endpoint) return [];
     const key = await this.#getApiKey();
-    if (!key) return [];
+    if (!key) { this.#cached = undefined; this.#pending = undefined; return []; }
+    if (this.#cached?.key === key && this.#cached.expiresAt > Date.now()) return structuredClone(this.#cached.footprints);
+    if (this.#pending?.key !== key) {
+      const promise = this.#readLegacyDr9Footprints(key).then(footprints => {
+        if (this.#pending?.promise === promise) this.#cached = { key, expiresAt: Date.now() + 5 * 60_000, footprints };
+        return footprints;
+      }).finally(() => {
+        if (this.#pending?.promise === promise) this.#pending = undefined;
+      });
+      this.#pending = { key, promise };
+    }
+    return structuredClone(await this.#pending.promise);
+  }
 
+  async #readLegacyDr9Footprints(key: string): Promise<SurveyFootprint[]> {
     const expected = new Map([
       ["source-units-legacy-surveys-legacy-dr9-coadded-imaging", "Coadded imaging"],
       ["source-units-legacy-surveys-legacy-dr9-tractor-catalog", "Tractor catalog"],

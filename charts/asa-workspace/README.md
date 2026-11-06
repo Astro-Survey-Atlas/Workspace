@@ -137,6 +137,19 @@ templates are immutable, remove its completed
 `asa-workspace-search-init` object
 before reapplying that static manifest after changing the script or mappings.
 
+For workspaces with millions of indexed points and concurrent scans, the
+optional `values-performance.yaml` profile gives the API a 2 CPU / 3 GiB limit
+and Elasticsearch a 2 CPU / 4 GiB limit with a 1 GiB JVM heap. Apply it only
+where the nodes can satisfy the additional requests:
+
+```bash
+helm upgrade asa ./charts/asa-workspace --namespace asa-workspace \
+  --reuse-values -f charts/asa-workspace/values-performance.yaml
+```
+
+Changing the Elasticsearch heap restarts the bundled single-node search
+service; queries can be temporarily unavailable while it recovers.
+
 ## Warehouse integration
 
 Set `dataWarehouse.enabled=true` to let Workspace submit the namespaced

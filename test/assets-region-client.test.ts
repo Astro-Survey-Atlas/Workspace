@@ -288,13 +288,14 @@ test("AssetsRegionClient preserves observation-footprint evidence without files 
 
 test("AssetsCoverageOverviewClient reads only the two estimated DR9 order-4 public layers", async () => {
   const requests: Array<{ url: string; init: RequestInit }> = [];
+  let apiKey: string | undefined = "asa_live_test";
   const layerRows = [
     { layerId: "source-units-legacy-surveys-legacy-dr9-coadded-imaging", product: "Coadded imaging", cells: [11, 12] },
     { layerId: "source-units-legacy-surveys-legacy-dr9-tractor-catalog", product: "Tractor catalog", cells: [12] },
   ];
   const client = new AssetsCoverageOverviewClient({
     catalogUrl: "http://assets.test/api/v1/resource-packages/catalog.json",
-    getApiKey: async () => "asa_live_test",
+    getApiKey: async () => apiKey,
     fetchImpl: (async (url, init) => {
       const requestUrl = new URL(String(url));
       requests.push({ url: requestUrl.href, init: init ?? {} });
@@ -324,7 +325,8 @@ test("AssetsCoverageOverviewClient reads only the two estimated DR9 order-4 publ
     }) as typeof fetch,
   });
 
-  const footprints = await client.legacyDr9Footprints();
+  const [footprints, concurrent] = await Promise.all([client.legacyDr9Footprints(), client.legacyDr9Footprints()]);
+  assert.deepEqual(concurrent, footprints);
   assert.equal(footprints.length, 2);
   assert.deepEqual(footprints.map(({ product, pixels, layerId, quality, nside }) => ({ product, pixels, layerId, quality, nside })), [
     {
@@ -347,6 +349,14 @@ test("AssetsCoverageOverviewClient reads only the two estimated DR9 order-4 publ
   assert.ok(requests.every(({ init }) => JSON.parse(String(init.body)).order === 4));
   assert.ok(requests.every(({ url }) => new URL(url).pathname === "/api/v1/access/coverage-block"));
   assert.ok(footprints.every(({ notes }) => notes.includes("overview")));
+  footprints[0]!.pixels.push(99);
+  assert.deepEqual((await client.legacyDr9Footprints())[0]!.pixels, [11, 12]);
+  assert.equal(requests.length, 2, "repeated and concurrent reads reuse the validated overview");
+  apiKey = "asa_rotated_test";
+  await client.legacyDr9Footprints();
+  assert.equal(requests.length, 4, "changing the API key invalidates the overview");
+  apiKey = undefined;
+  assert.deepEqual(await client.legacyDr9Footprints(), []);
 });
 
 test("AssetsCoverageOverviewClient rejects non-O4 precision returned by Assets", async () => {

@@ -328,7 +328,7 @@ function usage(): string {
     "  assets list|get ID",
     "  connectors list|get ID|check ID|scan ID|objects ID [--prefix PREFIX] [--continuation-token TOKEN]",
     "  production pipelines|list|get ID|submit --input run.json|cancel ID|retry ID|approve ID --sha256 HASH|reject ID",
-    "  workflows list|get WORKFLOW_KEY|runs [--limit N] [--workflow-key KEY]|run WORKFLOW_KEY (--input FILE|-|--data JSON)|run-get RUN_ID|decide RUN_ID (--input FILE|-|--data JSON)|artifact RUN_ID NAME --output FILE|artifact-read RUN_ID NAME [--max-bytes N]",
+    "  workflows list|get WORKFLOW_KEY|runs [--limit N] [--workflow-key KEY]|run WORKFLOW_KEY (--input FILE|-|--data JSON)|run-get RUN_ID|decide RUN_ID (--input FILE|-|--data JSON)|cutouts RUN_ID [--output ZIP]|artifact RUN_ID NAME --output FILE|artifact-read RUN_ID NAME [--max-bytes N]",
     "  system ai list|test ID; system mcp list|test ID; system runtime",
     "  agent sessions|new|send ID MESSAGE|confirm ID --approved|--rejected",
     "  api --method GET|POST|PUT|PATCH|DELETE --path /api/... [--data JSON|--input FILE|--input -] [--output FILE]",
@@ -383,6 +383,12 @@ async function run(client: WorkspaceClient, args: ParsedArgs): Promise<unknown> 
     if (action === "decide") {
       const runId = encodeURIComponent(requireCommand(identifier, "workflow run id"));
       return unwrap(await client.request("POST", `/api/workflow-runs/${runId}/decisions`, await readJsonInput(args)), "run");
+    }
+    if (action === "cutouts") {
+      const runId = encodeURIComponent(requireCommand(identifier, "workflow run id"));
+      const output = option(args, "output", "o");
+      return output?.trim() ? client.download(`/api/workflow-runs/${runId}/cutouts.zip`, output.trim())
+        : client.request("GET", `/api/workflow-runs/${runId}/cutouts`);
     }
     if (action === "artifact") {
       const runId = encodeURIComponent(requireCommand(identifier, "workflow run id"));

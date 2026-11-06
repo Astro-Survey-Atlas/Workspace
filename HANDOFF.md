@@ -4,10 +4,10 @@ Updated: 2026-11-05, Asia/Shanghai.
 
 ## Current Dev state
 
-Workspace is deployed at Helm revision **145**, image
-`0.0.1-dev-20261105-aladin-fast-r3`, digest
-`sha256:3dcf2e6b30732c7b701d40db14dd7a17a465d426bb3aa109a510d8a48118814f`.
-Pod `asa-workspace-5df48b48-285jg` is Ready with zero restarts. `NO_PROXY` now includes the expanded
+Workspace is deployed at Helm revision **148**, image
+`0.0.1-dev-20261105-download-perf-r3`, registry digest
+`sha256:525ae2450dee5c20b91aeb5fdc4f4b17ea36deb7de9231f596aa68f020024b8b`.
+Pod `asa-workspace-778fd684b8-srg5p` is Ready with zero restarts. `NO_PROXY` includes the expanded
 Kubernetes Service IP; a read-only Connector Secret request returned HTTP 200
 in 18 ms.
 
@@ -23,26 +23,56 @@ targets. Run `wfr_20261105013325_96ffeade` verified the empty-selection path:
 zero filtered rows, cutout skipped, zero-row export and overall success. Full
 trace and artifact evidence is in the [session handoff](docs/session-handoff-20261103-agent.md).
 
-## Open UX and performance follow-ups (November 5)
+## FITS downloads and performance release (November 5)
 
-- Reduce `/api/sky/points/query` response size. A bounded viewport request with
-  `includeAttributes=false` still returns repeated and non-rendering metadata;
-  retain only map and selection fields in the point response, and fetch detail
-  fields on demand. A user-provided sample response was about 1.2 MB.
-- Restore fast first paint: measure and remove the startup dependency on slow
-  `/api/public-surveys` and `/api/survey-footprints` requests. Samples took
-  about 8-9 seconds and 1.35-2.77 seconds respectively.
-- Enable HTTP compression for JSON and static assets. The observed point query
-  response used `Content-Encoding: identity`; the main JS bundle was 3.41 MB
-  uncompressed.
-- Improve Elasticsearch headroom and query latency. The observed Pod used about
-  1,825 MiB of its 2 GiB limit and had a prior OOMKilled exit; bounded viewport
-  queries still timed out under active indexing.
-- Make Workflow cutout products discoverable. Successful FITS files are
-  registered as individual binary artifacts under
-  `/state/workflow-runs/<runId>/` and referenced by `outputUri` in
-  `cutouts.json`; the current Workflow UI exposes the CSV result and cutout
-  index, but not per-target FITS downloads or image previews.
+Workflow now exposes per-target FITS downloads and a ZIP containing the FITS,
+filtered CSV, cutout index, available run result and checksummed manifest.
+Use `GET /api/workflow-runs/:id/cutouts` or `/:id/cutouts.zip`; CLI supports
+`workflows cutouts RUN_ID [--output cutouts.zip]`. The result section has a
+50-file paginated list. Successful files remain downloadable after partial
+failure; empty selections have no archive. ZIP streams, checks files before
+headers using bounded concurrency, and aborts reads when the client disconnects.
+
+The user's 2,000-point request now has about 477 KB of JSON and 43–46 KB of
+gzip transfer, compared with their previous approximately 1.2 MB sample.
+Complete fields are retrieved on demand. Explicit asset/source/HEALPix/bbox
+filters and pagination remain. The main bundle is now 988 KB raw / approximately
+305 KB over HTTP gzip; Aladin loads on entry. Both local and public survey
+directories return full records in one request. Workflow startup does not wait
+for public coverage or Agent initialization. DR9 overview reads are validated,
+cached for five minutes, deduplicated and warmed in the background.
+
+Dev applies `values-performance.yaml`: Workspace limit 2 CPU / 3 GiB,
+Elasticsearch 2 CPU / 4 GiB with a 1 GiB heap. Existing storage, credentials,
+downloader and scan configuration were retained. The two W2 Scanner slots
+continued processing; no new science scan or cutout run was submitted.
+
+**Remaining:** bounded point-query latency and download throughput are still
+variable. Samples include 0.759 s and 4.698 s, cold 16–18 s, and a later 30 s
+ES timeout. ES itself reported `took=14050 ms` on an isolated read. All Workspace
+and ES volumes use `nfs-data`; the ES node showed I/O pressure
+`full avg10=43.50` with low CPU usage. Resource headroom and application fixes
+do not resolve this shared-storage bottleneck. PNG/JPEG FITS previews remain
+future work. Do not report sustained fast queries or image previews as complete.
+
+Download hashes, browser interactions, measurements and validation limits:
+[release notes](docs/workspace-download-performance-20261105.md).
+Private receipt: `/tmp/workspace-download-perf-20261105-cv_fv5iz/`;
+pointer: `/tmp/workspace-download-perf-receipt-path`. Current changes remain
+uncommitted on `e22c940`. r1/r2 were full Docker builds; r3 overlays the two
+changed compiled server modules and the complete newly built Viewer on r2.
+
+Final revision 148 checks passed: deployed module/Viewer hashes match the local
+build; the last Helm upgrade changed only the Workspace image; ES and downloader
+remain Ready with zero restarts. UI/CLI/API expose 215 files, and both HTTP and
+browser ZIP downloads contain the verified FITS. The final 2,000-point query
+took **15.382 s / 45,890 bytes**, W2 **16.310 s**, ZIP **74.136 s**. Warm public
+footprints took **0.009 s**. Browser home initialization took **0.333 s**;
+Workflow initialized in **11.136 s** while public requests were deliberately
+held, with no page/API errors or initial Aladin download. API timings live in
+the receipt's `r3/live-verification.json`; browser results are in
+`browser-verification.json`. Main-process wait sampling observed
+`rpc_wait_bit_killable`; NFS waiting remains unresolved.
 
 The Aladin HEALPix anchor fallback shipped in revision 142; revision 143 added
 the Viewer query changes. Revisions 144 and 145 disable exact hit counting by

@@ -93,6 +93,18 @@ async function metadataStoreContract(store: MetadataStore): Promise<void> {
   assert.deepEqual((await store.listConnectorIngestRuns(latestRun.locationKey)).map((record) => record.id), [latestRun.id, olderRun.id]);
   assert.deepEqual(await store.listConnectorIngestRuns("s3://unrelated"), []);
 
+  const scopedRuns = [
+    ingestRun({ id: "quality-parent", assetId: "w2", fitsQualityProfile: "csst-wcs-v1" }),
+    ingestRun({ id: "quality-child", assetId: "w2", parentRunId: "quality-parent", fitsQualityProfile: "csst-wcs-v1" }),
+    ingestRun({ id: "quality-multi", assetIds: ["w2", "w3"], fitsQualityProfile: "csst-wcs-v1" }),
+    ingestRun({ id: "unrelated-quality", assetId: "w1", fitsQualityProfile: "csst-wcs-v1" }),
+  ];
+  for (const run of scopedRuns) await store.putConnectorIngestRun(run);
+  assert.deepEqual((await store.listConnectorIngestRuns({ assetIds: ["w2"], qualityOnly: true })).map(run => run.id).sort(), ["quality-multi", "quality-parent"]);
+  assert.deepEqual((await store.listConnectorIngestRuns({ assetIds: ["w3"] })).map(run => run.id), ["quality-multi"]);
+  assert.deepEqual(await store.listConnectorIngestRuns({ assetIds: [] }), []);
+  for (const run of scopedRuns) await store.deleteConnectorIngestRun(run.id);
+
   await store.transaction(async (transaction) => {
     await transaction.setImportMarker("legacy-json-v1", "complete");
     await transaction.putConnector(connector({ id: "connector-two", locationKey: "local:///data", kind: "local", config: { rootPath: "/data" } }));

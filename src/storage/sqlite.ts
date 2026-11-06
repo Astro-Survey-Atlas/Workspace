@@ -198,6 +198,11 @@ class SqliteTransaction implements MetadataTransaction {
     if (filter.connectorId !== undefined) { clauses.push("connector_id = ?"); parameters.push(filter.connectorId); }
     if (filter.connectorKind !== undefined) { clauses.push("connector_kind = ?"); parameters.push(filter.connectorKind); }
     if (filter.status !== undefined) { clauses.push("status = ?"); parameters.push(filter.status); }
+    if (filter.assetIds !== undefined) {
+      clauses.push("(json_extract(record, '$.assetId') IN (SELECT value FROM json_each(?)) OR EXISTS (SELECT 1 FROM json_each(json_extract(record, '$.assetIds')) WHERE value IN (SELECT value FROM json_each(?))))");
+      parameters.push(JSON.stringify(filter.assetIds), JSON.stringify(filter.assetIds));
+    }
+    if (filter.qualityOnly) clauses.push("json_extract(record, '$.parentRunId') IS NULL AND json_extract(record, '$.fitsQualityProfile') IS NOT NULL");
     const where = clauses.length ? ` WHERE ${clauses.join(" AND ")}` : "";
     return this.records<ConnectorIngestRunRecord>(`SELECT record FROM connector_ingest_runs${where} ORDER BY created_at DESC, id DESC`, ...parameters);
   }

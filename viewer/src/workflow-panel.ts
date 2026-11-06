@@ -1,6 +1,7 @@
 import { workspaceApi } from "./api";
 import type { DataAssetRecord } from "./api";
 import type { ToolDescriptor, WorkflowDefinition, WorkflowRun, WorkflowRunListItem } from "../../src/workflow";
+import type { WorkflowCutoutDownloads } from "../../src/workflow-downloads-http";
 import { notifyWorkspace } from "./notifications";
 
 function byId<T extends HTMLElement>(id: string): T {
@@ -20,6 +21,10 @@ function formatInteger(value: unknown): string {
 
 function shortId(value: string): string {
   return value.length > 23 ? `${value.slice(0, 14)}…${value.slice(-6)}` : value;
+}
+
+function formatBytes(bytes: number): string {
+  return bytes >= 1024 * 1024 ? `${(bytes / 1024 / 1024).toFixed(1)} MB` : bytes >= 1024 ? `${(bytes / 1024).toFixed(1)} KB` : `${bytes} B`;
 }
 
 function catalogFormat(asset: DataAssetRecord): "csv" | "fits" | undefined {
@@ -87,6 +92,10 @@ export class WorkflowPanel {
   private initialized = false;
   private active = false;
   private lastNotifiedRunStatus: WorkflowRun["status"] | null = null;
+  private cutoutDownloads: WorkflowCutoutDownloads | null = null;
+  private cutoutRequestKey = "";
+  private cutoutPage = 0;
+  private cutoutController: AbortController | null = null;
 
   constructor(private readonly onError: (error: unknown) => void) {
     const dialog = byId<HTMLDialogElement>("workflow-create-dialog");
@@ -113,6 +122,8 @@ export class WorkflowPanel {
     byId<HTMLButtonElement>("workflow-adjust-region").addEventListener("click", () => void this.decide({ action: "adjust_region", input: this.formInput() }));
     byId<HTMLButtonElement>("workflow-retry").addEventListener("click", () => void this.decide({ action: "retry" }));
     byId<HTMLButtonElement>("workflow-open-layers").addEventListener("click", () => this.navigate("layers"));
+    byId("workflow-cutouts-prev").addEventListener("click", () => { this.cutoutPage -= 1; this.renderCutoutFiles(); });
+    byId("workflow-cutouts-next").addEventListener("click", () => { this.cutoutPage += 1; this.renderCutoutFiles(); });
     byId<HTMLSelectElement>("workflow-catalog-source-euclid").addEventListener("change", () => this.catalogSourceChanged("euclid"));
     byId<HTMLSelectElement>("workflow-catalog-source-desi").addEventListener("change", () => this.catalogSourceChanged("desi"));
     byId<HTMLSelectElement>("workflow-catalog-map-side").addEventListener("change", () => {
@@ -494,9 +505,74 @@ export class WorkflowPanel {
     const cutoutArtifact = run.artifacts.find((candidate) => candidate.name === "cutouts.json");
     cutoutDownload.hidden = !cutoutArtifact;
     if (cutoutArtifact) cutoutDownload.href = `/api/workflow-runs/${encodeURIComponent(run.id)}/artifacts/${encodeURIComponent(cutoutArtifact.name)}`;
+    cutoutDownload.download = "cutouts.json";
+    this.loadCutoutFiles(run);
     this.renderPreview(run.preview);
     if (run.error) this.showError(new Error(run.error), false);
     else this.clearError();
+  }
+
+  private loadCutoutFiles(run: WorkflowRun): void {
+    const fits = run.artifacts.filter(artifact => artifact.mediaType === "application/fits");
+    const index = run.artifacts.find(artifact => artifact.name === "cutouts.json");
+    const step = run.steps.find(candidate => candidate.id === "cutout");
+    const key = `${run.id}:${fits.length}:${index?.sha256 ?? ""}`;
+    byId("workflow-cutouts").hidden = !fits.length && !index && !["running", "failed"].includes(step?.status ?? "");
+    if (key === this.cutoutRequestKey) return;
+    this.cutoutRequestKey = key;
+    this.cutoutController?.abort();
+    if (this.cutoutDownloads?.runId !== run.id) { this.cutoutDownloads = null; this.cutoutPage = 0; this.renderCutoutFiles(); }
+    if (!fits.length && !index) {
+      byId("workflow-cutouts-message").textContent = step?.status === "failed" ? "本次切割未生成 FITS 文件，请查看步骤错误。" : "正在生成 FITS 文件…";
+      return;
+    }
+    const controller = new AbortController();
+    this.cutoutController = controller;
+    byId("workflow-cutouts-message").textContent = "正在读取文件清单…";
+    void workspaceApi.workflowCutouts(run.id, controller.signal).then(result => {
+      if (controller.signal.aborted || this.cutoutRequestKey !== key) return;
+      this.cutoutDownloads = result;
+      this.renderCutoutFiles();
+    }).catch(error => {
+      if (controller.signal.aborted || this.cutoutRequestKey !== key) return;
+      this.cutoutRequestKey = "";
+      byId("workflow-cutouts-message").textContent = `文件清单读取失败：${error instanceof Error ? error.message : String(error)}`;
+    });
+  }
+
+  private renderCutoutFiles(): void {
+    const result = this.cutoutDownloads;
+    const files = result?.files ?? [];
+    const pageCount = Math.max(1, Math.ceil(files.length / 50));
+    this.cutoutPage = Math.max(0, Math.min(this.cutoutPage, pageCount - 1));
+    byId("workflow-cutouts-count").textContent = `${formatInteger(files.length)} FILES`;
+    byId("workflow-cutouts-message").textContent = files.length ? `共 ${files.length} 个 FITS 文件，${formatBytes(result!.totalBytes)}。ZIP 包含 FITS、筛选结果和文件校验清单。`
+      : "本次任务尚无 FITS 切割产物。筛选结果为空时会跳过切割。";
+    const archive = byId<HTMLAnchorElement>("workflow-cutouts-archive");
+    archive.hidden = !result?.archiveUrl;
+    if (result?.archiveUrl) archive.href = result.archiveUrl;
+    else archive.removeAttribute("href");
+    byId("workflow-cutouts-files").hidden = !files.length;
+    byId("workflow-cutouts-pagination").hidden = pageCount <= 1;
+    byId<HTMLButtonElement>("workflow-cutouts-prev").disabled = this.cutoutPage === 0;
+    byId<HTMLButtonElement>("workflow-cutouts-next").disabled = this.cutoutPage >= pageCount - 1;
+    byId("workflow-cutouts-page").textContent = `${this.cutoutPage + 1} / ${pageCount}`;
+    byId("workflow-cutouts-body").replaceChildren(...files.slice(this.cutoutPage * 50, (this.cutoutPage + 1) * 50).map(file => {
+      const row = document.createElement("tr");
+      for (const value of [file.objectId ?? file.name, file.telescope?.toUpperCase() ?? "—", file.band?.toUpperCase() ?? "—", formatBytes(file.byteLength)]) {
+        const cell = document.createElement("td"); cell.textContent = value; cell.title = value; row.append(cell);
+      }
+      const cell = document.createElement("td");
+      const link = document.createElement("a"); link.className = "command-button secondary";
+      link.href = file.downloadUrl; link.download = file.name; link.textContent = "下载 FITS"; link.title = file.name;
+      cell.append(link); row.append(cell); return row;
+    }));
+    const failures = result?.failures ?? [];
+    byId("workflow-cutouts-failures").hidden = !failures.length;
+    byId("workflow-cutouts-failures-title").textContent = `${failures.length} 项切割失败或文件不可用`;
+    byId("workflow-cutouts-failures-list").replaceChildren(...failures.slice(0, 50).map(failure => {
+      const item = document.createElement("li"); item.textContent = `${failure.objectId} · ${failure.telescope} ${failure.band}：${failure.error}`; return item;
+    }));
   }
 
   private renderPreview(rows: Array<Record<string, unknown>>): void {

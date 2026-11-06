@@ -372,6 +372,25 @@
             <div id="workflow-result-empty" class="result-empty">NO RESULT</div>
           </div>
         </section>
+        <section id="workflow-cutouts" class="results-section" aria-labelledby="workflow-cutouts-heading" hidden>
+          <div class="results-toolbar">
+            <div class="section-heading"><span id="workflow-cutouts-heading">FITS 切割产物</span><span id="workflow-cutouts-count"></span></div>
+            <a id="workflow-cutouts-archive" class="command-button" hidden download>下载全部 FITS（ZIP）</a>
+          </div>
+          <p id="workflow-cutouts-message" class="workflow-cutouts-message" role="status"></p>
+          <div id="workflow-cutouts-files" class="result-table-wrap" hidden>
+            <table class="result-table workflow-cutouts-table">
+              <thead><tr><th>目标</th><th>巡天</th><th>波段</th><th>文件大小</th><th>下载</th></tr></thead>
+              <tbody id="workflow-cutouts-body"></tbody>
+            </table>
+          </div>
+          <div id="workflow-cutouts-pagination" class="workflow-cutouts-pagination" hidden>
+            <button id="workflow-cutouts-prev" class="command-button secondary" type="button">上一页</button>
+            <span id="workflow-cutouts-page"></span>
+            <button id="workflow-cutouts-next" class="command-button secondary" type="button">下一页</button>
+          </div>
+          <details id="workflow-cutouts-failures" class="workflow-cutouts-message" hidden><summary id="workflow-cutouts-failures-title"></summary><ul id="workflow-cutouts-failures-list"></ul></details>
+        </section>
       </section>
 
       <section id="production-stage" class="production-stage" aria-label="其他数据生产流水线" hidden>

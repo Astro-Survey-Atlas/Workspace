@@ -9,6 +9,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { createMcpExpressApp } from "@modelcontextprotocol/sdk/server/express.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import express from "express";
+import compression from "compression";
 import type { NextFunction, Request, Response } from "express";
 
 import { AgentService } from "./agent.js";
@@ -30,7 +31,7 @@ import { DataCatalogRegistry, type DataAssetAccess, type DataAssetRecord, type D
 import { deriveDataAssetOperationalStatus, latestAssetScan, type DataAssetCoverageEvidence, type DataAssetRunEvidence } from "./data-asset-status.js";
 import { ConnectorScanCapabilityError, ConnectorScanPreconditionError, DataWarehouseDisabledError, dataWarehouseEnabled, validateConnectorSelfScanBody } from "./warehouse-scan.js";
 import { createAstroMcpServer } from "./mcp.js";
-import { ResourceCatalogSyncError, ResourceCatalogUnavailableError, ResourcePackageManager, resourcePackageSurveyRecords, type ResourcePackageLoad } from "./resource-packages.js";
+import { ResourceCatalogSyncError, ResourceCatalogUnavailableError, ResourcePackageManager, type ResourcePackageLoad } from "./resource-packages.js";
 import { normalizeSurveyFootprintManifest, type SurveyFootprintManifest } from "./survey-footprints.js";
 import { surveyCardFor, SurveyRegistry, type SurveyRecord, type SurveyRegistrationInput, type SurveyReleaseRegistrationInput } from "./survey-registry.js";
 import { isConcretePublicSourceId, parsePublicSourceId, publicGeometrySourceIdForFootprint, publicSourceIdForFootprint, publicSourceIdentityForFootprint } from "./public-source-identity.js";
@@ -39,6 +40,7 @@ import { WorkflowMcpClient } from "./workflow-mcp-client.js";
 import { WorkspaceFitsCutoutService } from "./workflow-fits-cutout.js";
 import { WorkflowInputCatalogReader } from "./workflow-input-catalog.js";
 import { WorkflowStore } from "./workflow-store.js";
+import { createWorkflowDownloadsRouter } from "./workflow-downloads-http.js";
 import { workflowRunListItems } from "./workflow.js";
 import { listTags } from "./tags.js";
 import { createMetadataStore, importJsonState } from "./storage/index.js";
@@ -133,10 +135,13 @@ const connectorRuns = new ConnectorIngestRunCatalog(metadataStore);
 const userMocs = new UserMocArtifactStore({ root: userMocRoot });
 const dataStatistics = new DataStatisticsClient({ root: path.join(stateRoot, "statistics"), workspaceScanRoot: path.join(stateRoot, "workspace-scans"),
   evidenceRoot: process.env.ASTRO_WAREHOUSE_EVIDENCE_MOUNT_PATH ?? "/var/lib/atlas-evidence" });
-const currentDataBatches = async (): Promise<ReadonlyMap<string, string>> => {
-  const [assets, runs] = await Promise.all([dataCatalog.list(), connectorRuns.list()]);
-  return new Map(assets.filter(asset => asset.scanSpec?.format === "fits" && asset.scanSpec.fitsQualityProfile)
-    .map(asset => [asset.id, currentQualityBatch(asset.id, runs)?.id ?? "pending-quality-validation"]));
+const currentDataBatches = async (assetIds?: readonly string[]): Promise<ReadonlyMap<string, string>> => {
+  const assets = assetIds === undefined ? await dataCatalog.list()
+    : (await Promise.all([...new Set(assetIds)].map(id => metadataStore.getDataAsset(id)))).filter(asset => asset !== undefined);
+  const qualityAssets = assets.filter(asset => asset.scanSpec?.format === "fits" && asset.scanSpec.fitsQualityProfile);
+  if (!qualityAssets.length) return new Map();
+  const runs = await connectorRuns.list({ assetIds: qualityAssets.map(asset => asset.id), qualityOnly: true });
+  return new Map(qualityAssets.map(asset => [asset.id, currentQualityBatch(asset.id, runs)?.id ?? "pending-quality-validation"]));
 };
 const astroObjectIndex = new AstroObjectIndexService({ baseUrl: astroEsUrl, dataBatches: currentDataBatches });
 const skyDataPoints = new AstroObjectIndexService({ baseUrl: astroEsUrl, objectIndex: SKY_DATA_POINT_INDEX, dataBatches: currentDataBatches });
@@ -324,6 +329,12 @@ const workflowEngine = new WorkflowEngine(
 );
 const agentService = new AgentService(workflowStore, workflowEngine);
 const app = createMcpExpressApp({ host, allowedHosts });
+app.use(compression({
+  threshold: 1024,
+  level: 1,
+  filter: (request, response) => !String(response.getHeader("Content-Type") ?? "").startsWith("text/event-stream")
+    && request.path !== "/mcp" && compression.filter(request, response),
+}));
 if (processRole === "scanner") {
   app.use((request, response, next) => {
     if (request.method === "GET" && request.path === "/healthz") {
@@ -627,7 +638,7 @@ async function effectiveFootprints(): Promise<SurveyFootprintManifest> {
 }
 
 function publicSurveyRecords(): SurveyRecord[] {
-  return resourcePackageSurveyRecords(resourcePackages.list());
+  return resourcePackages.surveyRecords();
 }
 
 async function surveyRecords(): Promise<SurveyRecord[]> {
@@ -1208,8 +1219,11 @@ app.delete("/api/connectors/:id", async (request: Request, response: Response) =
   }
 });
 
-app.get("/api/surveys", async (_request: Request, response: Response) => {
-  try { response.json({ surveys: (await surveyRecords()).map(surveyCardFor) }); }
+app.get("/api/surveys", async (request: Request, response: Response) => {
+  try {
+    const records = await surveyRecords();
+    response.json({ surveys: records.map(surveyCardFor), ...(request.query.includeRecords === "true" ? { records } : {}) });
+  }
   catch (error) { sendApiError(response, error); }
 });
 
@@ -1239,9 +1253,10 @@ app.get("/api/surveys/:id", async (request: Request, response: Response) => {
 
 // Public package metadata is read-only display data from the Assets v3
 // package catalog. It is deliberately separate from Atlas-local labels.
-app.get("/api/public-surveys", (_request: Request, response: Response) => {
+app.get("/api/public-surveys", (request: Request, response: Response) => {
   try {
-    response.json({ surveys: publicSurveyRecords().map(surveyCardFor) });
+    const records = publicSurveyRecords();
+    response.json({ surveys: records.map(surveyCardFor), ...(request.query.includeRecords === "true" ? { records } : {}) });
   } catch (error) {
     sendApiError(response, error);
   }
@@ -1591,13 +1606,15 @@ app.post("/api/sky/points/query", async (request: Request, response: Response) =
   try {
     const input = request.body as ObjectRegionQueryInput;
     if (!input.region || !Array.isArray(input.layerScopes)) throw new RangeError("Data point queries require an entry region and explicit layer scopes");
-    const result = await astroObjectIndex.queryObjects(
-      { ...input, trackTotalHits: input.trackTotalHits === true },
-      [astroObjectIndex.objectIndex, SKY_DATA_POINT_INDEX],
-      signal,
-    );
+    const [result, indexing] = await Promise.all([
+      astroObjectIndex.queryObjects(
+        { ...input, includeAttributes: input.includeAttributes === true, trackTotalHits: input.trackTotalHits === true },
+        [astroObjectIndex.objectIndex, SKY_DATA_POINT_INDEX], signal,
+      ),
+      derivedRepairs.isIndexing(input.layerScopes),
+    ]);
     signal.throwIfAborted();
-    response.json({ ...result, indexing: await derivedRepairs.isIndexing(input.layerScopes) });
+    response.json({ ...result, indexing });
   } catch (error) { sendApiError(response, error); }
 });
 app.post("/api/sky/points/density", async (request: Request, response: Response) => {
@@ -1605,10 +1622,13 @@ app.post("/api/sky/points/density", async (request: Request, response: Response)
   try {
     const input = request.body as AstroPointDensityQueryInput;
     if (!input || !Array.isArray(input.layers)) throw new RangeError("Point density requires explicit layers");
-    const result = await astroObjectIndex.queryPointDensity(input, [astroObjectIndex.objectIndex, SKY_DATA_POINT_INDEX], signal);
-    signal.throwIfAborted();
     const layerScopes = input.layers.flatMap(layer => layer.scopes ?? []);
-    response.json({ ...result, indexing: layerScopes.length ? await derivedRepairs.isIndexing(layerScopes) : false });
+    const [result, indexing] = await Promise.all([
+      astroObjectIndex.queryPointDensity(input, [astroObjectIndex.objectIndex, SKY_DATA_POINT_INDEX], signal),
+      derivedRepairs.isIndexing(layerScopes),
+    ]);
+    signal.throwIfAborted();
+    response.json({ ...result, indexing });
   } catch (error) { sendApiError(response, error); }
 });
 app.post("/api/sky/points/anchor", async (request: Request, response: Response) => {
@@ -1616,12 +1636,15 @@ app.post("/api/sky/points/anchor", async (request: Request, response: Response) 
   try {
     const input = request.body as ObjectRegionQueryInput;
     if (!input.region || !Array.isArray(input.layerScopes)) throw new RangeError("Point anchor requires an entry region and explicit layer scopes");
-    const result = await astroObjectIndex.queryObjects({ ...input, limit: 1, includeAttributes: false, trackTotalHits: false }, [astroObjectIndex.objectIndex, SKY_DATA_POINT_INDEX], signal);
+    const [result, indexing] = await Promise.all([
+      astroObjectIndex.queryObjects({ ...input, limit: 1, includeAttributes: false, trackTotalHits: false }, [astroObjectIndex.objectIndex, SKY_DATA_POINT_INDEX], signal),
+      derivedRepairs.isIndexing(input.layerScopes),
+    ]);
     signal.throwIfAborted();
     response.json({ status: result.status, message: result.message,
       point: result.objects[0] ? { objectId: result.objects[0].object_id, raDeg: result.objects[0].ra_deg, decDeg: result.objects[0].dec_deg } : null,
       ...(result.objects[0] ? { record: result.objects[0] } : {}),
-      indexing: await derivedRepairs.isIndexing(input.layerScopes) });
+      indexing });
   } catch (error) { sendApiError(response, error); }
 });
 app.post("/api/sky/points/inspect", async (request: Request, response: Response) => {
@@ -2965,6 +2988,8 @@ app.get("/api/workflow-runs/:id/artifacts/:name", async (request: Request, respo
   }
 });
 
+app.use("/api/workflow-runs", createWorkflowDownloadsRouter(workflowStore, sendApiError));
+
 app.post("/api/agent/sessions", async (request: Request, response: Response) => {
   try {
     const workflowId = String((request.body as { workflowId?: unknown })?.workflowId ?? "euclid-desi-crossmatch@1");
@@ -3114,6 +3139,7 @@ async function start(): Promise<void> {
   if (processRole !== "scanner") {
     await workspaceAgent.initialize();
     await resourcePackages.initialize();
+    void effectiveFootprints().catch(error => console.warn("Unable to warm public coverage", error instanceof Error ? error.message : String(error)));
     await configBackup.initialize();
   }
   if (processRole !== "scanner") {

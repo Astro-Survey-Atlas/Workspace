@@ -4539,6 +4539,10 @@ select.field-input {
   text-decoration: none;
 }
 
+.workflow-cutouts-message { color: var(--text-muted); font-size: 12px; line-height: 1.6; }
+.workflow-cutouts-pagination { display: flex; justify-content: flex-end; align-items: center; gap: 12px; margin-top: 10px; }
+.workflow-cutouts-table .command-button, #workflow-cutouts-archive { display: inline-flex; width: auto; text-decoration: none; white-space: nowrap; }
+
 .result-table-wrap {
   position: relative;
   min-height: 174px;

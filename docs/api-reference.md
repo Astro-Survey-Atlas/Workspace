@@ -35,6 +35,8 @@ GET /api/workflow-runs?limit=50&workflowKey=euclid-desi-crossmatch%401
 GET /api/workflow-runs/{runId}
 POST /api/workflow-runs/{runId}/decisions
 GET /api/workflow-runs/{runId}/artifacts/{artifactName}
+GET /api/workflow-runs/{runId}/cutouts
+GET /api/workflow-runs/{runId}/cutouts.zip
 ```
 
 `POST /api/workflow-runs` 接受 `{"workflowId":"euclid-desi-crossmatch@1","input":{...}}`，
@@ -47,7 +49,14 @@ GET /api/workflow-runs/{runId}/artifacts/{artifactName}
 会话确认；已有相同归一化输入的 queued、running 或 waiting run 会被复用。Agent 不代替研究者
 提交 Workflow 的人工闸门决策。
 
-CLI 对应命令为 `astro-workspace workflows list|get|runs|run|run-get|decide|artifact|artifact-read`；
+`cutouts` 返回本次 run 已登记的 FITS 文件、目标/波段、字节数、SHA-256 和同源下载地址，
+以及失败项；切割仍在运行或部分失败时，已经登记的文件也可下载。`cutouts.zip` 流式打包
+所有已登记 FITS、已有的 `filtered.csv`、`cutouts.json`、`result.json` 和含校验和的
+`manifest.json`；没有 FITS 时返回 400。ZIP 开始前检查文件是否存在且大小匹配，客户端
+取消后终止文件读取。现有单文件下载接口继续提供原始 FITS。
+
+CLI 对应命令为 `astro-workspace workflows list|get|runs|run|run-get|decide|cutouts|artifact|artifact-read`；
+`workflows cutouts RUN_ID` 列出文件，`workflows cutouts RUN_ID --output cutouts.zip` 下载全部。
 `workflows runs --limit 50 --workflow-key euclid-desi-crossmatch@1` 查询有限摘要。`api` 子命令
 可调用任意 Workspace `/api/...` 路由。
 
@@ -503,8 +512,10 @@ header、方法和源文件；无影像 WCS 时可使用明确的目标指向。
 `POST /api/sky/points/query` 必须提供 ICRS/NESTED `region` 和显式
 `layerScopes: [{"assetId":"...","sourceId":"可选的具体公开来源"}]`；`bbox` 与区域
 取交集。作用域是 asset AND source，多个作用域之间 OR，空数组严格返回空结果。
-`includeAttributes:false` 只返回位置和少量位置类型/来源标记，完整文件与 header
+该视野接口默认 `includeAttributes:false`、`trackTotalHits:false`，只返回位置、图层身份和少量位置类型/来源标记，完整文件与 header
 由 `GET /api/sky/points/{id}` 按需读取。分页延续原有 cursor/search_after 契约。
+快速模式以 `totalRelation:"gte"` 标记命中数下界；显式传入 `trackTotalHits:true`
+才要求精确统计。支持 gzip 的客户端可接收压缩后的 JSON。
 响应的 `indexing` 表示所选私有资产仍有正式坐标补建任务；样本和 MOC-only
 任务不计入。Aladin 在此期间保留已显示点，每 10 秒按冻结入口天区和当前视野
 重新查询，完成后恢复视野缓存。取消所有可查询图层或退出 Aladin 会停止刷新。
