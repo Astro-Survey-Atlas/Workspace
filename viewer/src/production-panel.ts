@@ -63,7 +63,7 @@ const downloadPreviewScrollTimers = new WeakMap<HTMLElement, ReturnType<typeof s
 
 const NODE_ICONS: Record<string, string> = {
   region: "map-pinned", resolve: "search", approval: "package-check",
-  download: "download", connector: "plug-zap", warehouse: "plug-zap",
+  download: "download", connector: "plug-zap", scan: "plug-zap",
   query: "database", match: "git-compare-arrows", export: "file-output",
   input: "database", cutout: "crop", denoise: "wand-sparkles", package: "package-check",
 };
@@ -591,7 +591,7 @@ export class ProductionPanel {
       ["区域快照", region?.nside ? `ICRS · NESTED · NSIDE ${region.nside} · ${region.pixels?.length ?? 0} cells` : "--"],
       ["执行编号", run.id],
     ];
-    if (typeof run.summary.scanExecutor === "string") rows.push(["扫描执行器", run.summary.scanExecutor === "workspace" ? "Workspace" : run.summary.scanExecutor === "warehouse" ? "Warehouse" : "仅下载"]);
+    if (typeof run.summary.scanExecutor === "string") rows.push(["扫描执行器", run.summary.scanExecutor === "workspace" ? "Workspace" : "仅下载"]);
     if (Array.isArray(run.summary.scanRuns) && run.summary.scanRuns.length) rows.push(["扫描任务", run.summary.scanRuns.join(" · ")]);
     rows.forEach(([label, value]) => {
       const row = document.createElement("div");
@@ -969,7 +969,7 @@ export class ProductionPanel {
     root.append(storageLabel);
     const scanNote = document.createElement("p");
     scanNote.className = "control-note";
-    scanNote.textContent = "默认由 Workspace 登记下载资产并生成 FITS 覆盖与数据点。需要时可选择可选 Warehouse 执行器；也可选择仅下载。";
+    scanNote.textContent = "默认由 Workspace 登记下载资产并生成 FITS 覆盖与数据点。也可选择仅下载。";
     root.append(scanNote);
     const files = document.createElement("p");
     files.id = "production-files-summary";
@@ -1648,7 +1648,7 @@ export class ProductionPanel {
       exportFormat: String(draft.exportFormat ?? "json") as "json" | "csv",
       crawlerId: String(draft.crawlerId ?? "builtin-http"),
       concurrency: Number(draft.concurrency ?? 2),
-      scanExecutor: String(draft.scanExecutor ?? "workspace") as "workspace" | "warehouse" | "none",
+      scanExecutor: String(draft.scanExecutor ?? "workspace") as "workspace" | "none",
       ...(draft.storageConnectorId ? { storageConnectorId: String(draft.storageConnectorId) } : {}),
     };
     this.submitLoading = true;
@@ -1706,7 +1706,7 @@ export class ProductionPanel {
       const labels: Record<string, string> = {
         "builtin-http": "内置 HTTP 爬虫",
         workspace: "Workspace 扫描",
-        warehouse: "可选 Warehouse 扫描",
+        scan: "覆盖扫描",
         none: "仅下载",
       };
       select.replaceChildren(...(parameter.options ?? []).map((option) => new Option(labels[option] ?? option.toUpperCase(), option)));
@@ -1756,7 +1756,7 @@ export class ProductionPanel {
           pipelineKey: pipeline.key, region, ...(context.files?.length ? { files: context.files } : {}),
           exportFormat: String(draft.exportFormat ?? "json") as "json" | "csv",
           crawlerId: String(draft.crawlerId ?? "builtin-http"), concurrency: Number(draft.concurrency ?? 2),
-          scanExecutor: String(draft.scanExecutor ?? "workspace") as "workspace" | "warehouse" | "none",
+          scanExecutor: String(draft.scanExecutor ?? "workspace") as "workspace" | "none",
           ...(draft.storageConnectorId ? { storageConnectorId: String(draft.storageConnectorId) } : {}),
         }
       : {

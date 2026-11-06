@@ -7,7 +7,6 @@ import test from "node:test";
 import { MemoryConnectorCredentialStore } from "../src/connector-credentials.js";
 import { connectorDisplayPath, connectorLocationKey, type ConnectorRecord } from "../src/connectors.js";
 import type { DataAssetRecord } from "../src/data-catalog.js";
-import { InstallationService, type WarehouseBindingState } from "../src/installation.js";
 import { LocalConnectorRootsPolicy } from "../src/local-connector-roots.js";
 import type { ResourcePackageJob, ResourcePackageLoad, ResourcePackageManager } from "../src/resource-packages.js";
 import { SqliteMetadataStore } from "../src/storage/sqlite.js";
@@ -46,7 +45,6 @@ interface Runtime {
   credentials: MemoryConnectorCredentialStore;
   roots: LocalConnectorRootsPolicy;
   systemConfig: SystemConfigStore;
-  installation: InstallationService;
   backup: WorkspaceConfigBackupService;
   backupRoot: string;
 }
@@ -57,16 +55,11 @@ async function runtime(base: string, roots: LocalConnectorRootsPolicy, resourceP
   const credentials = new MemoryConnectorCredentialStore();
   const systemConfig = new SystemConfigStore(path.join(base, "system"));
   await systemConfig.initialize();
-  const readEffective = (): WarehouseBindingState & { configured: boolean } => ({
-    enabled: false, elasticsearchUrl: "", namespace: "asa-workspace", configured: false,
-  });
-  const installation = new InstallationService({ root: path.join(base, "installation"), readEffective });
-  await installation.initialize();
   const backupRoot = path.join(base, "backup");
-  const backup = new WorkspaceConfigBackupService({ root: backupRoot, store, credentials, roots, systemConfig, installation,
+  const backup = new WorkspaceConfigBackupService({ root: backupRoot, store, credentials, roots, systemConfig,
     resourcePackages, surveys: { initialize: async () => undefined }, isBusy: async () => undefined });
   await backup.initialize();
-  return { store, credentials, roots, systemConfig, installation, backup, backupRoot };
+  return { store, credentials, roots, systemConfig, backup, backupRoot };
 }
 
 function localConnector(id: string, rootPath: string): ConnectorRecord {

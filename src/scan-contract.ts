@@ -1,64 +1,5 @@
 import path from "node:path";
-
-import { connectorLocationKey, type ConnectorRecord } from "./connectors.js";
-import type { CoverageJobSnapshot } from "./coverage-jobs.js";
-import type { ConnectorScanTargetSnapshot } from "./connector-history.js";
-
-/** Input shared by the Workspace scan adapters. It is deliberately independent
- * from either the legacy metadata CRD or the current Warehouse CRD. */
-export interface GenericScanInput {
-  assetId: string;
-  path?: string;
-  fileNamePattern?: string;
-  allowedSuffixes?: string[];
-  excludePatterns?: string[];
-  spatial?: {
-    mode?: "none" | "auto" | "catalog" | "healpix";
-    raColumn?: string;
-    decColumn?: string;
-    /** Name of a NESTED HEALPix pixel column for catalogs without RA/Dec. */
-    healpixColumn?: string;
-    frame?: string;
-    units?: string;
-    coverageRole?: string;
-    healpixOrder?: number;
-  };
-  /** Optional MOC Core scan context for a user-owned remote asset. */
-  coverage?: CoverageJobSnapshot;
-}
-
-export function validateConnectorSelfScanBody(body: unknown): void {
-  if (body !== undefined && (typeof body !== "object" || body === null || Array.isArray(body) || Object.keys(body).length > 0)) {
-    throw new RangeError("Connector scan runs do not accept a request body");
-  }
-}
-
-export class DataWarehouseDisabledError extends Error {
-  constructor() {
-    super("Data warehouse is disabled");
-    this.name = "DataWarehouseDisabledError";
-  }
-}
-
-export class ConnectorScanCapabilityError extends Error {
-  constructor(kind: ConnectorRecord["kind"]) {
-    super(`Connector scan executor is not implemented for ${kind} connectors`);
-    this.name = "ConnectorScanCapabilityError";
-  }
-}
-
-export class ConnectorScanPreconditionError extends Error {
-  constructor(message: string) {
-    super(message);
-    this.name = "ConnectorScanPreconditionError";
-  }
-}
-
-export function dataWarehouseEnabled(value = process.env.ASTRO_DATA_WAREHOUSE_ENABLED): boolean {
-  if (value === undefined || value === "false") return false;
-  if (value === "true") return true;
-  throw new RangeError("ASTRO_DATA_WAREHOUSE_ENABLED must be true or false");
-}
+import type { ConnectorRecord } from "./connectors.js";
 
 function s3Uri(connector: ConnectorRecord, key: string): string {
   return key ? `s3://${connector.config.bucket}/${key}` : `s3://${connector.config.bucket}`;
@@ -85,19 +26,6 @@ function localRoot(connector: ConnectorRecord): string {
   if (!rootPath || !path.isAbsolute(rootPath)) throw new RangeError("local connector rootPath must be an absolute path");
   const normalized = path.normalize(rootPath);
   return normalized;
-}
-
-export function connectorScanTarget(connector: ConnectorRecord): ConnectorScanTargetSnapshot {
-  if (connector.kind === "local") {
-    const rootPath = localRoot(connector);
-    return { uri: `local://${rootPath}`, rootPath };
-  }
-  if (connector.kind !== "s3") throw new ConnectorScanCapabilityError(connector.kind);
-  const bucket = cleanS3Value(connector.config.bucket).toLowerCase();
-  const prefix = cleanS3Value(connector.config.prefix);
-  if (!bucket || bucket.includes("/")) throw new RangeError("S3 connector bucket is invalid");
-  if (prefix.split("/").some((segment) => segment === "." || segment === "..")) throw new RangeError("S3 connector prefix cannot contain dot segments");
-  return { uri: connectorLocationKey("s3", { bucket, prefix }), bucket, prefix };
 }
 
 export function connectorScanPath(connector: ConnectorRecord, requested?: string): string {

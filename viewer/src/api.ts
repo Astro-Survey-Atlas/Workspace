@@ -9,10 +9,9 @@ import type { SurveyFootprintManifest } from "../../src/survey-footprints";
 import type { PublicResourcePackage, ResourceCatalogStatus, ResourcePackageJob, ResourcePackageLoad, ResourcePackageMocLayer } from "../../src/resource-packages";
 import type { AstroCoverageLayer, AstroOverviewResponse, AstroSkyQueryInput, AstroSpatialSummary } from "../../src/astro-index";
 import type { UserMocArtifact } from "../../src/user-moc-artifacts";
-import type { WarehouseTaskLogs } from "../../src/warehouse-scan";
+export interface ScanTaskLogs { runId: string; status: "available"; text: string; message?: string }
 import type { WorkflowCutoutDownloads } from "../../src/workflow-downloads-http";
 
-export type { WarehouseTaskLogs };
 import type { CoverageJobSpec } from "../../src/coverage-jobs";
 import type { DataAssetCoverageState, DataAssetNextAction, DataAssetObjectState, DataAssetOperationalStatus } from "../../src/data-asset-status";
 import type { DataStatisticsView, StatisticsRefresh } from "../../src/data-statistics-types";
@@ -53,7 +52,7 @@ import type {
 import type { RegionDownloadPreview, RegionDownloadPreviewEvent, RegionDownloadSelection } from "../../src/region-download-plan";
 
 export interface WorkspaceCapabilities {
-  dataWarehouse: { enabled: boolean; configured?: boolean; namespace?: string; layerIndex?: string; coverageIndex?: string };
+  scanning?: { paused: boolean; reason?: string; updatedAt: string };
   userMocs?: { rootConfigured: boolean; count: number };
   localScan?: { enabled: boolean; configured: boolean; executor: string; objectIndex: string; coverageIndex: string };
   metadataStore: { engine: string };
@@ -128,7 +127,7 @@ export interface WorkspaceAssetCoverageLayer extends Omit<AstroCoverageLayer, "k
   productId?: string;
   modality?: string;
   coverageRole?: string;
-  source?: "connector" | "asset" | "warehouse" | "combined" | "unassigned" | "conflict";
+  source?: "connector" | "asset" | "combined" | "unassigned" | "conflict";
   nativeOrders?: number[];
   availableOrders?: number[];
   maxOrder?: number;
@@ -217,60 +216,9 @@ export interface RuntimeDataServices {
     indices: { file: string; object: string; coverage: string };
     source: string;
   };
-  warehouseSearch: {
-    enabled: boolean;
-    endpoint: string;
-    configured: boolean;
-    indices: { layer: string; file: string; coverage: string };
-    source: string;
-  };
   capabilities?: RuntimeCapability[];
   build?: { commit: string | null; sourceUrl: string; permalinkBase: string | null };
   assetsApi?: { endpoint: string; apiKeyConfigured: boolean };
-}
-
-export type WarehouseInstallationIntent =
-  | { kind: "connect"; elasticsearchUrl: string; namespace?: string }
-  | { kind: "disconnect" }
-  | { kind: "install" }
-  | { kind: "uninstall"; deleteData?: boolean };
-
-export interface WarehouseInstallationOperation {
-  id: string;
-  packageId: string;
-  intent: Record<string, unknown>;
-  status: "succeeded" | "blocked" | "failed";
-  reason: string;
-  guidance: string[];
-  createdAt: string;
-}
-
-export interface WarehouseInstallationView {
-  packageId: string;
-  channel: string;
-  platform: { installerKind: string; installAvailable: boolean; notes: string[] };
-  binding: {
-    effective: { enabled: boolean; elasticsearchUrl: string; namespace: string };
-    desired: { enabled: boolean; elasticsearchUrl: string; namespace: string } | null;
-    aligned: boolean;
-  };
-  observed: { state: string; health: string };
-  actions: Array<{ kind: string; available: boolean; reason: string }>;
-  operations: WarehouseInstallationOperation[];
-}
-
-/** Browser-safe input for a Workspace-owned remote coverage scan. The server
- * adds the route asset id and keeps credentials in its namespace Secret. */
-export interface RemoteCoverageScanInput {
-  surveyId: string;
-  connectorId: string;
-  releaseId: string;
-  product: string;
-  path?: string;
-  fileNamePattern?: string;
-  allowedSuffixes?: string[];
-  excludePatterns?: string[];
-  coverage: CoverageJobSpec;
 }
 
 async function getJson<T>(url: string, signal?: AbortSignal): Promise<T> {
@@ -370,14 +318,8 @@ export const workspaceApi = {
   async deleteDataAsset(id: string): Promise<void> {
     await deleteRequest(`/api/data-assets/${encodeURIComponent(id)}`);
   },
-  async executeDataAssetLocalScan(id: string): Promise<ConnectorScanRun> {
-    return (await postJson<{ run: ConnectorScanRun }>(`/api/data-assets/${encodeURIComponent(id)}/local-scan`, {})).run;
-  },
   async executeDataAssetWorkspaceScan(id: string, connectorId?: string): Promise<ConnectorScanRun> {
-    return (await postJson<{ run: ConnectorScanRun }>(`/api/data-assets/${encodeURIComponent(id)}/workspace-scan`, { executor: "auto", ...(connectorId ? { connectorId } : {}) })).run;
-  },
-  async executeDataAssetRemoteScan(id: string, input: RemoteCoverageScanInput): Promise<ConnectorScanRun> {
-    return (await postJson<{ run: ConnectorScanRun }>(`/api/data-assets/${encodeURIComponent(id)}/remote-scan`, input)).run;
+    return (await postJson<{ run: ConnectorScanRun }>(`/api/data-assets/${encodeURIComponent(id)}/scan-runs`, connectorId ? { connectorId } : {})).run;
   },
   async dataAssetScanRuns(id: string): Promise<ConnectorScanRun[]> {
     const parameters = new URLSearchParams({ assetId: id });
@@ -428,11 +370,18 @@ export const workspaceApi = {
   async connectorIngestRuns(): Promise<ConnectorScanRun[]> {
     return (await getJson<{ runs: ConnectorScanRun[] }>("/api/connector-ingest-runs")).runs;
   },
-  async connectorRunLogs(connectorId: string, runId: string): Promise<WarehouseTaskLogs> {
-    return getJson<WarehouseTaskLogs>(`/api/connectors/${encodeURIComponent(connectorId)}/ingest-runs/${encodeURIComponent(runId)}/logs`);
+  async connectorRunLogs(connectorId: string, runId: string): Promise<ScanTaskLogs> {
+    return getJson<ScanTaskLogs>(`/api/connectors/${encodeURIComponent(connectorId)}/ingest-runs/${encodeURIComponent(runId)}/logs`);
   },
-  async executeConnectorScan(id: string, assetId?: string, executor: "auto" | "workspace" | "warehouse" = "auto"): Promise<ConnectorScanRun> {
-    return (await postJson<{ run: ConnectorScanRun }>(`/api/connectors/${encodeURIComponent(id)}/scan-runs`, { executor, ...(assetId ? { assetId } : {}) })).run;
+  async executeConnectorScan(id: string, assetId?: string): Promise<ConnectorScanRun> {
+    return (await postJson<{ run: ConnectorScanRun }>(`/api/connectors/${encodeURIComponent(id)}/scan-runs`, assetId ? { assetId } : {})).run;
+  },
+  async scanning(paused?: boolean): Promise<{ paused: boolean; reason?: string; updatedAt: string }> {
+    return (paused === undefined ? await getJson<{scanning: {paused: boolean; updatedAt: string}}>("/api/scanning")
+      : await postJson<{scanning: {paused: boolean; updatedAt: string}}>(`/api/scanning/${paused ? "pause" : "resume"}`, {})).scanning;
+  },
+  async controlScan(connectorId: string, runId: string, action: "pause" | "resume" | "cancel"): Promise<ConnectorScanRun> {
+    return (await postJson<{run: ConnectorScanRun}>(`/api/connectors/${encodeURIComponent(connectorId)}/ingest-runs/${encodeURIComponent(runId)}/${action}`, {})).run;
   },
   async retryConnectorScan(connectorId: string, runId: string): Promise<ConnectorScanRun> {
     return (await postJson<{ run: ConnectorScanRun }>(`/api/connectors/${encodeURIComponent(connectorId)}/ingest-runs/${encodeURIComponent(runId)}/retry`, {})).run;
@@ -473,12 +422,7 @@ export const workspaceApi = {
   async runtimeDataServices(): Promise<RuntimeDataServices> {
     return getJson<RuntimeDataServices>("/api/system-config/runtime");
   },
-  async warehouseInstallation(): Promise<WarehouseInstallationView> {
-    return (await getJson<{ installation: WarehouseInstallationView }>("/api/installation/warehouse")).installation;
-  },
-  async reconcileWarehouseInstallation(intent: WarehouseInstallationIntent): Promise<WarehouseInstallationOperation> {
-    return (await postJson<{ operation: WarehouseInstallationOperation }>("/api/installation/warehouse/reconcile", { intent })).operation;
-  },
+
   async syncResourceCatalog(): Promise<{ catalog: ResourceCatalogStatus; packages: PublicResourcePackage[] }> {
     return postJson<{ catalog: ResourceCatalogStatus; packages: PublicResourcePackage[] }>("/api/resource-packages/sync", {});
   },

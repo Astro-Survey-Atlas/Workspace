@@ -10,7 +10,7 @@ import { regionPixelFilter } from "./workspace-directories.js";
 
 export const ASTRO_OBJECT_INDEX = LOCAL_OBJECT_INDEX;
 export const ASTRO_COVERAGE_INDEX = LOCAL_COVERAGE_INDEX;
-export const ASTRO_IMAGE_FOOTPRINT_INDEX = "astro_data_image_footprint_index_v1";
+export const ASTRO_IMAGE_FOOTPRINT_INDEX = "astro_image_footprint_index_v2";
 export const ASTRO_OBJECT_NATIVE_ORDER = 8;
 export const ASTRO_OBJECT_NATIVE_NSIDE = 2 ** ASTRO_OBJECT_NATIVE_ORDER;
 export const ASTRO_HEALPIX_COORDINATE_FRAME = "ICRS" as const;
@@ -94,6 +94,7 @@ export interface AstroPointDensityResult {
 }
 
 export interface AstroObjectRecord {
+  evidence_ref?: string;
   object_id: string;
   ra_deg: number;
   dec_deg: number;
@@ -327,7 +328,7 @@ const OBJECT_SOURCE_FIELDS = [
   "asset_id",
   "source_file_id",
   "scan_run_id",
-  "attributes",
+  "attributes", "evidence_ref",
 ] as const;
 
 const OBJECT_POINT_SOURCE_FIELDS = [
@@ -1427,29 +1428,8 @@ export class AstroObjectIndexService {
         data_batch_id: { type: "keyword" },
         source_file_id: { type: "keyword" },
         scan_run_id: { type: "keyword" },
+        evidence_ref: { type: "keyword", index: false },
         attributes: { type: "flattened", ignore_above: 8192 },
-      },
-    });
-    await this.#ensureIndex(this.#coverageIndex, {
-      dynamic: "strict",
-      properties: {
-        healpix_order: { type: "byte" },
-        healpix_pixel: { type: "integer" },
-        objectCount: { type: "long" },
-        survey: { type: "keyword" },
-        release: { type: "keyword" },
-        product: { type: "keyword" },
-        modality: { type: "keyword" },
-        asset_id: { type: "keyword" },
-        data_batch_id: { type: "keyword" },
-        source_file_id: { type: "keyword" },
-        scan_run_id: { type: "keyword" },
-        coverage_role: { type: "keyword" },
-        data_origin: { type: "keyword" },
-        source_tier: { type: "keyword" },
-        max_order: { type: "byte" },
-        query_order: { type: "byte" },
-        preview_order: { type: "byte" },
       },
     });
     await this.#ensureIndex(this.imageFootprintIndex, {
@@ -1466,11 +1446,15 @@ export class AstroObjectIndexService {
       },
     });
     if (this.#dataBatches && !this.#batchMappingsReady) {
-      for (const index of new Set([this.#objectIndex, this.#coverageIndex, this.imageFootprintIndex])) {
+      for (const index of new Set([this.#objectIndex, this.imageFootprintIndex])) {
         await this.#requestJson(`/${encodeURIComponent(index)}/_mapping`, JSON.stringify({ properties: { data_batch_id: { type: "keyword" } } }), "application/json");
       }
       this.#batchMappingsReady = true;
     }
+  }
+
+  async refresh(): Promise<void> {
+    await this.#requestJson(`/${this.#objectIndex},${this.imageFootprintIndex}/_refresh`, "{}", "application/json");
   }
 
   async bulkImageFootprints(documents: AstroImageFootprintDocument[]): Promise<number> {
@@ -1888,18 +1872,14 @@ export class AstroObjectIndexService {
     signal?.throwIfAborted();
     if (this.#dataBatches && /\/_search(?:\?|$)/.test(path)) {
       const batches = await this.#dataBatches(assetIds);
-      if (batches.size) {
-        const request = JSON.parse(body) as Record<string, unknown>;
-        const visible = { bool: { should: [
-          { bool: { must_not: [{ terms: { asset_id: [...batches.keys()] } }] } },
-          ...[...batches].map(([assetId, batchId]) => ({ bool: { filter: [
-            { term: { asset_id: assetId } }, { term: { data_batch_id: batchId } },
-          ] } })),
-        ], minimum_should_match: 1 } };
-        request.query = { bool: { filter: [request.query ?? { match_all: {} }, visible] } };
-        body = JSON.stringify(request);
-      }
+      const request = JSON.parse(body) as Record<string, unknown>;
+      const visible = batches.size ? { bool: { should: [...batches].map(([assetId, batchId]) => ({ bool: { filter: [
+        { term: { asset_id: assetId } }, { term: { data_batch_id: batchId } },
+      ] } })), minimum_should_match: 1 } } : { match_none: {} };
+      request.query = { bool: { filter: [request.query ?? { match_all: {} }, visible] } };
+      body = JSON.stringify(request);
     }
+
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), this.#timeoutMs);
     try {

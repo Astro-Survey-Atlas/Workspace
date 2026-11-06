@@ -13,7 +13,7 @@ import { defaultMocCoreAdapter, MOC_CORE_DEFAULT_MAX_ORDER, MOC_CORE_PREVIEW_ORD
 
 export const LOCAL_SCAN_HEALPIX_ORDER = 8;
 export const LOCAL_SCAN_HEALPIX_NSIDE = 2 ** LOCAL_SCAN_HEALPIX_ORDER;
-export const LOCAL_OBJECT_INDEX = "astro_object_index_v1";
+export const LOCAL_OBJECT_INDEX = "astro_position_index_v2";
 export const LOCAL_COVERAGE_INDEX = "astro_coverage_index_v1";
 
 const DEFAULT_MAX_COLUMNS = 10_000;
@@ -70,6 +70,7 @@ export interface LocalCsvScanOptions {
 }
 
 export interface LocalObjectIndexDocument {
+  evidence_ref?: string;
   data_batch_id?: string;
   _index: string;
   _id: string;

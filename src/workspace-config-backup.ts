@@ -6,7 +6,6 @@ import { connectorDisplayPath, connectorLocationKey, validateConnectorInput, typ
 import type { ConnectorCredentialStore, StoredConnectorCredentials } from "./connector-credentials.js";
 import { normalizeDataAssetRecord, normalizePersistedDataAsset, type DataAssetRecord } from "./data-catalog.js";
 import type { LocalConnectorRootsPolicy } from "./local-connector-roots.js";
-import type { InstallationService, WarehouseBindingState } from "./installation.js";
 import type { ResourcePackageJob, ResourcePackageLoad, ResourcePackageManager } from "./resource-packages.js";
 import type { MetadataStore, SurveyIdentityRecord } from "./storage/types.js";
 import { normalizePersistedSurvey, type SurveyRecord, type SurveyRelease } from "./survey-registry.js";
@@ -39,7 +38,6 @@ interface WorkspaceBackupPayload {
   assets: DataAssetRecord[];
   surveys: SurveyIdentityRecord[];
   system: SystemConfigBackupState;
-  warehouse: WarehouseBindingState | null;
   publicResourceSelection: ResourcePackageLoad[];
   browserPreferences: Record<string, string>;
 }
@@ -93,7 +91,6 @@ interface ImportJournal {
   connectors: ConnectorRecord[];
   assets: DataAssetRecord[];
   surveys: SurveyIdentityRecord[];
-  desiredWarehouse: WarehouseBindingState | null;
   activePublicSelection: ResourcePackageLoad[];
   publicRestoreMarker: string | null;
   newCredentialRefs?: string[];
@@ -105,7 +102,6 @@ interface Options {
   credentials: ConnectorCredentialStore;
   roots: LocalConnectorRootsPolicy;
   systemConfig: SystemConfigStore;
-  installation: InstallationService;
   resourcePackages: ResourcePackageManager;
   surveys: { initialize(): Promise<void> };
   isBusy(): Promise<string | undefined>;
@@ -218,11 +214,8 @@ function parsePayload(value: unknown): WorkspaceBackupPayload {
     return { packageId: record.packageId, releaseIds: [...record.releaseIds] };
   });
   if (new Set(publicResourceSelection.map(load => load.packageId)).size !== publicResourceSelection.length) throw new RangeError("Public resource selection contains duplicate packages");
-  const warehouse = payload.warehouse;
-  if (warehouse !== null && (!warehouse || typeof warehouse !== "object" || typeof warehouse.enabled !== "boolean"
-    || typeof warehouse.elasticsearchUrl !== "string" || typeof warehouse.namespace !== "string")) throw new RangeError("Warehouse binding backup is invalid");
   return { schemaVersion: 1, createdAt: typeof payload.createdAt === "string" ? payload.createdAt : new Date().toISOString(),
-    connectors, assets, surveys, system, warehouse: warehouse ? structuredClone(warehouse) : null, publicResourceSelection,
+    connectors, assets, surveys, system, publicResourceSelection,
     browserPreferences: safePreferences(payload.browserPreferences) };
 }
 
@@ -306,7 +299,6 @@ export class WorkspaceConfigBackupService {
       schemaVersion: 1, createdAt: new Date().toISOString(), connectors: portableConnectors,
       assets: assets.filter(asset => asset.origin === "user").map(asset => ({ ...asset, footprintIds: [] })),
       surveys: surveyIdentities.filter(entry => entry.source === "user"), system,
-      warehouse: this.#options.installation.inspect().binding.desired,
       publicResourceSelection: this.#options.resourcePackages.activeSelection(),
       browserPreferences: safePreferences(browserPreferences),
     };
@@ -356,7 +348,6 @@ export class WorkspaceConfigBackupService {
       journal = {
         version: JOURNAL_VERSION, restorePoint, connectors,
         assets: allAssets.filter(asset => asset.origin === "user"), surveys: surveyIdentities.filter(entry => entry.source === "user"),
-        desiredWarehouse: this.#options.installation.inspect().binding.desired,
         activePublicSelection: this.#options.resourcePackages.activeSelection(), publicRestoreMarker,
       };
       await atomicJson(this.#journalPath, journal);
@@ -365,7 +356,6 @@ export class WorkspaceConfigBackupService {
       await atomicJson(this.#journalPath, journal);
       for (const record of next.connectors) if (record.credentialRef && record.savedCredentials) await this.#options.credentials.put(record.credentialRef, record.savedCredentials);
       await this.#options.systemConfig.replaceBackupState(next.system);
-      await this.#options.installation.restoreDesiredBinding(next.warehouse);
       const restore: PublicSelectionRestore = {
         requestedAt: new Date().toISOString(), updatedAt: new Date().toISOString(), status: next.publicResourceSelection.length ? "pending" : "succeeded",
         packages: next.publicResourceSelection.map(load => ({ ...load, status: "pending" })),
@@ -492,7 +482,6 @@ export class WorkspaceConfigBackupService {
     const previousRefs = new Set(journal.connectors.map(record => record.credentialRef).filter((ref): ref is string => Boolean(ref)));
     const currentRefs = new Set([...current.map(record => record.credentialRef), ...(journal.newCredentialRefs ?? [])].filter((ref): ref is string => Boolean(ref)));
     await this.#options.systemConfig.restoreRestorePoint(journal.restorePoint);
-    await this.#options.installation.restoreDesiredBinding(journal.desiredWarehouse);
     await this.#options.store.transaction(async tx => {
       for (const record of await tx.listConnectors()) await tx.deleteConnector(record.id);
       for (const record of journal.connectors) await tx.putConnector(record);

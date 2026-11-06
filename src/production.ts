@@ -1,3 +1,4 @@
+import { LocalState } from "./local-state.js";
 import { createHash, randomUUID } from "node:crypto";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
@@ -127,9 +128,7 @@ export interface ProductionRunInput {
   crawlerId?: string;
   concurrency?: number;
   storageConnectorId?: string;
-  scanExecutor?: "workspace" | "warehouse" | "none";
-  /** @deprecated Use scanExecutor. Kept for stored/older callers. */
-  warehouseHandoff?: "none" | "submit";
+  scanExecutor?: "workspace" | "none";
   leftAssetId?: string;
   rightAssetId?: string;
   matchRadiusArcsec?: number;
@@ -151,13 +150,13 @@ export interface ProductionSourceResolution {
 
 /** Adapter that registers source-scoped image assets and submits verified files to a scan executor. */
 export interface ProductionScanHandoff {
-  submit(input: ProductionWarehouseHandoffInput): Promise<ProductionWarehouseHandoffReceipt>;
+  submit(input: ProductionScanHandoffInput): Promise<ProductionScanHandoffReceipt>;
 }
 
 /** @deprecated Use ProductionScanHandoff. */
-export type ProductionWarehouseHandoff = ProductionScanHandoff;
 
-export interface ProductionWarehouseHandoffInput {
+
+export interface ProductionScanHandoffInput {
   runId: string;
   connectorId: string;
   inventorySha256: string;
@@ -165,7 +164,7 @@ export interface ProductionWarehouseHandoffInput {
   verifiedRelativePaths?: string[];
 }
 
-export interface ProductionWarehouseHandoffReceipt {
+export interface ProductionScanHandoffReceipt {
   accepted: boolean;
   scanRunIds: string[];
   message?: string;
@@ -186,7 +185,7 @@ export const PRODUCTION_PIPELINES: readonly ProductionPipelineDefinition[] = [
     version: 1,
     key: "overlap-download@1",
     title: "重合区域数据下载",
-    description: "解析重合区域的来源单元并流式下载；默认由 Workspace 登记和扫描 FITS 图像，也可选择 Warehouse 或仅下载。",
+    description: "解析重合区域的来源单元并流式下载；默认由 Workspace 登记和扫描 FITS 图像，或仅下载。",
     availability: "available",
     inputRequirements: ["RegionSnapshot", "来源解析", "清单审批", "并发", "存储位置", "覆盖扫描执行器"],
     outputs: ["区域 JSON/CSV", "下载清单 download-plan.json", "下载账本 download-manifest.json", "来源资产", "FITS 覆盖与数据点", "新的本地 Connector"],
@@ -196,13 +195,13 @@ export const PRODUCTION_PIPELINES: readonly ProductionPipelineDefinition[] = [
       { id: "approval", title: "清单审批", description: "人工确认清单内容与目标；审批绑定清单 SHA-256。", dependsOn: ["resolve"] },
       { id: "download", title: "流式下载与校验", description: "按并发配置流式下载清单文件，支持断点续传与校验。", dependsOn: ["approval"] },
       { id: "connector", title: "登记结果 Connector", description: "把下载目录登记为新的 Workspace Connector。", dependsOn: ["download"] },
-      { id: "warehouse", title: "覆盖扫描", description: "按已校验文件的巡天来源登记图像资产，并由所选执行器生成覆盖与数据点。", dependsOn: ["connector"] },
+      { id: "scan", title: "覆盖扫描", description: "按已校验文件的巡天来源登记图像资产，并由所选执行器生成覆盖与数据点。", dependsOn: ["connector"] },
     ],
     parameters: [
       { key: "exportFormat", label: "区域导出格式", type: "select", defaultValue: "json", options: ["json", "csv"] },
       { key: "crawlerId", label: "爬虫执行器", type: "select", defaultValue: "builtin-http", options: ["builtin-http"] },
       { key: "concurrency", label: "并发数", type: "number", defaultValue: 2 },
-      { key: "scanExecutor", label: "扫描执行器", type: "select", defaultValue: "workspace", options: ["workspace", "warehouse", "none"] },
+      { key: "scanExecutor", label: "扫描执行器", type: "select", defaultValue: "workspace", options: ["workspace", "none"] },
     ],
   },
   {
@@ -393,6 +392,7 @@ function directFilesInventory(files: readonly CoverageDownloadFile[]): SourceFil
 }
 
 interface ProductionServiceOptions {
+  state?: LocalState;
   root: string;
   downloads: CoverageDownloadService;
   connectors: ConnectorRegistry;
@@ -403,7 +403,6 @@ interface ProductionServiceOptions {
   sourceResolveOptions?: ResolveSourceInventoryOptions;
   confirmPublicDownload?: (confirmation: RegionDownloadConfirmation) => Promise<SourceFileInventory>;
   workspaceHandoff?: ProductionScanHandoff;
-  warehouseHandoff?: ProductionScanHandoff;
 }
 
 interface PersistedState {
@@ -413,7 +412,7 @@ interface PersistedState {
 
 export class ProductionService {
   readonly #root: string;
-  readonly #statePath: string;
+  readonly #state: LocalState;
   readonly #downloads: CoverageDownloadService;
   readonly #connectors: ConnectorRegistry;
   readonly #dataCatalog: DataCatalogRegistry;
@@ -423,7 +422,6 @@ export class ProductionService {
   readonly #sourceResolveOptions?: ResolveSourceInventoryOptions;
   readonly #confirmPublicDownload?: ProductionServiceOptions["confirmPublicDownload"];
   readonly #workspaceHandoff?: ProductionScanHandoff;
-  readonly #warehouseHandoff?: ProductionScanHandoff;
   readonly #runs = new Map<string, ProductionRun>();
   readonly #writes = new Map<string, Promise<void>>();
   readonly #locks = new Map<string, Promise<unknown>>();
@@ -434,7 +432,7 @@ export class ProductionService {
   constructor(options: ProductionServiceOptions) {
     if (!path.isAbsolute(options.root)) throw new RangeError("production root must be absolute");
     this.#root = path.resolve(options.root);
-    this.#statePath = path.join(this.#root, "production-runs.json");
+    this.#state = options.state ?? new LocalState(path.join(this.#root, "control.sqlite"));
     this.#downloads = options.downloads;
     this.#connectors = options.connectors;
     this.#dataCatalog = options.dataCatalog;
@@ -444,7 +442,6 @@ export class ProductionService {
     this.#sourceResolveOptions = options.sourceResolveOptions;
     this.#confirmPublicDownload = options.confirmPublicDownload;
     this.#workspaceHandoff = options.workspaceHandoff;
-    this.#warehouseHandoff = options.warehouseHandoff;
   }
 
   async initialize(): Promise<void> {
@@ -463,25 +460,11 @@ export class ProductionService {
   async #initializeState(): Promise<void> {
     await mkdir(this.#root, { recursive: true });
     try {
-      const parsed = JSON.parse(await readFile(this.#statePath, "utf8")) as unknown;
-      const entries = Array.isArray(parsed)
-        ? parsed // legacy raw array
-        : parsed && typeof parsed === "object" && Array.isArray((parsed as PersistedState).runs)
-          ? (parsed as PersistedState).runs
-          : null;
-      if (!entries) throw new Error("production state must be an array or a versioned envelope");
+      await this.#state.initialize();
+      const entries = this.#state.list<ProductionRun>("production-runs", 100_000);
       for (const entry of entries) {
         if (!entry || typeof entry !== "object" || typeof (entry as ProductionRun).id !== "string") continue;
-        const legacyRun = clone(entry as ProductionRun & { pipelinePresetId?: unknown });
-        delete legacyRun.pipelinePresetId;
-        const run: ProductionRun = {
-          ...legacyRun,
-          steps: Array.isArray(legacyRun.steps) ? legacyRun.steps.map(normalizeStep) : [],
-        };
-        if (run.pipelineKey === "overlap-download@1") {
-          const legacyExecutor = run.input.warehouseHandoff === "none" ? "none" : run.input.warehouseHandoff === "submit" ? "warehouse" : undefined;
-          run.input.scanExecutor ??= legacyExecutor ?? (this.#workspaceHandoff ? "workspace" : this.#warehouseHandoff ? "warehouse" : "none");
-        }
+        const run = clone(entry);
         if ((run.status === "queued" || run.status === "running" || run.status === "resolving")
           && !(this.#downloads.externalDownloads && run.pipelineKey === "overlap-download@1" && run.summary?.downloadJobId)) {
           run.status = "failed";
@@ -495,17 +478,6 @@ export class ProductionService {
             active.detail = run.error;
             active.logs = [...active.logs, stepLog(run.completedAt, "error", run.error)].slice(-MAX_STEP_LOGS);
           }
-        }
-        // Backfill DAG nodes introduced after the run was persisted so
-        // historical records never render phantom pending steps.
-        const pipeline = PRODUCTION_PIPELINES.find((candidate) => candidate.key === run.pipelineKey);
-        if (pipeline) {
-          pipeline.dag.forEach((node) => {
-            if (run.steps.some((step) => step.id === node.id)) return;
-            run.steps.push(normalizeStep({ id: node.id, title: node.title, status: "skipped", detail: "历史记录：该节点在任务执行后引入", logs: [] }));
-          });
-          const order = new Map(pipeline.dag.map((node, index) => [node.id, index]));
-          run.steps.sort((left, right) => (order.get(left.id) ?? 999) - (order.get(right.id) ?? 999));
         }
         if (this.#downloads.externalDownloads && run.summary.downloadJobId
           && (run.status === "running" || run.status === "resolving")) run.status = "queued";
@@ -532,10 +504,9 @@ export class ProductionService {
       if (executor) {
         executor.options = [
           ...(this.#workspaceHandoff ? ["workspace"] : []),
-          ...(this.#warehouseHandoff ? ["warehouse"] : []),
           "none",
         ];
-        executor.defaultValue = this.#workspaceHandoff ? "workspace" : this.#warehouseHandoff ? "warehouse" : "none";
+        executor.defaultValue = this.#workspaceHandoff ? "workspace" : "none";
       }
       return result;
     });
@@ -621,14 +592,9 @@ export class ProductionService {
       normalized.crawlerId = crawlerId;
       normalized.concurrency = concurrency;
       if (input.storageConnectorId !== undefined) normalized.storageConnectorId = text(input.storageConnectorId, "storageConnectorId");
-      if (input.warehouseHandoff !== undefined && input.warehouseHandoff !== "none" && input.warehouseHandoff !== "submit") {
-        throw new RangeError("warehouseHandoff must be none or submit");
-      }
-      const legacyExecutor = input.warehouseHandoff === "none" ? "none" : input.warehouseHandoff === "submit" ? "warehouse" : undefined;
-      const scanExecutor = input.scanExecutor ?? legacyExecutor ?? (this.#workspaceHandoff ? "workspace" : this.#warehouseHandoff ? "warehouse" : "none");
-      if (scanExecutor !== "workspace" && scanExecutor !== "warehouse" && scanExecutor !== "none") throw new RangeError("scanExecutor must be workspace, warehouse, or none");
+      const scanExecutor = input.scanExecutor ?? (this.#workspaceHandoff ? "workspace" : "none");
+      if (scanExecutor !== "workspace" && scanExecutor !== "none") throw new RangeError("scanExecutor must be workspace or none");
       if (scanExecutor === "workspace" && !this.#workspaceHandoff) throw new RangeError("Workspace scan executor is not configured");
-      if (scanExecutor === "warehouse" && !this.#warehouseHandoff) throw new RangeError("Warehouse scan executor is not configured");
       normalized.scanExecutor = scanExecutor;
       // Runs without pre-expanded files resolve their source units inside the
       // run and pause at a human approval gate before any transfer.
@@ -1057,16 +1023,15 @@ export class ProductionService {
     await this.setStep(run, "connector", "succeeded", current.outputConnectorId ?? "已登记");
 
     // --- coverage scan ---
-    const scanExecutor = run.input.scanExecutor === "warehouse" ? "warehouse"
-      : run.input.scanExecutor === "none" ? "none" : "workspace";
+    const scanExecutor = run.input.scanExecutor === "none" ? "none" : "workspace";
     if (scanExecutor === "none") {
-      await this.setStep(run, "warehouse", "skipped", "未请求覆盖扫描");
+      await this.setStep(run, "scan", "skipped", "未请求覆盖扫描");
       return;
     }
-    const handoff = scanExecutor === "workspace" ? this.#workspaceHandoff : this.#warehouseHandoff;
-    if (!handoff) throw new Error(`${scanExecutor === "workspace" ? "Workspace" : "Warehouse"} scan executor is not configured`);
+    const handoff = this.#workspaceHandoff;
+    if (!handoff) throw new Error(`Workspace scan executor is not configured`);
     if (!run.outputConnectorId) throw new Error("缺少下载结果 Connector，无法提交覆盖扫描");
-    await this.setStep(run, "warehouse", "running", `提交 ${scanExecutor === "workspace" ? "Workspace" : "Warehouse"} 覆盖扫描`);
+    await this.setStep(run, "scan", "running", `提交 Workspace 覆盖扫描`);
     const receipt = await handoff.submit({
       runId: originId,
       connectorId: run.outputConnectorId,
@@ -1078,14 +1043,14 @@ export class ProductionService {
       ...run.summary,
       scanExecutor,
       scanRuns: receipt.scanRunIds,
-      ...(scanExecutor === "workspace" ? { workspaceScanRuns: receipt.scanRunIds } : { warehouseScanRuns: receipt.scanRunIds }),
+      workspaceScanRuns: receipt.scanRunIds,
       ...(receipt.message ? { scanHandoffMessage: receipt.message } : {}),
     };
     if (!receipt.accepted) {
-      await this.setStep(run, "warehouse", "skipped", receipt.message ?? "下载内容没有可自动扫描的 FITS 图像资产");
+      await this.setStep(run, "scan", "skipped", receipt.message ?? "下载内容没有可自动扫描的 FITS 图像资产");
       return;
     }
-    await this.setStep(run, "warehouse", "succeeded", `${scanExecutor === "workspace" ? "Workspace" : "Warehouse"} 已受理 ${receipt.scanRunIds.length} 个扫描请求`);
+    await this.setStep(run, "scan", "succeeded", `Workspace 已受理 ${receipt.scanRunIds.length} 个扫描请求`);
   }
 
   async #executeCrossmatch(run: ProductionRun): Promise<void> {
@@ -1193,16 +1158,9 @@ export class ProductionService {
   }
 
   async #persist(): Promise<void> {
-    const snapshot = [...this.#runs.values()].sort((left, right) => right.createdAt.localeCompare(left.createdAt)).slice(0, MAX_STATE_RUNS);
-    const state: PersistedState = { schemaVersion: 2, runs: snapshot };
-    const previous = this.#writes.get("state") ?? Promise.resolve();
-    const current = previous.catch(() => undefined).then(async () => {
-      const temporary = `${this.#statePath}.${randomUUID()}.tmp`;
-      await writeFile(temporary, `${JSON.stringify(state, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
-      await rename(temporary, this.#statePath);
-    });
-    this.#writes.set("state", current);
-    try { await current; } finally { if (this.#writes.get("state") === current) this.#writes.delete("state"); }
+    for (const run of this.#runs.values()) this.#state.put("production-runs", run.id, run);
+    const ids = new Set(this.#runs.keys());
+    for (const run of this.#state.list<ProductionRun>("production-runs", 100_000)) if (!ids.has(run.id)) this.#state.delete("production-runs", run.id);
   }
 
 }

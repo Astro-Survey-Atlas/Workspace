@@ -20,7 +20,6 @@ import {
   type WorkspaceAssetCoverageLayer,
   type WorkspaceAssetCoverageResponse,
   type WorkspaceCapabilities,
-  type RemoteCoverageScanInput,
   type DataAssetOperationalStatusResponse,
   type SkyOverlapResponse,
   type CoverageDownloadJob,
@@ -126,15 +125,14 @@ function renderCoverageMetrics(): void {
   const ownedLayers = [
     ...[...workspaceAssetLayers.values()].filter((layer) => visibleAssetIds.has(layer.assetId) && layer.pixels.length > 0 && layer.status === "ready"),
     ...legacyWorkspaceLayers.filter((layer) => layer.pixels.length > 0 && layer.status === "ready"),
-    ...[...workspaceExtraLayers.entries()].filter(([key, layer]) => visibleWorkspaceLayerKeys.has(key) && layer.source !== "warehouse" && layer.pixels.length > 0 && layer.status === "ready").map(([, layer]) => layer),
+    ...[...workspaceExtraLayers.entries()].filter(([key, layer]) => visibleWorkspaceLayerKeys.has(key) && layer.pixels.length > 0 && layer.status === "ready").map(([, layer]) => layer),
   ];
-  const remoteLayers = [...workspaceExtraLayers.entries()].filter(([key, layer]) => visibleWorkspaceLayerKeys.has(key) && layer.source === "warehouse" && layer.pixels.length > 0 && layer.status === "ready");
-  const active = publicSources.size + ownedLayers.length + remoteLayers.length;
+  const active = publicSources.size + ownedLayers.length;
   const values: Array<[string, string, number]> = [
     ["metric-one", "ACTIVE", active],
     ["metric-two", "PUBLIC", publicSources.size],
     ["metric-three", "OWNED", ownedLayers.length],
-    ["metric-four", "REMOTE", remoteLayers.length],
+    ["metric-four", "SCANS", [...coverageStatusesByAsset.values()].filter(status => status.coverage === "pending").length],
   ];
   byId("metric-five-label").textContent = "";
   byId("metric-five").textContent = "";
@@ -397,7 +395,6 @@ let visibleWorkspaceLayerKeys = new Set<string>();
 let workspaceLayerVisibilityPreferenceRestored = false;
 let hasUnassignedWorkspaceCoverage = false;
 let unassignedWorkspaceVisible = false;
-let remoteCoverageAssetId: string | null = null;
 let layerOrder: string[] = [];
 let layerLayoutMode: SurveyLayerLayoutMode = "layers";
 let layerInteractionMode: SurveyLayerInteractionMode = "inspect";
@@ -1671,8 +1668,7 @@ function overlapSourceIdsForState(state: SurveyLayerState): string[] {
     .forEach((footprint) => ids.add(publicDisplaySourceId(footprint)));
   state.visibleAssetIds.forEach((assetId) => ids.add(`workspace:asset:${assetId}`));
   state.visibleWorkspaceLayerKeys.forEach((key) => {
-    if (key.startsWith("warehouse:")) ids.add(`workspace:warehouse:${key.slice("warehouse:".length)}`);
-    else if (key.startsWith("moc:")) ids.add(`workspace:moc:${key.slice("moc:".length)}`);
+    if (key.startsWith("moc:")) ids.add(`workspace:moc:${key.slice("moc:".length)}`);
   });
   return [...ids].sort();
 }
@@ -2705,8 +2701,7 @@ function layerBelongsToAsset(layer: WorkspaceCoverageLayer, assets: readonly Dat
 }
 
 function workspaceExtraLayerKey(layer: WorkspaceCoverageLayer): string | undefined {
-  if (layer.key?.startsWith("warehouse:") || layer.key?.startsWith("moc:")) return layer.key;
-  if (layer.source === "warehouse") return `warehouse:${layer.layerId ?? layer.key ?? "layer"}`;
+  if (layer.key?.startsWith("moc:")) return layer.key;
   if (layer.artifactId) return `moc:${layer.artifactId}`;
   return undefined;
 }
@@ -3127,7 +3122,7 @@ function restoreLayerPreferences(): void {
       : []);
     workspaceLayerVisibilityPreferenceRestored = storedSchemaVersion >= 5 && Array.isArray(stored?.visibleWorkspaceLayerKeys);
     visibleWorkspaceLayerKeys = new Set(workspaceLayerVisibilityPreferenceRestored
-      ? (stored?.visibleWorkspaceLayerKeys ?? []).filter((key) => key.startsWith("warehouse:") || key.startsWith("moc:"))
+      ? (stored?.visibleWorkspaceLayerKeys ?? []).filter((key) => key.startsWith("moc:"))
       : []);
     const addMissing = Array.isArray(stored?.layerOrder) && stored.layerOrder.length > 0;
     layerOrder = normalizeCurrentLayerOrder(stored?.layerOrder ?? [], addMissing);
@@ -3157,7 +3152,7 @@ function persistLayerPreferences(): void {
       unassignedWorkspaceVisible: boolean;
     } = {
       // Do not claim that workspace-layer visibility was restored until the
-      // first coverage load has populated the extra MOC/Warehouse layers.
+      // first coverage load has populated the extra MOC layers.
       // Otherwise the early empty list would hide ready MOCs after reload.
       schemaVersion: workspaceLayerVisibilityPreferenceRestored ? 5 : 4,
       visibleSurveyIds: [...visibleSurveyIds],
@@ -3604,179 +3599,17 @@ function renderSurveyDetails(survey: SurveyRecord): void {
   content.replaceChildren(heading, summary, metadata, releases);
 }
 
-function remoteCoverageSurveyRecords(): SurveyRecord[] {
-  const records = new Map<string, SurveyRecord>();
-  [...localSurveyRecordsById.values(), ...publicSurveyRecordsById.values()].forEach((record) => records.set(record.id, record));
-  return [...records.values()].sort((left, right) => left.name.localeCompare(right.name));
-}
-
-function remoteCoverageRecordForSurvey(id: string): SurveyRecord | undefined {
-  return localSurveyRecordsById.get(id) ?? publicSurveyRecordsById.get(id);
-}
-
-function assetHasS3Connector(asset: DataAssetRecord): boolean {
-  return linkedWorkspaceConnectors(asset).some((connector) => connector.kind === "s3");
-}
-
 function linkedWorkspaceConnectors(asset: DataAssetRecord): ConnectorPublicRecord[] {
   const accesses = [asset.access, ...(asset.accesses ?? [])];
-  const connectorIds = new Set([...(asset.connectorIds ?? []), ...accesses.map((access) => access.connectorId).filter((id): id is string => Boolean(id))]);
-  const locations = new Set([...(asset.connectorLocationKeys ?? []), ...accesses.map((access) => access.uri)]);
-  return workspaceConnectors.filter((connector) => (connector.kind === "local" || connector.kind === "s3")
-    && (connectorIds.has(connector.id) || locations.has(connector.locationKey)));
-}
-
-function linkedS3Connectors(asset: DataAssetRecord, connectors: readonly ConnectorPublicRecord[]): ConnectorPublicRecord[] {
-  const connectorIds = new Set([...(asset.connectorIds ?? []), ...[asset.access, ...(asset.accesses ?? [])].map((access) => access.connectorId).filter((id): id is string => Boolean(id))]);
-  const connectorLocations = new Set([...(asset.connectorLocationKeys ?? []), ...[asset.access, ...(asset.accesses ?? [])].map((access) => access.uri)]);
-  return connectors.filter((connector) => connector.kind === "s3" && (connectorIds.has(connector.id) || connectorLocations.has(connector.locationKey)));
-}
-
-function populateRemoteCoverageReleaseOptions(preferredReleaseId?: string): void {
-  const surveySelect = byId<HTMLSelectElement>("remote-coverage-survey");
-  const releaseSelect = byId<HTMLSelectElement>("remote-coverage-release");
-  const record = remoteCoverageRecordForSurvey(surveySelect.value);
-  const options = [new Option("选择发布", "")];
-  record?.releases.forEach((release) => options.push(new Option(`${release.label} · ${release.id}`, release.id)));
-  if (preferredReleaseId && !options.some((option) => option.value === preferredReleaseId)) {
-    options.push(new Option(`${preferredReleaseId}（资产标签）`, preferredReleaseId));
-  }
-  releaseSelect.replaceChildren(...options);
-  const defaultRelease = preferredReleaseId && options.some((option) => option.value === preferredReleaseId)
-    ? preferredReleaseId
-    : record?.releases[0]?.id ?? "";
-  releaseSelect.value = defaultRelease;
-}
-
-function syncRemoteCoverageMode(): void {
-  const mode = byId<HTMLSelectElement>("remote-coverage-mode").value as CoverageJobMode;
-  const catalogFields = byId<HTMLFieldSetElement>("remote-coverage-catalog-fields");
-  const healpixFields = byId<HTMLFieldSetElement>("remote-coverage-healpix-fields");
-  const catalogMode = mode === "catalog-radec";
-  const healpixMode = mode === "nested-healpix";
-  catalogFields.hidden = !catalogMode;
-  catalogFields.disabled = !catalogMode;
-  healpixFields.hidden = !healpixMode;
-  healpixFields.disabled = !healpixMode;
-  byId<HTMLInputElement>("remote-coverage-ra-column").required = catalogMode;
-  byId<HTMLInputElement>("remote-coverage-dec-column").required = catalogMode;
-  byId<HTMLInputElement>("remote-coverage-healpix-column").required = healpixMode;
-  byId<HTMLInputElement>("remote-coverage-healpix-order").required = healpixMode;
-  byId("remote-coverage-mode-note").textContent = mode === "fits-wcs"
-    ? "FITS WCS 必须声明 ICRS；扫描结果会生成图像范围 MOC，查询投影固定为 order 8，预览固定为 order 4。"
-    : "Assets Core 会以 ICRS、NESTED order 10 生成用户 MOC；查询投影固定为 order 8，预览固定为 order 4。";
-}
-
-function populateRemoteCoverageForm(asset: DataAssetRecord, connectors: readonly ConnectorPublicRecord[]): void {
-  const csvScan = asset.scanSpec?.format === "csv" ? asset.scanSpec : undefined;
-  remoteCoverageAssetId = asset.id;
-  const surveySelect = byId<HTMLSelectElement>("remote-coverage-survey");
-  const surveyOptions = [new Option("选择巡天", "")];
-  remoteCoverageSurveyRecords().forEach((survey) => surveyOptions.push(new Option(`${survey.name} · ${survey.id}`, survey.id)));
-  if (asset.surveyId && !surveyOptions.some((option) => option.value === asset.surveyId)) {
-    surveyOptions.push(new Option(`${asset.surveyId}（资产标签）`, asset.surveyId));
-  }
-  surveySelect.replaceChildren(...surveyOptions);
-  surveySelect.value = asset.surveyId && surveyOptions.some((option) => option.value === asset.surveyId)
-    ? asset.surveyId
-    : remoteCoverageSurveyRecords()[0]?.id ?? "";
-  populateRemoteCoverageReleaseOptions(asset.releaseId);
-
-  const connectorSelect = byId<HTMLSelectElement>("remote-coverage-connector");
-  const connectorOptions = [new Option("选择 Connector", "")];
-  connectors.forEach((connector) => connectorOptions.push(new Option(`${connector.name} · ${connector.displayPath}`, connector.id)));
-  connectorSelect.replaceChildren(...connectorOptions);
-  const preferredConnector = asset.connectorIds?.find((id) => connectors.some((connector) => connector.id === id))
-    ?? connectors[0]?.id
-    ?? "";
-  connectorSelect.value = preferredConnector;
-
-  byId<HTMLInputElement>("remote-coverage-product").value = asset.product;
-  byId<HTMLInputElement>("remote-coverage-path").value = asset.sourceRelativePath ?? "";
-  byId<HTMLInputElement>("remote-coverage-file-name-pattern").value = asset.warehouseScanSpec?.fileNamePattern ?? "";
-  byId<HTMLInputElement>("remote-coverage-allowed-suffixes").value = "";
-  byId<HTMLInputElement>("remote-coverage-exclude-patterns").value = "";
-  const defaultMode: CoverageJobMode = asset.scanSpec?.format === "csv"
-    ? "catalog-radec"
-    : asset.kind === "image" || asset.kind === "cube" ? "fits-wcs" : "catalog-radec";
-  byId<HTMLSelectElement>("remote-coverage-mode").value = defaultMode;
-  byId<HTMLInputElement>("remote-coverage-ra-column").value = csvScan?.raColumn ?? "ra";
-  byId<HTMLInputElement>("remote-coverage-dec-column").value = csvScan?.decColumn ?? "dec";
-  byId<HTMLSelectElement>("remote-coverage-coordinate-units").value = csvScan?.coordinateUnits ?? "deg";
-  byId<HTMLInputElement>("remote-coverage-healpix-column").value = "healpix";
-  byId<HTMLInputElement>("remote-coverage-healpix-order").value = "8";
-  syncRemoteCoverageMode();
-}
-
-async function openRemoteCoverageDialog(asset: DataAssetRecord): Promise<void> {
-  try {
-    const capabilities = workspaceCapabilities ?? await workspaceApi.capabilities();
-    workspaceCapabilities = capabilities;
-    if (!capabilities.dataWarehouse.enabled) throw new Error("Warehouse 远程执行已禁用；Workspace 本地 ES 仍可继续使用。");
-    if (capabilities.dataWarehouse.configured === false) throw new Error("Warehouse Elasticsearch 尚未配置。");
-    workspaceConnectors = await workspaceApi.connectors();
-    const connectors = linkedS3Connectors(asset, workspaceConnectors);
-    if (!connectors.length) throw new Error("该资产没有可用的已关联 S3 / OSS Connector。");
-    populateRemoteCoverageForm(asset, connectors);
-    const dialog = byId<HTMLDialogElement>("remote-coverage-dialog");
-    if (!dialog.open) dialog.showModal();
-  } catch (error) {
-    notifyWorkspace("无法打开远程覆盖扫描", error instanceof Error ? error.message : String(error), { tone: "warning" });
-  }
-}
-
-function remoteCoverageInput(): RemoteCoverageScanInput {
-  const mode = byId<HTMLSelectElement>("remote-coverage-mode").value as CoverageJobMode;
-  const coverage: CoverageJobSpec = {
-    mode,
-    coordinateFrame: "ICRS",
-    coverageRole: mode === "fits-wcs" ? "image_extent" : "object_presence",
-    // Catalog coordinates describe source presence; FITS-WCS coverage is an
-    // observed image extent unless a future recipe supplies a more specific
-    // origin classification.
-    dataOrigin: mode === "fits-wcs" ? "observed" : "catalog",
-    sourceTier: "user_file_derived",
-    maxOrder: 10,
-    queryOrder: 8,
-    previewOrder: 4,
-    ...(mode === "catalog-radec" ? {
-      coordinateUnits: byId<HTMLSelectElement>("remote-coverage-coordinate-units").value as CoverageCoordinateUnits,
-      raColumn: byId<HTMLInputElement>("remote-coverage-ra-column").value.trim(),
-      decColumn: byId<HTMLInputElement>("remote-coverage-dec-column").value.trim(),
-    } : {}),
-    ...(mode === "nested-healpix" ? {
-      healpixColumn: byId<HTMLInputElement>("remote-coverage-healpix-column").value.trim(),
-      healpixOrder: Number(byId<HTMLInputElement>("remote-coverage-healpix-order").value),
-    } : {}),
-  };
-  const pathValue = byId<HTMLInputElement>("remote-coverage-path").value.trim();
-  const fileNamePattern = byId<HTMLInputElement>("remote-coverage-file-name-pattern").value.trim();
-  const allowedSuffixes = byId<HTMLInputElement>("remote-coverage-allowed-suffixes").value
-    .split(/[,\s]+/)
-    .map((value) => value.trim())
-    .filter(Boolean);
-  const excludePatterns = byId<HTMLInputElement>("remote-coverage-exclude-patterns").value
-    .split(/[,\s]+/)
-    .map((value) => value.trim())
-    .filter(Boolean);
-  return {
-    surveyId: byId<HTMLSelectElement>("remote-coverage-survey").value,
-    connectorId: byId<HTMLSelectElement>("remote-coverage-connector").value,
-    releaseId: byId<HTMLSelectElement>("remote-coverage-release").value,
-    product: byId<HTMLInputElement>("remote-coverage-product").value.trim(),
-    ...(pathValue ? { path: pathValue } : {}),
-    ...(fileNamePattern ? { fileNamePattern } : {}),
-    ...(allowedSuffixes.length ? { allowedSuffixes } : {}),
-    ...(excludePatterns.length ? { excludePatterns } : {}),
-    coverage,
-  };
+  const ids = new Set([...(asset.connectorIds ?? []), ...accesses.flatMap(access => access.connectorId ? [access.connectorId] : [])]);
+  const locations = new Set([...(asset.connectorLocationKeys ?? []), ...accesses.map(access => access.uri)]);
+  return workspaceConnectors.filter(connector => ["local", "s3"].includes(connector.kind) && (ids.has(connector.id) || locations.has(connector.locationKey)));
 }
 
 function delay(milliseconds: number): Promise<void> {
   return new Promise((resolve) => window.setTimeout(resolve, milliseconds));
 }
 
-const remoteCoverageWatchers = new Set<string>();
 const workspaceScanWatchers = new Set<string>();
 
 async function watchWorkspaceScan(assetId: string, runId: string): Promise<void> {
@@ -3790,7 +3623,7 @@ async function watchWorkspaceScan(assetId: string, runId: string): Promise<void>
       if (attempt % 2 === 0 || !run || run.status === "failed" || run.status === "succeeded") {
         await refreshWorkspaceAssets(assetId).catch((error) => console.warn("Unable to refresh Workspace scan status", error));
       }
-      if (!run || run.status === "failed" || run.status === "succeeded") {
+      if (!run || ["paused", "cancelled", "failed", "succeeded"].includes(run.status)) {
         if (run?.status === "succeeded") {
           notifyWorkspace("Workspace 扫描完成", dataAssets.find((asset) => asset.id === assetId)?.name ?? assetId, { tone: "success" });
         } else if (run?.status === "failed") {
@@ -3803,80 +3636,6 @@ async function watchWorkspaceScan(assetId: string, runId: string): Promise<void>
   } finally {
     workspaceScanWatchers.delete(runId);
   }
-}
-
-async function watchRemoteCoverageScan(assetId: string, runId: string): Promise<void> {
-  if (remoteCoverageWatchers.has(runId)) return;
-  remoteCoverageWatchers.add(runId);
-  try {
-    for (let attempt = 0; attempt < 40; attempt += 1) {
-      await delay(3000);
-      const [runs] = await Promise.all([
-        workspaceApi.dataAssetScanRuns(assetId),
-        refreshWorkspaceAssets(assetId).catch((error) => {
-          console.warn("Unable to refresh remote coverage", error);
-        }),
-      ]);
-      const run = runs.find((candidate) => candidate.id === runId);
-      if (!run || run.status === "failed" || (run.status === "succeeded" && run.mocStatus !== "pending")) {
-        if (run?.status === "succeeded" && run.mocStatus === "ready") {
-          notifyWorkspace((run.skippedFileCount ?? 0) > 0 ? `扫描完成，已跳过 ${formatInteger(run.skippedFileCount!)} 个异常文件` : "用户 MOC 已生成", dataAssets.find((asset) => asset.id === assetId)?.name ?? assetId, { tone: "success" });
-        } else if (run?.status === "succeeded" && run.acceptedFileCount === 0) {
-          notifyWorkspace("扫描完成，无可用文件", "文件均已跳过，可在资产详情下载原因清单。", { tone: "info" });
-        } else if (run?.status === "failed" || run?.mocStatus === "failed") {
-          notifyWorkspace("远程覆盖扫描失败", run.error ?? "Warehouse 未返回可用覆盖", { tone: "error" });
-        }
-        return;
-      }
-    }
-    notifyWorkspace("远程覆盖仍在后台执行", "可稍后重新打开该资产查看 MOC 状态。", { tone: "info" });
-  } finally {
-    remoteCoverageWatchers.delete(runId);
-  }
-}
-
-function setupRemoteCoverageDialog(): void {
-  const dialog = byId<HTMLDialogElement>("remote-coverage-dialog");
-  const form = byId<HTMLFormElement>("remote-coverage-form");
-  const close = (): void => {
-    remoteCoverageAssetId = null;
-    if (dialog.open) dialog.close();
-  };
-  byId<HTMLButtonElement>("remote-coverage-dialog-close").addEventListener("click", close);
-  byId<HTMLButtonElement>("remote-coverage-form-cancel").addEventListener("click", close);
-  dialog.addEventListener("cancel", () => { remoteCoverageAssetId = null; });
-  byId<HTMLSelectElement>("remote-coverage-survey").addEventListener("change", () => populateRemoteCoverageReleaseOptions());
-  byId<HTMLSelectElement>("remote-coverage-mode").addEventListener("change", syncRemoteCoverageMode);
-  form.addEventListener("submit", (event) => {
-    event.preventDefault();
-    if (!form.reportValidity() || !remoteCoverageAssetId) return;
-    const assetId = remoteCoverageAssetId;
-    const submit = byId<HTMLButtonElement>("remote-coverage-form-submit");
-    submit.disabled = true;
-    let input: RemoteCoverageScanInput;
-    try {
-      input = remoteCoverageInput();
-    } catch (error) {
-      notifyWorkspace("远程覆盖扫描参数无效", error instanceof Error ? error.message : String(error), { tone: "error" });
-      submit.disabled = false;
-      return;
-    }
-    const asset = dataAssets.find((candidate) => candidate.id === assetId);
-    notifyWorkspace("正在提交远程覆盖扫描", asset?.name ?? assetId, { tone: "info" });
-    void workspaceApi.executeDataAssetRemoteScan(assetId, input)
-      .then((run) => {
-        close();
-        notifyWorkspace("远程覆盖扫描已提交", `${asset?.name ?? assetId} · ${run.taskKind ?? "user_coverage"}`, { tone: "success" });
-        return refreshWorkspaceAssets(assetId).catch((error) => {
-          console.warn("Unable to refresh submitted remote coverage", error);
-        }).then(() => { void watchRemoteCoverageScan(assetId, run.id).catch((error) => {
-          console.warn("Unable to monitor remote coverage", error);
-          notifyWorkspace("远程覆盖状态暂时不可用", "可稍后重新打开该资产查看任务状态。", { tone: "warning", dedupeMs: 5_000 });
-        }); });
-      })
-      .catch((error) => notifyWorkspace("远程覆盖扫描提交失败", error instanceof Error ? error.message : String(error), { tone: "error" }))
-      .finally(() => { submit.disabled = false; });
-  });
 }
 
 function renderLayerAssetDetails(asset: DataAssetRecord): void {
@@ -3894,7 +3653,7 @@ function renderLayerAssetDetails(asset: DataAssetRecord): void {
   }
   const linkedConnectors = linkedWorkspaceConnectors(asset);
   const supportsWorkspaceScan = scan?.format === "csv" || scan?.format === "fits" || asset.kind === "image" || asset.kind === "cube";
-  const workspaceScanAvailable = workspaceCapabilities?.localScan?.enabled !== false && workspaceCapabilities?.localScan?.configured !== false;
+  const workspaceScanAvailable = !workspaceCapabilities?.scanning?.paused && workspaceCapabilities?.localScan?.enabled !== false && workspaceCapabilities?.localScan?.configured !== false;
   const runWorkspaceScan = (): void => {
     const explicitConnectorId = asset.access?.connectorId ?? asset.accesses?.find((access) => access.connectorId)?.connectorId;
     const connectorId = explicitConnectorId && linkedConnectors.some((connector) => connector.id === explicitConnectorId)
@@ -3909,7 +3668,7 @@ function renderLayerAssetDetails(asset: DataAssetRecord): void {
     notifyWorkspace("正在提交 Workspace 扫描", asset.name, { tone: "info" });
     void workspaceApi.executeDataAssetWorkspaceScan(asset.id, connectorId)
       .then((run) => {
-        notifyWorkspace("Workspace 扫描已提交", `${asset.name} · ${run.fileCount ?? 0} 个文件`, { tone: "success" });
+        notifyWorkspace("Workspace 扫描已提交", `${asset.name} · 已进入扫描队列`, { tone: "success" });
         void watchWorkspaceScan(asset.id, run.id).catch((error) => console.warn("Unable to monitor Workspace scan", error));
         return refreshWorkspaceAssets(asset.id).catch((error) => {
           notifyWorkspace("资产扫描状态刷新失败", error instanceof Error ? error.message : String(error), { tone: "warning" });
@@ -3925,14 +3684,6 @@ function renderLayerAssetDetails(asset: DataAssetRecord): void {
     scanButton.disabled = linkedConnectors.length > 1 && !asset.access?.connectorId && !asset.accesses?.some((access) => access.connectorId);
     scanButton.title = scanButton.disabled ? "请在资产访问描述中指定一个 Connector" : "Workspace 读取 CSV / FITS 并生成覆盖与数据点";
     actions.push(scanButton);
-  }
-  const warehouseAvailable = Boolean(workspaceCapabilities?.dataWarehouse.enabled && workspaceCapabilities.dataWarehouse.configured !== false);
-  if (warehouseAvailable && assetHasS3Connector(asset) && coverageState !== "pending" && coverageState !== "ready" && coverageState !== "empty") {
-    const remoteButton = actionButton("Warehouse 扫描（可选）", () => {
-      void openRemoteCoverageDialog(asset);
-    });
-    remoteButton.title = "可选：由 Warehouse 扫描 S3 / OSS，结果仍写入 Workspace 索引";
-    actions.push(remoteButton);
   }
   if (operational?.nextAction === "configure_connector") {
     actions.push(actionButton("配置可扫描 Connector", () => {
@@ -4010,7 +3761,7 @@ function workspaceLayerStatusLabel(layer: WorkspaceCoverageLayer): string {
 
 function renderWorkspaceLayerDetails(layer: WorkspaceCoverageLayer): void {
   const artifact = layer.artifactId ? userMocArtifacts.get(layer.artifactId) : undefined;
-  const source = layer.key?.startsWith("warehouse:") ? "Warehouse 用户层" : "Workspace 用户 MOC";
+  const source = "Workspace 用户 MOC";
   const rows: Array<[string, string]> = [
     ["来源", source],
     ["状态", workspaceLayerStatusLabel(layer)],
@@ -4031,7 +3782,7 @@ function renderWorkspaceLayerDetails(layer: WorkspaceCoverageLayer): void {
       link.click();
     }));
   }
-  inspectorRows(layer.key?.startsWith("warehouse:") ? (layer.productId ?? "Warehouse 用户层") : "用户 MOC", rows, actions);
+  inspectorRows("用户 MOC", rows, actions);
 }
 
 function moveLayer(key: string, targetIndex: number): void {
@@ -4158,7 +3909,7 @@ function buildSurveyList(): void {
       ? dataAssets.find((candidate) => coverageLayerAssetIds(workspaceLayer).includes(candidate.id))
       : undefined;
     const workspaceLabel = workspaceLayer?.assetName ?? workspaceAsset?.name ?? workspaceLayer?.productId ?? workspaceLayer?.layerId ?? "用户层";
-    name.textContent = survey?.name ?? asset?.name ?? (workspaceLayer?.key?.startsWith("warehouse:") ? `Warehouse · ${workspaceLabel}` : workspaceLayer ? `MOC · ${workspaceLabel}` : "未设置巡天标签");
+    name.textContent = survey?.name ?? asset?.name ?? (workspaceLayer ? `MOC · ${workspaceLabel}` : "未设置巡天标签");
     const count = document.createElement("b");
     const metadata = document.createElement("small");
     if (survey) {
@@ -4175,7 +3926,7 @@ function buildSurveyList(): void {
       metadata.textContent = [asset.surveyId ?? "未设置巡天标签", asset.releaseId ?? "未设置发布标签", coverageMeaning(layer, asset), operational?.dataPointCount !== undefined ? `${formatInteger(operational.dataPointCount)} 个已索引数据点` : layer?.objectCount !== undefined && asset.kind !== "image" && asset.kind !== "cube" ? `${formatInteger(layer.objectCount)} 个目录对象` : undefined].filter(Boolean).join(" · ");
     } else if (workspaceLayer) {
       count.textContent = workspaceLayer.status === "ready" ? `${formatInteger(workspaceLayer.pixels.length)} CELLS` : workspaceLayer.status === "pending" ? "PENDING" : workspaceLayer.status === "error" ? "FAILED" : "UNAVAILABLE";
-      metadata.textContent = [workspaceLayer.source === "warehouse" ? "WAREHOUSE" : "USER MOC", workspaceLayer.surveyId, workspaceLayer.releaseId, workspaceLayer.precision].filter(Boolean).join(" · ");
+      metadata.textContent = ["USER MOC", workspaceLayer.surveyId, workspaceLayer.releaseId, workspaceLayer.precision].filter(Boolean).join(" · ");
     } else {
       count.textContent = "WORKSPACE";
       metadata.textContent = "仅显示未设置巡天标签的工作区覆盖";
@@ -4508,7 +4259,6 @@ function setupStatusHelp(): void {
 
 setupStatusHelp();
 setupCoverageLocatorTooltip(byId("inspector-content"));
-setupRemoteCoverageDialog();
 byId<HTMLButtonElement>("reset-button").addEventListener("click", () => {
   if (mode === "layers") {
     if (aladinExplorer) aladinExplorer.reset();

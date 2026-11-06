@@ -1,3 +1,4 @@
+import { LocalState } from "./local-state.js";
 import { randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
@@ -132,6 +133,7 @@ export const WORKSPACE_AGENT_TOOLS: readonly AgentToolDescriptor[] = [
 ];
 
 interface WorkspaceAgentOptions {
+  state?: LocalState;
   root: string;
   config: SystemConfigStore;
   cliPath: string;
@@ -141,7 +143,7 @@ interface WorkspaceAgentOptions {
 
 export class WorkspaceAgentService {
   readonly #root: string;
-  readonly #statePath: string;
+  readonly #state: LocalState;
   readonly #config: SystemConfigStore;
   readonly #cliPath: string;
   readonly #cliBaseUrl: string;
@@ -158,7 +160,7 @@ export class WorkspaceAgentService {
     if (!options.cliPath.trim()) throw new RangeError("Workspace CLI path is required");
     if (!options.cliBaseUrl.trim()) throw new RangeError("Workspace CLI base URL is required");
     this.#root = path.resolve(options.root);
-    this.#statePath = path.join(this.#root, "workspace-agent-sessions.json");
+    this.#state = options.state ?? new LocalState(path.join(this.#root, "control.sqlite"));
     this.#config = options.config;
     this.#cliPath = options.cliPath.trim();
     this.#cliBaseUrl = options.cliBaseUrl.trim();
@@ -170,8 +172,8 @@ export class WorkspaceAgentService {
     this.#initialized = true;
     await mkdir(this.#root, { recursive: true });
     try {
-      const parsed = JSON.parse(await readFile(this.#statePath, "utf8")) as AgentStoreState;
-      if (parsed.version === 1 && Array.isArray(parsed.sessions)) parsed.sessions.forEach((session) => {
+      await this.#state.initialize();
+      this.#state.list<WorkspaceAgentSession>("workspace-agent-sessions", 100_000).forEach((session) => {
         if (!session?.id) return;
         session.status ??= session.pendingTool ? "waiting_for_confirmation" : "idle";
         session.events ??= [];
@@ -731,10 +733,9 @@ export class WorkspaceAgentService {
   async #save(session: WorkspaceAgentSession): Promise<void> { session.updatedAt = now(); session.messages = session.messages.slice(-100); this.#sessions.set(session.id, clone(session)); await this.#persist(); }
 
   async #persist(): Promise<void> {
-    const state: AgentStoreState = { version: 1, sessions: [...this.#sessions.values()].slice(-100).map(clone) };
-    this.#writeChain = this.#writeChain.catch(() => undefined).then(async () => { const temporary = `${this.#statePath}.${randomUUID()}.tmp`; await writeFile(temporary, `${JSON.stringify(state, null, 2)}\n`, { encoding: "utf8", mode: 0o600 }); await rename(temporary, this.#statePath); });
-    return this.#writeChain;
+    for (const session of this.#sessions.values()) this.#state.put("workspace-agent-sessions", session.id, session);
   }
+
 }
 
 function workspaceCliEnvironment(): NodeJS.ProcessEnv {

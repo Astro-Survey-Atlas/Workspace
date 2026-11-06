@@ -3,7 +3,6 @@ import path from "node:path";
 import { backup, DatabaseSync, type StatementSync } from "node:sqlite";
 
 import type { ConnectorIngestRunFilter, ConnectorIngestRunRecord } from "../connector-history.js";
-import type { StatisticsEntry, StatisticsSnapshot, StatisticsTotals } from "../data-statistics-types.js";
 import type { ConnectorRecord } from "../connectors.js";
 import type { DataAssetRecord } from "../data-catalog.js";
 import { assertPersistableDataAsset, type MetadataStore, type MetadataTransaction, type SurveyIdentityRecord } from "./types.js";
@@ -90,6 +89,24 @@ const MIGRATIONS = [{
     snapshot_id TEXT NOT NULL, file_key TEXT NOT NULL, size_bytes REAL,
     PRIMARY KEY(snapshot_id, file_key)
   ) STRICT;`,
+}, {
+  version: 5,
+  sql: `
+    ALTER TABLE connector_ingest_runs RENAME TO old_connector_ingest_runs;
+    CREATE TABLE connector_ingest_runs (
+      id TEXT PRIMARY KEY, location_key TEXT NOT NULL,
+      status TEXT NOT NULL CHECK(status IN ('queued','running','paused','cancelled','succeeded','failed')),
+      created_at TEXT NOT NULL, record TEXT NOT NULL CHECK(json_valid(record)),
+      connector_id TEXT, connector_kind TEXT, idempotency_key_hash TEXT,
+      CHECK(json_extract(record,'$.id')=id), CHECK(json_extract(record,'$.locationKey')=location_key)
+    ) STRICT;
+    INSERT INTO connector_ingest_runs SELECT id,location_key,status,created_at,record,connector_id,connector_kind,idempotency_key_hash FROM old_connector_ingest_runs;
+    DROP TABLE old_connector_ingest_runs;
+    CREATE INDEX connector_ingest_runs_location_idx ON connector_ingest_runs(location_key,created_at DESC);
+    CREATE INDEX connector_ingest_runs_connector_idx ON connector_ingest_runs(connector_id,created_at DESC);
+    CREATE INDEX connector_ingest_runs_status_idx ON connector_ingest_runs(status);
+    CREATE UNIQUE INDEX connector_ingest_runs_idempotency_idx ON connector_ingest_runs(connector_id,idempotency_key_hash) WHERE idempotency_key_hash IS NOT NULL;
+  `,
 }];
 
 type SqliteRow = Record<string, unknown>;
@@ -109,40 +126,6 @@ class SqliteTransaction implements MetadataTransaction {
 
   async deleteSurveyIdentity(id: string): Promise<boolean> {
     return this.database.prepare("DELETE FROM survey_identities WHERE id = ?").run(id).changes > 0;
-  }
-
-  async listStatisticsSnapshots(): Promise<StatisticsSnapshot[]> {
-    return this.records<StatisticsSnapshot>("SELECT record FROM statistics_snapshots ORDER BY updated_at DESC, id DESC");
-  }
-
-  async putStatisticsSnapshot(record: StatisticsSnapshot): Promise<void> {
-    this.database.prepare("INSERT INTO statistics_snapshots(id, slot, updated_at, record) VALUES (?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET record=excluded.record, updated_at=excluded.updated_at")
-      .run(record.id, record.slot, record.updatedAt, JSON.stringify(record));
-  }
-
-  async putStatisticsEntries(snapshotId: string, entries: StatisticsEntry[]): Promise<void> {
-    const statement = this.database.prepare("INSERT INTO statistics_entries(snapshot_id,file_key,size_bytes) VALUES (?,?,?) ON CONFLICT(snapshot_id,file_key) DO UPDATE SET size_bytes=excluded.size_bytes");
-    for (const entry of entries) statement.run(snapshotId, entry.key, entry.bytes);
-  }
-
-  async deleteStatisticsSnapshot(id: string): Promise<void> {
-    this.database.prepare("DELETE FROM statistics_entries WHERE snapshot_id=?").run(id);
-    this.database.prepare("DELETE FROM statistics_snapshots WHERE id=?").run(id);
-  }
-
-  async statisticsTotals(snapshotIds: string[]): Promise<StatisticsTotals> {
-    if (!snapshotIds.length) return { files: 0, knownBytes: 0, unknownFiles: 0 };
-    // Entries are already unique by (snapshot_id, file_key). A single snapshot
-    // needs no window sort over hundreds of thousands of immutable identities.
-    const row = (snapshotIds.length === 1 ? this.database.prepare(`SELECT COUNT(*) files, COALESCE(SUM(size_bytes),0) known_bytes,
-      COALESCE(SUM(CASE WHEN size_bytes IS NULL THEN 1 ELSE 0 END),0) unknown_files
-      FROM statistics_entries WHERE snapshot_id=?`) : this.database.prepare(`SELECT COUNT(*) files, COALESCE(SUM(size_bytes),0) known_bytes,
-      COALESCE(SUM(CASE WHEN size_bytes IS NULL THEN 1 ELSE 0 END),0) unknown_files FROM (
-      SELECT size_bytes, ROW_NUMBER() OVER(PARTITION BY file_key ORDER BY s.updated_at DESC,s.id DESC) rank
-      FROM statistics_entries e JOIN statistics_snapshots s ON s.id=e.snapshot_id
-      WHERE snapshot_id IN (${snapshotIds.map(() => "?").join(",")})
-    ) WHERE rank=1`)).get(...snapshotIds) as SqliteRow;
-    return { files: Number(row.files), knownBytes: Number(row.known_bytes), unknownFiles: Number(row.unknown_files) };
   }
 
   async listConnectors(): Promise<ConnectorRecord[]> {
@@ -267,20 +250,13 @@ export class SqliteMetadataStore implements MetadataStore {
     await this.serialized(async () => { await backup(this.requireDatabase(), filename); });
   }
 
-  /** Call only when the independent statistics worker starts, before any writes. */
-  async removeUnpublishedStatisticsEntries(): Promise<void> {
-    await this.serialized(async () => {
-      this.requireDatabase().exec("DELETE FROM statistics_entries WHERE snapshot_id NOT IN (SELECT id FROM statistics_snapshots)");
-    });
-  }
-
   async initialize(): Promise<void> {
     await this.serialized(async () => {
       if (this.database) return;
       if (this.filename !== ":memory:") await mkdir(path.dirname(this.filename), { recursive: true });
       const database = new DatabaseSync(this.filename);
       try {
-        database.exec("PRAGMA journal_mode = DELETE; PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 100;");
+        database.exec("PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 100;");
         if (this.options.cacheSizeKiB !== undefined) {
           if (!Number.isSafeInteger(this.options.cacheSizeKiB) || this.options.cacheSizeKiB < 1) throw new RangeError("Invalid SQLite cache size");
           database.exec(`PRAGMA cache_size = -${this.options.cacheSizeKiB};`);
@@ -356,11 +332,6 @@ export class SqliteMetadataStore implements MetadataStore {
   listSurveyIdentities = () => this.read((transaction) => transaction.listSurveyIdentities());
   putSurveyIdentity = (record: SurveyIdentityRecord) => this.transaction((transaction) => transaction.putSurveyIdentity(record));
   deleteSurveyIdentity = (id: string) => this.transaction(tx => tx.deleteSurveyIdentity(id));
-  listStatisticsSnapshots = () => this.read(tx => tx.listStatisticsSnapshots());
-  putStatisticsSnapshot = (record: StatisticsSnapshot) => this.transaction(tx => tx.putStatisticsSnapshot(record));
-  putStatisticsEntries = (id: string, entries: StatisticsEntry[]) => this.transaction(tx => tx.putStatisticsEntries(id, entries));
-  deleteStatisticsSnapshot = (id: string) => this.transaction(tx => tx.deleteStatisticsSnapshot(id));
-  statisticsTotals = (ids: string[]) => this.read(tx => tx.statisticsTotals(ids));
   listConnectors = () => this.read((transaction) => transaction.listConnectors());
   getConnector = (id: string) => this.read((transaction) => transaction.getConnector(id));
   getConnectorByLocationKey = (locationKey: string) => this.read((transaction) => transaction.getConnectorByLocationKey(locationKey));

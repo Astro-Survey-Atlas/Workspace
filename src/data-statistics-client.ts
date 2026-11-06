@@ -1,56 +1,46 @@
-import { Worker } from "node:worker_threads";
+import { randomUUID } from "node:crypto";
+import type { MetadataStore } from "./storage/types.js";
 import type { ConnectorIngestRunRecord } from "./connector-history.js";
-import type { DataStatisticsView, StatisticsRefresh } from "./data-statistics-types.js";
+import type { DataAmount, DataStatisticsView, StatisticsRefresh } from "./data-statistics-types.js";
 
-/** HTTP handlers consume a small published view; SQLite and enumeration run off-thread. */
+const unknown = (): DataAmount => ({ files: 0, knownBytes: 0, unknownFiles: 0, bytes: null, state: "unknown",
+  message: "未枚举数据源；这里只展示已完成扫描的摘要" });
+function amount(runs: ConnectorIngestRunRecord[]): DataAmount {
+  if (!runs.length) return unknown();
+  const files = runs.reduce((sum, run) => sum + (run.processedFiles ?? run.fileCount ?? 0), 0);
+  const measured = runs.filter(run => run.totalBytes !== undefined);
+  const knownBytes = measured.reduce((sum, run) => sum + run.totalBytes!, 0);
+  const unknownFiles = runs.filter(run => run.totalBytes === undefined).reduce((sum, run) => sum + (run.processedFiles ?? run.fileCount ?? 0), 0);
+  return { files, knownBytes, unknownFiles, bytes: unknownFiles ? null : knownBytes,
+    state: unknownFiles ? "partial" : "complete", updatedAt: runs.map(run => run.updatedAt ?? run.createdAt).sort().at(-1) };
+}
+
+/** Published scan receipts only. Viewing statistics never lists sources or replays evidence. */
 export class DataStatisticsClient {
-  #worker?: Worker;
-  #view?: DataStatisticsView;
-  #sequence = 0;
-  #pending = new Map<number, { resolve: (value: unknown) => void; reject: (error: Error) => void }>();
-  #starting?: Promise<void>;
-  constructor(readonly options: { root: string; workspaceScanRoot: string; evidenceRoot: string }) {}
-  get busy(): boolean { return this.#view?.refresh?.status === "running"; }
-
-  async initialize(): Promise<void> {
-    this.#starting ??= this.#start();
-    await this.#starting;
+  constructor(readonly options: { store: MetadataStore }) {}
+  get busy(): boolean { return false; }
+  async initialize(): Promise<void> {}
+  async view(): Promise<DataStatisticsView> {
+    const [connectors, assets, history] = await Promise.all([this.options.store.listConnectors(), this.options.store.listDataAssets(),
+      this.options.store.listConnectorIngestRuns({ status: "succeeded" })]);
+    const completed = history.filter(run => !run.parentRunId);
+    const latest = new Map<string, ConnectorIngestRunRecord>();
+    for (const run of completed) for (const id of run.assetIds ?? (run.assetId ? [run.assetId] : [])) if (!latest.has(id)) latest.set(id, run);
+    const scanned = amount([...new Map([...latest.values()].map(run => [run.id, run])).values()]);
+    const cumulative = amount(completed);
+    return { connectorCount: connectors.length, assetCount: assets.length, accessible: unknown(), scanned,
+      cumulativeScanned: { ...cumulative, knownBytes: String(cumulative.knownBytes), bytes: cumulative.bytes === null ? null : String(cumulative.bytes) },
+      connectors: connectors.map(connector => ({ connectorId: connector.id, name: connector.name, kind: connector.kind,
+        assetCount: assets.filter(asset => asset.connectorIds?.includes(connector.id) || asset.connectorLocationKeys?.includes(connector.locationKey)
+          || [asset.access, ...(asset.accesses ?? [])].some(access => access.connectorId === connector.id || access.uri === connector.locationKey)).length,
+        accessible: unknown(), scanned: amount([...new Map([...latest.values()].filter(run => run.connectorId === connector.id).map(run => [run.id, run])).values()]) })),
+      assets: assets.map(asset => ({ assetId: asset.id, size: amount(latest.has(asset.id) ? [latest.get(asset.id)!] : []), connectorTotal: unknown(), sources: [] })) };
   }
-  async #start(): Promise<void> {
-    const extension = import.meta.url.endsWith(".ts") ? "ts" : import.meta.url.endsWith(".mjs") ? "mjs" : "js";
-    const entry = new URL(`./data-statistics-worker.${extension}`, import.meta.url);
-    const worker = extension === "ts"
-      ? new Worker('const { workerData } = require("node:worker_threads"); import("tsx/esm/api").then(({ tsImport }) => tsImport(workerData.entry, workerData.entry));',
-        { eval: true, workerData: { ...this.options, entry: entry.href } })
-      : new Worker(entry, { workerData: this.options });
-    this.#worker = worker;
-    worker.on("message", (message: { id?: number; value?: unknown; error?: string; view?: DataStatisticsView }) => {
-      if (message.view) this.#view = message.view;
-      if (message.id === undefined) return;
-      const pending = this.#pending.get(message.id);
-      this.#pending.delete(message.id);
-      if (message.error) pending?.reject(new Error(message.error)); else pending?.resolve(message.value);
-    });
-    worker.on("error", error => { for (const pending of this.#pending.values()) pending.reject(error); this.#pending.clear(); });
-    worker.on("exit", code => {
-      if (this.#worker !== worker) return;
-      this.#worker = undefined; this.#starting = undefined;
-      for (const pending of this.#pending.values()) pending.reject(new Error(`Statistics worker exited (${code})`));
-      this.#pending.clear();
-    });
-    this.#view = await this.#call<DataStatisticsView>("view");
+  async refresh(_connectorIds?: string[]): Promise<StatisticsRefresh> {
+    const view = await this.view(), at = new Date().toISOString();
+    return { id: randomUUID(), status: "succeeded", phase: "summary", processedFiles: view.scanned.files,
+      completedConnectors: view.connectorCount, totalConnectors: view.connectorCount, startedAt: at, updatedAt: at, errors: [] };
   }
-  #call<T>(method: "view" | "refresh" | "sync", connectorIds?: string[]): Promise<T> {
-    return new Promise((resolve, reject) => {
-      const id = ++this.#sequence;
-      this.#pending.set(id, { resolve: value => resolve(value as T), reject });
-      this.#worker!.postMessage({ id, method, connectorIds });
-    });
-  }
-  async view(): Promise<DataStatisticsView> { await this.initialize(); return structuredClone(this.#view!); }
-  async refresh(connectorIds?: string[]): Promise<StatisticsRefresh> { await this.initialize(); return this.#call("refresh", connectorIds); }
-  async recordScan(_run: ConnectorIngestRunRecord, _files?: unknown[]): Promise<void> {
-    await this.initialize(); await this.#call("sync");
-  }
-  async close(): Promise<void> { const worker = this.#worker; this.#worker = undefined; await worker?.terminate(); }
+  async recordScan(_run: ConnectorIngestRunRecord, _files?: unknown[]): Promise<void> {}
+  async close(): Promise<void> {}
 }

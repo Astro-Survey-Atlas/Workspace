@@ -10,7 +10,7 @@ import { pathToFileURL } from "node:url";
 
 import { ASTRO_FILE_INDEX } from "../src/astro-index.js";
 import { ASTRO_IMAGE_FOOTPRINT_INDEX } from "../src/astro-object-index.js";
-import { SKY_DATA_POINT_INDEX } from "../src/derived-repairs.js";
+import { ASTRO_OBJECT_INDEX as SKY_DATA_POINT_INDEX } from "../src/astro-object-index.js";
 import { UserMocArtifactStore } from "../src/user-moc-artifacts.js";
 
 const FITS_BLOCK_BYTES = 2_880;

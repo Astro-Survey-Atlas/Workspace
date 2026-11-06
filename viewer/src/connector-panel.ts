@@ -4,7 +4,7 @@ import type { DataAssetRecord } from "../../src/data-catalog";
 import type { SurveyCard, SurveyRecord } from "../../src/survey-registry";
 import { createIcons, Pencil, Play, ScrollText, SearchCheck, Trash2 } from "lucide";
 
-import { workspaceApi, type ConnectorScanRun, type WarehouseTaskLogs, type WorkspaceCapabilities } from "./api";
+import { workspaceApi, type ConnectorScanRun, type ScanTaskLogs, type WorkspaceCapabilities } from "./api";
 import type { DataAmount, DataStatisticsView } from "../../src/data-statistics-types";
 import { showContextMenu, type ContextMenuAction } from "./context-menu";
 import { notifyWorkspace } from "./notifications";
@@ -29,7 +29,7 @@ function field(form: HTMLFormElement, name: string): string {
 
 const KIND_LABELS: Record<ConnectorKind, string> = { s3: "S3 / OSS", local: "本地路径", jdbc: "JDBC 数据库" };
 const STATUS_LABELS: Record<ConnectorStatus, string> = { draft: "未检测", ready: "可用", disabled: "已停用" };
-const RUN_STATUS_LABELS: Record<ConnectorScanRun["status"], string> = { queued: "排队中", running: "执行中", succeeded: "成功", failed: "失败" };
+const RUN_STATUS_LABELS: Record<ConnectorScanRun["status"], string> = { queued: "排队中", running: "执行中", succeeded: "成功", failed: "失败", paused: "已暂停", cancelled: "已取消" };
 const SENSITIVE_CONFIG_KEY = /(auth|credential|secret|password|passphrase|token|access.?key|api.?key|private.?key|session|user(name)?)/i;
 
 type ConnectorView = "list" | "history" | "statistics";
@@ -52,11 +52,11 @@ export class ConnectorPanel {
   #assets: DataAssetRecord[] = [];
   #runs: ConnectorScanRun[] = [];
   #surveys: SurveyCard[] = [];
-  #capabilities: WorkspaceCapabilities = { dataWarehouse: { enabled: false }, metadataStore: { engine: "unknown" } };
+  #capabilities: WorkspaceCapabilities = { metadataStore: { engine: "sqlite" } };
   #surveyRecords = new Map<string, SurveyRecord>();
   #selectedId: string | null = null;
   #selectedRunId: string | null = null;
-  #runLogState: { runId: string; loading: boolean; value?: WarehouseTaskLogs; error?: string } | undefined;
+  #runLogState: { runId: string; loading: boolean; value?: ScanTaskLogs; error?: string } | undefined;
   #runLogRequest = 0;
   #editingId: string | null = null;
   #checkingConnectorId: string | null = null;
@@ -100,6 +100,12 @@ export class ConnectorPanel {
     ["connector-run-status-filter", "connector-run-kind-filter"].forEach((id) => {
       byId<HTMLSelectElement>(id).addEventListener("change", () => this.#renderHistory());
     });
+    byId<HTMLButtonElement>("scanning-control").addEventListener("click", () => {
+      const button = byId<HTMLButtonElement>("scanning-control"); button.disabled = true;
+      void workspaceApi.scanning(!this.#capabilities.scanning?.paused).then(scanning => {
+        this.#capabilities.scanning = scanning; this.#renderScanning(); this.#render();
+      }).catch(error => notifyWorkspace("扫描状态更新失败", String(error), { tone: "error" })).finally(() => { button.disabled = false; });
+    });
     const historyList = byId<HTMLElement>("connector-history-list");
     historyList.addEventListener("dblclick", (event) => {
       const target = event.target instanceof Element ? event.target : undefined;
@@ -131,6 +137,7 @@ export class ConnectorPanel {
     this.#runs = runs;
     this.#surveys = surveys;
     this.#capabilities = capabilities;
+    this.#renderScanning();
     this.#assets = assets;
     this.#updateMetrics(runs);
     const records = await Promise.all(this.#surveys.map((survey) => workspaceApi.survey(survey.id)));
@@ -198,7 +205,7 @@ export class ConnectorPanel {
     this.#editingId = null;
     this.#view = "list";
     this.#render();
-    void this.#executeScan(record, undefined, "auto");
+    void this.#executeScan(record, undefined);
   }
 
   deactivate(): void {
@@ -365,7 +372,7 @@ export class ConnectorPanel {
   }
 
   #runExecutor(run: ConnectorScanRun): string {
-    return run.executor === "warehouse-batch" ? "并行 Scanner Job" : run.executor ?? (run.jobId ? "Warehouse" : "未注明");
+    return run.executor ?? "历史记录";
   }
 
   #filteredRuns(): ConnectorScanRun[] {
@@ -586,10 +593,16 @@ export class ConnectorPanel {
     return button;
   }
 
-  #scanUnavailableReason(record: ConnectorPublicRecord, executor = "auto"): string | undefined {
-    const remote = executor === "warehouse" || executor === "auto" && this.#capabilities.dataWarehouse.enabled;
-    if (remote && !this.#capabilities.dataWarehouse.configured) return "Warehouse 扫描服务未配置。";
-    if (!remote && (!this.#capabilities.localScan?.enabled || !this.#capabilities.localScan.configured)) return "Workspace 空间索引未配置，当前不能执行扫描。";
+  #renderScanning(): void {
+    const paused = this.#capabilities.scanning?.paused;
+    const button = byId<HTMLButtonElement>("scanning-control");
+    button.textContent = paused ? "扫描已暂停 · 恢复扫描" : "暂停所有扫描";
+    button.title = paused ? "恢复任务接收；单独暂停的任务仍需手动恢复" : "停止接收任务，并在文件批次之间暂停执行";
+  }
+
+  #scanUnavailableReason(record: ConnectorPublicRecord): string | undefined {
+    if (this.#capabilities.scanning?.paused) return "扫描已暂停；请在扫描记录中恢复全局扫描。";
+    if (!this.#capabilities.localScan?.enabled || !this.#capabilities.localScan.configured) return "Workspace 空间索引未配置，当前不能执行扫描。";
     if (record.kind === "jdbc") return "JDBC 扫描执行器尚未接入；当前只能查看配置和历史记录。";
     if (record.status === "disabled") return "Connector 已停用，当前不能执行扫描。";
     if (record.lastCheck?.status !== "ok") return record.kind === "local" ? "请先检测本地目录是否可读。" : "请先检测连接并确认 S3 / OSS 可用。";
@@ -614,21 +627,12 @@ export class ConnectorPanel {
     const icon = document.createElement("i"); icon.dataset.lucide = "play";
     const label = document.createElement("span"); label.textContent = "执行扫描";
     button.append(icon, label);
-    const executor = document.createElement("select"); executor.className = "field-input"; executor.setAttribute("aria-label", "扫描执行位置");
-    executor.innerHTML = '<option value="auto">自动选择执行位置</option><option value="workspace">Workspace 本地扫描</option><option value="warehouse">并行 Scanner Job</option>';
-    (executor.querySelector('option[value="warehouse"]') as HTMLOptionElement).disabled = !this.#capabilities.dataWarehouse.enabled;
-    const note = document.createElement("p");
-    note.className = "connector-scan-availability";
-    const update = () => {
-      const reason = this.#scanUnavailableReason(record, executor.value);
-      button.disabled = Boolean(reason);
-      button.title = reason ?? "扫描已关联资产并生成覆盖与数据点";
-      note.textContent = reason ?? (executor.value === "warehouse" || executor.value === "auto" && this.#capabilities.dataWarehouse.enabled
-        ? "按清单分片扫描，最多同时运行 2 个任务；中断后自动接回。" : "在 Workspace 本地扫描并生成覆盖与数据点。");
-    };
-    update(); executor.addEventListener("change", update);
-    button.addEventListener("click", () => void this.#executeScan(record, button, executor.value as "auto" | "workspace" | "warehouse"));
-    section.append(executor, button, note);
+    const note = document.createElement("p"); note.className = "connector-scan-availability";
+    const reason = this.#scanUnavailableReason(record);
+    button.disabled = !!reason;
+    note.textContent = reason ?? "提交后由扫描进程读取文件；可在扫描记录中暂停和取消。";
+    button.addEventListener("click", () => void this.#executeScan(record, button));
+    section.append(button, note);
     return section;
   }
 
@@ -644,11 +648,11 @@ export class ConnectorPanel {
     ];
   }
 
-  async #executeScan(record: ConnectorPublicRecord, button: HTMLButtonElement | undefined, executor: "auto" | "workspace" | "warehouse"): Promise<void> {
+  async #executeScan(record: ConnectorPublicRecord, button: HTMLButtonElement | undefined): Promise<void> {
     if (button) button.disabled = true;
     notifyWorkspace("正在提交 Workspace 扫描", `${record.name} · 使用已保存的 Connector 配置`, { tone: "info" });
     try {
-      const submitted = await workspaceApi.executeConnectorScan(record.id, undefined, executor);
+      const submitted = await workspaceApi.executeConnectorScan(record.id);
       this.#runs = await workspaceApi.connectorIngestRuns();
       this.#selectedRunId = submitted.id ?? this.#runs[0]?.id ?? null;
       this.#updateMetrics(this.#runs);
@@ -779,9 +783,20 @@ export class ConnectorPanel {
     const headingActions = document.createElement("div");
     headingActions.className = "connector-run-detail-actions";
     headingActions.append(this.#iconButton("查看任务日志", "scroll-text", () => void this.#loadRunLogs(run, true)));
+    if (run.connectorId && run.executor === "workspace") {
+      const actions: Array<["pause" | "resume" | "cancel", string]> = run.status === "paused" ? [["resume", "恢复"], ["cancel", "取消"]]
+        : ["queued", "running"].includes(run.status) ? [["pause", "暂停"], ["cancel", "取消"]] : [];
+      for (const [action, label] of actions) {
+        const button = document.createElement("button"); button.type = "button"; button.className = "command-button secondary"; button.textContent = label;
+        button.addEventListener("click", () => { button.disabled = true; void workspaceApi.controlScan(run.connectorId!, run.id, action).then(async () => {
+          this.#runs = await workspaceApi.connectorIngestRuns(); this.#renderHistory(); this.#renderRunDetail();
+        }).catch(error => { button.disabled = false; notifyWorkspace("扫描操作失败", String(error), { tone: "error" }); }); });
+        headingActions.append(button);
+      }
+    }
     if (run.status === "failed" && run.connectorId && !run.parentRunId) {
       const retry = document.createElement("button"); retry.type = "button"; retry.className = "command-button secondary";
-      retry.textContent = run.executor === "warehouse-batch" ? "重试失败分片" : "重试扫描";
+      retry.textContent = "重试扫描";
       retry.addEventListener("click", () => {
         retry.disabled = true;
         void workspaceApi.retryConnectorScan(run.connectorId!, run.id).then(async () => {
@@ -825,23 +840,6 @@ export class ConnectorPanel {
     empty.hidden = true;
     content.hidden = false;
     const children: Node[] = [headingRow, status, metadata, error];
-    if (run.batchProgress) {
-      const partitions = document.createElement("details");
-      const title = document.createElement("summary"); title.textContent = "查看分片记录"; partitions.append(title);
-      const latest = new Map<string, ConnectorScanRun>();
-      for (const child of this.#runs.filter(child => child.parentRunId === run.id).sort((a, b) => a.createdAt.localeCompare(b.createdAt))) latest.set(child.partitionId!, child);
-      for (const child of latest.values()) {
-        const button = document.createElement("button"); button.type = "button"; button.className = "command-button secondary";
-        button.textContent = `${child.partitionId} · ${RUN_STATUS_LABELS[child.status]} · ${(child.fileCount ?? 0).toLocaleString()} 文件`;
-        button.addEventListener("click", () => { this.#selectedRunId = child.id; this.#runLogState = undefined; this.#renderRunDetail(); });
-        partitions.append(button);
-      }
-      children.push(partitions);
-    } else if (run.parentRunId) {
-      const parent = document.createElement("button"); parent.type = "button"; parent.className = "command-button secondary"; parent.textContent = "返回扫描批次";
-      parent.addEventListener("click", () => { this.#selectedRunId = run.parentRunId!; this.#runLogState = undefined; this.#renderRunDetail(); });
-      children.push(parent);
-    }
     const logState = this.#runLogState?.runId === run.id ? this.#runLogState : undefined;
     if (logState) {
       const logs = document.createElement("section");
@@ -851,11 +849,6 @@ export class ConnectorPanel {
       const logTitle = document.createElement("strong");
       logTitle.textContent = "任务日志";
       logHeading.append(logTitle);
-      if (logState.value?.podName) {
-        const source = document.createElement("small");
-        source.textContent = `${logState.value.podName} · ${logState.value.containerName ?? "scanner"}`;
-        logHeading.append(source);
-      }
       logs.append(logHeading);
       if (logState.loading) {
         const loading = document.createElement("p");
@@ -917,7 +910,7 @@ export class ConnectorPanel {
       status.textContent = state.error;
     } else if (state.value?.status === "available") {
       status.className = "connector-run-logs-dialog-status";
-      status.textContent = `${state.value.podName ?? "scanner Pod"} · ${state.value.containerName ?? "scanner"}`;
+      status.textContent = "Workspace 扫描进程";
       output.textContent = state.value.text || "任务日志为空";
       output.hidden = false;
     } else {

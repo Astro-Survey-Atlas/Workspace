@@ -1,6 +1,27 @@
 # Workspace handoff
 
-Updated: 2026-11-05, Asia/Shanghai.
+Updated: 2026-11-06, Asia/Shanghai.
+
+## Lightweight local refactor in progress (November 6)
+
+User approved a clean Workspace-only rewrite: local scanner, Workspace-owned ES,
+SQLite, Workflow/Agent/CLI; remove Warehouse runtime integration, duplicate
+executors, compatibility routes, PostgreSQL and obsolete recovery paths. Do not
+change Warehouse or Assets code/deployments/ES. See
+[active implementation record](docs/workspace-performance-refactor-20261106.md).
+
+Workspace dispatch was stopped on November 6 at approximately 07:57 UTC. Both
+Workspace-owned running Scanner Jobs were suspended and verified with active=0.
+Their CRs, evidence and logs remain. New image
+`0.0.1-dev-20261106-lightweight-pause-r1` adds a persistent global pause, disables
+Warehouse and local execution for maintenance, and replaces the statistics
+worker with metadata summaries. Deployment is being restored; verify rollout
+and `/api/scanning` before assuming availability. Never automatically resume
+large scans during this refactor.
+
+The original source baseline is `6c99df0`. The old plan's PostgreSQL and
+Warehouse changes have been superseded. Private operational receipts are in
+`/tmp/workspace-lightweight-refactor-20261106/` (not credentials for copying).
 
 ## Current Dev state
 
@@ -58,8 +79,8 @@ future work. Do not report sustained fast queries or image previews as complete.
 Download hashes, browser interactions, measurements and validation limits:
 [release notes](docs/workspace-download-performance-20261105.md).
 Private receipt: `/tmp/workspace-download-perf-20261105-cv_fv5iz/`;
-pointer: `/tmp/workspace-download-perf-receipt-path`. Current changes remain
-uncommitted on `e22c940`. r1/r2 were full Docker builds; r3 overlays the two
+pointer: `/tmp/workspace-download-perf-receipt-path`. These changes were later
+committed as `6c99df0`, following `e22c940`. r1/r2 were full Docker builds; r3 overlays the two
 changed compiled server modules and the complete newly built Viewer on r2.
 
 Final revision 148 checks passed: deployed module/Viewer hashes match the local

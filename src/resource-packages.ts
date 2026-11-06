@@ -1017,6 +1017,11 @@ export class ResourcePackageManager {
       await rm(current, { recursive: true, force: true });
       await rename(temporary, current);
     });
+    // Only catalog configuration snapshots rotate. Downloaded scientific artifacts are independent.
+    const versions = await Promise.all((await readdir(snapshots, { withFileTypes: true })).filter(entry => entry.isDirectory())
+      .map(async entry => ({ name: entry.name, at: (await stat(path.join(snapshots, entry.name))).mtimeMs })));
+    const keep = new Set([digest, ...versions.filter(entry => entry.name !== digest).sort((a,b) => b.at-a.at).slice(0,2).map(entry => entry.name)]);
+    for (const entry of versions) if (!keep.has(entry.name)) await rm(path.join(snapshots, entry.name), { recursive: true });
   }
 
   #assertAvailable(): void {

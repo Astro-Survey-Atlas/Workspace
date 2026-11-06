@@ -5,7 +5,8 @@ import path from "node:path";
 import test from "node:test";
 
 import { ConnectorRegistry } from "../src/connectors.js";
-import { SqliteMetadataStore, importJsonState, JSON_STATE_IMPORT_MARKER } from "../src/storage/index.js";
+import { SqliteMetadataStore } from "../src/storage/index.js";
+import { importJsonState, JSON_STATE_IMPORT_MARKER } from "../src/storage/json-migration.js";
 
 const timestamp = "2026-08-12T12:00:00.000Z";
 

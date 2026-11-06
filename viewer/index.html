@@ -148,7 +148,7 @@
             <div class="catalog-columns"><span>数据资产</span><span>巡天</span><span>类型</span><span>使用阶段 <button class="status-help" type="button" aria-label="使用阶段说明"><i data-lucide="info" aria-hidden="true"></i><span class="sr-only">使用阶段说明</span><span class="status-help-tooltip" role="tooltip">计划中：已登记但尚未准备使用。已掌握：已获得数据或访问权，但不代表已经建立空间覆盖。已处理：已完成项目处理。可用：可作为项目交付或分析输入。公开参考：仅作为公开说明参考。</span></button></span></div>
         <div id="catalog-asset-list" class="catalog-asset-list"></div>
         <div id="catalog-empty" class="catalog-empty" hidden>没有符合当前筛选条件的用户资产。</div>
-        <footer class="catalog-stage-footer">Workspace 可直接读取已关联的本地目录或 S3 / OSS，并生成用户覆盖与数据点；Warehouse 是可选扫描执行器。</footer>
+        <footer class="catalog-stage-footer">Workspace 可直接读取已关联的本地目录或 S3 / OSS，并生成用户覆盖与数据点。</footer>
       </section>
 
       <section id="resource-package-stage" class="catalog-stage resource-package-stage" aria-label="公开资源集" hidden>
@@ -208,10 +208,11 @@
         </section>
         <section id="connector-history-view" role="tabpanel" aria-labelledby="connector-history-tab" hidden>
           <div id="connector-history-search" class="connector-history-toolbar">
+            <button id="scanning-control" type="button" class="command-button secondary">读取扫描状态…</button>
             <label class="sr-only" for="connector-run-search">搜索扫描记录</label>
             <input id="connector-run-search" class="field-input" type="search" placeholder="搜索任务、Connector、资产、路径或执行器" />
             <label class="sr-only" for="connector-run-status-filter">扫描状态</label>
-            <select id="connector-run-status-filter" class="field-input"><option value="all">全部状态</option><option value="queued">排队中</option><option value="running">执行中</option><option value="succeeded">成功</option><option value="failed">失败</option></select>
+            <select id="connector-run-status-filter" class="field-input"><option value="all">全部状态</option><option value="queued">排队中</option><option value="running">执行中</option><option value="succeeded">成功</option><option value="failed">失败</option><option value="paused">已暂停</option><option value="cancelled">已取消</option></select>
             <label class="sr-only" for="connector-run-kind-filter">Connector 类型</label>
             <select id="connector-run-kind-filter" class="field-input"><option value="all">全部类型</option><option value="s3">S3 / OSS</option><option value="local">本地路径</option><option value="jdbc">JDBC 数据库</option></select>
             <output id="connector-run-filter-count">0 / 0</output>
@@ -420,7 +421,7 @@
 
       <section id="system-stage" class="system-stage" aria-label="系统配置" hidden>
         <header class="catalog-stage-header">
-          <div><span class="panel-kicker">WORKSPACE SETTINGS</span><h2>系统配置</h2><p>注册 AI Provider 与 MCP Server，查看 Warehouse 状态、部署环境配置的数据服务端点与生产能力注册表。</p></div>
+          <div><span class="panel-kicker">WORKSPACE SETTINGS</span><h2>系统配置</h2><p>注册 AI Provider 与 MCP Server，查看数据服务端点与生产能力注册表。</p></div>
           <dl class="catalog-summary">
             <div><dt>AI Provider</dt><dd id="system-provider-count">0</dd></div>
             <div><dt>MCP Server</dt><dd id="system-mcp-count">0</dd></div>
@@ -431,7 +432,7 @@
         <div class="settings-tabs" role="tablist" aria-label="系统配置视图">
           <button type="button" class="settings-tab active" role="tab" aria-selected="true" data-settings-tab="ai">AI Provider</button>
           <button type="button" class="settings-tab" role="tab" aria-selected="false" data-settings-tab="mcp">MCP Server</button>
-          <button type="button" class="settings-tab" role="tab" aria-selected="false" data-settings-tab="warehouse">Warehouse</button>
+
           <button type="button" class="settings-tab" role="tab" aria-selected="false" data-settings-tab="runtime">数据服务</button>
           <button type="button" class="settings-tab" role="tab" aria-selected="false" data-settings-tab="downloads">下载</button>
           <button type="button" class="settings-tab" role="tab" aria-selected="false" data-settings-tab="capabilities">生产能力</button>
@@ -445,11 +446,7 @@
           <div class="settings-view-actions"><button id="mcp-server-new" class="primary-command compact-command" type="button"><i data-lucide="plus"></i><span>注册 Server</span></button></div>
           <div id="mcp-server-list" class="settings-record-list"></div>
         </section>
-        <section id="settings-warehouse-view" class="settings-view" role="tabpanel" hidden>
-          <p class="control-note">Warehouse 数据面由部署环境统一安装与配置（Helm values / 环境变量），此处只读展示启用状态与连接信息。</p>
-          <div id="warehouse-info-list" class="settings-record-list"></div>
-          <div id="warehouse-installation-list" class="settings-record-list"></div>
-        </section>
+
         <section id="settings-runtime-view" class="settings-view" role="tabpanel" hidden>
           <p class="control-note">以下端点由部署环境（环境变量或内置默认值）统一配置，此处只读展示，不能在页面中修改。</p>
           <div id="runtime-service-list" class="settings-record-list"></div>
@@ -532,43 +529,7 @@
         </form>
       </dialog>
 
-      <dialog id="remote-coverage-dialog" class="workspace-dialog wide-dialog">
-        <form id="remote-coverage-form" class="dialog-form remote-coverage-form">
-          <header>
-            <div><span class="panel-kicker">WAREHOUSE USER COVERAGE</span><h2>提交远程覆盖扫描</h2></div>
-            <button id="remote-coverage-dialog-close" class="icon-button" type="button" aria-label="关闭"><i data-lucide="x"></i></button>
-          </header>
-          <p class="control-note">扫描任务由可选的 Warehouse 执行，Workspace 仍在自己的 Elasticsearch 中保存本地结果。凭据只在服务端创建临时 Secret。</p>
-          <div class="catalog-form-grid">
-            <label><span class="field-label">巡天 ID</span><select id="remote-coverage-survey" class="field-input" required></select></label>
-            <label><span class="field-label">发布 ID</span><select id="remote-coverage-release" class="field-input" required></select></label>
-            <label><span class="field-label">Connector</span><select id="remote-coverage-connector" class="field-input" required></select></label>
-            <label><span class="field-label">产品</span><input id="remote-coverage-product" class="field-input" readonly required /></label>
-            <label><span class="field-label">相对路径（可选）</span><input id="remote-coverage-path" class="field-input" maxlength="4096" placeholder="留空使用 Connector 根目录" /></label>
-            <label><span class="field-label">文件名筛选（可选）</span><input id="remote-coverage-file-name-pattern" class="field-input" maxlength="512" placeholder="^prefix-.*\\.fits$" /></label>
-            <label><span class="field-label">包含后缀（可选）</span><input id="remote-coverage-allowed-suffixes" class="field-input" maxlength="512" placeholder=".fits,.fit,.fits.gz" /></label>
-            <label><span class="field-label">排除规则（可选）</span><input id="remote-coverage-exclude-patterns" class="field-input" maxlength="2048" placeholder="catalogs/tmp*/*" /></label>
-            <label><span class="field-label">覆盖模式</span><select id="remote-coverage-mode" class="field-input" required><option value="catalog-radec">目录 RA / Dec</option><option value="nested-healpix">NESTED HEALPix 列</option><option value="fits-wcs">FITS WCS 图像范围</option></select></label>
-          </div>
-          <fieldset id="remote-coverage-catalog-fields" class="remote-coverage-fields">
-            <legend class="field-label">目录坐标列（ICRS）</legend>
-            <div class="catalog-form-grid">
-              <label><span class="field-label">RA 列</span><input id="remote-coverage-ra-column" class="field-input" pattern="[A-Za-z_][A-Za-z0-9_.-]*" required /></label>
-              <label><span class="field-label">Dec 列</span><input id="remote-coverage-dec-column" class="field-input" pattern="[A-Za-z_][A-Za-z0-9_.-]*" required /></label>
-              <label><span class="field-label">单位</span><select id="remote-coverage-coordinate-units" class="field-input"><option value="deg">度（deg）</option><option value="rad">弧度（rad）</option><option value="hourangle">时角（hourangle）</option></select></label>
-            </div>
-          </fieldset>
-          <fieldset id="remote-coverage-healpix-fields" class="remote-coverage-fields" hidden>
-            <legend class="field-label">NESTED HEALPix 列</legend>
-            <div class="catalog-form-grid">
-              <label><span class="field-label">像素列</span><input id="remote-coverage-healpix-column" class="field-input" pattern="[A-Za-z_][A-Za-z0-9_.-]*" /></label>
-              <label><span class="field-label">输入 order</span><input id="remote-coverage-healpix-order" class="field-input" type="number" min="0" max="29" step="1" value="8" /></label>
-            </div>
-          </fieldset>
-          <p id="remote-coverage-mode-note" class="control-note">Assets Core 会以 ICRS、NESTED order 10 生成用户 MOC；查询投影固定为 order 8，预览固定为 order 4。</p>
-          <footer><button id="remote-coverage-form-cancel" class="command-button secondary" type="button">取消</button><button id="remote-coverage-form-submit" class="command-button" type="submit">提交覆盖扫描</button></footer>
-        </form>
-      </dialog>
+  
 
       <dialog id="connector-create-dialog" class="workspace-dialog wide-dialog">
         <form id="connector-registration-form" class="dialog-form connector-registration">
@@ -609,7 +570,7 @@
           <div class="catalog-form-grid"><label><span class="field-label">巡天 ID</span><input name="id" class="field-input" placeholder="csst" pattern="[a-z0-9][a-z0-9._-]*" required /></label><label><span class="field-label">名称</span><input name="name" class="field-input" placeholder="CSST" maxlength="160" required /></label><label><span class="field-label">任务 / 项目</span><input name="mission" class="field-input" placeholder="Chinese Space Station Telescope" maxlength="160" /></label><label><span class="field-label">来源 URL</span><input name="sourceUrl" class="field-input" type="url" placeholder="https://..." required /></label></div>
           <label class="field-label" for="survey-registration-description">说明</label><input id="survey-registration-description" name="description" class="field-input" maxlength="1000" />
           <label class="field-label" for="survey-registration-modalities">模态</label><select id="survey-registration-modalities" name="modalities" class="field-input" multiple required><option value="imaging">图像</option><option value="spectroscopy">光谱</option><option value="photometry">测光</option><option value="time-domain">时域</option><option value="integral-field">积分场</option><option value="ultraviolet">紫外</option><option value="infrared">红外</option><option value="catalog">目录</option><option value="simulation">仿真</option></select>
-          <fieldset class="survey-release-field"><legend class="field-label">首个发布</legend><div class="catalog-form-grid"><label><span class="field-label">发布 ID</span><input name="releaseId" class="field-input" placeholder="cosmos-custom-v1" pattern="[a-z0-9][a-z0-9._-]*" required /></label><label><span class="field-label">发布名称</span><input name="releaseLabel" class="field-input" placeholder="COSMOS custom v1" maxlength="160" required /></label><label><span class="field-label">产品</span><input name="product" class="field-input" placeholder="Photometric catalog" maxlength="160" required /></label><label><span class="field-label">产品模态</span><select name="productModality" class="field-input"><option value="photometry">测光</option><option value="imaging">图像</option><option value="spectroscopy">光谱</option><option value="catalog">目录</option></select></label></div><label class="field-label" for="survey-registration-product-description">产品说明</label><input id="survey-registration-product-description" name="productDescription" class="field-input" maxlength="500" required /><p class="control-note">本地巡天和发布不要求存在于 Assets 目录。公开巡天可直接用于资产登记；覆盖资源包按需下载。Workspace 可扫描本地文件和 S3 / OSS；Warehouse 可作为可选执行器。</p></fieldset>
+          <fieldset class="survey-release-field"><legend class="field-label">首个发布</legend><div class="catalog-form-grid"><label><span class="field-label">发布 ID</span><input name="releaseId" class="field-input" placeholder="cosmos-custom-v1" pattern="[a-z0-9][a-z0-9._-]*" required /></label><label><span class="field-label">发布名称</span><input name="releaseLabel" class="field-input" placeholder="COSMOS custom v1" maxlength="160" required /></label><label><span class="field-label">产品</span><input name="product" class="field-input" placeholder="Photometric catalog" maxlength="160" required /></label><label><span class="field-label">产品模态</span><select name="productModality" class="field-input"><option value="photometry">测光</option><option value="imaging">图像</option><option value="spectroscopy">光谱</option><option value="catalog">目录</option></select></label></div><label class="field-label" for="survey-registration-product-description">产品说明</label><input id="survey-registration-product-description" name="productDescription" class="field-input" maxlength="500" required /><p class="control-note">本地巡天和发布不要求存在于 Assets 目录。公开巡天可直接用于资产登记；覆盖资源包按需下载。Workspace 可扫描本地文件和 S3 / OSS。</p></fieldset>
           <footer><button id="survey-registration-cancel" class="command-button secondary" type="button">取消</button><button class="command-button" type="submit">登记巡天</button></footer>
         </form>
       </dialog>

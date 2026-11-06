@@ -5,13 +5,11 @@ import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
 
-import { Pool } from "pg";
 
 import type { ConnectorIngestRunRecord } from "../src/connector-history.js";
 import type { ConnectorRecord } from "../src/connectors.js";
 import type { DataAssetRecord } from "../src/data-catalog.js";
-import type { StatisticsSnapshot } from "../src/data-statistics-types.js";
-import { createMetadataStore, PostgresMetadataStore, SqliteMetadataStore, type MetadataStore } from "../src/storage/index.js";
+import { createMetadataStore, SqliteMetadataStore, type MetadataStore } from "../src/storage/index.js";
 
 const timestamp = "2026-08-12T12:00:00.000Z";
 
@@ -148,23 +146,6 @@ test("SQLite metadata store satisfies the storage contract and persists one DELE
   }
 });
 
-test("SQLite statistics totals deduplicate files across selected snapshots", async (t) => {
-  const store = new SqliteMetadataStore(":memory:");
-  t.after(() => store.close());
-  await store.initialize();
-  const snapshots: StatisticsSnapshot[] = [
-    { id: "accessible", slot: "accessible:connector-one", category: "accessible", connectorId: "connector-one", fingerprint: "a", updatedAt: "2026-08-12T12:00:00.000Z", state: "complete" },
-    { id: "scanned", slot: "scanned:connector-one:asset-one", category: "scanned", connectorId: "connector-one", assetId: "asset-one", fingerprint: "b", updatedAt: "2026-08-13T12:00:00.000Z", state: "complete" },
-  ];
-  for (const snapshot of snapshots) await store.putStatisticsSnapshot(snapshot);
-  await store.putStatisticsEntries("accessible", [{ key: "shared", bytes: 100 }, { key: "accessible-only", bytes: 5 }]);
-  await store.putStatisticsEntries("scanned", [{ key: "shared", bytes: 30 }, { key: "unknown-size", bytes: null }]);
-
-  assert.deepEqual(await store.statisticsTotals(["accessible", "scanned"]), { files: 3, knownBytes: 35, unknownFiles: 1 });
-  assert.deepEqual(await store.statisticsTotals(["accessible"]), { files: 2, knownBytes: 105, unknownFiles: 0 });
-  assert.deepEqual(await store.statisticsTotals([]), { files: 0, knownBytes: 0, unknownFiles: 0 });
-});
-
 test("SQLite yields while waiting for another writer and invokes the transaction only once", async () => {
   const directory = await mkdtemp(path.join(os.tmpdir(), "astro-sqlite-contention-"));
   const filename = path.join(directory, "workspace.sqlite");
@@ -232,28 +213,7 @@ test("SQLite v2 migration retains legacy connector ingest runs", async () => {
   }
 });
 
-test("metadata store factory defaults to SQLite and validates backend configuration", () => {
-  const defaultStore = createMetadataStore({});
-  assert.ok(defaultStore instanceof SqliteMetadataStore);
-  assert.equal(defaultStore.filename, "/state/workspace.sqlite");
-  assert.throws(() => createMetadataStore({ ASTRO_METADATA_STORE: "postgres" }), /ASTRO_DATABASE_URL is required/);
-  assert.throws(() => createMetadataStore({ ASTRO_METADATA_STORE: "unknown" }), /Unsupported ASTRO_METADATA_STORE/);
-  assert.throws(() => new PostgresMetadataStore("postgresql://example.invalid/db", "invalid-schema"), /valid unqualified identifier/);
-});
-
-const postgresUrl = process.env.ASTRO_TEST_DATABASE_URL;
-test("PostgreSQL metadata store satisfies the storage contract", { skip: postgresUrl ? false : "ASTRO_TEST_DATABASE_URL is not set" }, async () => {
-  const schema = `astro_workspace_test_${process.pid}_${Date.now()}`;
-  const store = new PostgresMetadataStore(postgresUrl!, schema);
-  try {
-    await metadataStoreContract(store);
-  } finally {
-    await store.close();
-    const cleanup = new Pool({ connectionString: postgresUrl });
-    try {
-      await cleanup.query(`DROP SCHEMA IF EXISTS "${schema}" CASCADE`);
-    } finally {
-      await cleanup.end();
-    }
-  }
+test("metadata store uses the configured local SQLite path", () => {
+  assert.equal(createMetadataStore({ ASTRO_STATE_ROOT: "/tmp/workspace" }).filename, "/tmp/workspace/workspace.sqlite");
+  assert.equal(createMetadataStore({ ASTRO_SQLITE_PATH: "/tmp/custom.sqlite" }).filename, "/tmp/custom.sqlite");
 });

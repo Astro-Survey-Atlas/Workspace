@@ -326,6 +326,7 @@ function usage(): string {
     "astro-workspace [--base-url URL] [--json] <assets|connectors|workflows|production|system|agent|api> ...",
     "",
     "  assets list|get ID",
+    "  scans status|list|pause|resume|cancel RUN_ID --connector ID|retry RUN_ID --connector ID",
     "  connectors list|get ID|check ID|scan ID|objects ID [--prefix PREFIX] [--continuation-token TOKEN]",
     "  production pipelines|list|get ID|submit --input run.json|cancel ID|retry ID|approve ID --sha256 HASH|reject ID",
     "  workflows list|get WORKFLOW_KEY|runs [--limit N] [--workflow-key KEY]|run WORKFLOW_KEY (--input FILE|-|--data JSON)|run-get RUN_ID|decide RUN_ID (--input FILE|-|--data JSON)|cutouts RUN_ID [--output ZIP]|artifact RUN_ID NAME --output FILE|artifact-read RUN_ID NAME [--max-bytes N]",
@@ -346,6 +347,20 @@ async function run(client: WorkspaceClient, args: ParsedArgs): Promise<unknown> 
   if (domain === "assets") {
     if (!action || action === "list") return unwrap(await client.request("GET", "/api/data-assets"), "assets");
     if (action === "get") return unwrap(await client.request("GET", `/api/data-assets/${encodeURIComponent(requireCommand(identifier, "asset id"))}`), "asset");
+    if (action === "scan") return unwrap(await client.request("POST", `/api/data-assets/${encodeURIComponent(requireCommand(identifier, "asset id"))}/scan-runs`, {
+      ...(option(args, "connector") ? { connectorId: option(args, "connector") } : {}),
+      ...(option(args, "path") ? { relativePath: option(args, "path") } : {}),
+    }), "run");
+  }
+  if (domain === "scans") {
+    if (!action || action === "status") return unwrap(await client.request("GET", "/api/scanning"), "scanning");
+    if ((action === "pause" || action === "resume") && !identifier) return unwrap(await client.request("POST", `/api/scanning/${action}`, {}), "scanning");
+    if (action === "list") return unwrap(await client.request("GET", "/api/connector-ingest-runs"), "runs");
+    if (["pause", "resume", "cancel", "retry"].includes(action)) {
+      const connectorId = encodeURIComponent(requireCommand(option(args, "connector"), "--connector CONNECTOR_ID"));
+      const runId = encodeURIComponent(requireCommand(identifier, "scan run id"));
+      return unwrap(await client.request("POST", `/api/connectors/${connectorId}/ingest-runs/${runId}/${action}`, {}), "run");
+    }
   }
   if (domain === "connectors") {
     if (!action || action === "list") return unwrap(await client.request("GET", "/api/connectors"), "connectors");

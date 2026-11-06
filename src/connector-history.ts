@@ -1,10 +1,11 @@
 import { createHash, randomUUID } from "node:crypto";
 
+import type { ScanTask } from "./scan-task.js";
 import type { ConnectorKind } from "./connectors.js";
 import { validateCoverageJobSnapshot, type CoverageJobSnapshot } from "./coverage-jobs.js";
 import type { MetadataStore } from "./storage/types.js";
 
-export type ConnectorIngestRunStatus = "queued" | "running" | "succeeded" | "failed";
+export type ConnectorIngestRunStatus = "queued" | "running" | "paused" | "cancelled" | "succeeded" | "failed";
 export type AtlasTaskKind = "user_scan" | "user_coverage";
 export type ScanBackend = "local" | "warehouse" | "legacy-warehouse";
 export type ScanPrecision = "exact" | "estimated" | "entrypoint-only";
@@ -45,6 +46,7 @@ export interface ConnectorIngestRun {
   startedAt: string;
   completedAt?: string;
   fileCount?: number;
+  totalBytes?: number;
   documentCount?: number;
   error?: string;
   /** Retained as a legacy alias for target.uri. */
@@ -75,6 +77,7 @@ export interface ConnectorIngestRun {
 
 /** Persistence-only fields must never be returned from an HTTP history route. */
 export interface ConnectorIngestRunRecord extends ConnectorIngestRun {
+  scanTask?: ScanTask;
   secretName?: string;
   idempotencyKeyHash?: string;
 }
@@ -101,6 +104,7 @@ export interface ConnectorIngestRunInput {
   startedAt?: string;
   completedAt?: string;
   fileCount?: number;
+  totalBytes?: number;
   documentCount?: number;
   error?: string;
   sourcePath?: string;
@@ -125,6 +129,7 @@ export interface ConnectorIngestRunInput {
 }
 
 export interface ConnectorIngestRunInternalInput extends ConnectorIngestRunInput {
+  scanTask?: ScanTask;
   secretName?: string;
 }
 
@@ -277,7 +282,7 @@ export class ConnectorIngestRunCatalog {
     idempotencyKey?: string,
   ): Promise<{ run: ConnectorIngestRunRecord; created: boolean }> {
     if (!locationKey) throw new RangeError("locationKey is required");
-    if (!["queued", "running", "succeeded", "failed"].includes(input.status)) throw new RangeError("status is not supported");
+    if (!["queued", "running", "paused", "cancelled", "succeeded", "failed"].includes(input.status)) throw new RangeError("status is not supported");
     const keyHash = idempotencyKeyHash(idempotencyKey);
     const connectorId = optionalText(input.connectorId, 180);
     if (keyHash && !connectorId) throw new RangeError("connectorId is required with Idempotency-Key");
@@ -301,6 +306,8 @@ export class ConnectorIngestRunCatalog {
       startedAt: optionalText(input.startedAt, 80) ?? now,
       completedAt: optionalText(input.completedAt, 80),
       fileCount: optionalCount(input.fileCount, "fileCount"),
+      totalBytes: optionalCount(input.totalBytes, "totalBytes"),
+      ...(input.scanTask ? { scanTask: structuredClone(input.scanTask) } : {}),
       documentCount: optionalCount(input.documentCount, "documentCount"),
       error: optionalText(input.error, 2000),
       sourcePath: optionalText(input.sourcePath, 2048),
@@ -342,11 +349,13 @@ export class ConnectorIngestRunCatalog {
     return (await this.create(locationKey, input, idempotencyKey)).run;
   }
 
-  async update(id: string, patch: Partial<ConnectorIngestRunInternalInput>): Promise<ConnectorIngestRunRecord> {
-    const currentValue = await this.#store.getConnectorIngestRun(id);
+  async update(id: string, patch: Partial<ConnectorIngestRunInternalInput>, expected?: readonly ConnectorIngestRunStatus[]): Promise<ConnectorIngestRunRecord> {
+    return this.#store.transaction(async transaction => {
+    const currentValue = await transaction.getConnectorIngestRun(id);
     const current = currentValue ? atlasTaskKindRecord(currentValue) : undefined;
     if (!current) throw new Error(`Connector ingest run not found: ${id}`);
-    if (patch.status !== undefined && !["queued", "running", "succeeded", "failed"].includes(patch.status)) {
+    if (expected && !expected.includes(current.status)) throw Object.assign(new Error(`Scan is ${current.status}; this transition is no longer available`), { statusCode: 409 });
+    if (patch.status !== undefined && !["queued", "running", "paused", "cancelled", "succeeded", "failed"].includes(patch.status)) {
       throw new RangeError("status is not supported");
     }
     const next: ConnectorIngestRunRecord = {
@@ -367,6 +376,8 @@ export class ConnectorIngestRunCatalog {
       ...(patch.status === undefined ? {} : { status: patch.status }),
       ...(patch.startedAt === undefined ? {} : { startedAt: optionalText(patch.startedAt, 80) ?? current.startedAt }),
       ...(patch.completedAt === undefined ? {} : { completedAt: optionalText(patch.completedAt, 80) }),
+      ...(patch.scanTask === undefined ? {} : { scanTask: structuredClone(patch.scanTask) }),
+      ...(patch.totalBytes === undefined ? {} : { totalBytes: optionalCount(patch.totalBytes, "totalBytes") }),
       ...(patch.fileCount === undefined ? {} : { fileCount: optionalCount(patch.fileCount, "fileCount") }),
       ...(patch.documentCount === undefined ? {} : { documentCount: optionalCount(patch.documentCount, "documentCount") }),
       ...(patch.error === undefined ? {} : { error: optionalText(patch.error, 2000) }),
@@ -392,8 +403,25 @@ export class ConnectorIngestRunCatalog {
       ...(patch.secretName === undefined ? {} : { secretName: optionalText(patch.secretName, 63) }),
       updatedAt: new Date().toISOString(),
     };
-    await this.#store.putConnectorIngestRun(next);
+    // Explicit undefined clears terminal fields when a paused/failed run resumes.
+    if ("completedAt" in patch && patch.completedAt === undefined) delete next.completedAt;
+    if ("error" in patch && patch.error === undefined) delete next.error;
+    await transaction.putConnectorIngestRun(next);
     return structuredClone(next);
+    });
+  }
+
+  async activate(id: string, patch: Partial<ConnectorIngestRunRecord>, summary: NonNullable<import("./data-catalog.js").DataAssetRecord["activeScan"]>): Promise<ConnectorIngestRunRecord> {
+    return this.#store.transaction(async tx => {
+      const run = await tx.getConnectorIngestRun(id);
+      if (!run || run.status !== "running" || !run.assetId) throw Object.assign(new Error("Scan interrupted before activation"), { statusCode: 409 });
+      const asset = await tx.getDataAsset(run.assetId);
+      if (!asset) throw new Error("Scan asset was removed");
+      const completed = { ...run, ...patch, status: "succeeded" as const, completedAt: new Date().toISOString(), error: undefined };
+      await tx.putConnectorIngestRun(completed);
+      await tx.putDataAsset({ ...asset, activeScan: summary, updatedAt: completed.completedAt });
+      return completed;
+    });
   }
 
   async remove(locationKey: string, id: string, connectorId?: string): Promise<void> {
@@ -415,7 +443,7 @@ export class ConnectorIngestRunCatalog {
 }
 
 export function publicConnectorIngestRun(record: ConnectorIngestRunRecord): ConnectorIngestRun {
-  const { secretName: _secretName, idempotencyKeyHash: _idempotencyKeyHash, ...visible } = record;
+  const { scanTask: _scanTask, secretName: _secretName, idempotencyKeyHash: _idempotencyKeyHash, ...visible } = record;
   return structuredClone(visible);
 }
 
@@ -424,7 +452,7 @@ export function normalizeConnectorIngestRuns(entries: unknown[]): ConnectorInges
     if (!entry || typeof entry !== "object") throw new Error("connector ingest run state contains an invalid record");
     const record = entry as ConnectorIngestRunRecord;
     if (typeof record.id !== "string" || !record.id || typeof record.locationKey !== "string" || !record.locationKey
-      || !["queued", "running", "succeeded", "failed"].includes(record.status)
+      || !["queued", "running", "paused", "cancelled", "succeeded", "failed"].includes(record.status)
       || typeof record.startedAt !== "string" || typeof record.createdAt !== "string") {
       throw new Error("connector ingest run state contains an invalid record");
     }

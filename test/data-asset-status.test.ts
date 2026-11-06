@@ -16,7 +16,6 @@ function status(overrides: Partial<DataAssetStatusInput> = {}) {
     asset: baseAsset,
     objectIndexConfigured: true,
     localScanConfigured: true,
-    warehouseConfigured: true,
     ...overrides,
   });
 }

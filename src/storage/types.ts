@@ -2,7 +2,6 @@ import type { ConnectorIngestRunFilter, ConnectorIngestRunRecord } from "../conn
 import type { ConnectorRecord } from "../connectors.js";
 import type { DataAssetRecord } from "../data-catalog.js";
 import type { SurveyRecord } from "../survey-registry.js";
-import type { StatisticsEntry, StatisticsSnapshot, StatisticsTotals } from "../data-statistics-types.js";
 
 export interface SurveyIdentityRecord {
   id: string;
@@ -18,11 +17,6 @@ export interface MetadataTransaction {
   listSurveyIdentities(): Promise<SurveyIdentityRecord[]>;
   putSurveyIdentity(record: SurveyIdentityRecord): Promise<void>;
   deleteSurveyIdentity(id: string): Promise<boolean>;
-  listStatisticsSnapshots(): Promise<StatisticsSnapshot[]>;
-  putStatisticsSnapshot(record: StatisticsSnapshot): Promise<void>;
-  putStatisticsEntries(snapshotId: string, entries: StatisticsEntry[]): Promise<void>;
-  deleteStatisticsSnapshot(id: string): Promise<void>;
-  statisticsTotals(snapshotIds: string[]): Promise<StatisticsTotals>;
   listConnectors(): Promise<ConnectorRecord[]>;
   getConnector(id: string): Promise<ConnectorRecord | undefined>;
   getConnectorByLocationKey(locationKey: string): Promise<ConnectorRecord | undefined>;

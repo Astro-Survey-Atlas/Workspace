@@ -15,8 +15,8 @@ function find(list: ReturnType<typeof listProductionCapabilities>, key: string) 
 }
 
 test("capability registry reflects pipelines, resolvers, transfer, and handoffs", () => {
-  const disabled = listProductionCapabilities({ warehouseEnabled: false });
-  const enabled = listProductionCapabilities({ warehouseEnabled: true });
+  const disabled = listProductionCapabilities({ scanningEnabled: false });
+  const enabled = listProductionCapabilities({ scanningEnabled: true });
 
   assert.equal(disabled.filter((capability) => capability.kind === "pipeline").length, 3);
   assert.equal(find(disabled, "overlap-download").kind, "pipeline");
@@ -29,8 +29,8 @@ test("capability registry reflects pipelines, resolvers, transfer, and handoffs"
   assert.equal(find(disabled, "builtin-http-download").kind, "transfer");
   assert.equal(find(disabled, "workspace-local-connector").kind, "handoff");
 
-  assert.equal(find(disabled, "warehouse-scan").availability, "unavailable");
-  assert.equal(find(enabled, "warehouse-scan").availability, "available");
+  assert.equal(find(disabled, "workspace-scan").availability, "unavailable");
+  assert.equal(find(enabled, "workspace-scan").availability, "available");
 
   assert.ok(disabled.every((capability) => capability.responsibility.length > 0 && capability.sourcePath.length > 0));
   if (!process.env.ASTRO_BUILD_COMMIT) {

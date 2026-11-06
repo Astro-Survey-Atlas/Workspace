@@ -48,6 +48,9 @@ export interface DataAssetCsvScanSpec {
 }
 
 export interface DataAssetFitsScanSpec {
+  objectIdColumn?: string;
+  raColumn?: string;
+  decColumn?: string;
   format: "fits";
   fitsQualityProfile?: "csst-wcs-v1";
   fileNamePattern?: string;
@@ -62,7 +65,18 @@ export interface DataAssetWarehouseScanSpec {
   fileNamePattern: string;
 }
 
+export interface ActiveAssetScan {
+  runId: string;
+  artifactId?: string;
+  pointCount: number;
+  fileCount: number;
+  totalBytes?: number;
+  activatedAt: string;
+  anchor?: { raDeg: number; decDeg: number };
+}
+
 export interface DataAssetRecord {
+  activeScan?: ActiveAssetScan;
   id: string;
   name: string;
   description: string;
@@ -189,7 +203,9 @@ function validateScanSpec(value: unknown): DataAssetScanSpec | undefined {
     const product = scanSpecText(scanSpec.product, "scanSpec.product", SCAN_SPEC_TEXT_MAXIMUM, false);
     const fitsQualityProfile = scanSpec.fitsQualityProfile;
     if (fitsQualityProfile !== undefined && fitsQualityProfile !== "csst-wcs-v1") throw new RangeError("Unknown FITS quality profile");
-    return { format, ...(fitsQualityProfile ? { fitsQualityProfile } : {}), ...(fileNamePattern ? { fileNamePattern } : {}), ...(modality ? { modality } : {}), ...(product ? { product } : {}) };
+    const columns = Object.fromEntries(["objectIdColumn", "raColumn", "decColumn"].flatMap(key => { const value = scanSpecText(scanSpec[key], `scanSpec.${key}`, SCAN_SPEC_COLUMN_MAXIMUM, false); return value ? [[key, value]] : []; }));
+    if (Boolean(columns.raColumn) !== Boolean(columns.decColumn)) throw new RangeError("FITS catalog requires both RA and Dec columns");
+    return { format, ...columns, ...(fitsQualityProfile ? { fitsQualityProfile } : {}), ...(fileNamePattern ? { fileNamePattern } : {}), ...(modality ? { modality } : {}), ...(product ? { product } : {}) };
   }
   if (scanSpec.fitsQualityProfile !== undefined) throw new RangeError("FITS quality profile requires fits format");
   if (format !== "csv") throw new RangeError("scanSpec.format must be csv or fits");

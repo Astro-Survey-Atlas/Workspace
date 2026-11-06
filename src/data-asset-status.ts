@@ -58,11 +58,10 @@ export interface DataAssetStatusInput {
   latestRun?: DataAssetRunEvidence;
   objectIndexConfigured: boolean;
   localScanConfigured: boolean;
-  warehouseConfigured: boolean;
 }
 
 function hasPixelEvidence(coverage: DataAssetCoverageEvidence | undefined): boolean {
-  return (coverage?.pixels?.length ?? 0) > 0;
+  return (coverage?.pixels?.length ?? 0) > 0 || (coverage?.objectCount ?? 0) > 0;
 }
 
 function hasConnector(input: DataAssetStatusInput): boolean {
@@ -120,7 +119,6 @@ export function deriveDataAssetOperationalStatus(input: DataAssetStatusInput): D
   else if (state === "not_started") {
     if (hasLocal && input.localScanConfigured) nextAction = "scan_local";
     else if (hasRemote && input.localScanConfigured) nextAction = "scan_remote";
-    else if (hasRemote && input.warehouseConfigured) nextAction = "scan_remote";
     else if (!connectorAvailable) nextAction = "configure_connector";
     else if (hasLocal || hasRemote) nextAction = "configure_index";
     else nextAction = "configure_connector";

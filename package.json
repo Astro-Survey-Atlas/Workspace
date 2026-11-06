@@ -9,7 +9,7 @@
   "description": "Atlas user-asset workspace and MCP service",
   "scripts": {
     "build": "npm run build:server && npm run build:viewer && npm run build:cli",
-    "build:server": "tsc -p tsconfig.json && cp src/sky-point-coordinates.py src/workflow-catalog-fits.py src/workflow-fits-cutout.py dist/src/",
+    "build:server": "tsc -p tsconfig.json && cp src/sky-point-coordinates.py src/workflow-catalog-fits.py src/workflow-fits-cutout.py src/scan-fits-catalog.py src/workflow_catalog_helpers.py dist/src/",
     "build:viewer": "tsc -p tsconfig.viewer.json --noEmit && vite build",
     "build:cli": "npm run build --workspace @astro-workspace/cli",
     "dev": "tsx src/http-server.ts",
@@ -22,10 +22,9 @@
     "verify:types": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.viewer.json --noEmit",
     "verify:chart": "helm lint charts/asa-workspace --strict && helm template charts/asa-workspace > /dev/null",
     "smoke:http": "tsx scripts/mcp-http-smoke.ts",
-    "smoke:local-scan": "tsx scripts/smoke_local_csv_scan.ts",
     "smoke:workflow-real": "tsx scripts/smoke_real_workflow.ts",
-    "migrate:metadata:postgres": "tsx scripts/migrate_metadata_sqlite_to_postgres.ts",
-    "validate": "npm run build && npm test"
+    "validate": "npm run build && npm test",
+    "scan:worker": "node dist/src/scan-worker.js"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1095.0",
@@ -47,7 +46,6 @@
     "express": "^5.1.0",
     "healpixjs": "^2.0.0",
     "lucide": "^1.25.0",
-    "pg": "^8.16.3",
     "three": "^0.185.1",
     "yauzl": "^3.2.0",
     "yazl": "^3.3.1",
@@ -59,7 +57,6 @@
     "@types/compression": "^1.8.1",
     "@types/express": "^5.0.0",
     "@types/node": "^22.0.0",
-    "@types/pg": "^8.15.5",
     "@types/pngjs": "^6.0.5",
     "@types/three": "^0.185.1",
     "@types/yauzl": "^2.10.3",

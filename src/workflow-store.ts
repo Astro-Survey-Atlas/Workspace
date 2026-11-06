@@ -1,32 +1,16 @@
 import { createHash, randomUUID } from "node:crypto";
-import { mkdir, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 
+import { LocalState } from "./local-state.js";
 import type { AgentSession, WorkflowArtifact, WorkflowDefinition, WorkflowRun } from "./workflow.js";
 
 const MAX_PREVIEW_ROWS = 20;
 const MAX_ARTIFACT_ROWS = 5_000;
 const MAX_ARTIFACT_BYTES = 5 * 1024 * 1024;
-const MAX_RUNS = 100;
-const MAX_AGE_MS = 30 * 24 * 60 * 60 * 1_000;
 
 function now(): string {
   return new Date().toISOString();
-}
-
-async function atomicJson(filePath: string, value: unknown): Promise<void> {
-  const temporary = `${filePath}.${randomUUID()}.tmp`;
-  await writeFile(temporary, `${JSON.stringify(value, null, 2)}\n`, "utf8");
-  for (let attempt = 0; ; attempt += 1) {
-    try {
-      await rename(temporary, filePath);
-      return;
-    } catch (error) {
-      const code = (error as NodeJS.ErrnoException).code;
-      if ((code !== "EPERM" && code !== "EACCES") || attempt >= 8) throw error;
-      await new Promise((resolve) => setTimeout(resolve, 8 * (attempt + 1)));
-    }
-  }
 }
 
 function assertId(value: string, label: string): void {
@@ -51,14 +35,16 @@ export class WorkflowStore {
   readonly #writes = new Map<string, Promise<void>>();
   readonly #artifactWrites = new Map<string, Promise<void>>();
 
-  constructor(readonly root: string) {
+  readonly #state: LocalState;
+  constructor(readonly root: string, state?: LocalState) {
+    this.#state = state ?? new LocalState(path.join(root, "control.sqlite"));
     this.sessionsRoot = path.join(root, "_agent-sessions");
   }
 
   async initialize(): Promise<void> {
     await mkdir(this.root, { recursive: true });
-    await mkdir(this.sessionsRoot, { recursive: true });
-    const runs = await this.loadRunsFromDisk();
+    await this.#state.initialize();
+    const runs = await this.list();
     for (const run of runs) this.#runs.set(run.id, structuredClone(run));
     for (const run of runs) {
       if (run.status === "running" && run.resume?.kind !== "human_filter") {
@@ -76,7 +62,6 @@ export class WorkflowStore {
         await this.save(run);
       }
     }
-    await this.prune();
   }
 
   async create(definition: WorkflowDefinition, input: Record<string, unknown>, traceparent?: string, agentInitiated = false): Promise<WorkflowRun> {
@@ -106,8 +91,7 @@ export class WorkflowStore {
       artifacts: [],
       lineage: { sources: [], artifacts: [], relatedScanRunIds: [] },
     };
-    void this.save(run).catch((error) => console.error(`Failed to persist new workflow run ${run.id}`, error));
-    void this.prune().catch((error) => console.error("Failed to prune workflow runs", error));
+    await this.save(run);
     return structuredClone(run);
   }
 
@@ -125,40 +109,19 @@ export class WorkflowStore {
     run.events = run.events.slice(-200);
     const snapshot = structuredClone(run);
     this.#runs.set(run.id, snapshot);
-    await this.serializedJsonWrite(`run:${run.id}`, path.join(this.root, `${run.id}.json`), snapshot);
+    this.#state.put("workflow-runs", run.id, snapshot);
   }
 
   async get(id: string): Promise<WorkflowRun> {
     assertId(id, "workflow run id");
-    const cached = this.#runs.get(id);
-    if (cached) return structuredClone(cached);
-    try {
-      const run = JSON.parse(await readFile(path.join(this.root, `${id}.json`), "utf8")) as WorkflowRun;
-      this.#runs.set(id, structuredClone(run));
-      return run;
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === "ENOENT") throw new Error(`Workflow run not found: ${id}`);
-      throw error;
-    }
+    const run = this.#state.get<WorkflowRun>("workflow-runs", id);
+    if (!run) throw new Error(`Workflow run not found: ${id}`);
+    return run;
   }
 
   async list(): Promise<WorkflowRun[]> {
-    return [...this.#runs.values()]
-      .map((run) => structuredClone(run))
+    return this.#state.list<WorkflowRun>("workflow-runs", 100_000)
       .sort((left, right) => right.createdAt.localeCompare(left.createdAt));
-  }
-
-  private async loadRunsFromDisk(): Promise<WorkflowRun[]> {
-    const entries = await readdir(this.root, { withFileTypes: true }).catch((error: NodeJS.ErrnoException) => {
-      if (error.code === "ENOENT") return [];
-      throw error;
-    });
-    const runs: WorkflowRun[] = [];
-    for (const entry of entries) {
-      if (!entry.isFile() || !entry.name.endsWith(".json")) continue;
-      runs.push(JSON.parse(await readFile(path.join(this.root, entry.name), "utf8")) as WorkflowRun);
-    }
-    return runs.sort((left, right) => right.createdAt.localeCompare(left.createdAt));
   }
 
   async writeArtifact(
@@ -234,7 +197,7 @@ export class WorkflowStore {
       }));
       snapshot.updatedAt = now();
       this.#runs.set(runId, snapshot);
-      await this.serializedJsonWrite(`run:${runId}`, path.join(this.root, `${runId}.json`), snapshot);
+      this.#state.put("workflow-runs", runId, snapshot);
       return artifacts;
     } finally {
       if (this.#artifactWrites.get(runId) === current) this.#artifactWrites.delete(runId);
@@ -293,7 +256,7 @@ export class WorkflowStore {
         createdAt,
       }],
     };
-    void this.saveSession(session).catch((error) => console.error(`Failed to persist new agent session ${session.id}`, error));
+    await this.saveSession(session);
     return structuredClone(session);
   }
 
@@ -303,48 +266,16 @@ export class WorkflowStore {
     session.messages = session.messages.slice(-100);
     const snapshot = structuredClone(session);
     this.#sessions.set(session.id, snapshot);
-    await this.serializedJsonWrite(`session:${session.id}`, path.join(this.sessionsRoot, `${session.id}.json`), snapshot);
+    this.#state.put("workflow-sessions", session.id, snapshot);
   }
 
   async getSession(id: string): Promise<AgentSession> {
     assertId(id, "agent session id");
-    const cached = this.#sessions.get(id);
-    if (cached) return structuredClone(cached);
-    try {
-      const session = JSON.parse(await readFile(path.join(this.sessionsRoot, `${id}.json`), "utf8")) as AgentSession;
-      this.#sessions.set(id, structuredClone(session));
-      return session;
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === "ENOENT") throw new Error(`Agent session not found: ${id}`);
-      throw error;
-    }
+    const session = this.#state.get<AgentSession>("workflow-sessions", id);
+    if (!session) throw new Error(`Agent session not found: ${id}`);
+    return session;
   }
 
-  async flush(): Promise<void> {
-    while (this.#writes.size > 0) {
-      await Promise.allSettled([...this.#writes.values()]);
-    }
-  }
-
-  private async prune(): Promise<void> {
-    const runs = await this.list();
-    const cutoff = Date.now() - MAX_AGE_MS;
-    const expired = runs.filter((run, index) => index >= MAX_RUNS || Date.parse(run.createdAt) < cutoff);
-    for (const run of expired) {
-      this.#runs.delete(run.id);
-      await rm(path.join(this.root, `${run.id}.json`), { force: true });
-      await rm(path.join(this.root, run.id), { recursive: true, force: true });
-    }
-  }
-
-  private async serializedJsonWrite(key: string, filePath: string, value: unknown): Promise<void> {
-    const previous = this.#writes.get(key) ?? Promise.resolve();
-    const current = previous.catch(() => undefined).then(() => atomicJson(filePath, value));
-    this.#writes.set(key, current);
-    try {
-      await current;
-    } finally {
-      if (this.#writes.get(key) === current) this.#writes.delete(key);
-    }
-  }
+  async flush(): Promise<void> {}
+  close(): void { this.#state.close(); }
 }

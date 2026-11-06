@@ -24,7 +24,7 @@ export interface ProductionCapabilityDescriptor {
 }
 
 export interface ProductionCapabilityOptions {
-  warehouseEnabled?: boolean;
+  scanningEnabled?: boolean;
 }
 
 interface CapabilitySeed {
@@ -85,17 +85,17 @@ const CAPABILITY_SEEDS: readonly CapabilitySeed[] = [
   },
   {
     kind: "handoff",
-    key: "warehouse-scan",
+    key: "workspace-scan",
     version: 1,
-    title: "Warehouse 扫描提交",
-    description: "为生产输出创建 Warehouse ScanRequest（本地 PVC 或 S3 来源）。",
-    responsibility: "把输出 Connector 交给 Warehouse 扫描并跟踪受理结果。",
-    sourcePath: "src/warehouse-scan.ts",
+    title: "Workspace 扫描提交",
+    description: "为生产输出提交 Workspace 本地扫描任务。",
+    responsibility: "把输出 Connector 交给 Workspace 扫描并跟踪受理结果。",
+    sourcePath: "src/workspace-scan-executor.ts",
   },
 ];
 
 export function listProductionCapabilities(options: ProductionCapabilityOptions = {}): ProductionCapabilityDescriptor[] {
-  const warehouseEnabled = options.warehouseEnabled ?? false;
+  const scanningEnabled = options.scanningEnabled ?? false;
   const descriptors: ProductionCapabilityDescriptor[] = PRODUCTION_PIPELINES.map((pipeline) => ({
     kind: "pipeline" as const,
     key: pipeline.id,
@@ -108,7 +108,7 @@ export function listProductionCapabilities(options: ProductionCapabilityOptions 
     sourceUrl: sourcePermalink("src/production.ts"),
   }));
   CAPABILITY_SEEDS.forEach((seed) => {
-    const availability = seed.key === "warehouse-scan" && !warehouseEnabled ? "unavailable" as const : "available" as const;
+    const availability = seed.key === "workspace-scan" && !scanningEnabled ? "unavailable" as const : "available" as const;
     descriptors.push({
       ...seed,
       availability,

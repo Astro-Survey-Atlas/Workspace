@@ -1,158 +1,72 @@
+import { propagation, ROOT_CONTEXT, trace } from "@opentelemetry/api";
 import { createHash } from "node:crypto";
 import { createReadStream, createWriteStream } from "node:fs";
-import { mkdir, open, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, open, opendir, rename, rm, stat, writeFile } from "node:fs/promises";
 import { createGunzip } from "node:zlib";
+import { createInterface } from "node:readline";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
 import { pipeline } from "node:stream/promises";
-
+import type { ScanControl } from "./scan-control.js";
+import type { ScanTask } from "./scan-task.js";
+import { ScanEvidenceWriter } from "./scan-evidence.js";
 import type { ConnectorCredentialStore } from "./connector-credentials.js";
-import type { DataStatisticsModule } from "./data-statistics.js";
-import { listConnectorObjects, openConnectorObjectStream, readConnectorObjectRange, hasCurrentSuccessfulConnectorCheck, type ConnectorRecord, type ConnectorRegistry } from "./connectors.js";
+import { iterateConnectorObjectPages, openConnectorObjectStream, readConnectorObjectRange, hasCurrentSuccessfulConnectorCheck, type ConnectorRecord, type ConnectorRegistry } from "./connectors.js";
 import { ASTRO_OBJECT_INDEX, type AstroObjectIndexService } from "./astro-object-index.js";
 import { ConnectorIngestRunCatalog, type ConnectorIngestRunRecord } from "./connector-history.js";
 import { normalizeLocalSourceRelativePath } from "./local-source-inspection.js";
 import type { DataAssetRecord, DataCatalogRegistry } from "./data-catalog.js";
 import type { LocalConnectorRootsPolicy } from "./local-connector-roots.js";
-import { convertPositionHeaders, imageFootprintDocuments, pointDocument, type HeaderPoint, SKY_DATA_POINT_INDEX } from "./derived-repairs.js";
-import { scanLocalCsv, type LocalScanDocument } from "./local-scan.js";
+import { convertPositionHeaders, imageFootprintDocuments, pointDocument, type HeaderPoint } from "./fits-positions.js";
+import { scanLocalCsv, type LocalObjectIndexDocument } from "./local-scan.js";
 import { defaultMocCoreAdapter, type MocCoreAdapter, type MocCoreCatalogResult } from "./moc-core-adapter.js";
-import type { UserMocArtifactContext, UserMocArtifactStore } from "./user-moc-artifacts.js";
-import { readFitsHeaders, type FitsByteSource, type FitsHeaderRecord, FITS_RECORD_BYTES } from "./fits-headers.js";
+import type { UserMocArtifactStore } from "./user-moc-artifacts.js";
+import { readFitsHeaders, type FitsByteSource, type FitsHeaderRecord } from "./fits-headers.js";
 import { productionImageSources, registerProductionImageAssets, verifyProductionImageInventory } from "./production-image-assets.js";
 import type { SourceFileInventory } from "./source-crawler.js";
-import { SpanStatusCode } from "@opentelemetry/api";
-import { activeTraceparent, classifyError, recordScan, withContinuedSpan } from "./telemetry.js";
+import { activeTraceparent, recordScan, withRootSpan } from "./telemetry.js";
 
 const WORKSPACE_SCAN_EXECUTOR = "workspace";
 const MAX_INVENTORY_FILES = 1_000_000;
-const MAX_MOC_HEADERS_PER_BATCH = 256;
-const MAX_MOC_HEADER_BATCH_BYTES = 8 * 1024 * 1024;
-const MAX_MOC_MERGE_FAN_IN = 64;
-const MAX_BULK_DOCUMENTS = 500;
-const MAX_BULK_BYTES = 2 * 1024 * 1024;
-const SCAN_INPUT_FIELDS = new Set(["relativePath"]);
-
-interface ScanFile {
-  id: string;
-  name: string;
-  uri: string;
-  size: number;
-  localPath?: string;
-  objectKey?: string;
-  mtimeMs?: number;
-  lastModified?: string;
-  etag?: string;
-}
-
-interface FitsWcsHeader extends Record<string, unknown> {
-  file_id: string;
-  source_uri: string;
-  file_name: string;
-  hdu_index: number;
-  header: string;
-  primary_header: string;
-  moc_header: Record<string, unknown>;
-}
-
-interface WorkspaceScanTask {
-  version: 1;
-  runId: string;
-  connectorId: string;
-  assetId: string;
-  createdAt: string;
-  traceparent?: string;
-  files: ScanFile[];
-  sourceSnapshotSha256: string;
-  completedFileIds: string[];
-  partialMocPaths: string[];
-  pendingFitsHeaders: FitsWcsHeader[];
-  pendingFileIds: string[];
-  processedFiles: number;
-  pointCount: number;
-  documentCount: number;
-  failedFiles: number;
-  failedFileIds: string[];
-  errors: Array<{ fileId: string; message: string }>;
-}
-
-export interface WorkspaceScanInput {
-  relativePath?: string;
-}
-
+const BATCH_FILES = 64;
+interface ScanFile { id: string; name: string; uri: string; size: number; localPath?: string; objectKey?: string; mtimeMs?: number; lastModified?: string; etag?: string }
+export interface WorkspaceScanInput { relativePath?: string }
 export function workspaceScanEnabled(value = process.env.ASTRO_WORKSPACE_SCAN_ENABLED): boolean {
   if (value === undefined || value === "true") return true;
   if (value === "false") return false;
   throw new RangeError("ASTRO_WORKSPACE_SCAN_ENABLED must be true or false");
 }
-
 interface WorkspaceScanExecutorOptions {
-  enabled: boolean;
-  workerEnabled?: boolean;
-  maxConcurrency?: number;
-  root: string;
-  connectors: ConnectorRegistry;
-  credentials: ConnectorCredentialStore;
-  dataCatalog: DataCatalogRegistry;
-  runs: ConnectorIngestRunCatalog;
-  roots: LocalConnectorRootsPolicy;
-  objectIndex: AstroObjectIndexService;
-  skyPoints: AstroObjectIndexService;
-  artifacts: UserMocArtifactStore;
-  statistics?: Pick<DataStatisticsModule, "recordScan">;
-  mocCore?: MocCoreAdapter;
+  enabled: boolean; control: ScanControl; root: string;
+  connectors: ConnectorRegistry; credentials: ConnectorCredentialStore;
+  dataCatalog: DataCatalogRegistry; runs: ConnectorIngestRunCatalog;
+  roots: LocalConnectorRootsPolicy; objectIndex: AstroObjectIndexService;
+  artifacts: UserMocArtifactStore; mocCore?: MocCoreAdapter;
 }
-
-function sha256(value: string | Uint8Array): string {
-  return createHash("sha256").update(value).digest("hex");
-}
-
-function workspaceLayerId(assetId: string): string {
-  return `workspace-${assetId}`.toLowerCase().replace(/[^a-z0-9-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 180) || "workspace-asset";
-}
-
-function errorMessage(error: unknown): string {
-  return (error instanceof Error ? error.message : String(error)).slice(0, 2000) || "Workspace scan failed";
-}
-
-function documentBytes(document: LocalScanDocument): number {
-  const { _index: _indexValue, _id: _idValue, ...source } = document;
-  return Buffer.byteLength(JSON.stringify({ index: { _index: document._index, _id: document._id } }))
-    + Buffer.byteLength(JSON.stringify(source)) + 2;
-}
-
+const sha256 = (value: string | Uint8Array): string => createHash("sha256").update(value).digest("hex");
+const workspaceLayerId = (id: string): string => `workspace-${id}`.toLowerCase().replace(/[^a-z0-9-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 180);
+const errorMessage = (error: unknown): string => (error instanceof Error ? error.message : String(error)).slice(0, 2000);
 function linkedToConnector(asset: DataAssetRecord, connector: ConnectorRecord): boolean {
-  return (asset.connectorIds ?? []).includes(connector.id)
-    || (asset.connectorLocationKeys ?? []).includes(connector.locationKey)
-    || [asset.access, ...(asset.accesses ?? [])].some((access) => access.connectorId === connector.id || access.uri === connector.locationKey);
+  return (asset.connectorIds ?? []).includes(connector.id) || (asset.connectorLocationKeys ?? []).includes(connector.locationKey)
+    || [asset.access, ...(asset.accesses ?? [])].some(access => access.connectorId === connector.id || access.uri === connector.locationKey);
 }
-
-function fileMatches(asset: DataAssetRecord, fileName: string): boolean {
-  const scanSpec = asset.scanSpec;
-  const format = scanSpec?.format === "csv" ? "csv" : scanSpec?.format === "fits" || asset.kind === "image" || asset.kind === "cube" ? "fits" : undefined;
-  if (!format) throw new RangeError("Workspace scanning supports CSV catalogs and FITS image/cube assets");
-  const name = fileName.toLowerCase();
-  const supported = format === "csv" ? name.endsWith(".csv") : /\.(fits?|fits\.gz)$/.test(name);
-  if (!supported) return false;
-  const pattern = scanSpec?.format === "fits" ? scanSpec.fileNamePattern : asset.warehouseScanSpec?.fileNamePattern;
-  return !pattern || new RegExp(pattern).test(path.posix.basename(fileName));
+function taskFits(asset: DataAssetRecord): boolean { return asset.kind === "image" || asset.kind === "cube"; }
+function fileMatches(asset: DataAssetRecord, name: string): boolean {
+  const fits = asset.scanSpec?.format === "fits" || taskFits(asset);
+  const supported = fits ? /\.(fits?|fits\.gz)$/i.test(name) : /\.csv$/i.test(name);
+  const pattern = asset.scanSpec?.format === "fits" ? asset.scanSpec.fileNamePattern : undefined;
+  return supported && (!pattern || new RegExp(pattern).test(path.posix.basename(name)));
 }
-
-function needsFits(asset: DataAssetRecord): boolean {
-  return asset.scanSpec?.format === "fits" || asset.kind === "image" || asset.kind === "cube";
-}
-
-function normalizeInput(input: WorkspaceScanInput | undefined): WorkspaceScanInput {
-  if (input === undefined) return {};
-  if (!input || typeof input !== "object" || Array.isArray(input)) throw new RangeError("Workspace scan input must be an object");
-  const unknown = Object.keys(input).find((key) => !SCAN_INPUT_FIELDS.has(key));
-  if (unknown) throw new RangeError(`Workspace scan input contains an unsupported field: ${unknown}`);
+function normalizeInput(input: WorkspaceScanInput = {}): WorkspaceScanInput {
+  if (!input || typeof input !== "object" || Array.isArray(input) || Object.keys(input).some(key => key !== "relativePath")) throw new RangeError("Scan supports only relativePath");
   return input.relativePath === undefined ? {} : { relativePath: normalizeLocalSourceRelativePath(input.relativePath) };
 }
-
-function sourceId(connector: ConnectorRecord, file: Omit<ScanFile, "id">): string {
-  return sha256(JSON.stringify([connector.locationKey, file.objectKey ?? file.localPath, file.size, file.mtimeMs ?? null, file.lastModified ?? null, file.etag ?? null]));
+function configDigest(connector: ConnectorRecord, asset: DataAssetRecord, relativePath?: string): string {
+  return sha256(JSON.stringify([connector.locationKey, connector.config, asset.scanSpec, asset.kind, asset.surveyId, asset.releaseId, asset.product, relativePath ?? asset.sourceRelativePath]));
 }
+function sourceId(connector: ConnectorRecord, file: Omit<ScanFile, "id">): string {
+  return sha256(JSON.stringify([connector.locationKey, file.objectKey ?? file.localPath, file.size, file.mtimeMs, file.etag]));
+}
+class ScanInterrupted extends Error {}
 
 class GzipRangeSource implements FitsByteSource {
   readonly size: number;
@@ -213,22 +127,9 @@ class GzipRangeSource implements FitsByteSource {
 export class WorkspaceScanExecutor {
   readonly #options: WorkspaceScanExecutorOptions;
   readonly #root: string;
-  readonly #tasks = new Map<string, Promise<ConnectorIngestRunRecord>>();
-  readonly #queuedSlots: Array<() => void> = [];
-  readonly #workerEnabled: boolean;
-  readonly #maxConcurrency: number;
-  #activeTasks = 0;
-
-  constructor(options: WorkspaceScanExecutorOptions) {
-    this.#options = options;
-    this.#root = path.resolve(options.root);
-    this.#workerEnabled = options.workerEnabled ?? true;
-    this.#maxConcurrency = options.maxConcurrency ?? 2;
-    if (!Number.isSafeInteger(this.#maxConcurrency) || this.#maxConcurrency < 1 || this.#maxConcurrency > 2) {
-      throw new RangeError("Workspace scan concurrency must be 1 or 2");
-    }
-  }
-
+  #busy = false;
+  #stopping = false;
+  constructor(options: WorkspaceScanExecutorOptions) { this.#options = options; this.#root = path.resolve(options.root); }
   async submitAsset(assetId: string, input?: WorkspaceScanInput, connectorId?: string, idempotencyKey?: string): Promise<ConnectorIngestRunRecord> {
     if (!this.#options.enabled) throw new Error("Workspace scan execution is not enabled");
     const asset = await this.#options.dataCatalog.get(assetId);
@@ -277,345 +178,271 @@ export class WorkspaceScanExecutor {
     return { accepted: scanRunIds.length > 0, scanRunIds };
   }
 
-  async retry(connectorId: string, runId: string): Promise<ConnectorIngestRunRecord> {
-    const task = await this.#readTask(runId);
-    if (task.connectorId !== connectorId) throw new Error("Workspace scan run does not belong to this Connector");
-    const run = (await this.#options.runs.list({ connectorId })).find((candidate) => candidate.id === runId);
-    if (!run || run.executor !== WORKSPACE_SCAN_EXECUTOR || run.status !== "failed") throw new RangeError("Only a failed Workspace scan can be retried");
-    const queued = await this.#options.runs.update(run.id, { status: "queued", completedAt: undefined, error: undefined, phase: "reading" });
-    this.#schedule(task, queued);
-    return queued;
-  }
 
+  async #run(id: string, connectorId?: string): Promise<ConnectorIngestRunRecord> {
+    const run = (await this.#options.runs.list(connectorId ? { connectorId } : undefined)).find(run => run.id === id);
+    if (!run || run.executor !== WORKSPACE_SCAN_EXECUTOR || run.scanTask?.version !== 2) throw Object.assign(new RangeError("This record has no local resumable checkpoint; submit a new scan"), { statusCode: 409 });
+    return run;
+  }
+  async pause(connectorId: string, id: string): Promise<ConnectorIngestRunRecord> {
+    await this.#run(id, connectorId);
+    return this.#options.runs.update(id, { status: "paused" }, ["queued", "running"]);
+  }
+  async cancel(connectorId: string, id: string): Promise<ConnectorIngestRunRecord> {
+    await this.#run(id, connectorId);
+    return this.#options.runs.update(id, { status: "cancelled", completedAt: new Date().toISOString() }, ["queued", "running", "paused", "failed"]);
+  }
+  async resume(connectorId: string, id: string): Promise<ConnectorIngestRunRecord> {
+    this.#options.control.assertRunning();
+    const run = await this.#run(id, connectorId);
+    return this.#options.runs.update(run.id, { status: "queued", error: undefined, completedAt: undefined }, ["paused"]);
+  }
+  async retry(connectorId: string, id: string): Promise<ConnectorIngestRunRecord> {
+    this.#options.control.assertRunning();
+    const run = await this.#run(id, connectorId);
+    const task = { ...run.scanTask!, cursor: 0, processedFiles: 0, failedFiles: 0, pointCount: 0, mocBatches: 0, errors: [] };
+    return this.#options.runs.update(id, { scanTask: task, status: "queued", error: undefined, completedAt: undefined, processedFiles: 0, failedFiles: 0, pointCount: 0, mocStatus: "pending" }, ["failed"]);
+  }
+  /** A restarted worker requires an explicit resume for in-flight runs. */
   async recoverInterruptedRuns(): Promise<number> {
-    await mkdir(this.#root, { recursive: true });
-    const entries = await readdir(this.#root, { withFileTypes: true });
-    let count = 0;
-    for (const entry of entries.filter((item) => item.isFile() && item.name.endsWith(".json"))) {
-      const runId = entry.name.slice(0, -5);
-      const task = await this.#readTask(runId).catch(() => undefined);
-      if (!task) continue;
-      const run = (await this.#options.runs.list()).find((candidate) => candidate.id === runId);
-      if (!run || run.executor !== WORKSPACE_SCAN_EXECUTOR || !["queued", "running"].includes(run.status)) continue;
-      this.#schedule(task, run);
-      count += 1;
-    }
-    return count;
+    const running = (await this.#options.runs.list({ status: "running" })).filter(run => run.executor === WORKSPACE_SCAN_EXECUTOR);
+    for (const run of running) await this.#options.runs.update(run.id, { status: "paused", error: "Worker restarted; resume from the last committed file batch" }, ["running"]);
+    return running.length;
   }
-
-  async #submit(connector: ConnectorRecord, asset: DataAssetRecord, rawInput?: WorkspaceScanInput, idempotencyKey?: string): Promise<ConnectorIngestRunRecord> {
-    const input = normalizeInput(rawInput);
-    if (connector.status === "disabled") throw new RangeError("Disabled Connectors cannot be scanned");
-    if (connector.kind !== "local" && connector.kind !== "s3") throw new RangeError("Workspace scans support local and S3/OSS Connectors");
-    if (!hasCurrentSuccessfulConnectorCheck(connector)) throw new RangeError("Connector must pass a current connection check before scanning");
-    if (!this.#options.objectIndex.configured) throw new RangeError("Workspace Elasticsearch is not configured");
-    if (idempotencyKey) {
-      const existing = await this.#options.runs.findIdempotent(connector.id, idempotencyKey);
-      if (existing) return existing;
-    }
-    const credentials = connector.kind === "s3" && connector.credentialRef ? await this.#options.credentials.get(connector.credentialRef) : undefined;
-    if (connector.kind === "s3" && (!credentials?.accessKeyId || !credentials.secretAccessKey)) throw new RangeError("Connector has no saved S3/OSS credentials");
-    const files = await this.#inventory(connector, asset, input.relativePath, credentials);
-    if (!files.length) throw new RangeError("No supported source files matched this asset and Connector");
-    if (files.length > MAX_INVENTORY_FILES) throw new RangeError(`Scan inventory exceeds the ${MAX_INVENTORY_FILES} file limit`);
-    const sourceSnapshotSha256 = sha256(JSON.stringify(files.map(({ id, name, size, mtimeMs, lastModified, etag }) => [id, name, size, mtimeMs ?? null, lastModified ?? null, etag ?? null])));
-    const created = await this.#options.runs.create(connector.locationKey, {
-      connectorId: connector.id,
-      connectorName: connector.name,
-      connectorKind: connector.kind,
-      executor: WORKSPACE_SCAN_EXECUTOR,
-      backend: "local",
-      taskKind: "user_coverage",
-      target: connector.kind === "local" ? { uri: `local://${connector.config.rootPath}` } : { uri: `s3://${connector.config.bucket}/${connector.config.prefix ?? ""}`, bucket: connector.config.bucket, prefix: connector.config.prefix },
-      assetIds: [asset.id], assetId: asset.id, assetName: asset.name,
-      status: "queued", fileCount: files.length, processedFiles: 0, failedFiles: 0, pointCount: 0,
-      sourceSnapshotSha256, esIndex: this.#options.objectIndex.objectIndex,
-      phase: "staging", mocStatus: "pending",
-    }, idempotencyKey);
-    if (!created.created) return created.run;
-    const task: WorkspaceScanTask = {
-      version: 1,
-      runId: created.run.id,
-      connectorId: connector.id,
-      assetId: asset.id,
-      createdAt: created.run.createdAt,
-      ...(activeTraceparent() ? { traceparent: activeTraceparent() } : {}),
-      files,
-      sourceSnapshotSha256,
-      completedFileIds: [],
-      partialMocPaths: [],
-      pendingFitsHeaders: [],
-      pendingFileIds: [],
-      processedFiles: 0,
-      pointCount: 0,
-      documentCount: 0,
-      failedFiles: 0,
-      failedFileIds: [],
-      errors: [],
-    };
-    await this.#saveTask(task);
-    this.#schedule(task, created.run);
-    return created.run;
-  }
-
-  async #inventory(connector: ConnectorRecord, asset: DataAssetRecord, requestedPath: string | undefined, credentials: Awaited<ReturnType<ConnectorCredentialStore["get"]>>): Promise<ScanFile[]> {
-    const selectedPath = requestedPath ?? asset.sourceRelativePath;
-    const scanPath = selectedPath ? normalizeLocalSourceRelativePath(selectedPath) : undefined;
-    const files: ScanFile[] = [];
-    if (connector.kind === "local") {
-      const root = path.normalize(connector.config.rootPath ?? "");
-      const resolvedRoot = await this.#options.roots.resolveReadableDirectory(root);
-      const target = scanPath ? path.resolve(root, ...scanPath.split("/")) : root;
-      if (target !== root && !target.startsWith(`${root}${path.sep}`)) throw new RangeError("Scan path must stay inside the Connector root");
-      const resolved = scanPath
-        ? await stat((await this.#options.roots.resolveReadableFile(target).catch(() => this.#options.roots.resolveReadableDirectory(target))).fileSystemPath)
-        : undefined;
-      if (resolved?.isFile()) {
-        const safe = await this.#options.roots.resolveReadableFile(target);
-        const details = await stat(safe.fileSystemPath);
-        const entry = { name: path.basename(target), uri: `local://${target}`, size: details.size, localPath: safe.fileSystemPath, mtimeMs: details.mtimeMs };
-        if (fileMatches(asset, entry.name)) files.push({ ...entry, id: sourceId(connector, entry) });
-        return files;
-      }
-      const directoryPath = scanPath ? (await this.#options.roots.resolveReadableDirectory(target)).fileSystemPath : resolvedRoot.fileSystemPath;
-      const walk = async (containerDirectory: string, filesystemDirectory: string): Promise<void> => {
-        const entries = await readdir(filesystemDirectory, { withFileTypes: true });
-        for (const entry of entries) {
-          if (entry.isSymbolicLink()) continue;
-          const filesystemPath = path.join(filesystemDirectory, entry.name);
-          const containerPath = path.join(containerDirectory, entry.name);
-          if (entry.isDirectory()) await walk(containerPath, filesystemPath);
-          else if (entry.isFile() && fileMatches(asset, entry.name)) {
-            const details = await stat(filesystemPath);
-            const record = { name: entry.name, uri: `local://${containerPath}`, size: details.size, localPath: filesystemPath, mtimeMs: details.mtimeMs };
-            files.push({ ...record, id: sourceId(connector, record) });
+  stop(): void { this.#stopping = true; }
+  get busy(): boolean { return this.#busy; }
+  async runNext(): Promise<boolean> {
+    if (this.#busy || this.#stopping || !this.#options.enabled || this.#options.control.view().paused) return false;
+    this.#busy = true;
+    try {
+      const queued = (await this.#options.runs.list({ status: "queued" })).filter(run => run.executor === WORKSPACE_SCAN_EXECUTOR && run.scanTask?.version === 2).at(-1);
+      if (!queued) return false;
+      const run = await this.#options.runs.update(queued.id, { status: "running", startedAt: new Date().toISOString() }, ["queued"]);
+      await withRootSpan("scan.run", { "asa.component": "scan", "asa.scan.run_id": run.id, "asa.scan.kind": "workspace" }, async () => {
+        try { await this.#execute(run); }
+        catch (error) {
+          const current = await this.#run(run.id);
+          if (error instanceof ScanInterrupted || ["paused", "cancelled"].includes(current.status)) {
+            if (current.status === "running") await this.#options.runs.update(run.id, { status: "paused" }, ["running"]);
+            return;
           }
-          if (files.length > MAX_INVENTORY_FILES) throw new RangeError(`Scan inventory exceeds the ${MAX_INVENTORY_FILES} file limit`);
+          await this.#options.runs.update(run.id, { status: "failed", completedAt: new Date().toISOString(), error: errorMessage(error), mocStatus: "failed" }, ["running"]);
+          throw error;
+        }
+      }, run.scanTask!.traceparent ? trace.getSpanContext(propagation.extract(ROOT_CONTEXT, { traceparent: run.scanTask!.traceparent })) : undefined).catch(error => console.warn("Workspace scan failed", { runId: run.id, error: errorMessage(error) }));
+      return true;
+    } finally { this.#busy = false; }
+  }
+  async #check(runId: string): Promise<void> {
+    if (this.#stopping || this.#options.control.view().paused || (await this.#run(runId)).status !== "running") throw new ScanInterrupted();
+  }
+  async #submit(connector: ConnectorRecord, asset: DataAssetRecord, rawInput?: WorkspaceScanInput, idempotencyKey?: string): Promise<ConnectorIngestRunRecord> {
+    if (!this.#options.enabled) throw Object.assign(new Error("Workspace scanning is disabled"), { statusCode: 409 });
+    this.#options.control.assertRunning();
+    const input = normalizeInput(rawInput);
+    if (connector.status === "disabled" || !["local", "s3"].includes(connector.kind)) throw new RangeError("Scan requires an enabled local or S3/OSS Connector");
+    if (!hasCurrentSuccessfulConnectorCheck(connector)) throw new RangeError("Check the Connector before scanning");
+    if (!this.#options.objectIndex.configured) throw new RangeError("Workspace Elasticsearch is not configured");
+    if (!asset.scanSpec && !taskFits(asset)) throw new RangeError("Configure catalog coordinate columns before scanning");
+    const task: ScanTask = { version: 2, ...input, sourceConfigSha256: configDigest(connector, asset, input.relativePath), traceparent: activeTraceparent(), inventoryReady: false, cursor: 0, processedFiles: 0, failedFiles: 0, pointCount: 0, totalBytes: 0, mocBatches: 0, errors: [] };
+    // No directory enumeration, object-store requests, or scientific work here.
+    return (await this.#options.runs.create(connector.locationKey, {
+      connectorId: connector.id, connectorName: connector.name, connectorKind: connector.kind,
+      executor: WORKSPACE_SCAN_EXECUTOR, backend: "local", taskKind: "user_coverage",
+      assetId: asset.id, assetIds: [asset.id], assetName: asset.name,
+      target: { uri: connector.kind === "local" ? `local://${connector.config.rootPath}` : `s3://${connector.config.bucket}/${connector.config.prefix ?? ""}` },
+      status: "queued", phase: "staging", mocStatus: "pending", processedFiles: 0, failedFiles: 0, pointCount: 0,
+      esIndex: this.#options.objectIndex.objectIndex, scanTask: task,
+    }, idempotencyKey)).run;
+  }
+  async *#inventory(connector: ConnectorRecord, asset: DataAssetRecord, requestedPath?: string): AsyncGenerator<ScanFile> {
+    const selected = requestedPath ?? asset.sourceRelativePath;
+    const relative = selected ? normalizeLocalSourceRelativePath(selected) : undefined;
+    if (connector.kind === "local") {
+      const root = connector.config.rootPath!;
+      const target = relative ? path.resolve(root, ...relative.split("/")) : root;
+      if (target !== root && !target.startsWith(root + path.sep)) throw new RangeError("Scan path must stay inside Connector root");
+      const resolved = await this.#options.roots.resolveReadableFile(target).catch(() => this.#options.roots.resolveReadableDirectory(target));
+      const walk = async function* (filename: string, containerPath: string): AsyncGenerator<ScanFile> {
+        const details = await stat(filename);
+        if (details.isDirectory()) {
+          const directory = await opendir(filename);
+          for await (const entry of directory) if (!entry.isSymbolicLink()) yield* walk(path.join(filename, entry.name), path.join(containerPath, entry.name));
+        } else if (details.isFile() && fileMatches(asset, filename)) {
+          const record = { name: path.basename(filename), uri: `local://${containerPath}`, size: details.size, localPath: filename, mtimeMs: details.mtimeMs };
+          yield { ...record, id: sourceId(connector, record) };
         }
       };
-      await walk(scanPath ?? "", directoryPath);
+      yield* walk(resolved.fileSystemPath, target);
     } else {
-      if (!credentials) throw new RangeError("Connector has no saved S3/OSS credentials");
-      const basePrefix = (connector.config.prefix ?? "").replace(/^\/+|\/+$/g, "");
-      const pathPrefix = scanPath ? `${basePrefix ? `${basePrefix}/` : ""}${scanPath}` : basePrefix;
-      const objectEntries = await listConnectorObjects(connector, credentials, pathPrefix);
-      const exact = Boolean(scanPath && /\.(csv|fits?|fits\.gz)$/i.test(scanPath));
-      for (const object of objectEntries) {
-        const normalizedKey = object.key.replace(/^\/+/, "");
-        if (exact ? normalizedKey !== pathPrefix : pathPrefix && normalizedKey !== pathPrefix && !normalizedKey.startsWith(`${pathPrefix}/`)) continue;
-        if (!fileMatches(asset, normalizedKey)) continue;
-        if (!object.etag) throw new RangeError(`Object store inventory did not provide an ETag for ${normalizedKey}; a stable scan snapshot cannot be guaranteed`);
-        const record = {
-          name: path.posix.basename(normalizedKey), uri: `s3://${connector.config.bucket}/${normalizedKey}`,
-          size: object.size, objectKey: normalizedKey, ...(object.lastModified ? { lastModified: object.lastModified } : {}),
-          ...(object.etag ? { etag: object.etag } : {}),
-        };
-        files.push({ ...record, id: sourceId(connector, record) });
-        if (files.length > MAX_INVENTORY_FILES) throw new RangeError(`Scan inventory exceeds the ${MAX_INVENTORY_FILES} file limit`);
+      const credentials = connector.credentialRef ? await this.#options.credentials.get(connector.credentialRef) : undefined;
+      if (!credentials) throw new Error("Connector has no saved credentials");
+      const base = (connector.config.prefix ?? "").replace(/^\/+|\/+$/g, "");
+      const prefix = relative ? `${base ? base + "/" : ""}${relative}` : base;
+      const exact = !!relative && /\.(csv|fits?|fits\.gz)$/i.test(relative);
+      for await (const page of iterateConnectorObjectPages(connector, credentials, prefix)) for (const object of page.objects) {
+        const key = object.key.replace(/^\/+/, "");
+        if (exact ? key !== prefix : prefix && key !== prefix && !key.startsWith(prefix + "/")) continue;
+        if (!fileMatches(asset, key)) continue;
+        if (!object.etag) throw new Error("Object inventory has no ETag; immutable scanning requires an object version");
+        const record = { name: path.posix.basename(key), uri: `s3://${connector.config.bucket}/${key}`, size: object.size, objectKey: key, etag: object.etag, lastModified: object.lastModified };
+        yield { ...record, id: sourceId(connector, record) };
       }
     }
-    files.sort((left, right) => left.uri.localeCompare(right.uri));
-    return files;
   }
-
-  #schedule(task: WorkspaceScanTask, run: ConnectorIngestRunRecord): void {
-    if (!this.#workerEnabled) return;
-    const existing = this.#tasks.get(run.id);
-    if (existing) return;
-    const slot = new Promise<void>((resolve) => this.#queuedSlots.push(resolve));
-    const work = slot.then(() => this.#execute(task, run)).catch(async (error) => {
-      const completedAt = new Date().toISOString();
-      const message = errorMessage(error);
-      const asset = await this.#options.dataCatalog.get(task.assetId).catch(() => undefined);
-      if (asset) {
-        await this.#options.artifacts.fail({
-          layerId: workspaceLayerId(asset.id), scanRunId: run.id,
-          coverageRole: taskFits(asset) ? "image_extent" : "object_presence",
-          dataOrigin: taskFits(asset) ? "observed" : "catalog", sourceTier: "user_file_derived",
-          precision: "exact", availableOrders: [10], maxOrder: 10,
-          sourceSnapshotSha256: task.sourceSnapshotSha256,
-        }, message).catch(() => undefined);
+  async #freeze(run: ConnectorIngestRunRecord, task: ScanTask, asset: DataAssetRecord, connector: ConnectorRecord): Promise<void> {
+    const work = path.join(this.#root, run.id);
+    await mkdir(work, { recursive: true });
+    const temporary = path.join(work, "inventory.tmp");
+    const handle = await open(temporary, "w");
+    const digest = createHash("sha256");
+    let count = 0, bytes = 0;
+    try {
+      for await (const file of this.#inventory(connector, asset, task.relativePath)) {
+        await this.#check(run.id);
+        if (++count > MAX_INVENTORY_FILES) throw new RangeError("Inventory exceeds one million files");
+        const line = JSON.stringify(file) + "\n";
+        await handle.writeFile(line); digest.update(line); bytes += file.size;
+        if (count % 256 === 0) await this.#options.runs.update(run.id, { processedFiles: 0, phase: "staging" });
       }
-      return this.#options.runs.update(run.id, { status: "failed", error: message, completedAt, failedFiles: task.failedFiles, processedFiles: task.processedFiles, pointCount: task.pointCount, mocStatus: "failed" })
-        .catch(async () => (await this.#options.runs.list()).find((candidate) => candidate.id === run.id) ?? run);
-    });
-    this.#tasks.set(run.id, work);
-    const cleanup = (): void => { if (this.#tasks.get(run.id) === work) this.#tasks.delete(run.id); };
-    void work.then(cleanup, cleanup).finally(() => {
-      this.#activeTasks -= 1;
-      this.#drainQueue();
-    });
-    this.#drainQueue();
+      if (!count) throw new Error("No supported files matched this asset and Connector");
+      await handle.sync();
+    } finally { await handle.close(); }
+    await rename(temporary, path.join(work, "inventory.ndjson"));
+    Object.assign(task, { inventoryReady: true, inventorySha256: digest.digest("hex"), totalBytes: bytes });
+    await this.#options.runs.update(run.id, { scanTask: task, fileCount: count, totalBytes: bytes, sourceSnapshotSha256: task.inventorySha256, phase: "reading" });
   }
-
-  #drainQueue(): void {
-    while (this.#activeTasks < this.#maxConcurrency && this.#queuedSlots.length) {
-      const start = this.#queuedSlots.shift()!;
-      this.#activeTasks += 1;
-      start();
-    }
-  }
-
-  async #execute(task: WorkspaceScanTask, originalRun: ConnectorIngestRunRecord): Promise<ConnectorIngestRunRecord> {
-    const totalBytes = task.files.reduce((sum, file) => sum + file.size, 0);
-    const startedAt = performance.now();
-    return withContinuedSpan("scan.run", {
-      "asa.component": "scan",
-      "asa.scan.run_id": task.runId,
-      "asa.scan.kind": "workspace",
-      "asa.scan.files": task.files.length,
-      "asa.scan.bytes": totalBytes,
-    }, async (span) => {
-      try {
-        const result = await this.#executeScan(task, originalRun, span);
-        const peakRssBytes = process.memoryUsage().rss;
-        span.setAttribute("asa.scan.peak_rss_bytes", peakRssBytes);
-        span.setAttribute("asa.scan.outcome", result.status === "succeeded" ? "ok" : "error");
-        if (result.status !== "succeeded") span.setStatus({ code: SpanStatusCode.ERROR });
-        recordScan("workspace", {
-          accepted: task.completedFileIds.length,
-          failed: task.failedFileIds.length,
-          bytes: totalBytes,
-          peakRssBytes,
-        });
-        span.setAttribute("asa.scan.duration_seconds", (performance.now() - startedAt) / 1000);
-        return result;
-      } catch (error) {
-        const peakRssBytes = process.memoryUsage().rss;
-        span.setAttribute("asa.scan.peak_rss_bytes", peakRssBytes);
-        span.setAttribute("asa.scan.outcome", "error");
-        span.setStatus({ code: SpanStatusCode.ERROR });
-        recordScan("workspace", { failed: Math.max(1, task.failedFileIds.length), bytes: totalBytes, peakRssBytes });
-        throw error;
-      }
-    }, task.traceparent);
-  }
-
-  async #executeScan(task: WorkspaceScanTask, originalRun: ConnectorIngestRunRecord, span: import("@opentelemetry/api").Span): Promise<ConnectorIngestRunRecord> {
-    const connector = await this.#options.connectors.get(task.connectorId);
-    const asset = await this.#options.dataCatalog.get(task.assetId);
-    const credentials = connector.kind === "s3" && connector.credentialRef ? await this.#options.credentials.get(connector.credentialRef) : undefined;
-    if (connector.kind === "s3" && !credentials) throw new Error("Connector credentials are unavailable after restart");
-    const run = (await this.#options.runs.list()).find((candidate) => candidate.id === originalRun.id) ?? originalRun;
-    const context: UserMocArtifactContext = {
-      layerId: workspaceLayerId(asset.id), scanRunId: run.id,
-      coverageRole: taskFits(asset) ? "image_extent" : "object_presence",
-      dataOrigin: taskFits(asset) ? "observed" : "catalog", sourceTier: "user_file_derived",
-      precision: "exact", availableOrders: [10], maxOrder: 10,
-      sourceSnapshotSha256: task.sourceSnapshotSha256,
-    };
-    await this.#options.runs.update(run.id, { status: "running", phase: "reading", fileCount: task.files.length });
-    await this.#options.artifacts.createPending(context);
+  async #execute(run: ConnectorIngestRunRecord): Promise<void> {
+    const task = structuredClone(run.scanTask!);
+    const asset = await this.#options.dataCatalog.get(run.assetId!);
+    const connector = await this.#options.connectors.get(run.connectorId!);
+    if (configDigest(connector, asset, task.relativePath) !== task.sourceConfigSha256) throw new Error("Source configuration changed; submit a new scan");
+    if (!task.inventoryReady) await this.#freeze(run, task, asset, connector);
+    // Validate the frozen manifest before using a saved byte cursor.
+    const inventory = path.join(this.#root, run.id, "inventory.ndjson");
+    const digest = createHash("sha256");
+    for await (const chunk of createReadStream(inventory)) { await this.#check(run.id); digest.update(chunk); }
+    if (digest.digest("hex") !== task.inventorySha256) throw new Error("Frozen scan inventory checksum mismatch");
     await this.#options.objectIndex.ensureIndices();
-    await this.#options.skyPoints.ensureIndices();
-    const partialMocs = [...task.partialMocPaths];
-    for (const file of task.files) {
-      if (task.completedFileIds.includes(file.id)) continue;
-      try {
-        await this.#assertSourceVersion(file);
-        if (taskFits(asset)) await this.#scanFitsFile(file, task, run, asset, connector, credentials, partialMocs);
-        else await this.#scanCsvFile(file, task, run, asset, partialMocs);
-        await this.#assertSourceVersion(file);
-        task.completedFileIds.push(file.id);
-        task.failedFileIds = task.failedFileIds.filter((id) => id !== file.id);
-        task.errors = task.errors.filter((entry) => entry.fileId !== file.id);
-      } catch (error) {
-        if (!task.failedFileIds.includes(file.id)) task.failedFileIds.push(file.id);
-        task.errors = task.errors.filter((entry) => entry.fileId !== file.id);
-        task.errors.push({ fileId: file.id, message: `${file.name}: ${errorMessage(error)}` });
-        if (task.failedFileIds.length <= 20) {
-          const extension = /\.(?:fits\.gz|fits|fit|csv)$/i.exec(file.name)?.[0]?.toLowerCase() ?? ".other";
-          span.addEvent("scan.file_error", { "error.type": classifyError(error), "file.extension": extension });
+    const input = createReadStream(inventory, { start: task.cursor });
+    const lines = createInterface({ input, crlfDelay: Infinity });
+    let batch: ScanFile[] = [], nextCursor = task.cursor;
+    try {
+      for await (const line of lines) {
+        nextCursor += Buffer.byteLength(line) + 1;
+        batch.push(JSON.parse(line) as ScanFile);
+        if (batch.length === BATCH_FILES) { await this.#batch(run, task, asset, connector, batch, nextCursor); batch = []; }
+      }
+      if (batch.length) await this.#batch(run, task, asset, connector, batch, nextCursor);
+    } finally { lines.close(); input.destroy(); }
+    await this.#check(run.id);
+    if (task.failedFiles) throw new Error(`${task.failedFiles} files failed; previous active version retained. ${task.errors.join("; ")}`.slice(0, 2000));
+    if (!task.mocBatches || !task.pointCount) throw new Error("No usable positions or coverage found; previous active version retained");
+    await this.#options.runs.update(run.id, { phase: "coverage" });
+    const moc = await this.#merge(task.mocBatches, asset, run.id);
+    const context = { layerId: workspaceLayerId(asset.id), scanRunId: run.id, coverageRole: taskFits(asset) ? "image_extent" as const : "object_presence" as const, dataOrigin: taskFits(asset) ? "observed" as const : "catalog" as const, sourceTier: "user_file_derived" as const, precision: "exact" as const, availableOrders: [10], maxOrder: 10, sourceSnapshotSha256: task.inventorySha256! };
+    const artifact = await this.#options.artifacts.persist(moc, context, { statistics: { fileCount: task.processedFiles, pointCount: task.pointCount }, provenance: { sourceSnapshotSha256: task.inventorySha256, scanRunId: run.id, coordinateFrame: "ICRS", ordering: "NESTED" } });
+    if (artifact.status !== "ready") throw new Error(artifact.error ?? "MOC validation failed");
+    await this.#check(run.id);
+    await this.#options.runs.update(run.id, { phase: "indexing" });
+    await this.#options.objectIndex.refresh();
+    await this.#check(run.id);
+    await this.#options.runs.activate(run.id, { phase: "complete", artifactId: artifact.id, mocStatus: "ready", availableOrders: artifact.availableOrders, maxOrder: artifact.maxOrder, precision: artifact.precision, coverageRole: artifact.coverageRole }, { runId: run.id, artifactId: artifact.id, pointCount: task.pointCount, fileCount: task.processedFiles, totalBytes: task.totalBytes, activatedAt: new Date().toISOString() });
+    recordScan("workspace", { accepted: task.processedFiles, failed: task.failedFiles, bytes: task.totalBytes, peakRssBytes: process.memoryUsage().rss });
+  }
+  async #batch(run: ConnectorIngestRunRecord, task: ScanTask, asset: DataAssetRecord, connector: ConnectorRecord, files: ScanFile[], nextCursor: number): Promise<void> {
+    const next = structuredClone(task);
+    const writer = new ScanEvidenceWriter(this.#root, `${run.id}/evidence/batch-${task.cursor}`);
+    const wcs: Record<string, unknown>[] = [];
+    const credentials = connector.credentialRef ? await this.#options.credentials.get(connector.credentialRef) : undefined;
+    try {
+      for (const file of files) {
+        await this.#check(run.id);
+        try {
+          await this.#assertSourceVersion(file);
+          if (taskFits(asset)) await this.#scanFits(file, run, asset, connector, credentials, next, writer, wcs);
+          else await this.#scanCatalog(file, run, asset, connector, credentials, next, writer);
+          await this.#assertSourceVersion(file);
+          next.processedFiles++;
+        } catch (error) {
+          if (error instanceof ScanInterrupted) throw error;
+          next.failedFiles++;
+          if (next.errors.length < 20) next.errors.push(`${file.name}: ${errorMessage(error)}`);
         }
       }
-      task.failedFiles = task.failedFileIds.length;
-      task.processedFiles = task.completedFileIds.length;
-      await this.#saveTask(task);
-      await this.#options.runs.update(run.id, {
-        phase: "reading", processedFiles: task.processedFiles, failedFiles: task.failedFiles,
-        pointCount: task.pointCount, documentCount: task.documentCount,
-      });
-    }
-    await this.#flushFitsHeaders(task, run, asset, partialMocs);
-    if (!partialMocs.length) throw new Error(task.errors.length
-      ? task.errors.slice(0, 20).map(entry => entry.message).join("; ").slice(0, 2000)
-      : "No usable coverage geometry was found in the selected source files");
-    await this.#options.runs.update(run.id, { phase: "coverage" });
-    await this.#options.runs.update(run.id, { phase: "indexing" });
-    const moc = await this.#optionsMocMerge(partialMocs, asset, run.id);
-    if (!moc.artifacts?.moc) throw new Error("MOC Core did not produce a FITS MOC artifact");
-    const artifact = await this.#options.artifacts.persist(moc, context, {
-      statistics: { schemaVersion: 1, fileCount: task.files.length, pointCount: task.pointCount, failedFiles: task.failedFiles },
-      provenance: { schemaVersion: 1, layerId: workspaceLayerId(asset.id), scanRunId: run.id, sourceSnapshotSha256: task.sourceSnapshotSha256, coordinateFrame: "ICRS", ordering: "NESTED", coverageRole: context.coverageRole, sourceTier: "user_file_derived" },
-    });
-    if (artifact.status !== "ready") throw new Error(artifact.error ?? "Workspace MOC artifact validation failed");
-    const completedAt = new Date().toISOString();
-    const status = task.failedFiles ? "failed" : "succeeded";
-    const error = task.failedFiles ? task.errors.slice(0, 20).map((entry) => entry.message).join("; ").slice(0, 2000) : undefined;
-    const completed = await this.#options.runs.update(run.id, {
-      status, ...(error ? { error } : { error: undefined }), completedAt,
-      phase: "complete", processedFiles: task.processedFiles, failedFiles: task.failedFiles,
-      pointCount: task.pointCount, documentCount: task.documentCount,
-      mocStatus: artifact.status, artifactId: artifact.id, availableOrders: artifact.availableOrders,
-      maxOrder: artifact.maxOrder, precision: artifact.precision, coverageRole: artifact.coverageRole,
-    });
-    if (completed.status === "succeeded") {
-      await this.#options.statistics?.recordScan(completed, task.files).catch((statisticsError) => {
-        console.warn("Unable to record Workspace scan statistics", statisticsError instanceof Error ? statisticsError.message : statisticsError);
-      });
-    }
-    return completed;
+      await writer.close();
+      if (wcs.length) {
+        const core = this.#options.mocCore ?? defaultMocCoreAdapter;
+        if (!core.buildFitsWcs) throw new Error("MOC adapter cannot build image coverage");
+        const inputPath = path.join(this.#root, run.id, "wcs-input.json");
+        await writeFile(inputPath, JSON.stringify({ headers: wcs }));
+        const built = await core.buildFitsWcs({ inputPath, layerId: workspaceLayerId(asset.id), coverageRole: "image_extent", dataOrigin: "observed", sourceTier: "user_file_derived", maxOrder: 10 });
+        await this.#saveMoc(run.id, next, built);
+      }
+      await this.#check(run.id);
+      next.cursor = nextCursor;
+      await this.#options.runs.update(run.id, { scanTask: next, processedFiles: next.processedFiles, failedFiles: next.failedFiles, pointCount: next.pointCount, documentCount: next.pointCount, phase: "reading" });
+      Object.assign(task, next);
+    } finally { await writer.close(); }
   }
-
-  async #scanCsvFile(file: ScanFile, task: WorkspaceScanTask, run: ConnectorIngestRunRecord, asset: DataAssetRecord, partialMocs: string[]): Promise<void> {
-    const scanSpec = asset.scanSpec;
-    if (!scanSpec || scanSpec.format !== "csv") throw new Error("CSV asset must define object ID, RA, and Dec columns");
-    const connector = await this.#options.connectors.get(task.connectorId);
-    const credentials = connector.kind === "s3" && connector.credentialRef ? await this.#options.credentials.get(connector.credentialRef) : undefined;
-    const stagedPath = file.localPath ?? path.join(this.#root, run.id, `${file.id}.csv`);
-    await mkdir(path.dirname(stagedPath), { recursive: true });
-    if (!file.localPath) await this.#downloadObject(file, connector, credentials, stagedPath);
-    const sourceFileId = file.id;
-    const options = {
-      objectIdColumn: scanSpec.objectIdColumn, raColumn: scanSpec.raColumn, decColumn: scanSpec.decColumn,
-      surveyId: asset.surveyId ?? "user", releaseId: asset.releaseId ?? "user", product: scanSpec.product ?? asset.product,
-      modality: scanSpec.modality ?? asset.modalities[0] ?? "catalog", assetId: asset.id, sourceFileId, scanRunId: run.id,
-      objectIndex: ASTRO_OBJECT_INDEX, collectObjects: false, mocCore: this.#options.mocCore ?? defaultMocCoreAdapter,
-    } as const;
-    const validated = await scanLocalCsv(stagedPath, options);
-    let docs: LocalScanDocument[] = [];
-    let bytes = 0;
+  async #saveMoc(runId: string, task: ScanTask, result: MocCoreCatalogResult): Promise<void> {
+    if (!result.artifacts?.moc) throw new Error("MOC adapter returned no FITS artifact");
+    await writeFile(path.join(this.#root, runId, `batch-${task.mocBatches++}.moc.fits`), result.artifacts.moc);
+  }
+  async #compact(document: LocalObjectIndexDocument, writer: ScanEvidenceWriter): Promise<LocalObjectIndexDocument> {
+    const evidence_ref = await writer.write({ attributes: document.attributes });
+    const attributes = Object.fromEntries(Object.entries(document.attributes).filter(([key]) => ["source_uri", "file_name", "source_id", "position_role", "hdu_index"].includes(key)));
+    return { ...document, evidence_ref, attributes };
+  }
+  async #scanCatalog(file: ScanFile, run: ConnectorIngestRunRecord, asset: DataAssetRecord, connector: ConnectorRecord, credentials: Awaited<ReturnType<ConnectorCredentialStore["get"]>>, task: ScanTask, writer: ScanEvidenceWriter): Promise<void> {
+    const spec = asset.scanSpec;
+    if (!spec) throw new Error("Catalog coordinate columns are required");
+    const staged = file.localPath ?? path.join(this.#root, run.id, "catalog-source");
+    if (!file.localPath) await this.#downloadObject(file, connector, credentials, staged);
+    let csv = staged;
+    const fitsTable = spec.format === "fits";
+    if (fitsTable) { csv = path.join(this.#root, run.id, "catalog.csv"); await this.#fitsTableToCsv(staged, csv, spec); }
+    let docs: LocalObjectIndexDocument[] = [], bytes = 0, points = 0;
     const flush = async (): Promise<void> => {
       if (!docs.length) return;
-      const batch = docs;
-      docs = [];
-      bytes = 0;
-      const stored = await this.#options.objectIndex.bulk(batch);
-      task.documentCount += stored.objectCount;
-      await this.#saveTask(task);
+      await this.#check(run.id);
+      await this.#options.objectIndex.bulk(docs);
+      docs = []; bytes = 0;
     };
-    const sink = async (document: LocalScanDocument): Promise<void> => {
-      const size = documentBytes(document);
-      if (docs.length && (docs.length >= MAX_BULK_DOCUMENTS || bytes + size > MAX_BULK_BYTES)) await flush();
-      docs.push(document);
-      bytes += size;
-      if (docs.length >= MAX_BULK_DOCUMENTS || bytes >= MAX_BULK_BYTES) await flush();
-    };
-    const indexed = await scanLocalCsv(stagedPath, { ...options, sink });
-    await flush();
-    if (indexed.summary.sourceSnapshotSha256 !== validated.summary.sourceSnapshotSha256) throw new Error(`CSV source changed during scan: ${file.name}`);
-    const filename = path.join(this.#root, run.id, `${file.id}.moc.fits`);
-    await mkdir(path.dirname(filename), { recursive: true });
-    await writeFile(filename, indexed.moc?.artifacts?.moc ?? validated.moc?.artifacts?.moc ?? Buffer.alloc(0));
-    if (!indexed.moc?.artifacts?.moc && !validated.moc?.artifacts?.moc) throw new Error(`MOC Core did not build coverage for ${file.name}`);
-    partialMocs.push(filename);
-    task.partialMocPaths = partialMocs;
-    task.pointCount += indexed.summary.objectCount;
-    if (!file.localPath) await rm(stagedPath, { force: true });
-    await this.#saveTask(task);
+    try {
+      const indexed = await scanLocalCsv(csv, {
+        objectIdColumn: fitsTable ? "id" : spec.objectIdColumn!, raColumn: fitsTable ? "ra" : spec.raColumn!, decColumn: fitsTable ? "dec" : spec.decColumn!,
+        surveyId: asset.surveyId ?? "user", releaseId: asset.releaseId ?? "user", product: asset.product, modality: asset.modalities[0] ?? "catalog",
+        assetId: asset.id, sourceFileId: file.id, scanRunId: run.id, objectIndex: ASTRO_OBJECT_INDEX, collectObjects: false, mocCore: this.#options.mocCore ?? defaultMocCoreAdapter,
+        sink: async document => {
+          if (!("object_id" in document)) return;
+          const compact = await this.#compact({ ...document, _id: sha256(`${run.id}\n${document._id}`), data_batch_id: run.id, attributes: { ...document.attributes, source_uri: file.uri, file_name: file.name, position_role: "catalog_row" } }, writer);
+          const size = Buffer.byteLength(JSON.stringify(compact));
+          if (docs.length && (docs.length >= 500 || bytes + size > 2 * 1024 * 1024)) await flush();
+          docs.push(compact); bytes += size; points++;
+        },
+      });
+      await flush();
+      if (indexed.summary.invalidRowCount || indexed.summary.csvErrorCount) throw new Error(`Catalog has ${indexed.summary.invalidRowCount} invalid rows and ${indexed.summary.csvErrorCount} parse errors`);
+      if (!points) throw new Error("Catalog contains no usable positions");
+      await this.#saveMoc(run.id, task, indexed.moc!);
+      task.pointCount += points;
+    } finally { if (!file.localPath) await rm(staged, { force: true }); if (fitsTable) await rm(csv, { force: true }); }
   }
-
-  async #scanFitsFile(file: ScanFile, task: WorkspaceScanTask, run: ConnectorIngestRunRecord, asset: DataAssetRecord, connector: ConnectorRecord, credentials: Awaited<ReturnType<ConnectorCredentialStore["get"]>>, partialMocs: string[]): Promise<void> {
+  async #fitsTableToCsv(source: string, output: string, spec: import("./data-catalog.js").DataAssetFitsScanSpec): Promise<void> {
+    const { spawn } = await import("node:child_process");
+    const { fileURLToPath } = await import("node:url");
+    await new Promise<void>((resolve, reject) => {
+      const child = spawn(process.env.ASTRO_PYTHON ?? "python3", [fileURLToPath(new URL("./scan-fits-catalog.py", import.meta.url)), source, output], { stdio: ["pipe", "ignore", "pipe"] });
+      let error = "";
+      const timer = setTimeout(() => child.kill(), 300_000);
+      child.stderr.on("data", chunk => { if (error.length < 2000) error += String(chunk); });
+      child.on("error", reject);
+      child.on("close", code => { clearTimeout(timer); code === 0 ? resolve() : reject(new Error(`FITS catalog conversion failed: ${error}`)); });
+      child.stdin.end(JSON.stringify({ id: spec.objectIdColumn, ra: spec.raColumn, dec: spec.decColumn }));
+    });
+  }
+  async #scanFits(file: ScanFile, run: ConnectorIngestRunRecord, asset: DataAssetRecord, connector: ConnectorRecord, credentials: Awaited<ReturnType<ConnectorCredentialStore["get"]>>, task: ScanTask, writer: ScanEvidenceWriter, wcs: Record<string, unknown>[]): Promise<void> {
     let headers: FitsHeaderRecord[];
     if (file.name.toLowerCase().endsWith(".fits.gz")) {
       let local: NodeJS.ReadableStream;
@@ -651,87 +478,37 @@ export class WorkspaceScanExecutor {
         headers = await readFitsHeaders(source, { file_id: file.id, source_uri: file.uri, file_name: file.name });
       }
     }
-    const positionRows = await convertPositionHeaders(headers);
-    const validRows = positionRows.filter((record) => record.position_role === "image_center") as HeaderPoint[];
-    const pointDocs = validRows.map((point) => pointDocument(point, asset, run));
-    const footprintDocs = validRows.flatMap((point) => imageFootprintDocuments(point, asset.id));
-    for (let offset = 0; offset < pointDocs.length; offset += MAX_BULK_DOCUMENTS) {
-      await this.#options.skyPoints.bulk(pointDocs.slice(offset, offset + MAX_BULK_DOCUMENTS));
-      await this.#options.skyPoints.bulkImageFootprints(footprintDocs.slice(offset, offset + MAX_BULK_DOCUMENTS));
-      task.pointCount += Math.min(MAX_BULK_DOCUMENTS, pointDocs.length - offset);
-      await this.#saveTask(task);
-    }
-    const mocHeaders = validRows.flatMap((record) => {
-      const header = record.moc_header;
-      return header && Number.isSafeInteger(header.NAXIS1) && Number.isSafeInteger(header.NAXIS2)
-        ? [{ ...header, NAXIS: 2 }]
-        : [];
-    });
-    if (mocHeaders.length) {
-      task.pendingFitsHeaders.push(...validRows.filter((record) => record.moc_header
-        && Number.isSafeInteger(record.moc_header.NAXIS1) && Number.isSafeInteger(record.moc_header.NAXIS2))
-        .map((record) => record as unknown as FitsWcsHeader));
-      task.pendingFileIds.push(file.id);
-      await this.#saveTask(task);
-      const pendingBytes = Buffer.byteLength(JSON.stringify(task.pendingFitsHeaders.map((record) => record.moc_header)));
-      if (task.pendingFitsHeaders.length >= MAX_MOC_HEADERS_PER_BATCH || pendingBytes >= MAX_MOC_HEADER_BATCH_BYTES) await this.#flushFitsHeaders(task, run, asset, partialMocs);
-    } else {
-      throw new Error(`No two-dimensional celestial WCS found in ${file.name}`);
-    }
-    task.documentCount += pointDocs.length;
-    await this.#saveTask(task);
-  }
 
-  async #flushFitsHeaders(task: WorkspaceScanTask, run: ConnectorIngestRunRecord, asset: DataAssetRecord, partialMocs: string[]): Promise<void> {
-    if (!task.pendingFitsHeaders.length) return;
-    const core = this.#options.mocCore ?? defaultMocCoreAdapter;
-    if (!core.buildFitsWcs) throw new Error("Configured MOC SDK adapter does not support FITS/WCS coverage");
-    const work = path.join(this.#root, run.id);
-    await mkdir(work, { recursive: true });
-    const batchIndex = partialMocs.length;
-    const inputPath = path.join(work, `fits-headers-${batchIndex}.json`);
-    await writeFile(inputPath, JSON.stringify({ headers: task.pendingFitsHeaders.map((record) => record.moc_header) }));
-    const built = await core.buildFitsWcs({ inputPath, layerId: `${workspaceLayerId(asset.id)}-${batchIndex}`, coverageRole: "image_extent", dataOrigin: "observed", sourceTier: "user_file_derived", maxOrder: 10 });
-    if (!built.artifacts?.moc) throw new Error("MOC SDK returned no FITS coverage artifact");
-    const mocPath = path.join(work, `fits-${batchIndex}.moc.fits`);
-    await writeFile(mocPath, built.artifacts.moc);
-    partialMocs.push(mocPath);
-    task.partialMocPaths = partialMocs;
-    task.completedFileIds = [...new Set([...task.completedFileIds, ...task.pendingFileIds])];
-    task.processedFiles = task.completedFileIds.length;
-    task.pendingFitsHeaders = [];
-    task.pendingFileIds = [];
-    await this.#saveTask(task);
+    const positions = (await convertPositionHeaders(headers)) as HeaderPoint[];
+    const valid = positions.filter(point => point.position_role === "image_center" && point.moc_header);
+    if (!valid.length) throw new Error("No two-dimensional celestial WCS found");
+    const documents: LocalObjectIndexDocument[] = [];
+    for (const point of valid) documents.push(await this.#compact(pointDocument(point, asset, run), writer));
+    await this.#options.objectIndex.bulk(documents);
+    await this.#options.objectIndex.bulkImageFootprints(valid.flatMap(point => imageFootprintDocuments(point, asset.id, undefined, run.id)));
+    task.pointCount += documents.length;
+    for (const point of valid) wcs.push({ ...point.moc_header!, NAXIS: 2 });
+    if (Buffer.byteLength(JSON.stringify(wcs)) > 8 * 1024 * 1024) throw new Error("FITS WCS batch exceeds 8 MiB");
   }
-
-  async #optionsMocMerge(mocs: string[], asset: DataAssetRecord, runId: string): Promise<MocCoreCatalogResult> {
+  async #merge(count: number, asset: DataAssetRecord, runId: string): Promise<MocCoreCatalogResult> {
     const core = this.#options.mocCore ?? defaultMocCoreAdapter;
-    if (!core.mergeCatalogs) throw new Error("Configured MOC SDK adapter does not support merging coverage batches");
-    const context = {
-      layerId: workspaceLayerId(asset.id),
-      coverageRole: taskFits(asset) ? "image_extent" as const : "object_presence" as const,
-      dataOrigin: taskFits(asset) ? "observed" as const : "catalog" as const,
-      sourceTier: "user_file_derived" as const,
-      maxOrder: 10,
-    };
-    let paths = [...mocs];
-    let level = 0;
-    while (paths.length > MAX_MOC_MERGE_FAN_IN) {
-      const next: string[] = [];
-      for (let offset = 0; offset < paths.length; offset += MAX_MOC_MERGE_FAN_IN) {
-        const partialMocPaths = paths.slice(offset, offset + MAX_MOC_MERGE_FAN_IN);
-        const merged = await core.mergeCatalogs({ partialMocPaths, ...context });
-        if (!merged.artifacts?.moc) throw new Error("MOC Core did not produce a merged FITS MOC artifact");
-        const output = path.join(this.#root, runId, `merged-${level}-${next.length}.moc.fits`);
-        await writeFile(output, merged.artifacts.moc);
-        next.push(output);
+    if (!core.mergeCatalogs) throw new Error("MOC adapter cannot merge coverage batches");
+    const context = { layerId: workspaceLayerId(asset.id), coverageRole: taskFits(asset) ? "image_extent" as const : "object_presence" as const, dataOrigin: taskFits(asset) ? "observed" as const : "catalog" as const, sourceTier: "user_file_derived" as const, maxOrder: 10 };
+    let level = -1;
+    const filename = (index: number): string => path.join(this.#root, runId, level < 0 ? `batch-${index}.moc.fits` : `merged-${level}-${index}.moc.fits`);
+    while (count > 64) {
+      let written = 0;
+      for (let offset = 0; offset < count; offset += 64) {
+        await this.#check(runId);
+        const paths = Array.from({ length: Math.min(64, count - offset) }, (_, index) => filename(offset + index));
+        const result = await core.mergeCatalogs({ ...context, partialMocPaths: paths });
+        if (!result.artifacts?.moc) throw new Error("MOC merge returned no FITS artifact");
+        await writeFile(path.join(this.#root, runId, `merged-${level + 1}-${written++}.moc.fits`), result.artifacts.moc);
       }
-      paths = next;
-      level += 1;
+      count = written; level++;
     }
-    return core.mergeCatalogs({ partialMocPaths: paths, ...context });
+    return core.mergeCatalogs({ ...context, partialMocPaths: Array.from({ length: count }, (_, index) => filename(index)) });
   }
-
   async #downloadObject(file: ScanFile, connector: ConnectorRecord, credentials: Awaited<ReturnType<ConnectorCredentialStore["get"]>>, outputPath: string): Promise<void> {
     if (!credentials || !file.objectKey) throw new Error("Remote source is missing Connector credentials or object identity");
     const source = await openConnectorObjectStream(connector, credentials, file.objectKey, file.etag);
@@ -763,23 +540,5 @@ export class WorkspaceScanExecutor {
     if (current.size !== file.size || current.mtimeMs !== file.mtimeMs) throw new Error(`Local source changed during scan: ${file.name}`);
   }
 
-  async #saveTask(task: WorkspaceScanTask): Promise<void> {
-    await mkdir(this.#root, { recursive: true });
-    const finalPath = path.join(this.#root, `${task.runId}.json`);
-    const tempPath = `${finalPath}.${process.pid}.${Date.now()}.tmp`;
-    await writeFile(tempPath, `${JSON.stringify(task)}\n`, { encoding: "utf8", flag: "wx" });
-    await rename(tempPath, finalPath);
-  }
-
-  async #readTask(runId: string): Promise<WorkspaceScanTask> {
-    const value = JSON.parse(await readFile(path.join(this.#root, `${runId}.json`), "utf8")) as WorkspaceScanTask;
-    if (value.version !== 1 || value.runId !== runId || !Array.isArray(value.files) || !Array.isArray(value.completedFileIds)) throw new Error("Workspace scan checkpoint is invalid");
-    return value;
-  }
-}
-
-function taskFits(asset: Pick<DataAssetRecord, "kind" | "scanSpec">): boolean {
-  return asset.scanSpec?.format === "fits" || asset.kind === "image" || asset.kind === "cube";
-}
-
+ }
 export { WORKSPACE_SCAN_EXECUTOR };

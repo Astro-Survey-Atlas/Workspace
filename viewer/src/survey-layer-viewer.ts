@@ -105,7 +105,7 @@ export interface WorkspaceCoverageLayer {
   productId?: string;
   modality?: string;
   coverageRole?: string;
-  source?: "connector" | "asset" | "warehouse" | "combined" | "unassigned" | "conflict";
+  source?: "connector" | "asset" | "combined" | "unassigned" | "conflict";
   nativeOrders?: number[];
   availableOrders?: number[];
   maxOrder?: number;
@@ -1191,14 +1191,12 @@ export class SurveyLayerViewer {
     const key = this.#workspaceLayerKey(layer);
     // Explicit MOC layers have their own visibility toggle even when the
     // coverage payload records the source asset as well.
-    if (key.startsWith("moc:") || key.startsWith("warehouse:")) {
+    if (key.startsWith("moc:")) {
       return this.#visibleWorkspaceLayerKeys.has(key);
     }
     const assetIds = this.#workspaceLayerAssetIds(layer);
     if (assetIds.length) return assetIds.some((assetId) => this.#visibleAssetIds.has(assetId));
-    if (layer.source === "warehouse") {
-      return this.#visibleWorkspaceLayerKeys.has(key);
-    }
+
     return this.#visibleSurveyIds.has(layer.surveyId ?? "__unassigned__");
   }
 
@@ -1207,10 +1205,9 @@ export class SurveyLayerViewer {
   }
 
   #workspaceLayerKey(layer: WorkspaceCoverageLayer): string {
-    if (layer.key?.startsWith("warehouse:") || layer.key?.startsWith("moc:")) return layer.key;
+    if (layer.key?.startsWith("moc:")) return layer.key;
     const assetId = this.#workspaceLayerAssetIds(layer)[0];
     if (assetId) return `asset:${assetId}`;
-    if (layer.source === "warehouse") return `warehouse:${layer.layerId ?? layer.key ?? "layer"}`;
     if (layer.artifactId) return `moc:${layer.artifactId}`;
     if (layer.key) return layer.key;
     if (layer.layerId) return `workspace:${layer.layerId}`;
