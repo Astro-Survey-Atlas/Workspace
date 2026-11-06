@@ -44,13 +44,19 @@ without an archive. Full attributes load on demand from evidence chunks.
 Build/type/service/chart verification passed: 340 tests, 337 passed, three skipped,
 zero failures. Isolated CSV/FITS/S3 worker integration also passed against the
 container's pinned real science dependencies. Desktop prepare/smoke passed.
+All **17 browser regressions passed**. A real Dev browser right-clicked W2
+HEALPix 2071 and Aladin completed with **113 points**; the historical 215-FITS ZIP
+also downloaded through the visible button. No page/API errors or task mutations
+occurred. The temporary migration Pod has been removed; all original claims remain.
 See the [implementation and acceptance record](docs/workspace-performance-refactor-20261106.md)
 and [migration procedure](docs/workspace-metadata-migration.md) for browser checks,
 deployment details and remaining scope.
 
 The original source baseline is `6c99df0`. The old plan's PostgreSQL and
-Warehouse changes have been superseded. The image includes working-tree changes;
-do not claim they have all been committed. Private operational receipts are in
+Warehouse changes have been superseded. Runtime changes are now recorded in
+`70b5672` (the image was built before this commit, so its build commit label
+still points to `5d32886`). Final acceptance/handoff additions follow that commit.
+Private operational receipts are in
 `/tmp/workspace-lightweight-refactor-20261106/`; do not copy credential values.
 
 ## Historical Dev state (November 5; superseded by revision 150)

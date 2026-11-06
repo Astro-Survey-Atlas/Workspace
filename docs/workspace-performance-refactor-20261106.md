@@ -1,8 +1,10 @@
 # Workspace local lightweight refactor
 
 Updated 2026-11-06. Runtime migrated and deployed at Helm revision **150**,
-image `0.0.1-dev-20261106-lightweight-r5`. Source baseline `6c99df0`; the release
-includes uncommitted working-tree changes.
+image `0.0.1-dev-20261106-lightweight-r5`. Source baseline `6c99df0`; runtime
+changes are recorded in `70b5672`. The image was built from the working tree
+before that commit, so its build label still names `5d32886`. Final acceptance
+notes follow the runtime commit.
 
 ## Accepted scope
 
@@ -41,7 +43,7 @@ Public-catalog startup uses the validated local cache; remote sync is explicit.
 - [x] Update UI/CLI, make pause/progress/failure/download outcomes explicit.
 - [x] Verify isolated CSV/FITS/S3 fixtures, HEALPix queries and Workflow downloads.
 - [x] Run builds, service tests, Docker/Helm validation and desktop smoke.
-- [ ] Complete the final browser interaction acceptance and record the result.
+- [x] Pass all 17 browser regressions and real Dev-page HEALPix/download interactions.
 
 Production scanning remains paused. Tests use isolated fixtures. Rotate only
 recoverable state/configuration backups, retaining the latest three; retain
@@ -123,6 +125,21 @@ restart, PIXSCAL quality skips and all-rejected runs preserving publication.
 Desktop `prepare:server` and `smoke` passed. Catalog-cache startup tests verify
 zero startup requests against a stalled remote endpoint.
 
+Final browser regressions: **17/17 passed**, covering Agent desktop/mobile layout,
+Workflow restoration, initial Aladin navigation, failed-query retries, cancellation
+of old viewport pagination, fullscreen pan/zoom and density navigation. The style
+test now uses a fixed published asset rather than assuming the first live asset
+has an action; no runtime compatibility fallback was added.
+
+Real deployed-page acceptance used the existing W2 asset, with no API mocks:
+home ready in **1.32 s**, mouse rotation and right-click on **HEALPix 2071**,
+then Aladin rendered **113 real points** in the completed initial viewport.
+Workflow history shows all five runs; the successful historical run lists 215
+FITS with 50 per page and downloads the full ZIP through the visible button.
+There were no page errors, failed API responses or attempted state mutations.
+Receipts: `live-ui-verification.json`, `live-aladin-2071.png`,
+`live-workflow-download.png` and `browser-final.log` in the private directory.
+
 Telemetry follows `.tmp/WORKSPACE_REQUIREMENTS.md`: API `asa-workspace`, worker
 `asa-workspace-scanner`, OTLP HTTP/protobuf, `parentbased_always_on`, logs to
 stdout. Accepted/skipped/failed file counts and bytes are recorded at committed
@@ -139,6 +156,10 @@ Search and evidence-copy receipts also live in
 `/home/aaron/.cache/workspace-refactor-20261106/`. No secret values belong in this
 document. See [migration procedure](workspace-metadata-migration.md) for retained
 claims and the Helm 4 cutover detail.
+
+The temporary `workspace-local-migration` Pod was removed after verification;
+its receipts and all original claims remain. `runtime-verification.json` records
+the final deployment, pause, snapshot retention and resource checks.
 
 The cutover does not claim the separate year-end goals of two real researcher
 trials, long-duration availability, a published v1.0 release, or FITS PNG/JPEG
