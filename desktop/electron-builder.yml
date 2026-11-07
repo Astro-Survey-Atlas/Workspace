@@ -1,6 +1,6 @@
 appId: space.dev72602.astro-survey-atlas.workspace
 productName: Astro Survey Atlas Workspace
-copyright: MIT License
+copyright: Copyright 2026 Astro Survey Atlas contributors. Licensed under the Apache License, Version 2.0.
 
 directories:
   output: release

@@ -1,6 +1,6 @@
 # Astro Survey Atlas (Assets)
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![License: Apache-2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 [![Python: 3.10+](https://img.shields.io/badge/Python-3.10+-blue.svg)](requirements.lock)
 
 > **Assets** is the authoritative service and repository for public survey/release metadata, public footprints generation, and scientific coordinate mapping. It publishes the verified **Resource Package v3** catalog consumed by Workspace (Atlas).

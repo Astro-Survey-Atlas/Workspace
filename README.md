@@ -1,6 +1,6 @@
 # Astro Survey Atlas (Workspace)
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![License: Apache-2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 [![Node: >=22.15](https://img.shields.io/badge/Node->=22.15-brightgreen.svg)](package.json)
 [![Vite: ^8.1.5](https://img.shields.io/badge/Vite-^8.1.5-blueviolet.svg)](package.json)
 
