@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { cartesianToRaDec, circularMidpoint, normalizeRa, raDecToCartesian } from "../viewer/src/coordinates.js";
+import { cartesianToRaDec, circularMidpoint, normalizeRa, raDecToCartesian } from "@astro-survey-atlas/sky-globe";
 
 function almostEqual(actual: number, expected: number): void {
   assert.ok(Math.abs(actual - expected) < 1e-12, `${actual} != ${expected}`);

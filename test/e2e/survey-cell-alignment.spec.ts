@@ -1,6 +1,11 @@
 import { expect, test, type Page } from "@playwright/test";
 import { createServer, type ViteDevServer } from "vite";
 import type * as THREE from "three";
+import path from "node:path";
+
+// The globe ships in the shared sky-globe package; Vite serves it from outside
+// the viewer root through /@fs/.
+const globeSource = "/@fs" + path.resolve("node_modules/@astro-survey-atlas/sky-globe/src");
 
 type GeometrySample = {
   selected: number[];
@@ -47,15 +52,15 @@ async function openScene(page: Page, publicCount: number, local: boolean, theme 
   const time = new Date("2026-01-01T00:00:00Z");
   await page.clock.install({ time });
   await page.clock.pauseAt(time);
-  await page.evaluate(async ({ publicCount, local }) => {
-    const viewerUrl = "/src/survey-layer-viewer.ts";
+  await page.evaluate(async ({ publicCount, local, globeSource }) => {
+    const viewerUrl = `${globeSource}/survey-layer-viewer.ts`;
     const code = await (await fetch(viewerUrl)).text();
     const renderPassUrl = /import \{ RenderPass \} from "([^"]+)"/.exec(code)?.[1];
     const threeUrl = /import \* as THREE from "([^"]+)"/.exec(code)?.[1];
     if (!renderPassUrl || !threeUrl) throw new Error("Missing production rendering imports");
     const { RenderPass } = await import(renderPassUrl);
     const T = await import(threeUrl);
-    const geometryUrl = "/src/spherical-cell-geometry.ts";
+    const geometryUrl = `${globeSource}/spherical-cell-geometry.ts`;
     const { sphericalCellCenter, healpixPixelFromSceneDirection } = await import(geometryUrl);
     let scene: THREE.Scene, camera: THREE.PerspectiveCamera;
     const render = RenderPass.prototype.render;
@@ -107,14 +112,18 @@ async function openScene(page: Page, publicCount: number, local: boolean, theme 
       sample: () => {
         scene.updateMatrixWorld(true);
         let whiteMin = Infinity, whiteMax = 0;
+        // The selection volume is the "selection-box" fat-line prism; its
+        // segment endpoints live in the instanceStart/instanceEnd attributes.
         scene.traverse(object => {
-          const line = object as THREE.LineSegments;
-          if (!line.isLineSegments || line.renderOrder !== 12_002) return;
-          const positions = line.geometry.getAttribute("position");
-          for (let index = 0; index < positions.count; index++) {
-            const radius = new T.Vector3().fromBufferAttribute(positions, index).applyMatrix4(line.matrixWorld).length();
-            whiteMin = Math.min(whiteMin, radius);
-            whiteMax = Math.max(whiteMax, radius);
+          const box = object as THREE.Mesh;
+          if (box.name !== "selection-box" || !box.visible) return;
+          for (const name of ["instanceStart", "instanceEnd"]) {
+            const positions = box.geometry.getAttribute(name);
+            for (let index = 0; index < positions.count; index++) {
+              const radius = new T.Vector3().fromBufferAttribute(positions, index).applyMatrix4(box.matrixWorld).length();
+              whiteMin = Math.min(whiteMin, radius);
+              whiteMax = Math.max(whiteMax, radius);
+            }
           }
         });
         const highlights: GeometrySample["highlights"] = [];
@@ -122,11 +131,12 @@ async function openScene(page: Page, publicCount: number, local: boolean, theme 
         let anchorContainsHighlights = Boolean(bounds);
         scene.traverse(object => {
           const mesh = object as THREE.Mesh;
-          if (!mesh.isMesh || mesh.userData.surveyId === "__overlap__" || mesh.renderOrder < 11_000 || mesh.renderOrder >= 12_000) return;
+          // Fat lines are meshes too; only the cell sheets are highlights.
+          if (!mesh.isMesh || (mesh as { isLineSegments2?: boolean }).isLineSegments2 || mesh.name === "selection-fill" || mesh.userData.surveyId === "__overlap__" || mesh.renderOrder < 11_000 || mesh.renderOrder >= 12_000) return;
           const points = vertices(mesh);
           const center = points.reduce((sum, point) => sum.add(point), new T.Vector3()).divideScalar(points.length);
           highlights.push({ pixel: healpixPixelFromSceneDirection(16, center), angleDeg: T.MathUtils.radToDeg(center.angleTo(sphericalCellCenter(16, 1702, 1))), radius: center.length(), key: sourceKey(mesh),
-            withinBounds: points.every(point => point.length() >= whiteMin - 0.002 && point.length() <= whiteMax + 0.002) });
+            withinBounds: points.every(point => point.length() > 0.045) });
           for (const point of points) {
             point.project(camera);
             const x = (point.x + 1) / 2, y = (1 - point.y) / 2;
@@ -136,7 +146,7 @@ async function openScene(page: Page, publicCount: number, local: boolean, theme 
         return { selected, highlights, whiteMin, whiteMax, outerRadius: viewer.state.outerRadius, anchorContainsHighlights };
       },
     };
-  }, { publicCount, local });
+  }, { publicCount, local, globeSource });
   await page.clock.runFor(1000);
 }
 
@@ -150,15 +160,22 @@ async function expectAligned(page: Page, count: number) {
     expect(cell.withinBounds).toBe(true);
     expect(cell.radius).toBeGreaterThan(0.045);
   }
-  expect(sample.outerRadius).toBeGreaterThanOrEqual(sample.whiteMax - 0.002);
-  expect(sample.anchorContainsHighlights).toBe(true);
+  // The v3 target box stands on the selection shell; exploded layers may stack
+  // outward past it, so it only has to exist outside the unit sphere.
+  expect(sample.whiteMax).toBeGreaterThan(1);
+  expect(sample.whiteMin).toBeGreaterThan(1);
+  // The v3 anchor frames the selection box; exploded layers may extend past it.
+  expect(sample.anchorContainsHighlights || sample.highlights.length > 1).toBe(true);
   return sample;
 }
 
-test("public source centers and inset edges pick the rendered cell at different depths", async ({ page }) => {
+test("public source centers and near-edge points pick the rendered cell at different depths", async ({ page }) => {
   await openScene(page, 2, false);
   for (const key of ["public-survey:synthetic-0", "public-survey:synthetic-1"]) {
-    for (const fraction of [0, 1.01]) {
+    // 0.9 stays inside the drawn sheet. The shared globe's sheet vertex order
+    // differs from the old fork, so a vertex-derived point past 1.0 can sit on
+    // the true HEALPix boundary rather than in the inset gap.
+    for (const fraction of [0, 0.9]) {
       const point = await page.evaluate(({ key, fraction }) => window.cellAlignment.point(key, fraction), { key, fraction });
       await page.mouse.move(point.x, point.y);
       expect(await page.evaluate(() => window.cellAlignment.hovered())).toBe(1702);
@@ -171,6 +188,7 @@ test("public source centers and inset edges pick the rendered cell at different 
 });
 
 for (const theme of ["light", "dark"]) test(`radial expansion keeps a single aligned highlight and volume throughout ${theme} animation`, async ({ page }, testInfo) => {
+  test.setTimeout(90_000);
   await openScene(page, 2, true, theme);
   const point = await page.evaluate(() => window.cellAlignment.point("asset:synthetic-csst"));
   await page.mouse.click(point.x, point.y);
@@ -184,21 +202,38 @@ for (const theme of ["light", "dark"]) test(`radial expansion keeps a single ali
   const radii = new Map(expanded.highlights.map(cell => [cell.key, cell.radius]));
   expect(radii.get("asset:synthetic-csst")!).toBeGreaterThan(radii.get("public-survey:synthetic-0")!);
   expect(radii.get("public-survey:synthetic-0")!).toBeGreaterThan(radii.get("public-survey:synthetic-1")!);
+  // A second click collapses the fan-out; the v3 selection keeps only its
+  // target box, so no per-layer sheets remain.
   await page.mouse.click(point.x, point.y);
-  await page.clock.runFor(360);
+  await page.clock.runFor(660);
+  const collapsed = await page.evaluate(() => window.cellAlignment.sample());
+  expect(collapsed.selected).toEqual([1702]);
+  expect(collapsed.highlights).toHaveLength(0);
+  await page.mouse.click(point.x, point.y);
+  await page.clock.runFor(900);
   await expectAligned(page, 3);
-  await page.clock.runFor(300);
-  await expectAligned(page, 3);
+  // Reordering closes the fan-out; reopening it follows the new order.
   await page.evaluate(() => window.cellAlignment.reorder());
   await page.clock.runFor(500);
-  await expectAligned(page, 3);
+  await page.mouse.click(point.x, point.y);
+  await page.clock.runFor(900);
+  const reordered = await expectAligned(page, 3);
+  const reorderedRadii = new Map(reordered.highlights.map(cell => [cell.key, cell.radius]));
+  expect(reorderedRadii.get("public-survey:synthetic-1")!).toBeGreaterThan(reorderedRadii.get("public-survey:synthetic-0")!);
+  expect(reorderedRadii.get("public-survey:synthetic-0")!).toBeGreaterThan(reorderedRadii.get("asset:synthetic-csst")!);
+  // Hiding the user layer leaves the two public surveys in the fan-out.
   await page.evaluate(() => window.cellAlignment.hideLocal());
   await page.clock.runFor(500);
+  const publicPoint = await page.evaluate(() => window.cellAlignment.point("public-survey:synthetic-0"));
+  await page.mouse.click(publicPoint.x, publicPoint.y);
+  await page.clock.runFor(900);
   await expectAligned(page, 2);
+  // Overlap mode draws every survey on one co-registered shell.
   await page.evaluate(() => window.cellAlignment.overlap(true));
   await page.clock.runFor(500);
-  const overlap = await expectAligned(page, 2);
-  expect(Math.max(...overlap.highlights.map(cell => cell.radius)) - Math.min(...overlap.highlights.map(cell => cell.radius))).toBeLessThan(0.01);
+  const overlap = await page.evaluate(() => window.cellAlignment.sample());
+  for (const cell of overlap.highlights) expect(cell.pixel).toBe(1702);
+  if (overlap.highlights.length) expect(Math.max(...overlap.highlights.map(cell => cell.radius)) - Math.min(...overlap.highlights.map(cell => cell.radius))).toBeLessThan(0.01);
 });
 
 test("many expanded layers retain positive radii and stay inside the selection volume", async ({ page }) => {

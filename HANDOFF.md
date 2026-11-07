@@ -2,6 +2,36 @@
 
 Updated: 2026-11-06, Asia/Shanghai.
 
+## Shared sky globe and Apache-2.0 (November 8, branch `feat/hud-globe`, not deployed)
+
+Frontend and licensing only; no API, scan, task or deployment change. Scanning
+stays paused.
+
+- License is now Apache-2.0: `LICENSE`, `NOTICE`, `license` in the three
+  `package.json` files, README badges, and the desktop copyright line.
+- The three.js globe fork is gone (`viewer/src/survey-layer-viewer.ts`,
+  `spherical-cell-geometry.ts`, `coordinates.ts`, `layer-order.ts`). The viewer
+  uses `@astro-survey-atlas/sky-globe`, the package Assets now ships from
+  `packages/sky-globe`, so Workspace renders the v3 HUD globe.
+  - Workspace-only fields of coverage layers (MOC status, precision, orders)
+    live in a local `WorkspaceCoverageLayer` extension type in `main.ts`.
+  - Options passed: `sourceIdForFootprint: publicSourceIdForFootprint`,
+    `overlapContextMenu: true`.
+- **Temporary dependency:** `file:../Astro-Survey-Atlas-Assets/packages/sky-globe`
+  (installed as a copy). After changing the package, run
+  `rm -rf node_modules/@astro-survey-atlas/sky-globe && npm install`. Docker and
+  CI cannot resolve this path; switch to the git tag once
+  `Astro-Survey-Atlas/sky-globe` is published (plan stage B).
+- `test/sky-cross-repo.test.ts` was removed: both repos now run the same module.
+- `test/e2e/survey-cell-alignment.spec.ts` loads the package through `/@fs/` and
+  checks v3 semantics: the selection is a target box on the selection shell, a
+  second click collapses the fan-out, the fan-out follows display order.
+- Verified: `verify:types`, `npm test` (336 pass, 3 skipped, 0 fail),
+  `survey-cell-alignment` e2e 4/4. Other e2e specs were not run: `survey-layers`
+  installs resource packages on the Dev API.
+- Next (plan stages C3/D): Aladin drill-down (button + double-click) and the HUD
+  shell restyle through a token alias layer.
+
 ## Current Dev state: lightweight local runtime (November 6)
 
 Workspace has been cut over to its independent local runtime at Helm revision

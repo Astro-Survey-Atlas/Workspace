@@ -25,7 +25,7 @@ import {
   type CoverageDownloadJob,
 } from "./api";
 import { Healpix } from "healpixjs";
-import { cartesianToRaDec, raDecToCartesian } from "./coordinates";
+import { cartesianToRaDec, raDecToCartesian } from "@astro-survey-atlas/sky-globe";
 import { surveyDisplayColor } from "../../src/survey-colors";
 import {
   SurveyLayerViewer,
@@ -38,8 +38,22 @@ import {
   type SurveyLayerState,
   type SurveyObjectPoint,
   type SurveyLayerOverlapComponent,
-  type WorkspaceCoverageLayer,
-} from "./survey-layer-viewer";
+  type WorkspaceCoverageLayer as GlobeCoverageLayer,
+} from "@astro-survey-atlas/sky-globe";
+
+/** A Workspace coverage layer: what the globe draws, plus the catalogue and MOC
+ * status fields the inspector shows. The globe ignores the extra fields. */
+type WorkspaceCoverageLayer = GlobeCoverageLayer & {
+  coverageRole?: string;
+  nativeOrders?: number[];
+  availableOrders?: number[];
+  maxOrder?: number;
+  precision?: "exact" | "estimated" | "entrypoint-only";
+  mocStatus?: "pending" | "ready" | "failed" | "unavailable";
+  latestMocStatus?: "pending" | "ready" | "failed" | "unavailable";
+  latestArtifactId?: string;
+  state?: string;
+};
 import type { AssetsSurveyProduct, AssetsSurveyRelease, PublicResourcePackage, ResourceCatalogStatus } from "../../src/resource-packages";
 import type { SurveyModality, SurveyRegistrationInput } from "../../src/survey-registry";
 import type { ConnectorPublicRecord } from "../../src/connectors";
@@ -62,7 +76,7 @@ import { ResourcePackagePanel, type ResourcePackageSelectionCallbacks } from "./
 import type { AladinExplorer, AladinAssetTarget, AladinExplorerSnapshot, AladinExplorerStatus } from "./aladin-explorer";
 import { nestedSkyRegion } from "./sky-region";
 import { summarizeCoverageEvidence, summarizeCoverageMatches, summarizeScanScopes } from "./reverse-lookup-summary";
-import { normalizeLayerOrder } from "./layer-order";
+import { normalizeLayerOrder } from "@astro-survey-atlas/sky-globe";
 import { notifyWorkspace, notifyWorkspaceError } from "./notifications";
 import { CoverageLoader } from "./coverage-loader";
 
@@ -4132,7 +4146,10 @@ async function activateMode(nextMode: ViewMode): Promise<void> {
     byId("legend-min").textContent = "公开覆盖";
     byId("legend-max").textContent = "项目资产";
     byId("object-status").textContent = `${surveyFootprints?.footprints.length ?? 0} COVERAGE SOURCES`;
-     layerViewer = new SurveyLayerViewer(targetCanvas, surveyFootprints!, publicSurveyCards, renderSurveySelection, renderSurveyHover, renderSurveyInspection, renderSurveyContextMenu, renderLayerState, renderSurveyObjectPoint, renderOverlapComponent);
+     layerViewer = new SurveyLayerViewer(targetCanvas, surveyFootprints!, publicSurveyCards, renderSurveySelection, renderSurveyHover, renderSurveyInspection, renderSurveyContextMenu, renderLayerState, renderSurveyObjectPoint, renderOverlapComponent, {
+      sourceIdForFootprint: publicSourceIdForFootprint,
+      overlapContextMenu: true,
+    });
     applySceneBackground(storedSceneBackground());
     layerViewer.setLayoutMode(layerLayoutMode);
     layerViewer.setVisibleSurveys(visibleSurveyIds);

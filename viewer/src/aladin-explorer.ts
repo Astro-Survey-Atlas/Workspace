@@ -4,8 +4,8 @@ import { Healpix, Pointing } from "healpixjs";
 
 import type { AstroObjectRecord, AstroPointDensityLayerInput, AstroPointDensityResult, ObjectRegionQueryInput, SkyDataPointScope } from "../../src/astro-object-index";
 import { workspaceApi } from "./api";
-import { clampDec, normalizeRa } from "./coordinates";
-import type { SurveyObjectPoint } from "./survey-layer-viewer";
+import { clampDec, normalizeRa } from "@astro-survey-atlas/sky-globe";
+import type { SurveyObjectPoint } from "@astro-survey-atlas/sky-globe";
 import { compactRects, subtractRects, type QueryRect } from "./viewport-query-cache";
 
 export interface AladinExplorerSnapshot {

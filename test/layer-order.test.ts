@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { normalizeLayerOrder, visibleLayerDepths } from "../viewer/src/layer-order.js";
+import { normalizeLayerOrder, visibleLayerDepths } from "@astro-survey-atlas/sky-globe";
 
 const keys = ["asset:cosmos", "public-survey:sdss", "public-survey:galex"];
 

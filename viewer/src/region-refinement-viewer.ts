@@ -6,7 +6,7 @@ import {
   buildSphericalCellSheetGeometry,
   healpixPixelFromSceneDirection,
   sphericalCellBoundary,
-} from "./spherical-cell-geometry";
+} from "@astro-survey-atlas/sky-globe";
 
 export interface RegionRefinementMask {
   baseNside: number;

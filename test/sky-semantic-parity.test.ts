@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { cartesianToRaDec } from "../viewer/src/coordinates.js";
-import { healpixPixelFromSceneDirection, sphericalCellCenter } from "../viewer/src/spherical-cell-geometry.js";
+import { cartesianToRaDec } from "@astro-survey-atlas/sky-globe";
+import { healpixPixelFromSceneDirection, sphericalCellCenter } from "@astro-survey-atlas/sky-globe";
 import { nestedSkyRegion } from "../viewer/src/sky-region.js";
 import { buildSurveyLayerModel, visibleCoverageAtPixel } from "../src/survey-layer-model.js";
 import type { SurveyFootprintManifest } from "../src/survey-footprints.js";

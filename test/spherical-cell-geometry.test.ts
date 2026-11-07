@@ -13,7 +13,7 @@ import {
   sphericalCellCenter,
   TRIANGLES_PER_SPHERICAL_CELL,
   TRIANGLES_PER_SPHERICAL_CELL_SHEET,
-} from "../viewer/src/spherical-cell-geometry.js";
+} from "@astro-survey-atlas/sky-globe";
 
 const cell = {
   nside: 2,
