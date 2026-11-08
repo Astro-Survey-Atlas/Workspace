@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="dark">
+<head>
+<meta charset="utf-8"><title>系统配置 · Workspace HUD 设计稿</title>
+<link rel="stylesheet" href="shared.css">
+<style>
+.side-tabs{display:flex;flex-direction:column;gap:0;border-top:1px solid var(--line)}
+.side-tabs a{display:grid;grid-template-columns:24px 1fr auto;gap:9px;align-items:center;padding:10px 14px;border-bottom:1px solid var(--line);
+  font:700 12.5px var(--sans);color:var(--dim)}
+.side-tabs a b{font:700 9.5px var(--mono);color:var(--faint)}
+.side-tabs a small{font:700 9.5px var(--mono);color:var(--faint)}
+.side-tabs a.on{color:var(--ink);background:linear-gradient(90deg,var(--hot-soft),transparent);box-shadow:inset 2px 0 0 var(--hot)}
+.side-tabs a.on b{color:var(--hot)}
+.kv{display:grid;grid-template-columns:1fr auto;gap:10px;align-items:baseline;padding:9px 0;border-bottom:1px solid var(--line)}
+.kv dt{font:700 9px var(--mono);letter-spacing:.16em;color:var(--dim);text-transform:uppercase}
+.kv dd{font:400 11.5px var(--mono);text-align:right}
+</style>
+</head>
+<body>
+<main class="cockpit left-only">
+  <div class="col">
+    <section class="plate grow">
+      <div class="ph"><b>◆</b>SETTINGS<span class="r">WORKSPACE</span></div>
+      <div class="pb" style="padding-bottom:10px">
+        <div class="kicker"><i></i>WORKSPACE</div>
+        <h1>系统配置</h1>
+        <p class="sub">AI Provider、MCP Server、数据服务端点与生产能力注册表。</p>
+        <dl class="metrics">
+          <div><dt>PROVIDERS</dt><dd>2</dd></div>
+          <div><dt>MCP</dt><dd>3</dd></div>
+          <div><dt>CONNECTED</dt><dd>4</dd></div>
+          <div><dt>SERVICES</dt><dd>5</dd></div>
+          <div><dt>CAPABILITIES</dt><dd>9</dd></div>
+          <div><dt>BACKUP</dt><dd>1</dd></div>
+        </dl>
+      </div>
+      <nav class="side-tabs">
+        <a class="on"><b>01</b>AI Provider<small>2 ›</small></a>
+        <a><b>02</b>MCP Server<small>3 ›</small></a>
+        <a><b>03</b>数据服务<small>5 ›</small></a>
+        <a><b>04</b>下载<small>›</small></a>
+        <a><b>05</b>生产能力<small>9 ›</small></a>
+        <a><b>06</b>备份与恢复<small>›</small></a>
+      </nav>
+    </section>
+  </div>
+
+  <div class="col">
+    <section class="plate">
+      <div class="ph"><b>◆</b>AI PROVIDER<span class="r">2 REGISTERED</span></div>
+      <div class="pb tight">
+        <div class="search" style="margin:0 0 8px"><label class="field"><i data-icon="search"></i>搜索 Provider</label><button class="btn hot"><i data-icon="plus"></i>注册 Provider</button></div>
+        <table class="tbl">
+          <thead><tr><th>Provider</th><th>模型</th><th>端点</th><th>状态</th><th>最近调用</th></tr></thead>
+          <tbody>
+            <tr><td class="n">local-ollama</td><td class="m">qwen2.5:14b</td><td class="m">http://127.0.0.1:11434</td><td><span class="tag ok"><i></i>可用</span></td><td class="m">11-07 22:10</td></tr>
+            <tr><td class="n">lab-gateway</td><td class="m">claude-opus-5-5</td><td class="m">https://lab.internal/v1</td><td><span class="tag"><i></i>未检测</span></td><td class="m">--</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="plate grow">
+      <div class="ph"><b>◆</b>MCP SERVER<span class="r">3 REGISTERED</span></div>
+      <div class="pb tight scroll" style="overflow:auto;flex:1;min-height:0">
+        <table class="tbl">
+          <thead><tr><th>Server</th><th>传输</th><th>工具</th><th>状态</th><th></th></tr></thead>
+          <tbody>
+            <tr><td class="n">astro-object-index</td><td><span class="tag ind">stdio</span></td><td class="m">12 tools</td><td><span class="tag ok"><i></i>已连接</span></td><td style="text-align:right"><span class="btn sm">详情</span></td></tr>
+            <tr><td class="n">fits-cutout</td><td><span class="tag ind">http</span></td><td class="m">4 tools</td><td><span class="tag ok"><i></i>已连接</span></td><td style="text-align:right"><span class="btn sm">详情</span></td></tr>
+            <tr><td class="n">catalog-helpers</td><td><span class="tag ind">stdio</span></td><td class="m">6 tools</td><td><span class="tag warn"><i></i>未检测</span></td><td style="text-align:right"><span class="btn sm">详情</span></td></tr>
+          </tbody>
+        </table>
+        <div class="sect" style="margin-top:14px">数据服务端点 · 只读</div>
+        <dl class="kv"><dt>Workspace API</dt><dd>http://127.0.0.1:3000</dd></dl>
+        <dl class="kv"><dt>Assets 官方目录</dt><dd>http://10.15.51.75:32083</dd></dl>
+        <dl class="kv"><dt>Elasticsearch</dt><dd>http://asa-workspace-es:9200</dd></dl>
+        <dl class="kv" style="border-bottom:0"><dt>Evidence 根目录</dt><dd>/data/evidence</dd></dl>
+      </div>
+    </section>
+  </div>
+</main>
+<div class="mock-note">MOCKUP · 静态设计稿 · 未接入真实数据</div>
+<script type="module">
+import { applyChrome } from "./shared.js";
+import { topbar, icon } from "./shell.js";
+document.body.insertAdjacentHTML("afterbegin", topbar("system"));
+applyChrome("system");
+document.querySelectorAll("[data-icon]").forEach((node) => { node.innerHTML = icon(node.dataset.icon); });
+</script>
+</body>
+</html>

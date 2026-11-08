@@ -1,0 +1,138 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="dark">
+<head>
+<meta charset="utf-8"><title>用户资产 · Workspace HUD 设计稿</title>
+<link rel="stylesheet" href="shared.css">
+</head>
+<body>
+<main class="cockpit wide">
+  <div class="col">
+    <section class="plate grow">
+      <div class="ph"><b>◆</b>USER ASSETS<span class="r">FILTERS</span></div>
+      <div class="pb" style="padding-bottom:10px">
+        <div class="kicker"><i></i>WORKSPACE</div>
+        <h1>用户资产</h1>
+        <p class="sub">当前工作区中由用户登记的数据及其访问描述。只保存元数据与访问方式，不复制原始科学数据。</p>
+        <dl class="metrics">
+          <div><dt>ASSETS</dt><dd>23</dd></div>
+          <div><dt>READY</dt><dd>17</dd></div>
+          <div><dt>PLANNED</dt><dd>4</dd></div>
+          <div><dt>MAPPED</dt><dd>12</dd></div>
+          <div><dt>UNMAPPED</dt><dd>11</dd></div>
+          <div><dt>ERROR</dt><dd>2</dd></div>
+        </dl>
+      </div>
+      <div class="pb tight scroll" style="padding-top:0;flex:1;min-height:0;display:flex;flex-direction:column;gap:8px;overflow-y:auto">
+        <div class="sect">类型<output>4</output></div>
+        <div class="rows">
+          <label class="row on" style="--c:#8592ff"><span class="cb">✓</span><i class="bar"></i><span><span class="nm">全部类型</span><span class="mt">23 / 23</span></span></label>
+          <label class="row" style="--c:#5be3a4"><span class="cb"></span><i class="bar"></i><span><span class="nm">星表</span><span class="mt">11</span></span></label>
+          <label class="row" style="--c:#ffc35c"><span class="cb"></span><i class="bar"></i><span><span class="nm">图像</span><span class="mt">7</span></span></label>
+          <label class="row" style="--c:#c78bff"><span class="cb"></span><i class="bar"></i><span><span class="nm">光谱</span><span class="mt">5</span></span></label>
+        </div>
+        <div class="sect" style="margin-top:6px">项目阶段<output>5</output></div>
+        <div class="rows">
+          <label class="row" style="--c:#8592ff"><span class="cb"></span><i class="bar"></i><span><span class="nm">全部阶段</span><span class="mt">23 / 23</span></span></label>
+          <label class="row on" style="--c:#f01951"><span class="cb">✓</span><i class="bar"></i><span><span class="nm">已掌握</span><span class="mt">7</span></span></label>
+          <label class="row" style="--c:#5be3a4"><span class="cb"></span><i class="bar"></i><span><span class="nm">已加工</span><span class="mt">6</span></span></label>
+          <label class="row" style="--c:#ffc35c"><span class="cb"></span><i class="bar"></i><span><span class="nm">可交付</span><span class="mt">5</span></span></label>
+        </div>
+        <div class="sect" style="margin-top:6px">空间覆盖<output>3</output></div>
+        <div class="rows">
+          <label class="row" style="--c:#8592ff"><span class="cb"></span><i class="bar"></i><span><span class="nm">已建立覆盖</span><span class="mt">12</span></span></label>
+          <label class="row" style="--c:#ffc35c"><span class="cb"></span><i class="bar"></i><span><span class="nm">未建立覆盖</span><span class="mt">9</span></span></label>
+          <label class="row" style="--c:#ff2e63"><span class="cb"></span><i class="bar"></i><span><span class="nm">扫描失败</span><span class="mt">2</span></span></label>
+        </div>
+      </div>
+    </section>
+  </div>
+
+  <div class="col">
+    <section class="plate grow">
+      <div class="ph"><b>◆</b>CATALOG<span class="r">23 ASSETS · 已应用筛选 2</span></div>
+      <div style="padding:0 14px 10px;display:flex;flex-direction:column;min-height:0;flex:1">
+        <div class="search">
+          <label class="field"><i data-icon="search"></i>搜索名称、巡天、发布、Tag、路径或 Connector</label>
+          <button class="btn hot"><i data-icon="plus"></i>新增用户资产</button>
+        </div>
+        <div class="wide-wrap scroll">
+          <table class="tbl">
+            <thead><tr><th style="width:16px"></th><th>数据资产</th><th>巡天 / 发布</th><th>类型</th><th>阶段</th><th>空间覆盖</th><th>访问</th><th></th></tr></thead>
+            <tbody>
+              <tr style="--c:#f01951"><td><span class="cbar"></span></td><td class="n">HSC PDR3 Wide 2.1 HDF5 index</td><td class="m">hsc-pdr3 · w2</td><td>星表</td>
+                <td><span class="tag ok">已掌握</span></td><td><span class="tag ind"><i></i>O6 · 2 247 cells</span></td><td><span class="tag ok"><i></i>S3</span></td><td style="text-align:right"><span class="btn sm">详情 ›</span></td></tr>
+              <tr style="--c:#8592ff"><td><span class="cbar"></span></td><td class="n">CSST Simulation W3</td><td class="m">csst-css · simulation-w3</td><td>星表</td>
+                <td><span class="tag ok">已加工</span></td><td><span class="tag ind"><i></i>O5 · 894 cells</span></td><td><span class="tag ok"><i></i>local</span></td><td style="text-align:right"><span class="btn sm">详情 ›</span></td></tr>
+              <tr style="--c:#5be3a4"><td><span class="cbar"></span></td><td class="n">Euclid Q1 MER catalog tile 1</td><td class="m">euclid-q1-mer</td><td>星表</td>
+                <td><span class="tag">公开参考</span></td><td><span class="tag warn"><i></i>未建立</span></td><td><span class="tag ok"><i></i>S3</span></td><td style="text-align:right"><span class="btn sm">详情 ›</span></td></tr>
+              <tr style="--c:#ffc35c"><td><span class="cbar"></span></td><td class="n">CSST MSC C11 50 sq deg deep</td><td class="m">csst-msc-w2 · c11-deep</td><td>图像</td>
+                <td><span class="tag ok">可交付</span></td><td><span class="tag ind"><i></i>O7 · 412 cells</span></td><td><span class="tag ok"><i></i>OSS</span></td><td style="text-align:right"><span class="btn sm">详情 ›</span></td></tr>
+              <tr style="--c:#ff2e63"><td><span class="cbar"></span></td><td class="n">SDSS MaNGA ssy DRP FITS cutout</td><td class="m">sdss-manga</td><td>光谱</td>
+                <td><span class="tag warn">已掌握</span></td><td><span class="tag hot"><i></i>扫描失败</span></td><td><span class="tag ok"><i></i>S3</span></td><td style="text-align:right"><span class="btn sm">详情 ›</span></td></tr>
+              <tr style="--c:#c78bff"><td><span class="cbar"></span></td><td class="n">Legacy Survey DR10 South images</td><td class="m">legacy-dr10-south</td><td>图像</td>
+                <td><span class="tag">计划中</span></td><td><span class="tag warn"><i></i>未开始</span></td><td><span class="tag"><i></i>待配置</span></td><td style="text-align:right"><span class="btn sm">详情 ›</span></td></tr>
+              <tr style="--c:#8592ff"><td><span class="cbar"></span></td><td class="n">CSST MSC C11 1 000 sq deg</td><td class="m">csst-msc-w2</td><td>星表</td>
+                <td><span class="tag ok">已加工</span></td><td><span class="tag ind"><i></i>O6 · 1 811 cells</span></td><td><span class="tag ok"><i></i>S3</span></td><td style="text-align:right"><span class="btn sm">详情 ›</span></td></tr>
+              <tr style="--c:#5be3a4"><td><span class="cbar"></span></td><td class="n">euclid Euclid Q1 color imaging</td><td class="m">euclid-q1-vis</td><td>图像</td>
+                <td><span class="tag ok">已加工</span></td><td><span class="tag ind"><i></i>O8 · 3 402 cells</span></td><td><span class="tag ok"><i></i>OSS</span></td><td style="text-align:right"><span class="btn sm">详情 ›</span></td></tr>
+              <tr style="--c:#ffc35c"><td><span class="cbar"></span></td><td class="n">CSST bounded Scanner validation</td><td class="m">csst-simulation-v4</td><td>星表</td>
+                <td><span class="tag ok">可交付</span></td><td><span class="tag ind"><i></i>O4 · 96 cells</span></td><td><span class="tag ok"><i></i>local</span></td><td style="text-align:right"><span class="btn sm">详情 ›</span></td></tr>
+              <tr style="--c:#8592ff"><td><span class="cbar"></span></td><td class="n">Shared data archive metadata</td><td class="m">archive-meta</td><td>其他</td>
+                <td><span class="tag">计划中</span></td><td><span class="tag warn"><i></i>未开始</span></td><td><span class="tag"><i></i>待配置</span></td><td style="text-align:right"><span class="btn sm">详情 ›</span></td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="foot" style="margin-top:8px;border-top:1px solid var(--line);padding:10px 0 0">
+          <span>共 23 条 · 显示 10 条</span><span>每页 10 / 25 / 50</span><b>第 1 / 3 页 ›</b>
+        </div>
+      </div>
+    </section>
+  </div>
+
+  <div class="col">
+    <section class="plate hot grow">
+      <div class="ph"><b>◆</b>ASSET DETAIL<span class="r">HSC-PDR3-W2</span></div>
+      <div class="pb scroll" style="flex:1;min-height:0;overflow:auto">
+        <div class="kicker"><i></i>DATA ASSET</div>
+        <h2>HSC PDR3 Wide 2.1 HDF5 index</h2>
+        <p class="sub">HSC PDR3 宽场星表，2 247 个 HEALPix 区块已建立覆盖。</p>
+        <div class="btnrow" style="margin-top:12px">
+          <button class="btn sm"><i data-icon="globe"></i>在天球中定位</button>
+          <button class="btn sm ghost"><i data-icon="refresh"></i>重扫</button>
+          <button class="btn sm ghost">删除</button>
+        </div>
+        <div class="sect" style="margin-top:14px">标识</div>
+        <dl class="insp">
+          <div class="irow"><dt>巡天 / 发布</dt><dd>hsc-pdr3 · w2</dd></div>
+          <div class="irow"><dt>数据类型</dt><dd>星表 · catalog</dd></div>
+          <div class="irow"><dt>项目阶段</dt><dd><b>已掌握</b></dd></div>
+          <div class="irow"><dt>Tag</dt><dd><span class="tag">hsc</span> <span class="tag">wide</span> <span class="tag">pdr3</span></dd></div>
+        </dl>
+        <div class="sect" style="margin-top:12px">空间覆盖</div>
+        <dl class="insp">
+          <div class="irow"><dt>原生最大 order</dt><dd><b>O6</b> · 精确</dd></div>
+          <div class="irow"><dt>区块</dt><dd>2 247</dd></div>
+          <div class="irow"><dt>来源</dt><dd>scan · local worker</dd></div>
+          <div class="irow" style="border-bottom:0"><dt>最近成功</dt><dd>11-06 13:20</dd></div>
+        </dl>
+        <div class="sect" style="margin-top:12px">访问</div>
+        <dl class="insp">
+          <div class="irow"><dt>Connector</dt><dd>hsc-s3-public</dd></div>
+          <div class="irow"><dt>类型</dt><dd>S3 / OSS</dd></div>
+          <div class="irow" style="border-bottom:0"><dt>路径</dt><dd style="font-size:10.5px">s3://hsc-pdr3/w2/index.hdf5</dd></div>
+        </dl>
+        <div class="notice" style="border-left-color:var(--ind)"><b style="color:var(--ind)">NOTE</b>覆盖只描述空间范围，不代表数据完整或已达观测深度。</div>
+      </div>
+    </section>
+  </div>
+</main>
+<div class="mock-note">MOCKUP · 静态设计稿 · 未接入真实数据</div>
+<script type="module">
+import { applyChrome } from "./shared.js";
+import { topbar, icon } from "./shell.js";
+document.body.insertAdjacentHTML("afterbegin", topbar("catalog"));
+applyChrome("catalog");
+document.querySelectorAll("[data-icon]").forEach((node) => { node.innerHTML = icon(node.dataset.icon); });
+</script>
+</body>
+</html>

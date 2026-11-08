@@ -1,0 +1,125 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="dark">
+<head>
+<meta charset="utf-8"><title>数据生产 · Workspace HUD 设计稿</title>
+<link rel="stylesheet" href="shared.css">
+<style>
+.track{display:grid;grid-template-columns:repeat(4,1fr);gap:8px}
+.track .step{grid-template-columns:34px 1fr;align-items:start;padding:11px 12px}
+.track .step b{font-size:19px;color:var(--faint)}
+.track .step.on b{color:var(--hot);text-shadow:var(--hotglow)}
+.track .step span{display:block}
+.track .step small{display:block;margin-top:4px}
+.two{display:grid;grid-template-columns:1.15fr 1fr;gap:12px;min-height:0;flex:1}
+</style>
+</head>
+<body>
+<main class="cockpit left-only">
+  <div class="col">
+    <section class="plate grow">
+      <div class="ph"><b>◆</b>PRODUCTION<span class="r">WORKFLOW</span></div>
+      <div class="pb" style="padding-bottom:10px">
+        <div class="kicker"><i></i>WORKSPACE</div>
+        <h1>数据生产</h1>
+        <p class="sub">星表交叉匹配、人工筛选与 FITS cutout 在同一工作台中完成。</p>
+        <dl class="metrics">
+          <div><dt>RUNS</dt><dd>5</dd></div>
+          <div><dt>ACTIVE</dt><dd>1</dd></div>
+          <div><dt>DONE</dt><dd>3</dd></div>
+          <div><dt>FAILED</dt><dd>1</dd></div>
+          <div><dt>ROWS</dt><dd>43</dd></div>
+          <div><dt>CUTOUTS</dt><dd>215</dd></div>
+        </dl>
+      </div>
+      <div class="pb tight scroll" style="padding-top:0;flex:1;min-height:0;overflow-y:auto">
+        <div class="sect">执行记录<output>5</output></div>
+        <div class="rows">
+          <label class="row on" style="--c:#f01951"><span class="cb">✓</span><i class="bar"></i><span><span class="nm">wfr_…012541_6572797f</span><span class="mt">43 rows · 215 cutouts · 成功</span></span></label>
+          <label class="row" style="--c:#5be3a4"><span class="cb"></span><i class="bar"></i><span><span class="nm">wfr_…013325_96ffeade</span><span class="mt">空选择 · 成功</span></span></label>
+          <label class="row" style="--c:#ff2e63"><span class="cb"></span><i class="bar"></i><span><span class="nm">wfr_1103_1a2b3c</span><span class="mt">215 failed · cutout 超时</span></span></label>
+          <label class="row" style="--c:#ff2e63"><span class="cb"></span><i class="bar"></i><span><span class="nm">wfr_1103_4d5e6f</span><span class="mt">215 failed · cutout 超时</span></span></label>
+          <label class="row" style="--c:#8d90b8"><span class="cb"></span><i class="bar"></i><span><span class="nm">wfr_1028_9f8e7d</span><span class="mt">已取消</span></span></label>
+        </div>
+        <div class="sect" style="margin-top:10px">流水线模板<output>3</output></div>
+        <div class="rows">
+          <label class="row" style="--c:#8592ff"><span class="cb"></span><i class="bar"></i><span><span class="nm">星表交叉匹配</span><span class="mt">overlap-download@1</span></span></label>
+          <label class="row" style="--c:#5be3a4"><span class="cb"></span><i class="bar"></i><span><span class="nm">区域下载计划</span><span class="mt">region-download@1</span></span></label>
+          <label class="row" style="--c:#ffc35c"><span class="cb"></span><i class="bar"></i><span><span class="nm">Agent 分析</span><span class="mt">agent-run@1</span></span></label>
+        </div>
+      </div>
+    </section>
+  </div>
+
+  <div class="col">
+    <section class="plate">
+      <div class="ph"><b>◆</b>Euclid × DESI → 筛选 → FITS cutout<span class="r"><span class="tag" style="margin-right:6px">NO RUN</span><span class="tag hot"><i></i>IDLE</span></span></div>
+      <div class="pb tight">
+        <div class="track">
+          <div class="step on"><b>01</b><span>星表查询与匹配<small>Euclid × DESI</small></span></div>
+          <div class="step"><b>02</b><span>人工筛选<small>人在回路</small></span></div>
+          <div class="step"><b>03</b><span>FITS cutout<small>MCP 分组执行</small></span></div>
+          <div class="step"><b>04</b><span>导出<small>数据与血缘</small></span></div>
+        </div>
+      </div>
+    </section>
+
+    <div class="two">
+      <section class="plate grow">
+        <div class="ph"><b>◆</b>EXECUTION STEPS<span class="r">0 / 8</span></div>
+        <div class="pb tight scroll" style="overflow-y:auto;flex:1;min-height:0">
+          <div class="steps">
+            <div class="step on"><b>01</b><span>读取区域选区</span><small>overlap selection · O6</small></div>
+            <div class="step on"><b>02</b><span>查询 Euclid 星表</span><small>1 214 rows</small></div>
+            <div class="step"><b>03</b><span>查询 DESI 星表</span><small>waiting</small></div>
+            <div class="step"><b>04</b><span>交叉匹配</span><small>radius 1.0″</small></div>
+            <div class="step"><b>05</b><span>人工筛选</span><small>human gate</small></div>
+            <div class="step"><b>06</b><span>FITS cutout</span><small>MCP</small></div>
+            <div class="step"><b>07</b><span>打包产物</span><small>ZIP</small></div>
+            <div class="step"><b>08</b><span>导出与血缘</span><small>manifest</small></div>
+          </div>
+          <div class="progress" style="margin-top:12px"><i></i></div>
+        </div>
+      </section>
+
+      <section class="plate hot grow">
+        <div class="ph"><b>◆</b>RESULT PREVIEW<span class="r">0 ROWS</span></div>
+        <div class="pb tight scroll" style="overflow:auto;flex:1;min-height:0">
+          <table class="tbl">
+            <thead><tr><th>object_id</th><th>ra</th><th>dec</th><th>z</th></tr></thead>
+            <tbody>
+              <tr><td class="m">1237667781769195658</td><td class="m">150.0224</td><td class="m">+2.1814</td><td class="m">0.4871</td></tr>
+              <tr><td class="m">1237667781769196033</td><td class="m">150.0477</td><td class="m">+2.2055</td><td class="m">0.6120</td></tr>
+              <tr><td class="m">1237667781769197411</td><td class="m">150.1012</td><td class="m">+2.2403</td><td class="m">0.3512</td></tr>
+              <tr><td class="m">1237667781769253821</td><td class="m">150.1148</td><td class="m">+2.1988</td><td class="m">0.5277</td></tr>
+              <tr><td class="m">1237667781769254094</td><td class="m">150.1203</td><td class="m">+2.1701</td><td class="m">0.9034</td></tr>
+            </tbody>
+          </table>
+          <div class="empty" style="min-height:120px"><span>NO RESULT · 等待执行</span></div>
+        </div>
+      </section>
+    </div>
+
+    <section class="plate">
+      <div class="ph"><b>◆</b>HUMAN GATE<span class="r">WAITING</span></div>
+      <div class="pb tight">
+        <div class="search" style="margin:0">
+          <select class="sel"><option>z</option><option>magnitude</option><option>separation</option></select>
+          <select class="sel"><option>≤</option><option>&lt;</option><option>≥</option><option>&gt;</option></select>
+          <label class="field on">1.0</label>
+          <button class="btn hot">应用筛选</button>
+          <button class="btn ghost">全部保留</button>
+        </div>
+      </div>
+    </section>
+  </div>
+</main>
+<div class="mock-note">MOCKUP · 静态设计稿 · 未接入真实数据</div>
+<script type="module">
+import { applyChrome } from "./shared.js";
+import { topbar, icon } from "./shell.js";
+document.body.insertAdjacentHTML("afterbegin", topbar("workflow"));
+applyChrome("workflow");
+document.querySelectorAll("[data-icon]").forEach((node) => { node.innerHTML = icon(node.dataset.icon); });
+</script>
+</body>
+</html>

@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="dark">
+<head>
+<meta charset="utf-8"><title>连接器 · Workspace HUD 设计稿</title>
+<link rel="stylesheet" href="shared.css">
+<style>
+.viewtabs{display:flex;gap:0;border-bottom:1px solid var(--line);padding:0 4px}
+.viewtabs a{padding:9px 14px;font:700 11px var(--mono);letter-spacing:.16em;color:var(--dim);border-bottom:2px solid transparent}
+.viewtabs a.on{color:var(--ink);border-bottom-color:var(--hot);text-shadow:var(--txtglow)}
+</style>
+</head>
+<body>
+<main class="cockpit left-only">
+  <div class="col">
+    <section class="plate grow">
+      <div class="ph"><b>◆</b>ACCESS<span class="r">CONNECTORS</span></div>
+      <div class="pb" style="padding-bottom:10px">
+        <div class="kicker"><i></i>WORKSPACE</div>
+        <h1>连接器</h1>
+        <p class="sub">登记数据所在位置与访问方式。连接检测只验证端点、路径或数据库主机。</p>
+        <dl class="metrics">
+          <div><dt>TOTAL</dt><dd>22</dd></div>
+          <div><dt>READY</dt><dd>16</dd></div>
+          <div><dt>DRAFT</dt><dd>4</dd></div>
+          <div><dt>ERROR</dt><dd>2</dd></div>
+          <div><dt>DISABLED</dt><dd>0</dd></div>
+          <div><dt>KINDS</dt><dd>3</dd></div>
+        </dl>
+      </div>
+      <div class="pb tight scroll" style="padding-top:0;flex:1;min-height:0;overflow-y:auto">
+        <div class="sect">类型<output>3</output></div>
+        <div class="rows">
+          <label class="row on" style="--c:#8592ff"><span class="cb">✓</span><i class="bar"></i><span><span class="nm">全部类型</span><span class="mt">22 / 22</span></span></label>
+          <label class="row" style="--c:#5be3a4"><span class="cb"></span><i class="bar"></i><span><span class="nm">S3 / OSS</span><span class="mt">17</span></span></label>
+          <label class="row" style="--c:#ffc35c"><span class="cb"></span><i class="bar"></i><span><span class="nm">本地路径</span><span class="mt">4</span></span></label>
+          <label class="row" style="--c:#c78bff"><span class="cb"></span><i class="bar"></i><span><span class="nm">JDBC 数据库</span><span class="mt">1</span></span></label>
+        </div>
+        <div class="sect" style="margin-top:8px">连接状态<output>4</output></div>
+        <div class="rows">
+          <label class="row" style="--c:#5be3a4"><span class="cb"></span><i class="bar"></i><span><span class="nm">可用</span><span class="mt">16</span></span></label>
+          <label class="row" style="--c:#8d90b8"><span class="cb"></span><i class="bar"></i><span><span class="nm">未检测</span><span class="mt">4</span></span></label>
+          <label class="row" style="--c:#ff2e63"><span class="cb"></span><i class="bar"></i><span><span class="nm">异常</span><span class="mt">2</span></span></label>
+        </div>
+        <div class="notice"><b>SCANNING</b>真实扫描保持暂停；扫描记录只读。</div>
+      </div>
+    </section>
+  </div>
+
+  <div class="col">
+    <section class="plate grow">
+      <div class="ph"><b>◆</b>CONNECTORS<span class="r">22 CONNECTORS</span></div>
+      <div class="viewtabs"><a class="on">CONNECTOR LIST</a><a>扫描记录</a><a>数据统计</a></div>
+      <div style="padding:0 14px 10px;display:flex;flex-direction:column;min-height:0;flex:1">
+        <div class="search">
+          <label class="field"><i data-icon="search"></i>搜索名称、路径、类型、状态、巡天或发布</label>
+          <button class="btn hot"><i data-icon="plus"></i>新增 Connector</button>
+        </div>
+        <div class="wide-wrap scroll">
+          <table class="tbl">
+            <thead><tr><th>连接器</th><th>路径 / 端点</th><th>类型</th><th>巡天 · 发布</th><th>连接状态</th><th>最近检测</th><th></th></tr></thead>
+            <tbody>
+              <tr><td class="n">hsc-s3-public</td><td class="m">s3://hsc-pdr3/</td><td><span class="tag ind">S3</span></td><td class="m">hsc · pdr3</td>
+                <td><span class="tag ok"><i></i>可用</span></td><td class="m">11-06 13:04</td><td style="text-align:right"><span class="btn sm">检测</span></td></tr>
+              <tr><td class="n">euclid-oss-q1</td><td class="m">oss://euclid/q1/</td><td><span class="tag ind">OSS</span></td><td class="m">euclid · q1</td>
+                <td><span class="tag ok"><i></i>可用</span></td><td class="m">11-06 12:58</td><td style="text-align:right"><span class="btn sm">检测</span></td></tr>
+              <tr><td class="n">csst-sim-local</td><td class="m">/data/csst/simulation</td><td><span class="tag warn">LOCAL</span></td><td class="m">csst · simulation-w3</td>
+                <td><span class="tag ok"><i></i>可用</span></td><td class="m">11-06 12:40</td><td style="text-align:right"><span class="btn sm">检测</span></td></tr>
+              <tr><td class="n">sdss-manga-s3</td><td class="m">s3://sdss/manga/</td><td><span class="tag ind">S3</span></td><td class="m">sdss · dr18</td>
+                <td><span class="tag hot"><i></i>异常</span></td><td class="m">11-05 21:12</td><td style="text-align:right"><span class="btn sm">检测</span></td></tr>
+              <tr><td class="n">legacy-dr10</td><td class="m">s3://legacy-survey/dr10/</td><td><span class="tag ind">S3</span></td><td class="m">legacy · dr10</td>
+                <td><span class="tag"><i></i>未检测</span></td><td class="m">--</td><td style="text-align:right"><span class="btn sm">检测</span></td></tr>
+              <tr><td class="n">desi-legacy-coadd</td><td class="m">s3://desi/dr1/coadd/</td><td><span class="tag ind">S3</span></td><td class="m">desi · dr1</td>
+                <td><span class="tag ok"><i></i>可用</span></td><td class="m">11-06 09:31</td><td style="text-align:right"><span class="btn sm">检测</span></td></tr>
+              <tr><td class="n">archive-meta-pg</td><td class="m">jdbc:postgresql://archive/</td><td><span class="tag">JDBC</span></td><td class="m">--</td>
+                <td><span class="tag hot"><i></i>异常</span></td><td class="m">11-04 18:02</td><td style="text-align:right"><span class="btn sm">检测</span></td></tr>
+              <tr><td class="n">twomass-local</td><td class="m">/mnt/archive/2mass</td><td><span class="tag warn">LOCAL</span></td><td class="m">2mass · 6x</td>
+                <td><span class="tag ok"><i></i>可用</span></td><td class="m">11-05 15:44</td><td style="text-align:right"><span class="btn sm">检测</span></td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="foot" style="margin-top:8px;border-top:1px solid var(--line);padding:10px 0 0">
+          <span>扫描执行仅支持 S3 / OSS</span><span>筛选只改变本列表</span><b>显示 8 / 22 ›</b>
+        </div>
+      </div>
+    </section>
+  </div>
+</main>
+<div class="mock-note">MOCKUP · 静态设计稿 · 未接入真实数据</div>
+<script type="module">
+import { applyChrome } from "./shared.js";
+import { topbar, icon } from "./shell.js";
+document.body.insertAdjacentHTML("afterbegin", topbar("connectors"));
+applyChrome("connectors");
+document.querySelectorAll("[data-icon]").forEach((node) => { node.innerHTML = icon(node.dataset.icon); });
+</script>
+</body>
+</html>

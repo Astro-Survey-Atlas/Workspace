@@ -1,0 +1,118 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="dark">
+<head>
+<meta charset="utf-8"><title>数据覆盖 · Workspace HUD 设计稿</title>
+<link rel="stylesheet" href="shared.css">
+</head>
+<body>
+<i class="frame-c tl"></i><i class="frame-c tr"></i><i class="frame-c bl"></i><i class="frame-c br"></i>
+<main class="cockpit">
+  <!-- ── left: controls ─────────────────────────────────────────────── -->
+  <div class="col">
+    <section class="plate grow">
+      <div class="ph"><b>◆</b>DATA COVERAGE<span class="r">LAYERS</span></div>
+      <div class="pb" style="padding-bottom:12px">
+        <div class="kicker"><i></i>WORKSPACE</div>
+        <h1>数据覆盖</h1>
+        <p class="sub">公开覆盖与用户资产状态已载入。球面颜色表达覆盖来源；层间偏移只用于显示。</p>
+        <dl class="metrics">
+          <div><dt>ACTIVE</dt><dd>3</dd></div>
+          <div><dt>PUBLIC</dt><dd>3</dd></div>
+          <div><dt>OWNED</dt><dd>0</dd></div>
+          <div><dt>SCANS</dt><dd>0<em>已暂停</em></dd></div>
+          <div><dt>CELLS</dt><dd>2247</dd></div>
+          <div><dt>ORDER</dt><dd>O6</dd></div>
+        </dl>
+      </div>
+      <div class="pb tight" style="padding-top:0;flex:1;min-height:0;display:flex;flex-direction:column">
+        <div class="sect">数据图层<output>1 SOURCES · 2247 CELLS</output></div>
+        <div class="rows scroll" style="flex:1;min-height:0">
+          <label class="row on" style="--c:#f01951"><span class="cb">✓</span><i class="bar"></i>
+            <span><span class="nm">HSC PDR3 Wide 2.1 HDF5 in…</span><span class="mt">hsc-pdr3-w2 · imaging · O6</span></span><span class="go">›</span></label>
+          <label class="row" style="--c:#8592ff"><span class="cb"></span><i class="bar"></i>
+            <span><span class="nm">CSST Simulation W3</span><span class="mt">csst-css·simulation-w3 · 数据点</span></span><span class="go">›</span></label>
+          <label class="row" style="--c:#5be3a4"><span class="cb"></span><i class="bar"></i>
+            <span><span class="nm">Euclid Q1 MER catalog tile 1…</span><span class="mt">euclid-q1-mer · 未设定公开产品</span></span><span class="go">›</span></label>
+          <label class="row" style="--c:#ffc35c"><span class="cb"></span><i class="bar"></i>
+            <span><span class="nm">CSST MSC C11 50 sq deg de…</span><span class="mt">csst-msc-w2 · 覆盖已建立</span></span><span class="go">›</span></label>
+          <label class="row" style="--c:#c78bff"><span class="cb"></span><i class="bar"></i>
+            <span><span class="nm">SDSS MaNGA ssy DRP FITS cu…</span><span class="mt">sdss-manga · 扫描失败</span></span><span class="go">›</span></label>
+          <label class="row" style="--c:#f01951"><span class="cb"></span><i class="bar"></i>
+            <span><span class="nm">Legacy Survey DR10 South …</span><span class="mt">legacy-dr10-south · 未开始</span></span><span class="go">›</span></label>
+          <label class="row" style="--c:#8592ff"><span class="cb"></span><i class="bar"></i>
+            <span><span class="nm">CSST MSC C11 1 000 sq deg…</span><span class="mt">csst-msc-w2 · 已建立</span></span><span class="go">›</span></label>
+          <label class="row" style="--c:#5be3a4"><span class="cb"></span><i class="bar"></i>
+            <span><span class="nm">euclid Euclid Q1 color ima…</span><span class="mt">euclid-q1-vis · 已建立</span></span><span class="go">›</span></label>
+          <label class="row" style="--c:#ffc35c"><span class="cb"></span><i class="bar"></i>
+            <span><span class="nm">CSST bounded Scanner vali…</span><span class="mt">csst-simulation-v4 · 数据点</span></span><span class="go">›</span></label>
+        </div>
+        <div class="notice"><b>PAUSED</b>真实扫描保持暂停；本页只做只读预览。</div>
+        <div class="btnrow" style="margin-top:10px">
+          <button class="btn sm">全选可见</button>
+          <button class="btn sm ghost">对比重合</button>
+          <button class="btn sm ghost">导入 MOC</button>
+        </div>
+      </div>
+    </section>
+  </div>
+
+  <!-- ── centre: globe ───────────────────────────────────────────────── -->
+  <div class="col">
+    <section class="stage" style="flex:1">
+      <div id="globe-host" style="position:absolute;inset:0"></div>
+      <div class="hud-top">
+        <div class="readout">
+          <span><b>FRAME</b>ICRS</span>
+          <span><b>DATA COVERAGE</b>PUBLIC + OWNED</span>
+          <span><b>CAMERA</b><output>1.68 R</output></span>
+          <span><b>ORDER</b><output>O6</output></span>
+        </div>
+        <div class="tools">
+          <button class="iconbtn" title="天球背景设置"><i data-icon="sliders"></i></button>
+          <button class="iconbtn" title="重置视图"><i data-icon="reset"></i></button>
+          <button class="iconbtn" title="返回上一级天区" disabled><i data-icon="back"></i></button>
+          <button class="iconbtn" title="进入全屏"><i data-icon="expand"></i></button>
+        </div>
+      </div>
+      <div class="callout" style="left:calc(50% + 210px);top:34%">TARGET LOCK<b>HSC · O6 / 1702</b><small>3 SURVEYS OVERLAP</small></div>
+      <div class="hud-bottom">
+        <div class="badge"><i data-icon="layers"></i><span>查看模式</span><b>NO CELL</b></div>
+        <div class="legend">INNER<i></i>OUTER</div>
+      </div>
+    </section>
+  </div>
+
+  <!-- ── right: inspector ────────────────────────────────────────────── -->
+  <div class="col">
+    <section class="plate hot grow">
+      <div class="ph"><b>◆</b>REGION SELECTION<span class="r">NO SELECTION</span></div>
+      <div class="empty">
+        <span class="reticle"></span>
+        <span>NO SELECTION</span>
+        <p class="sub" style="max-width:230px;text-align:center">左键点击区块查看覆盖；右键打开任务菜单或进入 Aladin。</p>
+      </div>
+    </section>
+    <section class="plate">
+      <div class="ph"><b>◆</b>SCAN STATUS<span class="r"><span class="tag warn"><i></i>PAUSED</span></span></div>
+      <div class="pb tight">
+        <dl class="insp" style="margin:0">
+          <div class="irow"><dt>执行器</dt><dd>local scan worker</dd></div>
+          <div class="irow"><dt>队列</dt><dd><b>0</b> running · <b>3</b> paused</dd></div>
+          <div class="irow" style="border-bottom:0"><dt>最近成功</dt><dd>11-06 13:20</dd></div>
+        </dl>
+      </div>
+    </section>
+  </div>
+</main>
+<div class="mock-note">MOCKUP · 静态设计稿 · 未接入真实数据</div>
+<script type="module">
+import { applyChrome, coverageGlobe } from "./shared.js";
+import { topbar, icon } from "./shell.js";
+// The shell goes in first so applyChrome can find its logo and theme link.
+document.body.insertAdjacentHTML("afterbegin", topbar("layers"));
+applyChrome("layers");
+document.querySelectorAll("[data-icon]").forEach((node) => { node.innerHTML = icon(node.dataset.icon); });
+document.getElementById("globe-host").innerHTML = coverageGlobe({ size: 900, patches: 8 });
+</script>
+</body>
+</html>

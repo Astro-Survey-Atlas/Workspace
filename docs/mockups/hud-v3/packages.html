@@ -1,0 +1,95 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="dark">
+<head>
+<meta charset="utf-8"><title>公开资源集 · Workspace HUD 设计稿</title>
+<link rel="stylesheet" href="shared.css">
+</head>
+<body>
+<main class="cockpit left-only">
+  <div class="col">
+    <section class="plate grow">
+      <div class="ph"><b>◆</b>PUBLIC COVERAGE<span class="r">CATALOG</span></div>
+      <div class="pb" style="padding-bottom:10px">
+        <div class="kicker"><i></i>WORKSPACE</div>
+        <h1>公开资源集</h1>
+        <p class="sub">已公开巡天与望远镜数据产品的天空覆盖范围。不含图像、星表或光谱数据本身。</p>
+        <dl class="metrics">
+          <div><dt>AVAILABLE</dt><dd>48</dd></div>
+          <div><dt>DOWNLOADED</dt><dd>11</dd></div>
+          <div><dt>APPLIED</dt><dd>3</dd></div>
+          <div><dt>SELECTED</dt><dd>2</dd></div>
+          <div><dt>UPDATABLE</dt><dd>1</dd></div>
+          <div><dt>FAILED</dt><dd>0</dd></div>
+        </dl>
+      </div>
+      <div class="pb tight scroll" style="padding-top:0;flex:1;min-height:0;overflow-y:auto">
+        <div class="sect">覆盖质量<output>4</output></div>
+        <div class="rows">
+          <label class="row on" style="--c:#8592ff"><span class="cb">✓</span><i class="bar"></i><span><span class="nm">真实覆盖</span><span class="mt">31 · 可加载到天球</span></span></label>
+          <label class="row" style="--c:#ffc35c"><span class="cb"></span><i class="bar"></i><span><span class="nm">官方概览</span><span class="mt">9 · 仅大致范围</span></span></label>
+          <label class="row" style="--c:#8d90b8"><span class="cb"></span><i class="bar"></i><span><span class="nm">待补充几何</span><span class="mt">6</span></span></label>
+          <label class="row" style="--c:#8d90b8"><span class="cb"></span><i class="bar"></i><span><span class="nm">未收录</span><span class="mt">2</span></span></label>
+        </div>
+        <div class="sect" style="margin-top:8px">服务器状态<output>5</output></div>
+        <div class="rows">
+          <label class="row" style="--c:#8d90b8"><span class="cb"></span><i class="bar"></i><span><span class="nm">未下载</span><span class="mt">37</span></span></label>
+          <label class="row" style="--c:#ffc35c"><span class="cb"></span><i class="bar"></i><span><span class="nm">已下载</span><span class="mt">8</span></span></label>
+          <label class="row on" style="--c:#f01951"><span class="cb">✓</span><i class="bar"></i><span><span class="nm">已应用</span><span class="mt">3</span></span></label>
+          <label class="row" style="--c:#5be3a4"><span class="cb"></span><i class="bar"></i><span><span class="nm">可更新</span><span class="mt">1</span></span></label>
+        </div>
+        <div class="notice"><b>BOUNDARY</b>这里筛选的是覆盖几何，不是科学数据文件。</div>
+      </div>
+    </section>
+  </div>
+
+  <div class="col">
+    <section class="plate grow">
+      <div class="ph"><b>◆</b>PUBLIC SURVEY COVERAGE<span class="r">48 PACKAGES · 已应用 3</span></div>
+      <div style="padding:0 14px 10px;display:flex;flex-direction:column;min-height:0;flex:1">
+        <div class="search">
+          <label class="field"><i data-icon="search"></i>搜索名称、设施、波段、发布或产品</label>
+          <button class="iconbtn" title="同步公开巡天目录"><i data-icon="refresh"></i></button>
+          <button class="btn hot">应用到天球</button>
+        </div>
+        <div class="wide-wrap scroll">
+          <table class="tbl">
+            <thead><tr><th style="width:16px"></th><th>巡天 / 设施</th><th>发布 · 产品</th><th>波段</th><th>已收录覆盖</th><th>服务器状态</th><th></th></tr></thead>
+            <tbody>
+              <tr style="--c:#f01951"><td><span class="cbar"></span></td><td class="n">Euclid</td><td class="m">Q1 · MER catalog</td><td class="m">VIS / NISP</td>
+                <td><span class="tag ok"><i></i>真实覆盖 · O8</span></td><td><span class="tag hot"><i></i>已应用</span></td><td style="text-align:right"><span class="btn sm">详情 ›</span></td></tr>
+              <tr style="--c:#8592ff"><td><span class="cbar"></span></td><td class="n">DESI</td><td class="m">DR1 · Legacy survey coadd</td><td class="m">g r z</td>
+                <td><span class="tag ok"><i></i>真实覆盖 · O6</span></td><td><span class="tag hot"><i></i>已应用</span></td><td style="text-align:right"><span class="btn sm">详情 ›</span></td></tr>
+              <tr style="--c:#5be3a4"><td><span class="cbar"></span></td><td class="n">HSC</td><td class="m">PDR3 · Wide</td><td class="m">g r i z y</td>
+                <td><span class="tag ok"><i></i>真实覆盖 · O6</span></td><td><span class="tag hot"><i></i>已应用</span></td><td style="text-align:right"><span class="btn sm">详情 ›</span></td></tr>
+              <tr style="--c:#ffc35c"><td><span class="cbar"></span></td><td class="n">SDSS</td><td class="m">DR18 · MaNGA</td><td class="m">g r i</td>
+                <td><span class="tag ok"><i></i>真实覆盖 · O7</span></td><td><span class="tag warn"><i></i>已下载</span></td><td style="text-align:right"><span class="btn sm">详情 ›</span></td></tr>
+              <tr style="--c:#c78bff"><td><span class="cbar"></span></td><td class="n">2MASS</td><td class="m">6X · K band imaging</td><td class="m">Ks</td>
+                <td><span class="tag ok"><i></i>真实覆盖 · O5</span></td><td><span class="tag ok"><i></i>可更新</span></td><td style="text-align:right"><span class="btn sm">详情 ›</span></td></tr>
+              <tr style="--c:#8d90b8"><td><span class="cbar"></span></td><td class="n">CFHTLS</td><td class="m">Wide · r band imaging</td><td class="m">r</td>
+                <td><span class="tag warn"><i></i>官方概览</span></td><td><span class="tag"><i></i>未下载</span></td><td style="text-align:right"><span class="btn sm">详情 ›</span></td></tr>
+              <tr style="--c:#8d90b8"><td><span class="cbar"></span></td><td class="n">ACT</td><td class="m">DR5 · 90 GHz coverage</td><td class="m">90 GHz</td>
+                <td><span class="tag warn"><i></i>官方概览</span></td><td><span class="tag"><i></i>未下载</span></td><td style="text-align:right"><span class="btn sm">详情 ›</span></td></tr>
+              <tr style="--c:#8d90b8"><td><span class="cbar"></span></td><td class="n">SphereX</td><td class="m">QR2 · d6 coverage</td><td class="m">0.75–5 µm</td>
+                <td><span class="tag"><i></i>待补充几何</span></td><td><span class="tag"><i></i>未下载</span></td><td style="text-align:right"><span class="btn sm">详情 ›</span></td></tr>
+              <tr style="--c:#8d90b8"><td><span class="cbar"></span></td><td class="n">iPHAS</td><td class="m">DR2 · i band imaging</td><td class="m">i</td>
+                <td><span class="tag"><i></i>待补充几何</span></td><td><span class="tag"><i></i>未下载</span></td><td style="text-align:right"><span class="btn sm">详情 ›</span></td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="foot" style="margin-top:8px;border-top:1px solid var(--line);padding:10px 0 0">
+          <span>应用后可前往「数据覆盖」查看 3D 天球</span><span>未下载的选择会先自动下载到当前服务器</span><b>显示 9 / 48 ›</b>
+        </div>
+      </div>
+    </section>
+  </div>
+</main>
+<div class="mock-note">MOCKUP · 静态设计稿 · 未接入真实数据</div>
+<script type="module">
+import { applyChrome } from "./shared.js";
+import { topbar, icon } from "./shell.js";
+document.body.insertAdjacentHTML("afterbegin", topbar("packages"));
+applyChrome("packages");
+document.querySelectorAll("[data-icon]").forEach((node) => { node.innerHTML = icon(node.dataset.icon); });
+</script>
+</body>
+</html>

@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="dark">
+<head>
+<meta charset="utf-8"><title>Workspace HUD 设计稿 · 总览</title>
+<link rel="stylesheet" href="shared.css">
+<style>
+.idx{padding:28px 40px 60px;max-width:1280px;margin:0 auto}
+.grid{display:grid;grid-template-columns:repeat(3,1fr);gap:14px;margin-top:22px}
+.card{position:relative;background:var(--plate);border-left:2px solid var(--ind);box-shadow:var(--indglow);backdrop-filter:blur(8px);padding:16px 18px}
+:root[data-theme="light"] .card{box-shadow:var(--shadow);border-top:1px solid rgba(255,255,255,.9)}
+.card.hot{border-left-color:var(--hot);box-shadow:var(--hotglow)}
+.card h3{font:700 16px var(--sans);margin-top:6px}
+.card p{font:400 11.5px/1.55 var(--sans);color:var(--dim);margin-top:7px;min-height:52px}
+.card .links{display:flex;gap:7px;margin-top:12px}
+.card .scrollid{position:absolute;right:14px;top:12px;font:700 9px var(--mono);letter-spacing:.18em;color:var(--faint)}
+</style>
+</head>
+<body>
+<main class="idx">
+  <div class="kicker" style="margin-top:8px"><i></i>WORKSPACE · V3 TACTICAL HUD</div>
+  <h1 style="font-size:34px">Workspace 界面重构 · 设计稿</h1>
+  <p class="sub" style="max-width:760px;font-size:13px;margin-top:12px">
+    沿用 Assets 已批准的 v3 视觉语言：同一套颜色 token、字号、板面与方括号导航。
+    本目录下全是静态稿，未接入真实数据；确认后再落到 <span class="u">viewer/src/hud-workspace.css</span> 与各模式布局。
+  </p>
+
+  <div class="grid">
+    <div class="card hot"><span class="scrollid">01</span>
+      <div class="kicker"><i></i>COCKPIT</div><h3>数据覆盖</h3>
+      <p>三栏驾驶舱：左侧图层、中间天球与 HUD 读数、右侧选区检查器。天球模式是本轮重点。</p>
+      <div class="links"><a class="btn sm" href="layers.html?theme=dark">DARK →</a><a class="btn sm ghost" href="layers.html?theme=light">LIGHT →</a></div>
+    </div>
+    <div class="card"><span class="scrollid">02</span>
+      <div class="kicker"><i></i>CATALOG</div><h3>用户资产</h3>
+      <p>资产列表改成板面表格，行内直接看数据类型、项目阶段与该资产的空间覆盖状态。</p>
+      <div class="links"><a class="btn sm" href="catalog.html?theme=dark">DARK →</a><a class="btn sm ghost" href="catalog.html?theme=light">LIGHT →</a></div>
+    </div>
+    <div class="card"><span class="scrollid">03</span>
+      <div class="kicker"><i></i>ACCESS</div><h3>连接器</h3>
+      <p>Connector 列表与扫描记录共用一套表格骨架；扫描状态全局暂停时在页头常驻提示。</p>
+      <div class="links"><a class="btn sm" href="connectors.html?theme=dark">DARK →</a><a class="btn sm ghost" href="connectors.html?theme=light">LIGHT →</a></div>
+    </div>
+    <div class="card"><span class="scrollid">04</span>
+      <div class="kicker"><i></i>PACKAGES</div><h3>公开资源集</h3>
+      <p>公开覆盖包的目录、服务器状态与「应用到天球」。只讲覆盖，不涉及科学数据本体。</p>
+      <div class="links"><a class="btn sm" href="packages.html?theme=dark">DARK →</a><a class="btn sm ghost" href="packages.html?theme=light">LIGHT →</a></div>
+    </div>
+    <div class="card"><span class="scrollid">05</span>
+      <div class="kicker"><i></i>PRODUCTION</div><h3>数据生产</h3>
+      <p>Workflow 阶段条 + 执行步骤 + 结果预览；人工门与 FITS cutout 在同一屏完成。</p>
+      <div class="links"><a class="btn sm" href="workflow.html?theme=dark">DARK →</a><a class="btn sm ghost" href="workflow.html?theme=light">LIGHT →</a></div>
+    </div>
+    <div class="card"><span class="scrollid">06</span>
+      <div class="kicker"><i></i>SETTINGS</div><h3>系统配置</h3>
+      <p>AI Provider / MCP / 数据服务 / 下载 / 生产能力 / 备份，横向 tab 收进左侧导航。</p>
+      <div class="links"><a class="btn sm" href="system.html?theme=dark">DARK →</a><a class="btn sm ghost" href="system.html?theme=light">LIGHT →</a></div>
+    </div>
+  </div>
+
+  <div class="notice" style="margin-top:22px">
+    <b>说明</b>所有页面共用 <span class="u">shared.css</span>（token 与组件）与 <span class="u">shell.js</span>（顶栏）。
+    主题按 ?theme= 参数切换，缺省时跟随系统。
+  </div>
+</main>
+<div class="mock-note">MOCKUP · 静态设计稿 · 未接入真实数据</div>
+<script type="module">
+import { applyChrome } from "./shared.js";
+applyChrome("");
+</script>
+</body>
+</html>
