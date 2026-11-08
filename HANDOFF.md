@@ -29,8 +29,16 @@ stays paused.
 - Verified: `verify:types`, `npm test` (336 pass, 3 skipped, 0 fail),
   `survey-cell-alignment` e2e 4/4. Other e2e specs were not run: `survey-layers`
   installs resource packages on the Dev API.
-- Next (plan stages C3/D): Aladin drill-down (button + double-click) and the HUD
-  shell restyle through a token alias layer.
+- Aladin drill-down (stage C3): the region inspector has an "在 Aladin 中打开"
+  button (`data-action="open-aladin"`) and a double-click on a cell
+  (`onDrillDown`) both call `enterAladinExplorer`, the same entry as the context
+  menu. Aladin outlines the selected cells (`regionOutline`, skipped above
+  1,000 cells, `data-region-outline` on the host). Leaving Aladin restores the
+  3D camera pose. Entry FOV stays 0.5° (the existing navigation contract).
+- Verified after C3: `aladin-initial-navigation` 12/12 (one new test) and
+  `survey-cell-alignment` 4/4, `verify:types`, `npm test` 336/3 skipped.
+- Next (stage D): HUD shell restyle through a token alias layer. Needs a design
+  mockup approved first.
 
 ## Current Dev state: lightweight local runtime (November 6)
 

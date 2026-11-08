@@ -20,7 +20,12 @@ export interface AladinExplorerSnapshot {
   assetTargets: AladinAssetTarget[];
   initialAssetId?: string;
   layerScopes?: SkyDataPointScope[];
+  /** Outline these NESTED cells (the 3D-globe selection) in Aladin. */
+  regionOutline?: { nside: number; pixels: number[]; color: string };
 }
+
+/** Above this many cells the outline is skipped; polygon overlays get slow. */
+export const REGION_OUTLINE_CELL_LIMIT = 1_000;
 
 export interface AladinAssetTarget {
   assetId: string;
@@ -514,6 +519,7 @@ export class AladinExplorer {
       ? null
       : new ResizeObserver(() => { this.renderDirectionGuides(); this.positionDensityLabels(); this.scheduleQuery(0); });
     this.resizeObserver?.observe(this.host);
+    this.renderRegionOutline();
     this.renderSeedRecords();
     this.callbacks.onAssetChange?.(this.activeAssetId);
     this.refreshDirectionTargets();
@@ -1587,6 +1593,26 @@ export class AladinExplorer {
     this.aladin?.destroy?.();
     this.aladin?.dispose?.();
     this.aladin = null;
+  }
+
+  private renderRegionOutline(): void {
+    const outline = this.snapshot.regionOutline;
+    if (!outline?.pixels.length || !this.aladin || !A?.graphicOverlay || !A?.polygon) return;
+    if (outline.pixels.length > REGION_OUTLINE_CELL_LIMIT) {
+      this.host.dataset.regionOutline = "skipped";
+      return;
+    }
+    const healpix = new Healpix(outline.nside);
+    const overlay = A.graphicOverlay({ name: "Selected region", color: outline.color, lineWidth: 2 });
+    this.aladin.addOverlay(overlay);
+    for (const pixel of outline.pixels) {
+      const vertices = healpix.getBoundaries(pixel).map((vertex) => [
+        normalizeRa(Math.atan2(vertex.y, vertex.x) * 180 / Math.PI),
+        Math.asin(Math.max(-1, Math.min(1, vertex.z))) * 180 / Math.PI,
+      ]);
+      overlay.add(A.polygon(vertices, { color: outline.color, lineWidth: 2, fill: false }));
+    }
+    this.host.dataset.regionOutline = String(outline.pixels.length);
   }
 
   dispose(): void {

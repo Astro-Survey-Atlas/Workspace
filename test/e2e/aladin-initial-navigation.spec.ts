@@ -284,6 +284,49 @@ test("preview coverage never changes the selection when entering and leaving Ala
   await expect(page.locator('#sky-layer-list [data-layer-key="asset:user-preview-cosmos"] input')).not.toBeChecked();
 });
 
+async function selectFixtureCell(page: Page) {
+  await page.goto("/?mode=layers");
+  await expect(page.locator("#service-status")).toHaveText("SERVICE ONLINE");
+  const canvas = page.locator("#scene-canvas");
+  await expect(canvas).toBeVisible();
+  const toggle = page.locator(`#sky-layer-list [data-layer-key="asset:${assetId}"] input[type=checkbox]`);
+  if (!await toggle.isChecked()) await toggle.check();
+  const point = await canvas.evaluate(element => {
+    const rect = element.getBoundingClientRect();
+    element.dispatchEvent(new PointerEvent("pointermove", {
+      bubbles: true, clientX: rect.left + rect.width / 2, clientY: rect.top + rect.height / 2, pointerId: 1, pointerType: "mouse",
+    }));
+    return { x: rect.width / 2, y: rect.height / 2, pixel: element.dataset.hoveredPixel };
+  });
+  expect(point.pixel).toMatch(/^\d+$/);
+  return { canvas, point };
+}
+
+test("the inspector button and a double-click both drill into Aladin with the region outlined", async ({ page }) => {
+  await prepareCoverageLoadingFixture(page);
+  const { canvas, point } = await selectFixtureCell(page);
+  // Right-click selects the cell as a region, which opens the region inspector.
+  await canvas.click({ button: "right", position: { x: point.x, y: point.y } });
+  const open = page.locator('#inspector-panel [data-action="open-aladin"]');
+  await expect(open).toBeVisible();
+  await expect.poll(async () => canvas.getAttribute("data-camera-position")).not.toBeNull();
+  await page.waitForTimeout(1200);
+  const pose = await canvas.getAttribute("data-camera-position");
+  await open.click();
+  const aladin = page.locator("#aladin-explorer");
+  await expect(aladin).toBeVisible();
+  await expect(aladin).toHaveAttribute("data-pixels", point.pixel!);
+  await expect(aladin).toHaveAttribute("data-region-outline", "1");
+  await page.locator("#drill-back-button").click();
+  await expect(canvas).toBeVisible();
+  // Returning restores the 3D camera the user left.
+  await expect.poll(async () => canvas.getAttribute("data-camera-position")).toBe(pose);
+  await canvas.dblclick({ position: { x: point.x, y: point.y } });
+  await expect(aladin).toBeVisible();
+  await expect(aladin).toHaveAttribute("data-pixels", point.pixel!);
+  await expect(aladin).toHaveAttribute("data-region-outline", "1");
+});
+
 test("selected coverage shows loading and preempts pending background coverage", async ({ page }) => {
   let releaseSelected!: () => void, releaseBackground!: () => void;
   const selectedGate = new Promise<void>(resolve => { releaseSelected = resolve; });

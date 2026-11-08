@@ -37,6 +37,7 @@ import {
   type SurveyLayerSelection,
   type SurveyLayerState,
   type SurveyObjectPoint,
+  type SurveyLayerCameraPose,
   type SurveyLayerOverlapComponent,
   type WorkspaceCoverageLayer as GlobeCoverageLayer,
 } from "@astro-survey-atlas/sky-globe";
@@ -410,6 +411,10 @@ let layerLayoutMode: SurveyLayerLayoutMode = "layers";
 let layerInteractionMode: SurveyLayerInteractionMode = "inspect";
 let hoverDismissTimer: ReturnType<typeof setTimeout> | null = null;
 let layerViewer: SurveyLayerViewer | null = null;
+/** 3D-globe camera saved on Aladin entry and restored when the globe returns. */
+let pendingGlobePose: SurveyLayerCameraPose | null = null;
+/** Selected-region outline colour in Aladin (logo magenta). */
+const ALADIN_REGION_OUTLINE_COLOR = "#f01951";
 let overlapResponse: SkyOverlapResponse | null = null;
 let overlapModeActive = false;
 let activeOverlapComponentId: string | null = null;
@@ -1145,6 +1150,7 @@ async function enterAladinExplorer(menu: SkyRegionMenu): Promise<void> {
   aladinSnapshot = null;
   latestAladinStatus = null;
   aladinAssetDrawerOpen = true;
+  if (layerViewer) pendingGlobePose = layerViewer.cameraPose;
   layerViewer?.dispose();
   layerViewer = null;
 
@@ -1184,6 +1190,7 @@ async function enterAladinExplorer(menu: SkyRegionMenu): Promise<void> {
     centerDecDeg: fallbackCenter.decDeg,
     initialFovDeg,
     imageSurveyUrl: ALADIN_IMAGE_SURVEYS[imageSurveyId].url,
+    regionOutline: { nside: menu.nside, pixels, color: ALADIN_REGION_OUTLINE_COLOR },
   };
   aladinSnapshot = snapshot;
   mode = "layers";
@@ -2139,6 +2146,17 @@ function renderSurveySelection(selection: SurveyLayerSelection | null): void {
   }));
   downloadAction.classList.add("secondary");
   downloadAction.dataset.action = "download-region";
+  const aladinAction = actionButton("在 Aladin 中打开", () => {
+    const sourceIds = [...new Set(selection.artifacts
+      .map((artifact) => publicSourceIdForFootprint(artifact))
+      .filter((id): id is string => Boolean(id)))].sort();
+    void enterAladinExplorer({
+      clientX: 0, clientY: 0, nside: selection.nside, pixels: [...selection.pixels],
+      surveyIds: selection.surveyIds, releaseIds: selection.releaseIds, assetIds: selection.assetIds, sourceIds,
+      center: { raDeg: selection.centerRaDeg, decDeg: selection.centerDecDeg },
+    }).catch(showFatal);
+  });
+  aladinAction.dataset.action = "open-aladin";
   const clearAction = actionButton("清除所选区域", () => {
     layerViewer?.clearRegionSelection();
   });
@@ -2164,7 +2182,7 @@ function renderSurveySelection(selection: SurveyLayerSelection | null): void {
     ["产品与模态", artifactSummary || "所选区块尚无已登记产品"],
       ["项目资产", projectStateSummary(selectedAssets)],
       ["选区状态", selection.notice ?? "普通点击替换区块；Ctrl / Meta 点击可增减；右键在 Aladin 中探索"],
-   ], [downloadAction, buildAction, clearAction]);
+   ], [aladinAction, downloadAction, buildAction, clearAction]);
   if (layerViewer) renderRegionSceneLegend(layerViewer.state);
 }
 
@@ -4149,12 +4167,18 @@ async function activateMode(nextMode: ViewMode): Promise<void> {
      layerViewer = new SurveyLayerViewer(targetCanvas, surveyFootprints!, publicSurveyCards, renderSurveySelection, renderSurveyHover, renderSurveyInspection, renderSurveyContextMenu, renderLayerState, renderSurveyObjectPoint, renderOverlapComponent, {
       sourceIdForFootprint: publicSourceIdForFootprint,
       overlapContextMenu: true,
+      // Double-click drills into Aladin through the same entry as the menu.
+      onDrillDown: (region) => { void enterAladinExplorer(region).catch(showFatal); },
     });
     applySceneBackground(storedSceneBackground());
     layerViewer.setLayoutMode(layerLayoutMode);
     layerViewer.setVisibleSurveys(visibleSurveyIds);
     layerViewer.setInteractionMode(layerInteractionMode);
     applyLayerPreferences();
+    if (pendingGlobePose) {
+      layerViewer.restoreCameraPose(pendingGlobePose);
+      pendingGlobePose = null;
+    }
     void loadWorkspaceAssetCoverage().catch((error) => {
       notifyWorkspace("用户资产覆盖读取失败", error instanceof Error ? error.message : String(error), { tone: "warning", dedupeMs: 5_000 });
       console.warn("Unable to load custom workspace coverage", error);
