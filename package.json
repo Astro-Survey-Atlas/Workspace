@@ -28,7 +28,7 @@
     "scan:worker": "node dist/src/scan-worker.js"
   },
   "dependencies": {
-    "@astro-survey-atlas/sky-globe": "file:../Astro-Survey-Atlas-Assets/packages/sky-globe",
+    "@astro-survey-atlas/sky-globe": "https://codeload.github.com/Astro-Survey-Atlas/sky-globe/tar.gz/refs/tags/v0.1.0",
     "@aws-sdk/client-s3": "^3.1095.0",
     "@modelcontextprotocol/sdk": "1.32.2",
     "@opentelemetry/api": "1.10.0",

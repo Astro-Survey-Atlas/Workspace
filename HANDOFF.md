@@ -17,11 +17,12 @@ stays paused.
     live in a local `WorkspaceCoverageLayer` extension type in `main.ts`.
   - Options passed: `sourceIdForFootprint: publicSourceIdForFootprint`,
     `overlapContextMenu: true`.
-- **Temporary dependency:** `file:../Astro-Survey-Atlas-Assets/packages/sky-globe`
-  (installed as a copy). After changing the package, run
-  `rm -rf node_modules/@astro-survey-atlas/sky-globe && npm install`. Docker and
-  CI cannot resolve this path; switch to the git tag once
-  `Astro-Survey-Atlas/sky-globe` is published (plan stage B).
+- **Dependency:** the release tarball
+  `https://codeload.github.com/Astro-Survey-Atlas/sky-globe/tar.gz/refs/tags/v0.1.0`
+  (repo `Astro-Survey-Atlas/sky-globe`, public, Apache-2.0). It is an HTTPS
+  tarball with an integrity hash, so Docker and CI need no git or SSH key.
+  Upgrade by changing the tag in `package.json` and running `npm install`;
+  Assets and Workspace move to a new tag together.
 - `test/sky-cross-repo.test.ts` was removed: both repos now run the same module.
 - `test/e2e/survey-cell-alignment.spec.ts` loads the package through `/@fs/` and
   checks v3 semantics: the selection is a target box on the selection shell, a
